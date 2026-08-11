@@ -4,67 +4,85 @@ set -uo pipefail
 # test-tasks-concurrency.sh - what the tasks.json verbs do when two of them
 # run at once.
 #
+# THE ASSERTIONS IN THIS FILE HAVE INVERTED, AND THAT INVERSION IS THE POINT.
+#
+# As first written this suite was green against four KNOWN DEFECTS: each of
+# these verbs read a precondition in an unlocked jq and then acted on that
+# answer under the lock, so a concurrent writer could invalidate it in between.
+# The commit that moved the four onto one crossing into scripts/tasks.py —
+# read, decide and write all inside the lock — closed three of those races and
+# fixed the fourth's report, and the diff of THIS FILE is the statement of what
+# changed and when. `assert_eq "skipped"` became `assert_eq "completed"`; the
+# gate tests now expect a refusal where they expected an invented gate.
+#
+# A reviewer can read the inverted assertions and know exactly what moved
+# without reasoning about concurrency from source. And the inversion happened
+# in ONE labelled commit: this suite stayed green, un-inverted, through every
+# pure-port slice before it, which is the evidence those slices were pure. If a
+# later change closes or reopens one of these races by accident, this file goes
+# red where it happened.
+#
+# THE GOLDEN CORPUS COVERS NONE OF THIS, AND CANNOT. scripts/tests/
+# golden_from_jq.json is single-threaded by construction — one CLI invocation
+# per recorded case, comparing stdout, exit status and the resulting document.
+# No recording of a single process can observe a lost update. This suite is the
+# separate artifact that covers what the golden cannot; a reviewer who assumes
+# the golden covers concurrency is wrong.
+#
+# THE SCHEDULE IS PRODUCED EXACTLY, NOT APPROXIMATED, AND NEEDS NO SLEEP.
+# This suite takes the tasks file's own lock itself, launches the verb under
+# test (which now blocks, because its only read is inside that lock), mutates
+# the document underneath it, and only then releases. The verb therefore reads
+# what the mutation left behind — not because the timing worked out, but
+# because the lock orders it. Every concurrent test here uses that one helper;
+# the single-writer control does not, and is the poorer for nothing.
+#
+# It did not always: the cascade-skip test used to sleep 0.10s into a window
+# measured in seconds, which is what an UNLOCKED quadratic `reduce
+# range(length)` closure cost at 400 stories (~37ms at 50, ~337ms at 200,
+# ~2826ms at 400 on a 16-core host with jq-1.6). That window is gone — there is
+# no unlocked read left to sleep into — so the test now produces its
+# interleaving the same way the other three always did. The fan-shaped fixture
+# stays: every story depending on one root is still the shape that exercises
+# the closure hardest.
+#
+# WHAT KEEPS THESE TESTS FROM PASSING VACUOUSLY, AND WHY THE PROBE HAS TWO
+# ARMS. Holding the lock guarantees a one-crossing verb cannot observe the
+# pre-mutation document. It guarantees nothing about the verbs these tests were
+# written against: those read BEFORE taking the lock, so a mutation that lands
+# early is one they read normally, and every assertion here would go green
+# against the defect it was written to catch. Verified, not assumed — with a
+# probe that only proved the verb was running, this whole file passed against
+# the unported jq.
+#
+# So the lock holder waits for `verb_past_its_read_point`, which is true once
+# EITHER the verb has created its pre-lock `mktemp` sibling (proof an unlocked
+# read already happened) OR some process is blocked waiting for the lock this
+# suite holds (proof a locked read has not happened yet, and cannot until the
+# release). One predicate, both shapes, and the mutation lands on the correct
+# side of each. Run this file against a tree without the fix and it goes red;
+# that is the property that makes the inversion a proof rather than a claim.
+#
 # SERIAL ONLY, AND DELIBERATELY NOT IN test-aimi-cli.sh's PARTS ARRAY. Every
-# assertion in here depends on a timing window, and two of the three windows
-# only exist because a jq program is slow. Four concurrent parts contending
-# for the same cores compress that window by an amount nobody can predict,
-# which is precisely how a deterministic test becomes a flaky one. The
-# standing precedent is test-worktree-manager.sh: also not parallel-safe (its
-# five `serve` assertions collide on a fixed port), also deliberately left out
-# of the dispatcher, also documented in the root CLAUDE.md as its own entry
-# point. This suite follows that shape exactly — own SCRIPT_DIR, own counters,
-# own fixtures under `mktemp -d`, its own passed/failed totals on exit, and a
-# non-zero status if anything failed.
+# test here spawns background processes that contend for one lock and one
+# document. The standing precedent is test-worktree-manager.sh: also not
+# parallel-safe (its five `serve` assertions collide on a fixed port), also
+# deliberately left out of the dispatcher, also documented in the root
+# CLAUDE.md as its own entry point. This suite follows that shape exactly —
+# own SCRIPT_DIR, own counters, own fixtures under `mktemp -d`, its own
+# passed/failed totals on exit, and a non-zero status if anything failed.
 #
 # The cost of staying out is that these assertions do not roll into the
 # dispatcher's EXPECTED_ASSERTIONS invariant. That is paid for by printing the
 # totals below and by the root CLAUDE.md naming this file beside the other
 # suites, so no reviewer has to discover it.
 #
-# WHY THE WINDOW IS WIDE ENOUGH TO BE DETERMINISTIC. cmd_cascade_skip computes
-# its transitive skip set in an UNLOCKED jq whose body is a
-# `reduce range(length)` closure — quadratic in the story count before the
-# per-iteration `unique` is counted. Measured here (16 cores, jq-1.6) against
-# the fan-shaped fixture this suite builds:
-#
-#     stories   unlocked closure
-#          50   ~37ms
-#         200   ~337ms
-#         400   ~2826ms
-#
-# (Planning measured ~185ms / ~1129ms / ~3739ms on a different host. Same
-# shape, same order of magnitude; the ratio is what matters, not the absolute.)
-# A linear dependency CHAIN is far slower still — ~32s at 400 stories, because
-# every story's dependency sits in the middle of the sorted skip list instead
-# of at its head — which is why the fixture fans out from one root rather than
-# chaining. It buys a window measured in seconds while keeping this suite's
-# whole runtime in the same seconds.
-#
-# So the cascade-skip test sleeps 0.10s into a ~2.8s window: a ~28x margin,
-# and the test asserts the margin held rather than assuming it. Five
-# consecutive runs are the acceptance bar, not one.
-#
 # DETERMINISM AS MEASURED, NOT AS CLAIMED. A test that passes once and flakes
-# later is worse than no test at all here, because the whole point of this
-# file is that its cascade-skip assertions INVERT when the defect is fixed —
-# an inversion nobody can read as proof if the suite is noisy. On first
-# authoring it was run twelve consecutive times on a 16-core host, jq-1.6,
-# against the unmodified jq cmd_cascade_skip with no Python implementation of
-# any tasks.json verb in the tree. Every run: 18 passed, 0 failed, exit 0. No
-# sleep window and no fixture size needed raising. Whole-suite wall clock
-# ~11s, nearly all of it the 400-story closure the cascade test races against.
-# If a future run disagrees, raise the fixture size (which widens the window
-# quadratically) rather than the sleep, and re-record the count here.
-#
-# THE OTHER TWO TESTS NEED NO SLEEP AT ALL. gate-pass, gate-fail and
-# reset-orphaned read their precondition outside the lock and then write
-# inside it, so the interleaving that matters is "another writer holds the
-# lock while this verb waits for it" — a schedule this suite can produce
-# exactly rather than approximately. It takes the flock itself, waits for the
-# verb under test to create its `mktemp` sibling (which happens after the
-# unlocked read and before the lock, so its existence PROVES the unlocked read
-# has already happened), mutates the file, and only then releases. No sleep,
-# no guessing.
+# later is worse than no test at all here, because the whole point of this file
+# is what its assertions say about behaviour, and nobody can read a noisy suite
+# as proof. Twelve consecutive runs were the bar against the jq; eight
+# consecutive runs were the bar against the port, all of them 18 passed, 0
+# failed, exit 0.
 #
 # PORTABILITY: no `mapfile`, no `readarray`, no associative arrays, no
 # indexing into an array by number — same rules the dispatcher header states,
@@ -90,9 +108,9 @@ CLI="$SCRIPT_DIR/aimi-cli.sh"
 # file path.
 #
 # The fan shape — every story but the root depending directly on the root —
-# is what makes cascade-skip's unlocked closure expensive enough to race
-# against. See the header for the measurements and for why a chain is the
-# wrong shape here.
+# is the shape that exercises cascade-skip's transitive closure hardest, and
+# it is what made that closure expensive enough to race against back when it
+# ran outside the lock. See the header.
 build_fan_fixture() {
   local dir="$1"
   local count="$2"
@@ -134,16 +152,56 @@ build_small_fixture() {
 
 # True once a `mktemp "${tasks_file}.XXXXXX"` sibling exists.
 #
-# This is the whole reason the lock-holding tests need no sleep. Every verb
-# here does its unlocked read FIRST, then mktemp, then blocks on the lock — so
-# the sibling appearing is a happens-after proof that the unlocked read is
-# already done. Globbed by `find` rather than by the shell so no shell's
-# no-match behaviour (bash's literal-pattern, zsh's hard error) can leak in.
-# The six-character suffix cannot collide with "${tasks_file}.lock" (four) or
-# with this suite's own "${tasks_file}.holdertmp" (nine).
+# A verb that reads its precondition OUTSIDE the lock does its read FIRST, then
+# mktemp, then blocks on the lock — so the sibling appearing is a happens-after
+# proof that the unlocked read is already done. Globbed by `find` rather than
+# by the shell so no shell's no-match behaviour (bash's literal-pattern, zsh's
+# hard error) can leak in. The six-character suffix cannot collide with
+# "${tasks_file}.lock" (four) or with this suite's own
+# "${tasks_file}.holdertmp" (nine).
+#
+# No verb here has such a sibling any more: each makes one crossing into
+# tasks.py inside the lock, and the temp file tasks.py writes is created there.
+# The predicate is kept, and is still the half of verb_past_its_read_point that
+# discriminates — see that comment.
 tmp_sibling_exists() {
   local tasks_file="$1"
   find "$(dirname "$tasks_file")" -maxdepth 1 -name "$(basename "$tasks_file").??????" -print 2>/dev/null | grep -q .
+}
+
+# True once some process is BLOCKED waiting for the lock on $1.
+#
+# Which is the shape a one-crossing verb has: taking the lock is its first
+# file action, so it never reaches a read to be caught mid-way through. Linux
+# lists blocked lock requests in /proc/locks with a `->` marker and the target
+# inode in decimal; where that file is unreadable this returns false and the
+# poll below falls back to the sibling alone, which costs a timeout rather than
+# an answer.
+verb_waits_for_lock() {
+  local lock_file="$1"
+  [ -r /proc/locks ] || return 1
+  local inode
+  inode=$(stat -c '%i' "$lock_file" 2>/dev/null) || return 1
+  [ -n "$inode" ] || return 1
+  grep -q -- "-> FLOCK .*:${inode} " /proc/locks 2>/dev/null
+}
+
+# True once the verb has demonstrably passed the point where a pre-lock read
+# would have happened. THIS IS THE PREDICATE THAT MAKES THE INVERSION MEAN
+# SOMETHING, and it has to answer for both shapes at once:
+#
+#   * a verb that reads outside the lock announces itself with the mktemp
+#     sibling, and the mutation must land AFTER that read or the defect is
+#     never exercised and the test passes vacuously;
+#   * a verb that reads inside the lock announces itself by blocking on that
+#     lock, and the mutation must land BEFORE it is granted.
+#
+# Waiting for either is what lets one suite discriminate between them. Drop the
+# first arm and these tests go green against the very jq they were written to
+# catch; drop the second and every one of them burns wait_for's whole timeout.
+verb_past_its_read_point() {
+  local tasks_file="$1"
+  tmp_sibling_exists "$tasks_file" || verb_waits_for_lock "$tasks_file.lock"
 }
 
 # Bounded poll. Returns 0 when the predicate held, 1 on timeout — a timeout is
@@ -162,37 +220,83 @@ wait_for() {
 
 file_exists() { [ -e "$1" ]; }
 
+# Runs `$CLI <verb> <args...>` against a fixture while this suite holds the
+# tasks.json lock, and applies `$mutation` (a jq program) to the file before
+# releasing it. The verb blocks on the lock, so what it goes on to read is
+# what the mutation left behind — ordered by the lock, not by timing.
+#
+# All four tests use this now, which is why it lives here beside the other
+# fixture helpers rather than under one test's banner. The cascade-skip test
+# used to sleep into an unlocked window instead; there is no unlocked window
+# left to sleep into.
+run_against_a_held_lock() {
+  local tasks_file="$1"
+  local mutation="$2"
+  shift 2
+
+  local ready="$tasks_file.ready"
+  local marked="$tasks_file.marked"
+  rm -f "$ready" "$marked"
+
+  (
+    flock -x 9
+    : > "$ready"
+    if wait_for verb_past_its_read_point "$tasks_file"; then
+      : > "$marked"
+    fi
+    jq "$mutation" "$tasks_file" > "$tasks_file.holdertmp" && mv "$tasks_file.holdertmp" "$tasks_file"
+  ) 9>"$tasks_file.lock" &
+  local holder=$!
+
+  # Do not launch the verb until the lock is genuinely held, or it would sail
+  # straight through and test nothing.
+  wait_for file_exists "$ready"
+
+  local rc=0
+  "$CLI" "$@" > "$tasks_file.verbout" 2>&1 &
+  local verb=$!
+
+  wait "$holder"
+  wait "$verb" || rc=$?
+
+  HELD_LOCK_RC="$rc"
+  HELD_LOCK_MARKED=0
+  [ -e "$marked" ] && HELD_LOCK_MARKED=1
+  HELD_LOCK_OUT="$tasks_file.verbout"
+}
+
 # ============================================================================
-# cascade-skip: the lost-completion race
+# cascade-skip: the lost-completion race, now closed
 # ============================================================================
 
-# KNOWN DEFECT — ASSERTED GREEN AGAINST TODAY'S jq. THE ASSERTIONS BELOW
-# INVERT IN outline:06, AND THAT INVERSION IS THE REVIEWABLE PROOF THAT THE
-# BEHAVIOUR CHANGED.
+# THE ASSERTIONS BELOW INVERTED, AND THAT INVERSION IS THE REVIEWABLE PROOF
+# THAT THE BEHAVIOUR CHANGED. They read `assert_eq "skipped"` when this suite
+# was written; they read `assert_eq "completed"` now.
 #
-# The defect, precisely:
+# What they used to assert, precisely:
 #
-#   cmd_cascade_skip computes its skip set in an UNLOCKED jq call, and that
-#   call is the ONLY place `status != "completed"` is ever tested. The locked
-#   apply that follows asks a different and weaker question — its inner filter
-#   is `if (.id as $sid | $to_skip | any(. == $sid)) then` — membership in a
-#   list of ids computed some seconds ago, with no re-read of status at all.
+#   cmd_cascade_skip computed its skip set in an UNLOCKED jq call, and that
+#   call was the ONLY place `status != "completed"` was ever tested. The locked
+#   apply that followed asked a different and weaker question — its inner
+#   filter was `if (.id as $sid | $to_skip | any(. == $sid)) then` — membership
+#   in a list of ids computed some seconds ago, with no re-read of status.
 #
-#   So a story that COMPLETES during that window is overwritten with
-#   `status: "skipped"` and a note claiming it depends on a failed story. The
-#   completion is lost, and the note that replaces it is false: the story did
-#   not fail and was not skipped, it finished.
+#   So a story that COMPLETED during that window was overwritten with
+#   `status: "skipped"` and a note claiming it depended on a failed story. The
+#   completion was lost, and the note that replaced it was false: the story did
+#   not fail and was not skipped, it finished. Eight times out of eight.
 #
-# This is data loss, and it is the reason this suite exists. It is NOT the same
-# class of bug as the reset-orphaned divergence at the bottom of this file —
-# see the comment there.
+# The verb now makes one crossing into tasks.py inside the lock: the closure,
+# both status filters, the write and the report all run against the same
+# document. A completion that lands before the lock is granted is therefore
+# SEEN, and the story it belongs to is never added to the skip set.
 #
-# Every port slice between here and outline:06 claims "delta zero". An
-# accidental fix in any of them turns THIS test red, which is exactly what it
-# is for.
-test_cascade_skip_loses_a_concurrent_completion() {
+# This was data loss, and it is the reason this suite exists. It was NOT the
+# same class of bug as the reset-orphaned divergence at the bottom of this file
+# — see the comment there.
+test_cascade_skip_keeps_a_concurrent_completion() {
   echo ""
-  echo "=== cascade-skip: a completion inside the unlocked window is lost (KNOWN DEFECT) ==="
+  echo "=== cascade-skip: a completion that lands before the lock is kept ==="
 
   local dir="$TEST_DIR/cascade-race"
   local tasks_file
@@ -200,51 +304,45 @@ test_cascade_skip_loses_a_concurrent_completion() {
 
   cd "$dir" || return
 
-  local cs_out="$dir/cascade.out"
-  local cs_rc=0
-
   # US-001 is the fan root; every other story depends on it, so the skip set
-  # is US-002..US-400 and the closure has 400 iterations of work to do first.
-  "$CLI" cascade-skip US-001 > "$cs_out" 2>&1 &
-  local cs_pid=$!
+  # would be US-002..US-400. US-200 completes while cascade-skip is in flight
+  # and waiting for the lock this suite holds.
+  run_against_a_held_lock "$tasks_file" \
+    '(.userStories[] | select(.id == "US-200")) |= . + {status: "completed"}' \
+    cascade-skip US-001
 
-  sleep 0.10
-  "$CLI" mark-complete US-200 > /dev/null 2>&1
-
-  # The premise, asserted rather than assumed. If the window ever closes early
-  # enough that mark-complete lands after the apply, THIS assertion fails
-  # loudly instead of the test quietly proving nothing.
-  local mid_status
-  mid_status=$(jq -r '.userStories[] | select(.id == "US-200") | .status' "$tasks_file")
-  assert_eq "completed" "$mid_status" \
-    "cascade-skip race: mark-complete landed inside the unlocked window"
-
-  wait "$cs_pid" || cs_rc=$?
-  assert_exit_code "0" "$cs_rc" "cascade-skip race: cascade-skip exits 0"
+  # The premise, asserted rather than assumed. If cascade-skip were ever to
+  # finish before the completion landed, THIS assertion fails loudly instead of
+  # the test quietly proving nothing.
+  assert_eq "1" "$HELD_LOCK_MARKED" \
+    "cascade-skip race: the completion landed while cascade-skip was in flight"
+  assert_exit_code "0" "$HELD_LOCK_RC" "cascade-skip race: cascade-skip exits 0"
 
   local final_status final_notes
   final_status=$(jq -r '.userStories[] | select(.id == "US-200") | .status' "$tasks_file")
   final_notes=$(jq -r '.userStories[] | select(.id == "US-200") | .notes' "$tasks_file")
 
-  # INVERTS IN outline:06 — expected becomes "completed".
-  assert_eq "skipped" "$final_status" \
-    "cascade-skip race: KNOWN DEFECT — the completed story is overwritten with skipped"
-  # INVERTS IN outline:06 — expected becomes the empty note the story carried.
-  assert_eq "Skipped: depends on failed story US-001" "$final_notes" \
-    "cascade-skip race: KNOWN DEFECT — and given a note saying it depended on a failure"
+  # INVERTED — this expected "skipped" when the closure ran outside the lock.
+  assert_eq "completed" "$final_status" \
+    "cascade-skip race: the completed story keeps its status"
+  # INVERTED — this expected the "depends on failed story" note.
+  assert_eq "" "$final_notes" \
+    "cascade-skip race: and keeps its own notes rather than a note about a failure"
 
-  # The printed report agrees with the file, so a caller reading stdout gets
-  # no hint that anything was lost.
+  # The printed report agrees with the file, as it always did — what changed is
+  # that the file is now right, so agreeing with it is worth something.
   local reported
-  reported=$(jq -r '[.skipped[] | select(. == "US-200")] | length' "$cs_out")
-  assert_eq "1" "$reported" \
-    "cascade-skip race: KNOWN DEFECT — the report claims US-200 among the skipped"
+  reported=$(jq -r '[.skipped[] | select(. == "US-200")] | length' "$HELD_LOCK_OUT")
+  # INVERTED — this expected 1.
+  assert_eq "0" "$reported" \
+    "cascade-skip race: and the report does not claim US-200 among the skipped"
 }
 
 # The control. Same verb, same fixture shape, no concurrent writer: a story
-# already completed BEFORE cascade-skip starts is correctly left alone,
-# because the unlocked closure CAN see its status. That is what isolates the
-# defect above to the window rather than to the rule.
+# already completed BEFORE cascade-skip starts is left alone. It was green
+# before the fix too — the closure could always see a completion that predated
+# it — which is what isolated the defect above to the window rather than to
+# the rule, and is why it does not invert.
 test_cascade_skip_respects_a_completion_it_can_see() {
   echo ""
   echo "=== cascade-skip: a completion visible to the closure is respected ==="
@@ -273,65 +371,24 @@ test_cascade_skip_respects_a_completion_it_can_see() {
 }
 
 # ============================================================================
-# gate-pass / gate-fail: the precondition read outside the lock
+# gate-pass / gate-fail: the precondition, now read under the lock
 # ============================================================================
 
-# Runs `$CLI <verb> <args...>` against a fixture while this suite holds the
-# tasks.json lock, and applies `$mutation` (a jq program) to the file in the
-# window between the verb's unlocked precondition read and its locked write.
-#
-# The interleaving is produced exactly, not approximated — see tmp_sibling_exists.
-run_against_a_held_lock() {
-  local tasks_file="$1"
-  local mutation="$2"
-  shift 2
-
-  local ready="$tasks_file.ready"
-  local marked="$tasks_file.marked"
-  rm -f "$ready" "$marked"
-
-  (
-    flock -x 9
-    : > "$ready"
-    if wait_for tmp_sibling_exists "$tasks_file"; then
-      : > "$marked"
-    fi
-    jq "$mutation" "$tasks_file" > "$tasks_file.holdertmp" && mv "$tasks_file.holdertmp" "$tasks_file"
-  ) 9>"$tasks_file.lock" &
-  local holder=$!
-
-  # Do not launch the verb until the lock is genuinely held, or it would sail
-  # straight through and test nothing.
-  wait_for file_exists "$ready"
-
-  local rc=0
-  "$CLI" "$@" > "$tasks_file.verbout" 2>&1 &
-  local verb=$!
-
-  wait "$holder"
-  wait "$verb" || rc=$?
-
-  HELD_LOCK_RC="$rc"
-  HELD_LOCK_MARKED=0
-  [ -e "$marked" ] && HELD_LOCK_MARKED=1
-  HELD_LOCK_OUT="$tasks_file.verbout"
-}
-
-# KNOWN DEFECT — cmd_gate_pass reads "does this story have a gate?" in an
-# unlocked jq, then takes the lock and writes. Between those two crossings the
-# answer can change, and nothing re-asks it. The write is
+# INVERTED. cmd_gate_pass used to read "does this story have a gate?" in an
+# unlocked jq, then take the lock and write. Between those two crossings the
+# answer could change and nothing re-asked it. The write is
 # `(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed"}`,
 # and in jq `null + {status: "passed"}` is `{status: "passed"}` — so the verb
-# does not fail, it CREATES a gate on a story that no longer has one.
+# did not fail, it CREATED a gate on a story that no longer had one.
 #
-# Ranked with cascade-skip, not with reset-orphaned: the file is wrong
-# afterwards. It is narrower only because the window is a lock wait rather
-# than seconds of computation.
-#
-# INVERTS IN outline:06.
-test_gate_pass_writes_a_gate_that_was_removed_under_it() {
+# The precondition is now decided inside the same crossing that writes, so the
+# verb refuses with the object its pre-lock guard already knew how to print,
+# and writes nothing. Ranked with cascade-skip, not with reset-orphaned: the
+# file was wrong afterwards. It was narrower only because the window was a lock
+# wait rather than seconds of computation.
+test_gate_pass_refuses_a_gate_that_was_removed_under_it() {
   echo ""
-  echo "=== gate-pass: precondition read outside the lock (KNOWN DEFECT) ==="
+  echo "=== gate-pass: precondition read under the lock ==="
 
   local dir="$TEST_DIR/gate-pass-race"
   local tasks_file
@@ -354,29 +411,32 @@ EOF
     gate-pass US-001
 
   assert_eq "1" "$HELD_LOCK_MARKED" \
-    "gate-pass race: the verb reached its locked write with the gate already gone"
-  assert_exit_code "0" "$HELD_LOCK_RC" \
-    "gate-pass race: exits 0 — the no-gate guard already ran and cannot run again"
+    "gate-pass race: the gate was removed while gate-pass was in flight"
+  # INVERTED — this expected 0, on the ground that the no-gate guard had
+  # already run outside the lock and could not run again.
+  assert_exit_code "1" "$HELD_LOCK_RC" \
+    "gate-pass race: exits 1 — the no-gate guard runs where the write happens"
 
   local on_disk
   on_disk=$(jq -c '.userStories[] | select(.id == "US-001") | .gate' "$tasks_file")
-  # INVERTS IN outline:06 — expected becomes null, and the verb is expected to
-  # refuse with the "has no gate defined" error the guard already knows how to
-  # produce.
-  assert_eq '{"status":"passed"}' "$on_disk" \
-    "gate-pass race: KNOWN DEFECT — a gate is created on a story that has none"
+  # INVERTED — this expected {"status":"passed"}.
+  assert_eq "null" "$on_disk" \
+    "gate-pass race: no gate is invented on a story that has none"
 
   local echoed
-  echoed=$(jq -c '.gate' "$HELD_LOCK_OUT")
-  assert_eq '{"status":"passed"}' "$echoed" \
-    "gate-pass race: KNOWN DEFECT — and the echo-back reports it as a real gate"
+  echoed=$(cat "$HELD_LOCK_OUT")
+  # INVERTED — this read `jq -c '.gate'` off an echo-back that reported the
+  # invented gate as a real one. There is no echo-back to read: the verb
+  # refuses, with the object it has always printed for a story with no gate.
+  assert_eq '{"valid":false,"errors":["Story US-001 has no gate defined"]}' "$echoed" \
+    "gate-pass race: and refuses with the same object the pre-lock guard printed"
 }
 
-# The same crossing in cmd_gate_fail, which carries a byte-identical guard.
-# INVERTS IN outline:06.
-test_gate_fail_writes_a_gate_that_was_removed_under_it() {
+# The same crossing in cmd_gate_fail, which carried a byte-identical guard and
+# is now one implementation rather than two copies. INVERTED with gate-pass.
+test_gate_fail_refuses_a_gate_that_was_removed_under_it() {
   echo ""
-  echo "=== gate-fail: precondition read outside the lock (KNOWN DEFECT) ==="
+  echo "=== gate-fail: precondition read under the lock ==="
 
   local dir="$TEST_DIR/gate-fail-race"
   local tasks_file
@@ -398,39 +458,42 @@ EOF
     'del(.userStories[] | select(.id == "US-001") | .gate)' \
     gate-fail US-001
 
-  assert_exit_code "0" "$HELD_LOCK_RC" \
-    "gate-fail race: exits 0 — the no-gate guard already ran and cannot run again"
+  # INVERTED — this expected 0.
+  assert_exit_code "1" "$HELD_LOCK_RC" \
+    "gate-fail race: exits 1 — the no-gate guard runs where the write happens"
 
   local on_disk
   on_disk=$(jq -c '.userStories[] | select(.id == "US-001") | .gate' "$tasks_file")
-  # INVERTS IN outline:06 — expected becomes null.
-  assert_eq '{"status":"failed"}' "$on_disk" \
-    "gate-fail race: KNOWN DEFECT — a gate is created on a story that has none"
+  # INVERTED — this expected {"status":"failed"}.
+  assert_eq "null" "$on_disk" \
+    "gate-fail race: no gate is invented on a story that has none"
 }
 
 # ============================================================================
 # reset-orphaned: report-only staleness
 # ============================================================================
 
-# COSMETIC. NOT DATA LOSS. DO NOT RANK THIS WITH cascade-skip.
+# COSMETIC. NOT DATA LOSS. DO NOT RANK THIS WITH cascade-skip, AND DO NOT READ
+# ITS FIX AS RECOVERING ANYTHING.
 #
-# cmd_reset_orphaned reads the orphan list in an unlocked jq, exactly like
-# cascade-skip reads its skip set. The difference is what the locked write
-# does with it: cascade-skip's apply filters by id alone, but reset-orphaned's
-# apply re-selects `status == "in_progress"` and ignores the precomputed list
-# entirely. So the FILE IS ALREADY CORRECT — a story that stopped being
-# in_progress during the window is not touched.
+# cmd_reset_orphaned read the orphan list in an unlocked jq, exactly like
+# cascade-skip read its skip set. The difference was what the locked write did
+# with it: cascade-skip's apply filtered by id alone, but reset-orphaned's
+# apply re-selected `status == "in_progress"` and ignored the precomputed list
+# entirely. So THE FILE WAS ALREADY CORRECT — a story that stopped being
+# in_progress during the window was never touched, then or now.
 #
-# What can be wrong is the printed `{count, reset}` report, which is built
-# from the stale unlocked read. A caller that trusts stdout over the file will
-# believe it reset a story it did not reset. That is a report bug, and pricing
-# it as data loss would over-price the fix.
+# What could be wrong was the printed `{count, reset}` report, built from the
+# stale unlocked read. A caller that trusted stdout over the file believed it
+# had reset a story it had not. That is a report bug, and pricing it as data
+# loss would over-price the fix.
 #
-# This test therefore asserts BOTH halves: the report is stale AND the file is
-# right. outline:06 changes only the first half.
-test_reset_orphaned_report_can_be_stale_but_the_file_is_not() {
+# This test asserts BOTH halves. Only the first inverted: the report is now
+# produced by the same locked call that writes, so it names what was written.
+# The two file assertions did not invert, because they were never wrong.
+test_reset_orphaned_report_is_what_was_written() {
   echo ""
-  echo "=== reset-orphaned: stale report, correct file (cosmetic) ==="
+  echo "=== reset-orphaned: the report is what was written (cosmetic fix) ==="
 
   local dir="$TEST_DIR/reset-orphaned-race"
   local tasks_file
@@ -455,15 +518,16 @@ EOF
 
   assert_exit_code "0" "$HELD_LOCK_RC" "reset-orphaned race: exits 0"
 
-  # Half one: the report is stale.
+  # Half one: the report names only what it reset.
   local reported
   reported=$(jq -c '{count, reset}' "$HELD_LOCK_OUT")
-  # INVERTS IN outline:06 — expected becomes {"count":1,"reset":["US-001"]}.
-  assert_eq '{"count":2,"reset":["US-001","US-002"]}' "$reported" \
-    "reset-orphaned race: KNOWN DEFECT (cosmetic) — the report still names US-002"
+  # INVERTED — this expected {"count":2,"reset":["US-001","US-002"]}, the
+  # stale list the unlocked read produced.
+  assert_eq '{"count":1,"reset":["US-001"]}' "$reported" \
+    "reset-orphaned race: the report no longer names US-002"
 
-  # Half two: the file is not. These two assertions do NOT invert — they are
-  # what makes this cosmetic, and they must keep holding after outline:06.
+  # Half two: the file, which was right all along. These two assertions did NOT
+  # invert — they are what makes this cosmetic, and they keep holding.
   local us1 us2
   us1=$(jq -r '.userStories[] | select(.id == "US-001") | .status' "$tasks_file")
   us2=$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$tasks_file")
@@ -494,17 +558,17 @@ main() {
 
   echo ""
   echo "--- cascade-skip Tests ---"
-  test_cascade_skip_loses_a_concurrent_completion
+  test_cascade_skip_keeps_a_concurrent_completion
   test_cascade_skip_respects_a_completion_it_can_see
 
   echo ""
   echo "--- gate-pass / gate-fail Tests ---"
-  test_gate_pass_writes_a_gate_that_was_removed_under_it
-  test_gate_fail_writes_a_gate_that_was_removed_under_it
+  test_gate_pass_refuses_a_gate_that_was_removed_under_it
+  test_gate_fail_refuses_a_gate_that_was_removed_under_it
 
   echo ""
   echo "--- reset-orphaned Tests ---"
-  test_reset_orphaned_report_can_be_stale_but_the_file_is_not
+  test_reset_orphaned_report_is_what_was_written
 
   echo ""
   echo "================================================"

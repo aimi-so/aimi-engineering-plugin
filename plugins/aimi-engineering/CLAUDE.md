@@ -99,6 +99,21 @@ Two CLI subcommands manage the research lifecycle. Both are internal — consume
 
 ## aimi-cli.sh Story Lifecycle Subcommands
 
+### One-crossing invariant (structural, and mechanically checkable)
+
+**Every `tasks.json` verb wrapper in `aimi-cli.sh` makes exactly one crossing into Python, and for a writer that crossing is inside the lock.** The shape is `( _lock "$f.lock"; python3 tasks.py <op> … ) 200>"$f.lock"` — read, decide, write and return, all within the single call. A wrapper that crosses twice has, by construction, a read that happens outside the lock it then writes under, and something can change in between.
+
+**The check is counting `python3` invocations per wrapper.** That is the whole point of writing this down: *"did concurrency change?"* is a behavioural question a reviewer cannot answer by reading a diff, and *"how many times does this wrapper call `python3`?"* is a structural one they can. More than one in a tasks verb is the defect, not a style choice. `test_every_locked_tasks_verb_crosses_into_python_exactly_once` in `scripts/tests/test_tasks.py` enforces it; `scripts/test-tasks-concurrency.sh` is what demonstrates the consequence.
+
+Two exemptions exist, both in the roadmap family, both named here so the list cannot grow quietly:
+
+- **`roadmap-init`** and **`roadmap-amend-phase`** cross twice on purpose. A payload arrives on **stdin** and can be refused without reading `roadmap.json` at all — malformed JSON, a bad `creates`/`needs` identity, an unamendable key. Refusing inside the lock would create the feature directory as a side effect of saying no, so the payload is validated in its own crossing first. `cmd_roadmap_set_status` carries the normative statement of this in a comment beside its own single crossing.
+- **No `tasks.json` verb takes a stdin payload**, so none of them has that exemption available. Every refusal a tasks verb can reach without the document — a missing argument, a malformed story id, an unknown flag — already happens in bash before the lock; every remaining one needs the file, and a second call could only re-read what the first one holds.
+
+Readers are exempt from the lock half and not from the counting half. `cmd_list_ready` names the module in each of two mutually exclusive branches, which is one crossing per invocation; that branch exemption is asserted by name too.
+
+### `story-merge`
+
 One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/aimi:plan` two-pass pipeline, not invoked by users directly.
 
 - **`story-merge`** — Consolidates per-story JSON staging files written by Pass 2 sub-agents into a single validated `tasks.json`. Key behaviors:

@@ -1578,53 +1578,31 @@ cmd_cascade_skip() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$failed_id" "$tasks_file"
 
-  # Find all stories that transitively depend on the failed story and mark them as skipped
-
-  # First compute which IDs to skip
-  local to_skip
-  to_skip=$(jq --arg failed_id "$failed_id" '
-    . as $root |
+  # BEHAVIOUR CHANGE, and the one this verb existed to get. This used to be
+  # two jq calls with the lock around only the second: an UNLOCKED closure
+  # computed the skip set, and the locked apply took that precomputed id list
+  # on trust -- its inner filter asked `is this id in the list?` and nothing
+  # else. The `status != "completed"` test lived only in the unlocked call, so
+  # a story that completed inside the window (measured in seconds at 400
+  # stories, because the closure was a quadratic `reduce range(length)`) was
+  # overwritten with status "skipped" and a note saying it depended on a
+  # failure. Real work, lost, 8 times out of 8.
+  #
+  # One crossing, inside the lock: the closure, both status filters, the write
+  # and the {skipped, count} report all happen against the same document. There
+  # is nowhere left to put an unlocked read, which is what closes the race.
+  # test-tasks-concurrency.sh asserts it; the golden corpus is single-threaded
+  # and cannot see it.
+  check_python3
+  local out
+  out=$(
     (
-      reduce range($root.userStories | length) as $_ (
-        [$failed_id];
-        . as $skip_ids |
-        ($skip_ids + [
-          $root.userStories[] |
-          select(
-            (.status != "completed") and
-            (.status != "skipped") and
-            ((.dependsOn // []) | any(. as $d | $skip_ids | any(. == $d)))
-          ) |
-          .id
-        ]) | unique
-      )
-    ) | map(select(. != $failed_id))
-  ' "$tasks_file")
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg failed_id "$failed_id" --argjson to_skip "$to_skip" '
-      .userStories |= [
-        .[] |
-        if (.id as $sid | $to_skip | any(. == $sid)) then
-          . + {status: "skipped", notes: ("Skipped: depends on failed story " + $failed_id)}
-        else
-          .
-        end
-      ]
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
-
-  # Output result
-  local count
-  count=$(echo "$to_skip" | jq 'length')
-  jq -n --argjson skipped "$to_skip" --argjson count "$count" \
-    '{skipped: $skipped, count: $count}'
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" cascade-skip \
+        --tasks-file "$tasks_file" --failed-id "$failed_id"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Reset orphaned in_progress stories to failed
@@ -1632,30 +1610,28 @@ cmd_reset_orphaned() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  # Find all in_progress story IDs
-  local orphaned
-  orphaned=$(jq '[.userStories[] | select(.status == "in_progress") | .id]' "$tasks_file")
-
-  local count
-  count=$(echo "$orphaned" | jq 'length')
-
-  if [ "$count" -eq 0 ]; then
-    jq -n '{count: 0, reset: []}'
-    return
-  fi
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '(.userStories[] | select(.status == "in_progress")) |= . + {status: "failed", notes: "Reset: orphaned from previous session"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq -n --argjson reset "$orphaned" --argjson count "$count" \
-    '{count: $count, reset: $reset}'
+  # A REPORT FIX, and only a report fix. Do not rank it with cascade-skip.
+  #
+  # The orphan list was read in an unlocked jq here too, but the locked apply
+  # re-selected `status == "in_progress"` and ignored that list entirely, so
+  # the file on disk was ALREADY correct: a story that stopped being in
+  # progress inside the window was never touched. What could be wrong was the
+  # printed {count, reset} report, built from the stale read -- a caller
+  # trusting stdout over the file believed it had reset a story it had not.
+  # No data was ever lost here and none is recovered.
+  #
+  # One crossing, inside the lock, so the ids printed are the ids written. The
+  # empty case still writes nothing; that decision moved inside the lock, the
+  # guarantee did not move at all.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" reset-orphaned --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Get branch name
@@ -10316,31 +10292,31 @@ cmd_gate_pass() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Verify story has a gate field
-  local has_gate
-  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
-  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
-    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
-    exit 1
-  fi
+  # BEHAVIOUR CHANGE. The gate-present precondition was read in an unlocked jq
+  # and the {id, gate} echo-back re-read the file after the lock had been
+  # released -- three crossings with the lock around only the middle one. If
+  # the gate was removed in between, nothing re-asked: the write is a merge
+  # into `.gate`, and in jq `null + {status: "passed"}` is `{status:
+  # "passed"}`, so the verb did not refuse, it CREATED a gate on a story that
+  # no longer had one.
+  #
+  # One crossing, inside the lock: precondition, write and echo-back all decide
+  # against the same document. The refusal object and the exit status are
+  # unchanged -- it is only WHEN the question is asked that moved.
+  check_python3
+  local option_args=()
+  [ -n "$option" ] && option_args=(--option "$option")
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    if [ -n "$option" ]; then
-      jq --arg id "$story_id" --arg option "$option" \
-        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed", selectedOption: $option}' \
-        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-    else
-      jq --arg id "$story_id" \
-        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed"}' \
-        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-    fi
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+  local out rc=0
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" gate-pass \
+        --tasks-file "$tasks_file" --story-id "$story_id" "${option_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  ) || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || exit "$rc"
 }
 
 # Fail a gate on a story
@@ -10358,25 +10334,20 @@ cmd_gate_fail() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Verify story has a gate field
-  local has_gate
-  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
-  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
-    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
-    exit 1
-  fi
-
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "failed"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+  # Same three crossings, same behaviour change, same single call. See
+  # cmd_gate_pass above -- the guard these two carried was byte-identical, and
+  # it is one implementation now rather than two copies that could drift.
+  check_python3
+  local out rc=0
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" gate-fail \
+        --tasks-file "$tasks_file" --story-id "$story_id"
+    ) 200>"${tasks_file}.lock"
+  ) || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || exit "$rc"
 }
 
 # Update a nested field on a story

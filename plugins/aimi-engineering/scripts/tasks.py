@@ -28,6 +28,22 @@ inside the lock, and nothing in this file acquires or releases anything.
 Reimplementing `_lock` here -- two strategies, `flock -x 200` and an `mkdir`
 spinlock -- would be the exact duplication the port exists to remove.
 
+The FOUR RACING WRITERS came last, and they are the one place in this port
+where behaviour changed: `cascade-skip`, `gate-pass`, `gate-fail` and
+`reset-orphaned`. Each of them used to read its precondition in an UNLOCKED jq
+and then act on that answer under the lock, so a concurrent writer could
+invalidate the answer in between. There is nowhere left to put an unlocked
+read once a verb makes one crossing, so adopting the template above closed
+those races by construction; keeping them would have meant deliberately
+authoring a two-crossing wrapper whose only purpose was preserving a defect.
+The three rules the unlocked calls owned -- cascade-skip's transitive closure
+and its two status filters, the gate-present precondition, and
+reset-orphaned's orphan list -- all live below, evaluated against the same
+document the write goes on to produce. What that cost is recorded in
+scripts/test-tasks-concurrency.sh, whose assertions INVERT in the commit that
+introduced these four ops; the golden corpus is single-threaded by
+construction and covers none of it.
+
 WHAT THESE SLICES ACTUALLY COLLAPSED
 ------------------------------------
 
@@ -242,6 +258,23 @@ def jq_all_over(elements, outputs_for):
     return True
 
 
+def jq_unique(values):
+    """jq's `unique`: sort by jq's total order, then drop adjacent equals.
+
+    cascade-skip's closure ran its accumulator through this on every iteration,
+    so the id list it printed was SORTED rather than in discovery order, and
+    part1 pins that. jq_sort_key is what makes a list holding an id nobody
+    expected -- a number, a null -- sort instead of raising, exactly as
+    next_story needs it to.
+    """
+    ordered = sorted(values, key=jq_sort_key)
+    unique = []
+    for value in ordered:
+        if not unique or unique[-1] != value:
+            unique.append(value)
+    return unique
+
+
 def jq_add_object(value, patch, owner):
     """jq's `. + {…}`, as the four mark-* verbs used it.
 
@@ -348,6 +381,17 @@ def _emit(value):
     them through the same double.
     """
     json.dump(jq_numbers(value), sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def _emit_compact(value):
+    """One JSON value on stdout with no spaces at all -- bash's `echo`, not jq.
+
+    The gate refusal was a literal string in aimi-cli.sh, not a jq program, so
+    it never had jq's two-space indent. part1 compares the whole line, so the
+    separators are the contract rather than a preference.
+    """
+    json.dump(value, sys.stdout, separators=(",", ":"), ensure_ascii=False)
     sys.stdout.write("\n")
 
 
@@ -797,6 +841,178 @@ def normalize_verification(doc):
 
 
 # ---------------------------------------------------------------------------
+# The four rules that used to be evaluated before the lock
+# ---------------------------------------------------------------------------
+#
+# Read the module docstring's third paragraph first. Everything in this section
+# is a rule aimi-cli.sh used to evaluate in an unlocked jq and then act on
+# under the lock. Here each one is evaluated against the very document its
+# write goes on to produce, which is the whole of the fix -- there is no second
+# read, so there is nothing for a concurrent writer to invalidate.
+
+
+CASCADE_NOTE = "Skipped: depends on failed story "
+ORPHAN_PATCH = {"status": "failed", "notes": "Reset: orphaned from previous session"}
+
+
+def _depends_on_any(story, skip_ids):
+    """`(.dependsOn // []) | any(. as $d | $skip_ids | any(. == $d))`.
+
+    Both `any`s short-circuit, as jq's do. `//` leaves 0, "" and {} alone, so a
+    `dependsOn` of 0 reaches jq_iterate and aborts there -- which is what jq
+    did, and is NOT the same value space `_dependencies` walks through
+    jq_length in the readiness predicate.
+    """
+    deps = jq_alternative(jq_index(story, "dependsOn", STORY), [])
+    for dep in jq_iterate(deps, STORY + ".dependsOn"):
+        for skip_id in skip_ids:
+            if skip_id == dep:
+                return True
+    return False
+
+
+def cascade_skip_ids(stories, failed_id):
+    """The transitive skip set, WITH the two status filters that decide it.
+
+    jq built this with `reduce range($root.userStories | length)` -- one pass
+    per story, each pass adding every not-completed, not-skipped story that
+    depends on something already in the set, and `unique` on every iteration.
+    n passes always reach the fixpoint for n stories, so stopping when the set
+    stops growing gives the identical answer; a fan of 400 stories converges in
+    two passes rather than four hundred. Ranging over the whole length was also
+    what made this quadratic, and the seconds of unlocked computation it cost
+    were what made the lost-update window wide enough to hit deterministically.
+
+    THE TWO FILTERS ARE THE FIX. `status != "completed"` and `status !=
+    "skipped"` were tested only here, in the call that used to run outside the
+    lock; the locked apply asked a weaker question -- is this id in the list --
+    and never re-read status. They are now decided against the same document
+    the write goes on to produce, so a story that completed a moment ago is
+    seen as completed and is never added.
+
+    `and` short-circuits the way jq's does, so a completed story's `dependsOn`
+    is never iterated and never aborts on a shape the walk would not like.
+    """
+    skip_ids = [failed_id]
+    while True:
+        grown = jq_unique(
+            skip_ids
+            + [
+                jq_index(story, "id", STORY)
+                for story in stories
+                if jq_index(story, "status", STORY) != "completed"
+                and jq_index(story, "status", STORY) != "skipped"
+                and _depends_on_any(story, skip_ids)
+            ]
+        )
+        if grown == skip_ids:
+            # `map(select(. != $failed_id))`: the failed story is the seed of
+            # its own closure and never appears in its own skip list.
+            return [skip_id for skip_id in skip_ids if skip_id != failed_id]
+        skip_ids = grown
+
+
+def cascade_skip(doc, failed_id):
+    """The closure, then `.userStories |= [.[] | if <in set> then . + {…}]`.
+
+    The apply keeps jq's ARRAY-producing form -- `[...]`, not the in-place path
+    update reset_orphaned uses -- so a `userStories` object comes back a list,
+    which is what the jq did.
+    """
+    skip_ids = cascade_skip_ids(_stories(doc), failed_id)
+    patch = {"status": "skipped", "notes": CASCADE_NOTE + failed_id}
+    _mapped_stories(
+        doc,
+        lambda story: jq_add_object(story, patch, STORY)
+        if any(skip_id == jq_index(story, "id", STORY) for skip_id in skip_ids)
+        else story,
+    )
+    return skip_ids
+
+
+def reset_orphaned(doc):
+    """The orphan list AND the reset, from one selection.
+
+    jq made the same selection twice: once unlocked to build the printed
+    report, once under the lock to write. Only the report could be wrong --
+    the locked apply re-selected `status == "in_progress"` and ignored the
+    precomputed list entirely, so the file was already correct and a story that
+    completed mid-flight was already left alone. COSMETIC, and deliberately not
+    ranked with cascade-skip: no data was ever lost here, and the fix recovers
+    none. What it fixes is that the ids printed are now the ids written.
+
+    `(.userStories[] | select(...)) |= . + {…}` is an in-place path update, so
+    a `userStories` object stays an object -- the opposite of cascade_skip's
+    form, and both are jq's.
+    """
+    container, keys = _story_slots(doc)
+    selected = [
+        key for key in keys if jq_index(container[key], "status", STORY) == "in_progress"
+    ]
+    reset = [jq_index(container[key], "id", STORY) for key in selected]
+    for key in selected:
+        container[key] = jq_add_object(container[key], ORPHAN_PATCH, STORY)
+    return reset
+
+
+def story_gates(docs, story_id):
+    """Every matching story's `.gate`, across the whole stream.
+
+    The precondition bash evaluated before the lock, in the shape it evaluated
+    it: `[.userStories[] | select(.id == $id) | .gate] | length` counted the
+    MATCHES (a story with no gate still yields one null), and the second jq
+    printed those gates for a string comparison against "null". Both are one
+    read of one list here.
+    """
+    return [
+        jq_index(story, "gate", STORY)
+        for doc in docs
+        for story in stories_with_id(doc, story_id)
+    ]
+
+
+def gate_is_absent(gates):
+    """bash's `[ "$has_gate" -eq 0 ] || [ "$(jq …)" = "null" ]`, to the case.
+
+    No match at all is the first arm -- reachable now that the check runs under
+    the lock, because the story can be deleted between validate_story_exists
+    and the crossing. One match whose gate is null is the second: jq rendered
+    that single value as the four characters `null`. TWO matches rendered as
+    two lines, which never equalled "null", so a duplicated story id fell
+    through to the write -- reproduced rather than tidied, because a tasks file
+    carrying one id twice is a broken file and what to do about it is a
+    decision, not a port.
+    """
+    return not gates or (len(gates) == 1 and gates[0] is None)
+
+
+def set_gate(doc, story_id, patch):
+    """`(.userStories[] | select(.id == $id) | .gate) |= . + $patch`.
+
+    jq_setpath for the `.gate` half so an existing gate keeps its position in
+    the story and a story with no gate gains the key at the end; jq_add_object
+    for the `+` so the fixture's type, prompt and options survive a merge that
+    only writes status (and selectedOption).
+    """
+    container, selected = _selected_slots(doc, story_id)
+    for key in selected:
+        story = container[key]
+        merged = jq_add_object(jq_index(story, "gate", STORY), patch, STORY + ".gate")
+        container[key] = jq_setpath(story, ["gate"], merged, STORY)
+
+
+def gate_payload(docs, story_id):
+    """`.userStories[] | select(.id == $id) | {id, gate}`, read off the
+    document the write just produced rather than off a second read of the
+    file -- which is what the jq echo-back after the lock was."""
+    return [
+        {"id": jq_index(story, "id", STORY), "gate": jq_index(story, "gate", STORY)}
+        for doc in docs
+        for story in stories_with_id(doc, story_id)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Ops -- one per verb (plus the one twin), each handed an already-resolved path
 # ---------------------------------------------------------------------------
 
@@ -1031,6 +1247,85 @@ def _normalize_op(verb, rule):
     return op
 
 
+def op_cascade_skip(argv):
+    """Closure, filters, write and report -- the one crossing bash now makes.
+
+    It was two jq calls with the lock between them, and the report was built
+    from the first. Prints `{skipped, count}` in that key order, which is the
+    order the jq object literal named them in.
+    """
+    path = _flag(argv, "--tasks-file")
+    failed_id = _flag(argv, "--failed-id")
+    if not path or failed_id is None:
+        die("Usage: tasks.py cascade-skip --tasks-file <path> --failed-id <id>")
+    docs = read_docs(path, "cascade-skip")
+    reports = [cascade_skip(doc, failed_id) for doc in docs]
+    write_docs_atomically(path, docs)
+    for skipped in reports:
+        _emit({"skipped": skipped, "count": len(skipped)})
+    return 0
+
+
+def op_reset_orphaned(argv):
+    """One selection, used for both the write and the report.
+
+    Writes NOTHING when nothing was orphaned. bash returned before the lock was
+    even set up in that case, and part1 asserts the file is untouched; the
+    decision moves inside the lock, the guarantee does not move at all.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py reset-orphaned --tasks-file <path>")
+    docs = read_docs(path, "reset-orphaned")
+    reports = [reset_orphaned(doc) for doc in docs]
+    if any(reports):
+        write_docs_atomically(path, docs)
+    for reset in reports:
+        _emit({"count": len(reset), "reset": reset})
+    return 0
+
+
+def _gate_op(verb, status):
+    """gate-pass and gate-fail, which differed in one string and one flag.
+
+    The refusal, the write and the echo-back were three crossings with the lock
+    around only the middle one. They are one call now, so the gate a story has
+    when the write lands is the gate the precondition looked at.
+    """
+
+    def op(argv):
+        path = _flag(argv, "--tasks-file")
+        story_id = _flag(argv, "--story-id")
+        if not path or story_id is None:
+            die(
+                "Usage: tasks.py " + verb + " --tasks-file <path> --story-id <id>"
+                + (" [--option <text>]" if status == "passed" else "")
+            )
+        docs = read_docs(path, verb)
+        if gate_is_absent(story_gates(docs, story_id)):
+            # bash's own line, to the byte and on stdout, because that is where
+            # it printed it and part1 compares the whole string. Exit 1, and
+            # nothing has been written -- the write is below this return.
+            _emit_compact(
+                {"valid": False, "errors": ["Story " + story_id + " has no gate defined"]}
+            )
+            return 1
+        patch = {"status": status}
+        option = _flag(argv, "--option")
+        if option is not None:
+            # bash refuses an empty --option before the crossing, so a value
+            # that arrives here is one the caller meant.
+            patch["selectedOption"] = option
+        for doc in docs:
+            set_gate(doc, story_id, patch)
+        write_docs_atomically(path, docs)
+        for payload in gate_payload(docs, story_id):
+            _emit(payload)
+        return 0
+
+    return op
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -1048,6 +1343,10 @@ _OPS = {
     "update-field": op_update_field,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
+    "cascade-skip": op_cascade_skip,
+    "reset-orphaned": op_reset_orphaned,
+    "gate-pass": _gate_op("gate-pass", "passed"),
+    "gate-fail": _gate_op("gate-fail", "failed"),
 }
 
 # No _VERB_FOR_OP table, unlike roadmap.py: every op here is named after the

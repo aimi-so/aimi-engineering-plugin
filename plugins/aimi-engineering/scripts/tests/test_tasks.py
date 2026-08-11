@@ -858,6 +858,74 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8"))["userStories"][0]["id"] == "US-001"
 
 
+_WRAPPER = re.compile(r"^(cmd_\w+)\(\) \{\n(.*?)^\}$", re.M | re.S)
+_TASKS_CROSSING = 'python3 "$(_aimi_tasks_py)"'
+_ROADMAP_CROSSING = 'python3 "$(_aimi_roadmap_py)"'
+
+
+def _wrappers():
+    with open(CLI, encoding="utf-8") as handle:
+        return _WRAPPER.findall(handle.read())
+
+
+def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
+    """THE structural invariant, and the reason it is worth having.
+
+    "Did concurrency change?" is a question a reviewer cannot answer by reading
+    a diff. "How many times does this wrapper call python3?" is one they can,
+    and the two are the same question: a verb that crosses once, inside the
+    lock, has nowhere left to put an unlocked read. cascade-skip, gate-pass,
+    gate-fail and reset-orphaned each crossed twice or three times with the
+    lock around only one of them, and each lost a race because of it.
+
+    More than one crossing in a tasks verb is the defect, not a style choice.
+    The two roadmap verbs that legitimately cross twice are asserted here by
+    name so the exception list cannot grow quietly: a payload arrives on their
+    stdin and can be refused without reading roadmap.json at all, so refusing
+    inside the lock would create the feature directory as a side effect of
+    saying no. No tasks verb takes a stdin payload, so none of them qualifies.
+
+    Readers are exempt from the lock half and not from the counting half:
+    cmd_list_ready names the module in each of two mutually exclusive branches,
+    which is one crossing per invocation. The check below is scoped to the
+    wrappers that take the lock, where "per invocation" and "per body" agree.
+    """
+    wrappers = _wrappers()
+    locked = {
+        name: body
+        for name, body in wrappers
+        if "_lock " in body and _TASKS_CROSSING in body
+    }
+    assert set(locked) == {
+        "cmd_mark_in_progress",
+        "cmd_mark_complete",
+        "cmd_mark_failed",
+        "cmd_mark_skipped",
+        "cmd_update_field",
+        "cmd_normalize_status",
+        "cmd_normalize_verification",
+        "cmd_cascade_skip",
+        "cmd_reset_orphaned",
+        "cmd_gate_pass",
+        "cmd_gate_fail",
+    }
+    for name, body in sorted(locked.items()):
+        assert body.count(_TASKS_CROSSING) == 1, name + " crosses more than once"
+        assert body.index('_lock "') < body.index(_TASKS_CROSSING), name
+        assert body.index(_TASKS_CROSSING) < body.index('200>"'), name
+
+    two_crossings = [
+        name for name, body in wrappers if body.count(_ROADMAP_CROSSING) > 1
+    ]
+    assert two_crossings == ["cmd_roadmap_init", "cmd_roadmap_amend_phase"]
+
+    # And the branch exemption is exactly one wrapper wide, named here so a
+    # second one cannot arrive by claiming to be a branch.
+    branched = [name for name, body in wrappers if body.count(_TASKS_CROSSING) > 1]
+    assert branched == ["cmd_list_ready"]
+    assert "_lock " not in dict(wrappers)["cmd_list_ready"]
+
+
 def test_every_op_is_named_after_the_verb_that_calls_it():
     """roadmap.py needed a _VERB_FOR_OP table because its op names drifted from
     its verb names, and a diagnostic then quoted a command nobody could run.
@@ -883,6 +951,10 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "update-field",
         "normalize-status",
         "normalize-verification",
+        "cascade-skip",
+        "reset-orphaned",
+        "gate-pass",
+        "gate-fail",
     }
     # The four mark-* ops are one implementation built four times rather than
     # four near-copies of one jq program, which is what they were.
