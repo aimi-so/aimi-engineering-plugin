@@ -17,6 +17,7 @@ set -uo pipefail
 # Sections, in the order the single-file suite ran them:
 #   - General Tests
 #   - Lifecycle Tests
+#   - validate-ids Tests
 #   - New Feature Tests (v1.13.0)
 #   - Version Command Test
 #   - Version Staleness Tests
@@ -218,11 +219,61 @@ test_metadata() {
   echo ""
   echo "=== Testing metadata command ==="
 
-  local output
-  output=$("$CLI" metadata)
+  # Pin all three halves of the contract, not just two substrings: the exit
+  # code, the exact object printed, and the fact that a read verb writes
+  # nothing. A port that returned the right keys with a stray addition, or
+  # that rewrote the file on the way past, would satisfy assert_contains and
+  # still be a behaviour change.
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
 
+  local output exit_code=0
+  output=$("$CLI" metadata) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "metadata exits 0"
   assert_contains '"title": "feat: Test feature"' "$output" "metadata returns title"
   assert_contains '"branchName": "feat/test-feature"' "$output" "metadata returns branch"
+
+  local compact
+  compact=$(printf '%s' "$output" | jq -Sc '.')
+  assert_eq \
+    '{"brainstormPath":null,"branchName":"feat/test-feature","createdAt":"2026-02-27","maxConcurrency":4,"planPath":null,"title":"feat: Test feature","type":"feat"}' \
+    "$compact" \
+    "metadata prints the whole metadata object and nothing else"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "metadata leaves tasks.json untouched"
+}
+
+test_metadata_max_concurrency_default() {
+  echo ""
+  echo "=== Testing metadata: maxConcurrency defaulting ==="
+
+  # cmd_metadata carries exactly one rule beyond "print .metadata":
+  # `.maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)`.
+  # Both of its branches are pinned here, because a port that dropped the
+  # clamp would still pass every other metadata assertion in this file.
+  local mc_fixture="$TASKS_DIR/9999-99-93-metadata-mc.json"
+
+  # (a) absent -> 20
+  jq 'del(.metadata.maxConcurrency)' "$TASKS_FILE" > "$mc_fixture"
+  echo "$mc_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code=0
+  output=$("$CLI" metadata) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "metadata: exits 0 with maxConcurrency absent"
+  assert_eq "20" "$(printf '%s' "$output" | jq '.maxConcurrency')" \
+    "metadata: absent maxConcurrency defaults to 20"
+
+  # (b) zero -> 20
+  jq '.metadata.maxConcurrency = 0' "$TASKS_FILE" > "$mc_fixture"
+  output=$("$CLI" metadata)
+  assert_eq "20" "$(printf '%s' "$output" | jq '.maxConcurrency')" \
+    "metadata: non-positive maxConcurrency is clamped to 20"
+
+  rm -f "$mc_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
 test_current_story() {
@@ -232,10 +283,32 @@ test_current_story() {
   # First set a current story
   "$CLI" next-story > /dev/null
 
-  local output
-  output=$("$CLI" current-story)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
 
+  local output exit_code=0
+  output=$("$CLI" current-story) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "current-story exits 0"
   assert_contains '"id": "US-001"' "$output" "current-story returns correct story"
+  assert_eq "Schema story (root)" "$(printf '%s' "$output" | jq -r '.title')" \
+    "current-story prints the whole story object, not just its id"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "current-story leaves tasks.json untouched"
+
+  # The no-current-story branch prints the bare string `null` and still exits
+  # 0. Removing just that one state file keeps current-tasks/current-branch in
+  # place for the tests that run after this one; clear-state would not.
+  rm -f "$AIMI_DIR/current-story"
+  exit_code=0
+  output=$("$CLI" current-story) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "current-story: exits 0 with no story in state"
+  assert_eq "null" "$output" "current-story: prints null with no story in state"
+
+  # Restore the state the following tests read.
+  "$CLI" next-story > /dev/null
 }
 
 test_get_branch() {
@@ -252,10 +325,30 @@ test_get_state() {
   echo ""
   echo "=== Testing get-state command ==="
 
-  local output
-  output=$("$CLI" get-state)
+  local output exit_code=0
+  output=$("$CLI" get-state) || exit_code=$?
 
+  assert_exit_code "0" "$exit_code" "get-state exits 0"
   assert_contains '"branch": "feat/test-feature"' "$output" "get-state returns branch"
+
+  # get-state is a fixed four-key assembly over four state files. Pin the key
+  # set, not just one value — the shape is the contract, and an assembly that
+  # gained or lost a key would still satisfy the assertion above.
+  assert_eq '["branch","last","story","tasks"]' \
+    "$(printf '%s' "$output" | jq -c 'keys')" \
+    "get-state prints exactly the four state keys"
+
+  assert_eq "US-001" "$(printf '%s' "$output" | jq -r '.story')" \
+    "get-state reports the story current-story holds"
+
+  # The empty-string-to-null mapping is the one rule in the jq: nothing has
+  # written last-result yet at this point in the run, so `.last` must be JSON
+  # null rather than "".
+  assert_eq "true" "$(printf '%s' "$output" | jq -c '.last == null')" \
+    "get-state maps an unwritten state file to null, not to an empty string"
+
+  assert_eq "false" "$(printf '%s' "$output" | jq -c '.tasks == null')" \
+    "get-state reports the resolved tasks path"
 }
 
 test_clear_state() {
@@ -310,9 +403,17 @@ test_count_pending() {
   echo ""
   echo "=== Testing count-pending ==="
 
-  local output
-  output=$("$CLI" count-pending)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" count-pending) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "count-pending exits 0"
   assert_eq "4" "$output" "count-pending counts stories with status pending"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "count-pending leaves tasks.json untouched"
 }
 
 test_list_ready() {
@@ -419,16 +520,34 @@ test_cascade_skip() {
   echo ""
   echo "=== Testing cascade-skip ==="
 
-  local output
-  output=$("$CLI" cascade-skip US-002)
+  local output exit_code=0
+  output=$("$CLI" cascade-skip US-002) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "cascade-skip exits 0"
 
   # US-004 depends on US-002 (failed), should be skipped
   assert_contains '"US-004"' "$output" "cascade-skip includes US-004 (depends on failed US-002)"
+
+  # Pin the report shape as well as its content: {skipped, count}, the failed
+  # story itself excluded from its own skip set.
+  assert_eq '["count","skipped"]' "$(printf '%s' "$output" | jq -c 'keys')" \
+    "cascade-skip prints exactly {skipped, count}"
+  assert_eq '["US-004"]' "$(printf '%s' "$output" | jq -c '.skipped')" \
+    "cascade-skip skip list is exactly US-004 (the failed story is not in its own set)"
+  assert_eq "1" "$(printf '%s' "$output" | jq '.count')" \
+    "cascade-skip count matches the skip list length"
 
   # Verify US-004 is now skipped in the file
   local us004_status
   us004_status=$(jq -r '.userStories[] | select(.id == "US-004") | .status' "$TASKS_FILE")
   assert_eq "skipped" "$us004_status" "US-004 status is skipped in file"
+
+  # The note the apply writes is part of the on-disk contract — it is the
+  # string a reader sees when asking why a story never ran.
+  local us004_notes
+  us004_notes=$(jq -r '.userStories[] | select(.id == "US-004") | .notes' "$TASKS_FILE")
+  assert_eq "Skipped: depends on failed story US-002" "$us004_notes" \
+    "cascade-skip writes the depends-on-failed-story note on disk"
 
   # US-003 does NOT depend on US-002, should not be skipped
   local us003_status
@@ -536,11 +655,103 @@ test_count_pending_final() {
   echo ""
   echo "=== Testing count-pending (final state) ==="
 
-  local output
-  output=$("$CLI" count-pending)
+  local output exit_code=0
+  output=$("$CLI" count-pending) || exit_code=$?
 
   # US-001 completed, US-002 failed, US-003 skipped, US-004 skipped = 0 pending
   assert_eq "0" "$output" "count-pending returns 0 after all stories resolved"
+  # Zero pending is not an error condition — the exit code is what a caller
+  # branches on, so it is pinned separately from the number.
+  assert_exit_code "0" "$exit_code" "count-pending exits 0 when nothing is pending"
+}
+
+# ============================================================================
+# validate-ids Tests
+# ============================================================================
+#
+# This verb had no assertions at all before this suite grew them, which is why
+# its two traps are pinned explicitly rather than described.
+
+test_validate_ids_valid() {
+  echo ""
+  echo "=== Testing validate-ids: well-formed ids ==="
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "validate-ids: exits 0 when every id is well formed"
+  assert_eq '{"count":4,"valid":true}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "validate-ids: the pass branch prints {valid: true, count: N}"
+
+  # TRAP: the output shape is ASYMMETRIC. The pass branch has no `errors` key
+  # at all — it is not an empty array — and the failure branch below has no
+  # `count`. A port that normalised the two into one object would be a
+  # behaviour change, so both halves are pinned.
+  assert_eq "false" "$(printf '%s' "$output" | jq -c 'has("errors")')" \
+    "validate-ids: the pass branch carries no errors key"
+}
+
+test_validate_ids_lowercase_suffix() {
+  echo ""
+  echo "=== Testing validate-ids: US-NNNa is accepted ==="
+
+  # TRAP: the regex is ^US-[0-9]{3}[a-z]?$ — the optional lowercase suffix is
+  # part of the contract, and task-format-v3.md documents it with US-012a as
+  # the example. The error wording says "(expected US-NNN)", which describes
+  # the common case and not the regex; a test written from that message alone
+  # would assert the opposite of the code.
+  local suffix_fixture="$TASKS_DIR/9999-99-92-validate-ids-suffix.json"
+  jq '.userStories = [
+        (.userStories[0] | .id = "US-001" | .dependsOn = []),
+        (.userStories[1] | .id = "US-001a" | .dependsOn = [])
+      ]' "$TASKS_FILE" > "$suffix_fixture"
+  echo "$suffix_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "validate-ids: a lowercase-suffixed id exits 0"
+  assert_eq '{"count":2,"valid":true}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "validate-ids: US-001a is counted as valid, not reported as an error"
+
+  rm -f "$suffix_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_ids_malformed() {
+  echo ""
+  echo "=== Testing validate-ids: malformed ids ==="
+
+  local bad_fixture="$TASKS_DIR/9999-99-91-validate-ids-bad.json"
+  jq '.userStories = [
+        (.userStories[0] | .id = "US-001" | .dependsOn = []),
+        (.userStories[1] | .id = "us-002" | .dependsOn = []),
+        (.userStories[2] | .id = "US-3" | .dependsOn = [])
+      ]' "$TASKS_FILE" > "$bad_fixture"
+  echo "$bad_fixture" > "$AIMI_DIR/current-tasks"
+
+  local pre_file
+  pre_file=$(jq -S '.' "$bad_fixture")
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "validate-ids: a malformed id exits 1"
+  assert_eq "false" "$(printf '%s' "$output" | jq -c '.valid')" \
+    "validate-ids: the failure branch reports valid false"
+  assert_eq '["Invalid story ID: us-002 (expected US-NNN)","Invalid story ID: US-3 (expected US-NNN)"]' \
+    "$(printf '%s' "$output" | jq -c '.errors')" \
+    "validate-ids: one error per malformed id, in file order, with the documented wording"
+  assert_eq "false" "$(printf '%s' "$output" | jq -c 'has("count")')" \
+    "validate-ids: the failure branch carries no count key"
+
+  # A validator writes nothing.
+  local post_file
+  post_file=$(jq -S '.' "$bad_fixture")
+  assert_eq "$pre_file" "$post_file" "validate-ids: leaves tasks.json untouched"
+
+  rm -f "$bad_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
 # ============================================================================
@@ -1033,8 +1244,13 @@ test_reset_orphaned_empty() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local output
-  output=$("$CLI" reset-orphaned)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" reset-orphaned) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "reset-orphaned exits 0 when there is nothing to reset"
 
   local count
   count=$(echo "$output" | jq '.count')
@@ -1043,6 +1259,15 @@ test_reset_orphaned_empty() {
   local reset_len
   reset_len=$(echo "$output" | jq '.reset | length')
   assert_eq "0" "$reset_len" "reset-orphaned returns empty reset array"
+
+  assert_eq '{"count":0,"reset":[]}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "reset-orphaned: the empty case prints exactly {count: 0, reset: []}"
+
+  # The zero case returns before the locked write is even set up, so the file
+  # must be byte-for-byte what it was.
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "reset-orphaned: the empty case writes nothing"
 }
 
 test_reset_orphaned_with_orphans() {
@@ -1056,8 +1281,10 @@ test_reset_orphaned_with_orphans() {
   "$CLI" mark-in-progress US-001 > /dev/null
   "$CLI" mark-in-progress US-002 > /dev/null
 
-  local output
-  output=$("$CLI" reset-orphaned)
+  local output exit_code=0
+  output=$("$CLI" reset-orphaned) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "reset-orphaned exits 0 when it reset something"
 
   local count
   count=$(echo "$output" | jq '.count')
@@ -1067,11 +1294,28 @@ test_reset_orphaned_with_orphans() {
   assert_contains "US-001" "$output" "reset-orphaned includes US-001"
   assert_contains "US-002" "$output" "reset-orphaned includes US-002"
 
+  assert_eq '["count","reset"]' "$(printf '%s' "$output" | jq -c 'keys')" \
+    "reset-orphaned prints exactly {count, reset}"
+  assert_eq '["US-001","US-002"]' "$(printf '%s' "$output" | jq -c '.reset')" \
+    "reset-orphaned reset list is exactly the two in_progress ids, in file order"
+
   # Verify the stories are now failed in the file
   local status_output us1_status
   status_output=$("$CLI" status)
   us1_status=$(echo "$status_output" | jq -r '.userStories[] | select(.id == "US-001") | .status')
   assert_eq "failed" "$us1_status" "US-001 status is failed after reset-orphaned"
+
+  # On-disk state, read from the file rather than through another verb: both
+  # stories failed, both carrying the fixed note, and nothing left in_progress.
+  assert_eq "failed" \
+    "$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$TASKS_FILE")" \
+    "US-002 status is failed on disk after reset-orphaned"
+  assert_eq "Reset: orphaned from previous session" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$TASKS_FILE")" \
+    "reset-orphaned writes its fixed note on disk"
+  assert_eq "0" \
+    "$(jq '[.userStories[] | select(.status == "in_progress")] | length' "$TASKS_FILE")" \
+    "reset-orphaned leaves no story in_progress on disk"
 }
 
 test_stale_state_warning() {
@@ -4091,12 +4335,28 @@ test_gate_pass() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-pass US-001)
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-001) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-pass: exits 0"
 
   local gate_status
   gate_status=$(echo "$output" | jq -r '.gate.status')
   assert_eq "passed" "$gate_status" "gate-pass: gate.status set to passed"
+
+  assert_eq '["gate","id"]' "$(printf '%s' "$output" | jq -Sc 'keys')" \
+    "gate-pass: echoes back exactly {id, gate}"
+  assert_eq "US-001" "$(printf '%s' "$output" | jq -r '.id')" \
+    "gate-pass: echoes back the story it was given"
+
+  # On disk: the gate is merged into, not replaced — the fixture's type,
+  # prompt and options survive, and the bare variant adds nothing but status.
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","status":"passed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: on disk the gate keeps every sibling field and gains only status"
+  assert_eq "false" \
+    "$(jq -c '.userStories[] | select(.id == "US-001") | .gate | has("selectedOption")' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: the bare variant writes no selectedOption"
 
   _teardown_gate_fixture
 }
@@ -4107,12 +4367,21 @@ test_gate_fail() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-fail US-001)
+  local output exit_code=0
+  output=$("$CLI" gate-fail US-001) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-fail: exits 0"
 
   local gate_status
   gate_status=$(echo "$output" | jq -r '.gate.status')
   assert_eq "failed" "$gate_status" "gate-fail: gate.status set to failed"
+
+  assert_eq '["gate","id"]' "$(printf '%s' "$output" | jq -Sc 'keys')" \
+    "gate-fail: echoes back exactly {id, gate}"
+
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","status":"failed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-fail: on disk the gate keeps every sibling field and gains only status"
 
   _teardown_gate_fixture
 }
@@ -4123,14 +4392,70 @@ test_gate_pass_with_option() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-pass US-001 --option "A")
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-001 --option "A") || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-pass --option: exits 0"
 
   local gate_status selected_option
   gate_status=$(echo "$output" | jq -r '.gate.status')
   selected_option=$(echo "$output" | jq -r '.gate.selectedOption')
   assert_eq "passed" "$gate_status" "gate-pass --option: gate.status set to passed"
   assert_eq "A" "$selected_option" "gate-pass --option: selectedOption is 'A'"
+
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","selectedOption":"A","status":"passed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-pass --option: on disk the gate gains both status and selectedOption"
+
+  _teardown_gate_fixture
+}
+
+test_gate_pass_no_gate_defined() {
+  echo ""
+  echo "=== Testing gate-pass on a story with no gate ==="
+
+  _setup_gate_fixture
+
+  # US-005 in the gate fixture carries no gate field at all.
+  local pre_file
+  pre_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-005 2>&1) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "gate-pass: a story with no gate exits 1"
+  assert_eq '{"valid":false,"errors":["Story US-005 has no gate defined"]}' "$output" \
+    "gate-pass: the no-gate path prints the valid/errors object naming the story"
+
+  local post_file
+  post_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+  assert_eq "$pre_file" "$post_file" "gate-pass: the no-gate path writes nothing"
+  assert_eq "false" \
+    "$(jq -c '.userStories[] | select(.id == "US-005") | has("gate")' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: the no-gate path does not invent a gate"
+
+  _teardown_gate_fixture
+}
+
+test_gate_fail_no_gate_defined() {
+  echo ""
+  echo "=== Testing gate-fail on a story with no gate ==="
+
+  _setup_gate_fixture
+
+  local pre_file
+  pre_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-fail US-005 2>&1) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "gate-fail: a story with no gate exits 1"
+  assert_eq '{"valid":false,"errors":["Story US-005 has no gate defined"]}' "$output" \
+    "gate-fail: the no-gate path prints the same object gate-pass does"
+
+  local post_file
+  post_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+  assert_eq "$pre_file" "$post_file" "gate-fail: the no-gate path writes nothing"
 
   _teardown_gate_fixture
 }
@@ -4261,6 +4586,14 @@ WAVEOF
   assert_contains '"valid": false' "$output" "validate-waves: mismatched waves fail validation"
   assert_contains "Wave mismatch" "$output" "validate-waves: reports wave mismatch error"
   assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"
+
+  # TRAP, pinned deliberately: cmd_validate_waves' body ENDS at its jq call —
+  # there is no `return 1` on the invalid branch, so an invalid verdict still
+  # exits 0. A caller that branches on `$?` rather than on `.valid` sees a
+  # pass. This is current behaviour, and pinning it stops a later port
+  # "correcting" it into a silent regression for anyone doing exactly that.
+  assert_exit_code "0" "$exit_code" \
+    "validate-waves: exits 0 even for an invalid verdict (the verdict is in .valid, not in \$?)"
 
   rm -f "$wave_fixture"
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
@@ -6345,9 +6678,11 @@ test_update_field_nested_path() {
   # Run the update against the dotted path, keeping the trailing echo-back:
   # it is a second jq program built from the same argument, so it is part of
   # what "the legitimate path is unchanged" has to mean.
-  local echo_back
-  echo_back=$("$CLI" update-field US-001 verification.status passed | jq -c '.')
+  local echo_back raw exit_code=0
+  raw=$("$CLI" update-field US-001 verification.status passed) || exit_code=$?
+  echo_back=$(printf '%s' "$raw" | jq -c '.')
 
+  assert_exit_code "0" "$exit_code" "update-field nested: exits 0 on the legitimate path"
   assert_eq \
     '{"id":"US-001","verification":{"strategy":"test","status":"passed","url":"http://example.com","expect":"all green"}}' \
     "$echo_back" \
@@ -6367,6 +6702,36 @@ test_update_field_nested_path() {
   assert_eq "$pre_strategy" "$post_strategy" "update-field nested: verification.strategy sibling preserved"
   assert_eq "$pre_url" "$post_url" "update-field nested: verification.url sibling preserved"
   assert_eq "$pre_expect" "$post_expect" "update-field nested: verification.expect sibling preserved"
+}
+
+test_update_field_single_segment() {
+  echo ""
+  echo "=== Testing update-field: a one-segment path patches the story's own key ==="
+
+  reset_fixture
+
+  # The echo-back filter interpolates "${field_path%%.*}" — the FIRST segment
+  # — so on a one-segment path the echoed key and the written key are the same
+  # one. Both interpolation sites are behind the validate_field_path gate the
+  # preceding story added; this test is the legitimate half of that contract.
+  local pre_other_stories
+  pre_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" update-field US-001 notes "hand written") || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "update-field single segment: exits 0"
+  assert_eq '{"id":"US-001","notes":"hand written"}' "$(printf '%s' "$output" | jq -c '.')" \
+    "update-field single segment: echo-back is {id, <first segment>}"
+  assert_eq "hand written" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$TASKS_FILE")" \
+    "update-field single segment: the value lands on disk"
+
+  # The write is scoped to the named story and to nothing else.
+  local post_other_stories
+  post_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+  assert_eq "$pre_other_stories" "$post_other_stories" \
+    "update-field single segment: every other story is untouched on disk"
 }
 
 test_update_field_refuses_non_identifier_path() {
@@ -6439,6 +6804,7 @@ main() {
   test_find_tasks
   test_init_session
   test_metadata
+  test_metadata_max_concurrency_default
   test_current_story
   test_get_branch
   test_get_state
@@ -6464,6 +6830,14 @@ main() {
   test_validate_deps
   test_status
   test_count_pending_final
+
+  # validate-ids — own fixtures, so they run after the progressive lifecycle
+  # sequence above rather than inside it
+  echo ""
+  echo "--- validate-ids Tests ---"
+  test_validate_ids_valid
+  test_validate_ids_lowercase_suffix
+  test_validate_ids_malformed
 
   # New feature tests (v1.13.0) — run with fresh state
   echo ""
@@ -6608,6 +6982,8 @@ main() {
   test_gate_pass
   test_gate_fail
   test_gate_pass_with_option
+  test_gate_pass_no_gate_defined
+  test_gate_fail_no_gate_defined
   test_list_ready_decision_gate_pending
   test_list_ready_action_gate_pending_dependency
   test_list_ready_verify_gate_non_blocking
@@ -6636,6 +7012,7 @@ main() {
   test_validate_tasks_backendspec_derived_escape_hatch
   test_mark_complete_preserves_new_fields
   test_update_field_nested_path
+  test_update_field_single_segment
   test_update_field_refuses_non_identifier_path
 
   # CLI output optimization tests — run with fresh fixture each time

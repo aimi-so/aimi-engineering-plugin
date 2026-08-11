@@ -108,6 +108,15 @@ set -uo pipefail
 # was lost, duplicated or silently skipped when the parts moved, and it is
 # equally what proves concurrency changed only WHEN tests run, never WHICH.
 #
+# ONE SUITE OVER tasks.json IS DELIBERATELY NOT HERE. test-tasks-concurrency.sh
+# runs two verbs at once and asserts what the loser sees; every one of its
+# assertions depends on a timing window, and two of them exist only because a
+# jq program is slow. Four parts contending for cores compress those windows
+# unpredictably, which is how a deterministic test becomes a flaky one — so it
+# stays out of PARTS, keeps its own counters, and contributes nothing to
+# EXPECTED_ASSERTIONS. Same reasoning, same shape as test-worktree-manager.sh.
+# Both are named in the root CLAUDE.md § Testing.
+#
 # PORTABILITY: no `mapfile`, no `readarray`, no associative arrays, and no
 # indexing into an array by number — none of those behave the same under zsh
 # and the bash 3.2 that ships on macOS, and where they are missing the read
@@ -175,7 +184,7 @@ done
 # rule down and the pair cannot disagree. A commit that adds assertions now
 # edits exactly one line here.
 _WORKTREE_FRAME_DELTA=2   # 3 assertions minus the 1 a worktree-resident CLI emits
-EXPECTED_ASSERTIONS=4047
+EXPECTED_ASSERTIONS=4113
 RUN_FRAME=checkout
 _resolved_cli="$(realpath "$SCRIPT_DIR/aimi-cli.sh" 2>/dev/null || printf '%s' "$SCRIPT_DIR/aimi-cli.sh")"
 case "$_resolved_cli" in
