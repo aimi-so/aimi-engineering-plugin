@@ -936,6 +936,70 @@ test_validate_ids_malformed() {
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_validators_moved_to_tasks_py() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the four validators left aimi-cli.sh ==="
+
+  # The retargeted form of a grep that used to find these rules in bash,
+  # following the same precedent test_metadata_max_concurrency_default set (and
+  # part3's "exactly one cv_identity definition in roadmap.py" before it): scan
+  # aimi-cli.sh for the deleted text AND tasks.py for the surviving symbol, two
+  # assertions per rule, so a re-introduced copy in either file fails on its own
+  # line rather than being masked by the other.
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: no jq copy of any of the four may come back. Each string
+  # is one the deleted program built, and each is one /aimi:plan matches on.
+  assert_eq "0" "$(grep -cF 'Circular dependency' "$CLI" || true)" \
+    "validators: no jq copy of validate-deps' cycle message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'Wave mismatch' "$CLI" || true)" \
+    "validators: no jq copy of validate-waves' mismatch message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'Invalid story ID: ' "$CLI" || true)" \
+    "validators: no bash copy of validate-ids' rejection message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'ignore previous|(^|' "$CLI" || true)" \
+    "validators: no jq copy of the suspicious-content screen survives in aimi-cli.sh"
+
+  # Scans tasks.py: exactly one of each, which is where they went.
+  assert_eq "1" "$(grep -c '^def validate_deps(' "$tasks_py" || true)" \
+    "validators: exactly one validate_deps definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_stories(' "$tasks_py" || true)" \
+    "validators: exactly one validate_stories definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_ids(' "$tasks_py" || true)" \
+    "validators: exactly one validate_ids definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_waves(' "$tasks_py" || true)" \
+    "validators: exactly one validate_waves definition in tasks.py"
+
+  # The screen the jq wrote out THREE times -- title, description, tasks[] --
+  # is one constant now. Three copies of a prompt-injection rule are three
+  # chances to fix two of them.
+  assert_eq "1" "$(grep -c '^SUSPICIOUS = ($' "$tasks_py" || true)" \
+    "validators: exactly one SUSPICIOUS definition in tasks.py"
+
+  # The story-id regex is the one thing here that did NOT fully move, and the
+  # count says so rather than leaving a reader to wonder. validate_story_id
+  # still gates a CLI ARGUMENT in bash — a different call site with the same
+  # pattern — while the DOCUMENT rule is tasks.py's.
+  assert_eq "1" "$(grep -cF '^US-[0-9]{3}[a-z]?$' "$CLI" || true)" \
+    "validators: aimi-cli.sh keeps exactly one story-id regex, validate_story_id's argument gate"
+  assert_eq "1" "$(grep -c '^STORY_ID_PATTERN = ' "$tasks_py" || true)" \
+    "validators: exactly one STORY_ID_PATTERN definition in tasks.py"
+
+  # And the wrapper shape, per verb. These four are READERS: one crossing each,
+  # no jq left, and — unlike the eleven writers — no lock, because there is
+  # nothing to serialize against a verb that only reads.
+  local fn body
+  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves; do
+    body=$(_cmd_body "$fn")
+    assert_eq "1" "$(printf '%s\n' "$body" | grep -c 'python3 ' || true)" \
+      "validators: $fn makes exactly one python3 call"
+    assert_eq "0" "$(printf '%s\n' "$body" | grep -c '\bjq\b' || true)" \
+      "validators: $fn has no jq left"
+    assert_eq "0" "$(printf '%s\n' "$body" | grep -c '_lock ' || true)" \
+      "validators: $fn takes no lock, because a reader has nothing to serialize"
+  done
+}
+
 # ============================================================================
 # New Feature Tests (v1.13.0)
 # ============================================================================
@@ -7023,6 +7087,7 @@ main() {
   test_validate_ids_valid
   test_validate_ids_lowercase_suffix
   test_validate_ids_malformed
+  test_validators_moved_to_tasks_py
 
   # New feature tests (v1.13.0) — run with fresh state
   echo ""

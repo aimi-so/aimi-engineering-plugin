@@ -17,6 +17,16 @@ rather than a verb and is explained below. They could be the first crossings
 because they take no lock and there is no writer to get the lock ordering
 wrong.
 
+The FOUR VALIDATORS -- `validate-deps`, `validate-stories`, `validate-ids` and
+`validate-waves` -- are readers too, and took no lock either. Their whole
+observable contract is a JSON verdict plus an exit status, which made them the
+cleanest thing in this port to prove: every input maps to one deterministic
+answer with no document left behind to reason about. What makes them delicate
+is the other end -- /aimi:plan's Phase 4.5 loop and its Phase 3e staging check
+read the error STRINGS, so a divergence surfaces as a planning failure rather
+than as a test failure. Three of their contract details look like defects and
+are reproduced deliberately; the section that holds them says which and why.
+
 The seven LOCKED WRITERS followed: `mark-complete`, `mark-failed`,
 `mark-in-progress`, `mark-skipped`, `update-field`, `normalize-status` and
 `normalize-verification`. They were chosen as the first writers because they
@@ -104,9 +114,18 @@ it cannot handle. Each of those is reproduced deliberately below -- jq_index,
 clamp_max_concurrency's comparison, read_docs, jq_length, jq_all_over, and
 MalformedTasks -- and the one place fidelity is impossible (the engine's own
 wording and exit status) is recorded case by case in
-tests/golden_from_jq.json's `tasks_read_cases`, `tasks_ready_cases` and
-`tasks_write_cases`, whose `_comment_tasks_read`, `_comment_tasks_ready` and
-`_comment_tasks_write` name every divergence and what it cost.
+tests/golden_from_jq.json's `tasks_read_cases`, `tasks_ready_cases`,
+`tasks_write_cases` and `tasks_validate_cases`, whose `_comment_tasks_read`,
+`_comment_tasks_ready`, `_comment_tasks_write` and `_comment_tasks_validate`
+name every divergence and what it cost.
+
+The validators added five more of jq's habits, none of them optional: `==`
+says a boolean is not a number where Python says it is (jq_equal), `index`
+searches for a SUBSEQUENCE when handed an array (jq_index_in), `-r` unquotes a
+string and pretty-prints everything else over as many lines as it takes
+(jq_raw), interpolation compacts the same values onto one (jq_tostring), and
+`has` refuses both a non-object and a non-string key rather than answering
+false (jq_has).
 
 Three more of jq's habits belong to the writers alone: `. + {…}` treats null as
 the empty object, `.a.b = v` BUILDS the intermediates it walks through, and
@@ -116,6 +135,7 @@ normalize rules reproduce all three.
 
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -202,7 +222,7 @@ def jq_alternative(value, fallback):
 
 
 def jq_length(value, owner):
-    """jq's `length`, over the values `.dependsOn // []` can actually hold.
+    """jq's `length`, over the values these verbs can actually hand it.
 
     It is not Python's len(), and the difference decides whether a story is
     ready: a NUMBER's length is its absolute value, so `dependsOn: 0` has
@@ -210,9 +230,16 @@ def jq_length(value, owner):
     does, and an empty STRING does the same. Both are recorded (depende-formas)
     because both are stories the pre-port CLI listed as ready.
 
+    NULL HAS LENGTH 0, which the readiness predicate never sees -- `//` had
+    already replaced it -- and validate-stories reaches on its first line:
+    `.title | length` runs against a story with no title, and answering 0 there
+    is what keeps such a story merely un-flagged rather than refused.
+
     A boolean is the one value with no length at all -- jq aborts there, and so
-    does this. null and false never arrive: `//` replaced them with [] first.
+    does this.
     """
+    if value is None:
+        return 0
     if isinstance(value, bool):
         raise MalformedTasks(
             owner + ": boolean (" + ("true" if value else "false") + ") has no length"
@@ -220,6 +247,147 @@ def jq_length(value, owner):
     if isinstance(value, (int, float)):
         return abs(value)
     return len(value)
+
+
+def jq_type(value):
+    """jq's `type` builtin -- the six names jq itself prints, not prose.
+
+    Distinct from roadmap.py's _json_type, which produces "a string" for a
+    DIAGNOSTIC. These names are compared against string literals the jq source
+    wrote out (`!= "array"`, `== "string"`), so they have to be jq's spelling.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    return "object"
+
+
+def jq_equal(left, right):
+    """jq's `==`, which is NOT Python's over the shapes a tasks file can hold.
+
+    Python says `1 == True` and `0 == False`; jq says neither, because a
+    boolean and a number are different types in its total order. validate-waves
+    compares a stored wave against a computed one and a hand-edited `wave: true`
+    has to come out as a mismatch (wave-true records that it does), so the type
+    is checked before the value.
+
+    Deep for arrays and objects, because a dependsOn entry can be either and
+    `[1] == [true]` would otherwise be true here and false in jq.
+    """
+    if jq_type(left) != jq_type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            jq_equal(a, b) for a, b in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            jq_equal(left[key], right[key]) for key in left
+        )
+    return left == right
+
+
+def jq_tostring(value):
+    """jq's `tostring`, which is also what string INTERPOLATION does.
+
+    A string interpolates as itself with no quotes; everything else as its
+    COMPACT JSON form. Both halves are load-bearing: `\\($story.id)` on a real
+    id must not gain quotes, and `\\($dep)` on a hand-edited number has to read
+    `3` -- deps-heterogeneo records "depends on 3 which does not exist".
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(jq_numbers(value), separators=(",", ":"), ensure_ascii=False)
+
+
+def jq_raw(value):
+    """One line of `jq -r` output, which is NOT jq_tostring.
+
+    `-r` unquotes a STRING and leaves every other value to jq's ordinary
+    printer, which is the PRETTY one -- so an id that is `[1, 2]` comes out over
+    four lines and validate-ids, which reads that output a line at a time,
+    reports four malformed ids from one story. Recorded as id-array.
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(jq_numbers(value), indent=2, ensure_ascii=False)
+
+
+def jq_has(value, key, owner):
+    """jq's `has`, which is strict about both halves and says so.
+
+    Only an object answers -- `has` on a string is jq's "Cannot check whether
+    string has a string key", which is what a story whose `gate` is a bare
+    string hits -- and only a string is a key an object can be asked about,
+    which is what validate-waves hits on a dependsOn holding null.
+    """
+    if not isinstance(value, dict):
+        raise MalformedTasks(owner + ": cannot check whether " + _json_type(value) + " has a key")
+    if not isinstance(key, str):
+        raise MalformedTasks(
+            owner + ": cannot check whether an object has " + _json_type(key) + " as a key"
+        )
+    return key in value
+
+
+def jq_test(value, pattern, owner):
+    """jq's `test(re; "i")`. Case-insensitive at every one of its call sites.
+
+    jq refuses a non-string input rather than treating it as no match, which is
+    why a story whose `project` is a number aborts validate-stories instead of
+    being reported -- projeto-numero records the abort.
+    """
+    if not isinstance(value, str):
+        raise MalformedTasks(
+            owner + ": " + _json_type(value) + " cannot be matched, as it is not a string"
+        )
+    return re.search(pattern, value, re.IGNORECASE) is not None
+
+
+def jq_index_in(array, needle):
+    """jq's `index`, whose two behaviours are decided by the NEEDLE's type.
+
+    A scalar needle is an element search. An ARRAY needle is a contiguous
+    SUBSEQUENCE search, so `["US-001"] | index(["US-001"])` is 0 and a
+    `dependsOn` holding `["US-001"]` is therefore NOT reported as a missing id
+    -- deps-array-elemento records that pass, which an element search would
+    turn into a false error. An empty array needle finds nothing at all.
+    """
+    if isinstance(needle, list):
+        if not needle:
+            return None
+        for start in range(len(array) - len(needle) + 1):
+            if all(jq_equal(array[start + offset], needle[offset]) for offset in range(len(needle))):
+                return start
+        return None
+    for position, item in enumerate(array):
+        if jq_equal(item, needle):
+            return position
+    return None
+
+
+def jq_group_by(values):
+    """jq's `group_by(.)`: sort by jq's total order, then group adjacent equals.
+
+    Only validate-stories' duplicate-skill rule reaches it, and it reaches it
+    for the FIRST element of each group of more than one -- which is why the
+    order matters at all: the reported duplicate is the sorted-first copy, not
+    the first one the author wrote.
+    """
+    groups = []
+    for value in sorted(values, key=jq_sort_key):
+        if groups and jq_equal(groups[-1][0], value):
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return groups
 
 
 def jq_all_over(elements, outputs_for):
@@ -699,6 +867,377 @@ def next_story(doc):
 
 
 # ---------------------------------------------------------------------------
+# The four validators -- a verdict and an exit status, and nothing else
+# ---------------------------------------------------------------------------
+#
+# /aimi:plan's Phase 4.5 loop and its Phase 3e staging check read these error
+# STRINGS, not merely the boolean beside them, so every message below is the jq
+# one to the character. Two of them look like typos and are not corrections to
+# make here:
+#
+#   * validate-ids says "(expected US-NNN)" while its regex accepts an optional
+#     lowercase suffix. task-format-v3.md documents `^US-\d{3}[a-z]?$` with
+#     US-012a as its example, so the REGEX is the contract and the message
+#     describes the common case. US-001a is accepted, and id-sufixo records it.
+#   * the plural-gates message reads `gates` and `gate` with no quotes around
+#     either, because the jq program was inside a bash SINGLE-quoted string and
+#     the quotes the author wrote closed and reopened it. gates-plural records
+#     the string bash actually assembled, which is the string /aimi:plan matches.
+#
+# And one omission, pinned rather than fixed: validate-waves has no `return 1`.
+# Its bash body ended at the jq call, so an invalid verdict still exits 0 --
+# the verdict lives in `.valid`, never in `$?`. See op_validate_waves.
+
+# The prompt-injection screen, written out THREE times in the jq -- once for a
+# title, once for a description, once per tasks[] entry. One constant here for
+# the same reason clamp_max_concurrency is one function: three copies of a
+# security rule are three chances to fix two of them.
+SUSPICIOUS = (
+    "ignore previous"
+    "|(^|\\s)[^a-zA-Z0-9]*system\\s*:"
+    "|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b"
+    "|INSTRUCTIONS\\s*:"
+    "|```"
+    "|\\$\\("
+)
+
+# aimi-cli.sh's `[[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]`, verbatim. The optional
+# lowercase suffix is the contract; see the note above before "fixing" it.
+STORY_ID_PATTERN = "^US-[0-9]{3}[a-z]?$"
+
+VALID_SKILL = "^[a-zA-Z0-9][a-zA-Z0-9_-]*$"
+VALID_PROJECT = "^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$"
+PATH_COMPONENT = ("\\.\\.", "/", "[\\$`;|&]")
+GATE_KEYS = ("type", "status", "prompt")
+
+
+def _verdict(errors):
+    """`if length == 0 then {valid: true, errors: []} else {valid: false, errors: .}`.
+
+    The same two-branch literal all three of deps, stories and waves ended on.
+    validate-ids is the one that does NOT use it -- its shape is asymmetric on
+    purpose and is built in validate_ids itself.
+    """
+    if not errors:
+        return {"valid": True, "errors": []}
+    return {"valid": False, "errors": errors}
+
+
+def validate_deps(doc):
+    """Self-references, dangling ids and cycles, in the order jq appended them.
+
+    The order is the output: `$self_refs + $missing_refs + $cycles` is one
+    concatenation, so every self-reference precedes every missing id and every
+    missing id precedes every cycle, whatever order the stories are in.
+    """
+    stories = _stories(doc)
+    all_ids = [jq_index(story, "id", STORY) for story in stories]
+    errors = []
+
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        deps = jq_iterate(_dependencies(story), STORY + ".dependsOn")
+        if any(jq_equal(dep, story_id) for dep in deps):
+            errors.append("Self-reference: " + jq_tostring(story_id) + " depends on itself")
+
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        for dep in jq_iterate(_dependencies(story), STORY + ".dependsOn"):
+            if jq_index_in(all_ids, dep) is None:
+                errors.append(
+                    "Missing ID: " + jq_tostring(story_id) + " depends on "
+                    + jq_tostring(dep) + " which does not exist"
+                )
+
+    for start in stories:
+        start_id = jq_index(start, "id", STORY)
+        reached = _reachable_deps(start, stories)
+        if any(jq_equal(value, start_id) for value in reached):
+            errors.append(
+                "Circular dependency: " + jq_tostring(start_id)
+                + " is part of a dependency cycle"
+            )
+
+    return _verdict(errors)
+
+
+def _reachable_deps(start, stories):
+    """One story's dependency closure -- jq's `reduce range(length)`, at a fixpoint.
+
+    The jq ran exactly n passes for n stories, each pass adding the dependsOn of
+    every story already named in the accumulator and running the result through
+    `unique`. The accumulator only grows and n passes always reach the fixpoint
+    (the longest chain through n stories is n-1 edges), so stopping when it
+    stops growing gives the identical array -- the same argument cascade_skip_ids
+    makes, and the same reason: n passes over n stories is quadratic for nothing.
+
+    `unique` is why jq_sort_key has to be here. A hand-edited dependsOn holding
+    a null beside a string sorts fine in jq and raises TypeError under a naive
+    Python `sorted`; deps-heterogeneo is the recorded case.
+    """
+    current = _dependencies(start)
+    if not isinstance(current, list):
+        # jq's `$current + [...]`, which refuses anything but two arrays. The
+        # self-reference walk above already refused a dependsOn it could not
+        # ITERATE, so only a shape that iterates and cannot be added reaches here.
+        raise MalformedTasks(
+            STORY + ".dependsOn: cannot add an array to " + _json_type(current)
+        )
+    while True:
+        grown = jq_unique(
+            current
+            + [
+                dep
+                for story in stories
+                if any(jq_equal(value, jq_index(story, "id", STORY)) for value in current)
+                for dep in jq_iterate(_dependencies(story), STORY + ".dependsOn")
+            ]
+        )
+        if grown == current:
+            return current
+        current = grown
+
+
+def _story_errors(story):
+    """Every rule validate-stories applies to ONE story, in the jq's own order.
+
+    The order is load-bearing for the same reason it is in is_ready: each rule
+    can abort on a shape the one before it never looked at, so a document that
+    aborts has to abort in the same place. A story with no acceptanceCriteria
+    dies on rule 3 rather than reaching the title screen -- sem-criterios.
+    """
+    story_id = jq_tostring(jq_index(story, "id", STORY))
+    errors = []
+
+    if jq_length(jq_index(story, "title", STORY), STORY + ".title") > 200:
+        errors.append(story_id + ": title exceeds 200 chars")
+    if jq_length(jq_index(story, "description", STORY), STORY + ".description") > 500:
+        errors.append(story_id + ": description exceeds 500 chars")
+    criteria = jq_iterate(
+        jq_index(story, "acceptanceCriteria", STORY), STORY + ".acceptanceCriteria"
+    )
+    if any(jq_length(c, STORY + ".acceptanceCriteria[]") > 5000 for c in criteria):
+        errors.append(story_id + ": acceptance criterion exceeds 5000 chars")
+    if jq_test(jq_index(story, "title", STORY), SUSPICIOUS, STORY + ".title"):
+        errors.append(story_id + ": title contains suspicious content")
+    if jq_test(jq_index(story, "description", STORY), SUSPICIOUS, STORY + ".description"):
+        errors.append(story_id + ": description contains suspicious content")
+
+    # The project chain is an if/elif in the jq too, so a project that is both
+    # absolute and traversing is reported once, as absolute.
+    project = jq_index(story, "project", STORY)
+    if project is not None:
+        owner = STORY + ".project"
+        if jq_test(project, "^/", owner):
+            errors.append(story_id + ": project must not be an absolute path")
+        elif jq_test(project, "\\.\\.", owner):
+            errors.append(story_id + ": project must not contain path traversal (..)")
+        elif jq_test(project, "[\\$`;|&]", owner):
+            errors.append(story_id + ": project contains shell metacharacters")
+        elif not jq_test(project, VALID_PROJECT, owner):
+            errors.append(story_id + ": project contains invalid characters")
+
+    skills = jq_index(story, "skills", STORY)
+    if skills is not None:
+        owner = STORY + ".skills"
+        if jq_type(skills) != "array":
+            errors.append(story_id + ": skills must be an array")
+        else:
+            entries = jq_iterate(skills, owner)
+            if jq_length(skills, owner) > 10:
+                errors.append(story_id + ": skills array exceeds 10 entries")
+            # Two separate passes, as the jq wrote them: a skill that is both
+            # malformed and path-bearing is reported twice, once under each
+            # heading, and skills-caminho records both lines.
+            for skill in entries:
+                if not jq_test(skill, VALID_SKILL, owner + "[]"):
+                    errors.append(
+                        story_id + ": skills[" + jq_tostring(skill) + "] contains invalid characters"
+                    )
+            for skill in entries:
+                if any(jq_test(skill, p, owner + "[]") for p in PATH_COMPONENT):
+                    errors.append(
+                        story_id + ": skills[" + jq_tostring(skill)
+                        + "] must not contain path components"
+                    )
+            if len(jq_unique(entries)) != jq_length(skills, owner):
+                for group in jq_group_by(entries):
+                    if len(group) > 1:
+                        errors.append(
+                            story_id + ": skills contains duplicate entry " + jq_tostring(group[0])
+                        )
+
+    tasks = jq_index(story, "tasks", STORY)
+    if tasks is not None:
+        owner = STORY + ".tasks"
+        if jq_type(tasks) != "array":
+            errors.append(story_id + ": tasks must be an array")
+        elif jq_length(tasks, owner) == 0:
+            errors.append(story_id + ": tasks must be omitted when empty")
+        else:
+            entries = jq_iterate(tasks, owner)
+            if jq_length(tasks, owner) > 50:
+                errors.append(story_id + ": tasks array exceeds 50 entries")
+            for entry in entries:
+                if jq_type(entry) != "string":
+                    errors.append(story_id + ": tasks[] element must be a string")
+            # `type == "string" and length > 5000` -- jq's `and` short-circuits,
+            # which is what keeps a non-string entry from reaching `length` here
+            # after it has already been reported above.
+            for entry in entries:
+                if jq_type(entry) == "string" and jq_length(entry, owner + "[]") > 5000:
+                    errors.append(story_id + ": tasks[] entry exceeds 5000 chars")
+            for entry in entries:
+                if jq_type(entry) == "string" and jq_test(entry, SUSPICIOUS, owner + "[]"):
+                    errors.append(story_id + ": tasks[] entry contains suspicious content")
+
+    # No quotes around either word: see the note at the top of this section.
+    if jq_has(story, "gates", STORY):
+        errors.append(
+            story_id + ": gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+        )
+    gate = jq_index(story, "gate", STORY)
+    if gate is not None:
+        for key in GATE_KEYS:
+            if not jq_has(gate, key, STORY + ".gate"):
+                errors.append(story_id + ": gate: missing required field " + key)
+
+    verification = jq_index(story, "verification", STORY)
+    if verification is not None and jq_type(verification) == "string":
+        errors.append(
+            story_id + ": verification must be an object {strategy, status, url, expect}; "
+            "found bare string — run normalize-verification to fix"
+        )
+    if not jq_has(story, "status", STORY):
+        errors.append(
+            story_id + ": missing required field: status — run normalize-status to fix"
+        )
+    return errors
+
+
+def validate_stories(doc):
+    stories = _stories(doc)
+    errors = []
+    for story in stories:
+        errors += _story_errors(story)
+    return _verdict(errors)
+
+
+def id_lines(docs):
+    """The LINES bash's `while read` walked, which is not the list of ids.
+
+    `ids=$(jq -r '.userStories[].id' "$f")` renders one output per story, joins
+    them with newlines, and then command substitution strips the trailing ones;
+    `<<< "$ids"` puts exactly one back. So an id containing a newline arrives as
+    TWO lines (id-newline: two well-formed ids out of one story), an id that is
+    an array arrives as four (id-array), and an empty ids string still yields one
+    empty line -- which the loop skips, giving `{valid: true, count: 0}` for an
+    empty userStories.
+
+    The whole STREAM feeds one pool: a file holding two documents produces a
+    single verdict over both, and dois-documentos records it.
+    """
+    rendered = ""
+    for doc in docs:
+        for story in _stories(doc):
+            rendered += jq_raw(jq_index(story, "id", STORY)) + "\n"
+    return rendered.rstrip("\n").split("\n")
+
+
+def validate_ids(docs):
+    """The verdict AND its exit status, because the two shapes disagree.
+
+    THE OUTPUT IS ASYMMETRIC and that is the contract: the pass branch is
+    `{valid, count}` with no `errors` key, the failure branch is
+    `{valid, errors}` with no `count`. A port that emitted both keys on both
+    branches would look tidier and would break /aimi:plan, which reads them
+    apart. part1-core pins each half on its own line.
+    """
+    errors = []
+    count = 0
+    for line in id_lines(docs):
+        if line == "":
+            continue
+        count += 1
+        if not re.match(STORY_ID_PATTERN, line):
+            errors.append("Invalid story ID: " + line + " (expected US-NNN)")
+    if not errors:
+        return {"valid": True, "count": count}, 0
+    return {"valid": False, "errors": errors}, 1
+
+
+def computed_waves(stories):
+    """The wave assignment, exactly as the jq's nested reduce built it.
+
+    n outer passes over the stories still unassigned; a story with no
+    dependencies lands in wave 0, one whose dependencies are ALL already
+    assigned lands one above their max, and one whose dependencies are not
+    lands nowhere this pass. A story inside a cycle is therefore never assigned
+    at all -- which is why validate-waves reports nothing for a cyclic file
+    (wave-ciclo) and why a dangling dependsOn hides every wave error in its
+    story (dep-pendurada). Both are recorded passes, not oversights: reporting
+    them is validate-deps' job.
+    """
+    deps = {}
+    for story in stories:
+        key = jq_index(story, "id", STORY)
+        if not isinstance(key, str):
+            # jq's "Cannot use null (null) as object key", from the
+            # `map({(.id): ...})` that builds this table before anything else
+            # runs. A story with no id aborts the verb -- id-ausente-waves.
+            raise MalformedTasks(
+                ".userStories: cannot use " + _json_type(key) + " as an object key"
+            )
+        deps[key] = jq_alternative(jq_index(story, "dependsOn", STORY), [])
+    all_ids = [jq_index(story, "id", STORY) for story in stories]
+
+    assigned = {}
+    for _ in range(len(all_ids)):
+        remaining = [i for i in all_ids if not jq_has(assigned, i, "$assigned")]
+        current = assigned
+        for story_id in remaining:
+            story_deps = jq_alternative(deps.get(story_id), [])
+            if jq_length(story_deps, STORY + ".dependsOn") == 0:
+                current = dict(current)
+                current[story_id] = 0
+            elif all(
+                jq_has(current, dep, "$assigned")
+                for dep in jq_iterate(story_deps, STORY + ".dependsOn")
+            ):
+                current = dict(current)
+                current[story_id] = max(current[dep] for dep in story_deps) + 1
+        assigned = current
+    return assigned
+
+
+def validate_waves(doc):
+    """Stored wave against computed wave, for the stories that have both.
+
+    A story the walk never reached is skipped entirely -- `$computed_wave !=
+    null` guards both arms of the select -- so only a story that COULD be placed
+    is ever reported. A stored wave that is absent, null or false reads as null
+    and is reported against its computed one; wave-false records that `false`
+    takes `//`'s alternative and comes out as `stored=null`.
+    """
+    stories = _stories(doc)
+    assigned = computed_waves(stories)
+    errors = []
+    for story in stories:
+        computed = jq_alternative(assigned.get(jq_index(story, "id", STORY)), None)
+        stored = jq_alternative(jq_index(story, "wave", STORY), None)
+        mismatch = (
+            computed is not None and stored is not None and not jq_equal(computed, stored)
+        ) or (computed is not None and stored is None)
+        if mismatch:
+            errors.append(
+                "Wave mismatch: " + jq_tostring(jq_index(story, "id", STORY))
+                + " stored=" + jq_tostring(stored)
+                + " computed=" + jq_tostring(computed)
+            )
+    return _verdict(errors)
+
+
+# ---------------------------------------------------------------------------
 # The write rules -- seven verbs, all of them called from inside bash's lock
 # ---------------------------------------------------------------------------
 
@@ -1123,6 +1662,91 @@ def op_next_story(argv):
     return 0
 
 
+def _emit_echoed(verdicts):
+    """bash's `echo "$(jq …)"`, which is not the same as letting jq print.
+
+    Command substitution strips EVERY trailing newline and `echo` puts exactly
+    one back, so a stream of two verdicts prints as two objects with one newline
+    at the end -- and a stream of NONE prints a single blank line rather than
+    nothing at all. doc-vazio records that blank line, and reproducing it is
+    what keeps an empty tasks file looking to a caller exactly as it did.
+    """
+    rendered = "".join(
+        json.dumps(jq_numbers(verdict), indent=2, ensure_ascii=False) + "\n"
+        for verdict in verdicts
+    )
+    sys.stdout.write(rendered.rstrip("\n") + "\n")
+
+
+def op_validate_deps(argv):
+    """The verdict, then bash's own re-read of it to decide the exit status.
+
+    `is_valid=$(echo "$errors" | jq -r '.valid')` collected ONE line per
+    document and compared the lot against the four characters `true`, so a file
+    holding two valid documents exits 1 -- two lines never equal one word.
+    Recorded as dois-documentos-validos-deps, and reproduced rather than tidied:
+    a caller branching on `$?` sees today what it saw before.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-deps --tasks-file <path>")
+    verdicts = [validate_deps(doc) for doc in read_docs(path, "validate-deps")]
+    _emit_echoed(verdicts)
+    valid_lines = "\n".join("true" if v["valid"] else "false" for v in verdicts)
+    return 0 if valid_lines == "true" else 1
+
+
+def op_validate_stories(argv):
+    """Same verdict shape, a different exit rule, and both are bash's.
+
+    The status came from `echo "$result" | jq -e '.valid == false'`, and `-e`
+    reports on the LAST value a program produced -- so over two documents only
+    the second one's verdict decides, and over ZERO values jq exits 0, which
+    inverts into a refusal here. doc-vazio-stories records the exit 1 an empty
+    tasks file earns.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-stories --tasks-file <path>")
+    verdicts = [validate_stories(doc) for doc in read_docs(path, "validate-stories")]
+    _emit_echoed(verdicts)
+    if not verdicts or not verdicts[-1]["valid"]:
+        return 1
+    return 0
+
+
+def op_validate_ids(argv):
+    """ONE verdict over the whole stream, unlike its three siblings.
+
+    The ids were pooled by a single `jq -r` before bash ever looked at them, so
+    two concatenated documents produce one count and one error list rather than
+    one verdict each.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-ids --tasks-file <path>")
+    verdict, status = validate_ids(read_docs(path, "validate-ids"))
+    _emit(verdict)
+    return status
+
+
+def op_validate_waves(argv):
+    """ALWAYS 0. Not an oversight to tidy up on the way past.
+
+    cmd_validate_waves' bash body ended at its jq call -- no `return 1`, unlike
+    all three of its siblings -- so an invalid verdict has always exited 0 and
+    the verdict has always lived in `.valid`. part1-core asserts the exit status
+    against a wave-mismatch fixture so the omission cannot be quietly "fixed"
+    into a regression for a caller that branches on `$?`.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-waves --tasks-file <path>")
+    for doc in read_docs(path, "validate-waves"):
+        _emit(validate_waves(doc))
+    return 0
+
+
 def op_validate_story_exists(argv):
     """aimi-cli.sh's validate_story_exists, in Python, for the verbs that have
     already crossed. NOT a verb -- the twin of a bash gate that ten call sites
@@ -1335,6 +1959,10 @@ _OPS = {
     "count-pending": op_count_pending,
     "list-ready": op_list_ready,
     "next-story": op_next_story,
+    "validate-deps": op_validate_deps,
+    "validate-stories": op_validate_stories,
+    "validate-ids": op_validate_ids,
+    "validate-waves": op_validate_waves,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),
     "mark-failed": _mark_op("mark-failed"),

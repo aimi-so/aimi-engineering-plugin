@@ -1314,77 +1314,12 @@ cmd_validate_deps() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local errors
-  errors=$(jq '
-    . as $root |
-    ($root.userStories | map(.id)) as $all_ids |
-
-    # Check self-references
-    (
-      [
-        $root.userStories[] |
-        . as $story |
-        select(($story.dependsOn // []) | any(. == $story.id)) |
-        "Self-reference: \($story.id) depends on itself"
-      ]
-    ) as $self_refs |
-
-    # Check missing references
-    (
-      [
-        $root.userStories[] |
-        . as $story |
-        ($story.dependsOn // [])[] |
-        . as $dep |
-        select(($all_ids | index($dep)) == null) |
-        "Missing ID: \($story.id) depends on \($dep) which does not exist"
-      ]
-    ) as $missing_refs |
-
-    # Check circular dependencies using iterative reachability
-    # For each story, walk its dependency graph and check if it reaches itself
-    (
-      [
-        $root.userStories[] |
-        . as $start |
-        $start.id as $start_id |
-        # Build reachability: iterate N times where N = number of stories
-        (
-          [$start_id] as $initial |
-          reduce range($root.userStories | length) as $_ (
-            ($start.dependsOn // []);
-            . as $current |
-            ($current + [
-              $root.userStories[] |
-              select((.id) as $sid | $current | any(. == $sid)) |
-              (.dependsOn // [])[]
-            ]) | unique
-          )
-        ) |
-        if any(. == $start_id) then
-          "Circular dependency: \($start_id) is part of a dependency cycle"
-        else
-          empty
-        end
-      ]
-    ) as $cycles |
-
-    ($self_refs + $missing_refs + $cycles) |
-    if length == 0 then
-      {valid: true, errors: []}
-    else
-      {valid: false, errors: .}
-    end
-  ' "$tasks_file")
-
-  echo "$errors"
-
-  # Return non-zero exit code if invalid
-  local is_valid
-  is_valid=$(echo "$errors" | jq -r '.valid')
-  if [ "$is_valid" != "true" ]; then
-    return 1
-  fi
+  # A pure reader: no lock, no temp file, one crossing. The exit status is the
+  # crossing's own, which is what it was before -- the jq verdict and the
+  # `is_valid != "true"` test that used to follow it both live in tasks.py, so
+  # the two cannot answer differently.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-deps --tasks-file "$tasks_file"
 }
 
 # Validate story content (field lengths, suspicious patterns)
@@ -1392,70 +1327,12 @@ cmd_validate_stories() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local result
-  result=$(jq '
-    .userStories as $stories |
-    [
-      $stories[] |
-      . as $s |
-      (
-        (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
-        (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
-        (if ($s.title | test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
-        (if ($s.project != null) then
-          (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
-           elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
-           elif ($s.project | test("[\\$`;|&]")) then ["\($s.id): project contains shell metacharacters"]
-           elif ($s.project | test("^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$") | not) then ["\($s.id): project contains invalid characters"]
-           else [] end)
-         else [] end) +
-        (if ($s.skills != null) then
-          (if ($s.skills | type) != "array" then ["\($s.id): skills must be an array"]
-           else
-             (if ($s.skills | length) > 10 then ["\($s.id): skills array exceeds 10 entries"] else [] end) +
-             [$s.skills[] | select(test("^[a-zA-Z0-9][a-zA-Z0-9_-]*$") | not) | "\($s.id): skills[" + (. | tostring) + "] contains invalid characters"] +
-             [$s.skills[] | select(test("\\.\\.") or test("/") or test("[\\$`;|&]")) | "\($s.id): skills[" + (. | tostring) + "] must not contain path components"] +
-             (if ($s.skills | unique | length) != ($s.skills | length) then
-               [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
-             else [] end)
-           end)
-         else [] end) +
-        (if ($s.tasks != null) then
-          (if ($s.tasks | type) != "array" then ["\($s.id): tasks must be an array"]
-           elif ($s.tasks | length) == 0 then ["\($s.id): tasks must be omitted when empty"]
-           else
-             (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
-             [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
-             [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
-             [$s.tasks[] | select(type == "string" and test("ignore previous|(^|\\s)[^a-zA-Z0-9]*system\\s*:|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b|INSTRUCTIONS\\s*:|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
-           end)
-         else [] end) +
-        (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
-        (if ($s.gate != null) then
-          (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
-         else [] end) +
-        (if ($s.verification != null and ($s.verification | type) == "string") then
-          ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
-         else [] end) +
-        (if (has("status") | not) then
-          ["\($s.id): missing required field: status — run normalize-status to fix"]
-         else [] end)
-      ) | .[]
-    ] |
-    if length == 0 then {valid: true, errors: []}
-    else {valid: false, errors: .}
-    end
-  ' "$tasks_file")
-  local jq_exit=$?
-  echo "$result"
-  [ $jq_exit -ne 0 ] && return $jq_exit
-  # Return exit 1 when validation found errors
-  if echo "$result" | jq -e '.valid == false' > /dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+  # Same shape as cmd_validate_deps above, and the same reason. Every one of
+  # this verb's twenty-odd error strings is read by /aimi:plan's Phase 4.5 loop
+  # and Phase 3e staging check, so they moved character-for-character rather
+  # than being retyped.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-stories --tasks-file "$tasks_file"
 }
 
 # Normalize verification fields: rewrite any bare-string verification into object form
@@ -1541,26 +1418,12 @@ cmd_validate_ids() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local ids errors=() count=0
-  ids=$(jq -r '.userStories[].id' "$tasks_file")
-
-  while IFS= read -r id; do
-    [ -z "$id" ] && continue
-    count=$((count + 1))
-    if ! [[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]; then
-      errors+=("Invalid story ID: $id (expected US-NNN)")
-    fi
-  done <<< "$ids"
-
-  if [ ${#errors[@]} -eq 0 ]; then
-    jq -n --argjson count "$count" '{valid: true, count: $count}'
-    return 0
-  else
-    local errors_json
-    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
-    jq -n --argjson errors "$errors_json" '{valid: false, errors: $errors}'
-    return 1
-  fi
+  # The regex, the line-at-a-time walk over `jq -r` output and the ASYMMETRIC
+  # pass/failure shapes all moved together, because they are one rule: the
+  # count exists only on the pass branch and the errors only on the failure
+  # one, and /aimi:plan reads them apart.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-ids --tasks-file "$tasks_file"
 }
 
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
@@ -10404,57 +10267,12 @@ cmd_validate_waves() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
-    . as $root |
-    ($root.userStories | map({(.id): (.dependsOn // [])}) | add // {}) as $deps |
-    ($root.userStories | map(.id)) as $all_ids |
-
-    # Compute waves iteratively
-    # Wave 0: stories with no dependencies
-    # Wave N: stories whose deps are all in waves < N
-    (
-      reduce range($all_ids | length) as $iteration (
-        {};
-        . as $assigned |
-        ($all_ids | map(select(. as $id | $assigned | has($id) | not))) as $remaining |
-        reduce $remaining[] as $id (
-          $assigned;
-          . as $current |
-          if (($deps[$id] // []) | length == 0) then
-            $current + {($id): 0}
-          elif (($deps[$id] // []) | all(. as $d | $current | has($d))) then
-            (($deps[$id] // []) | map($current[.]) | max + 1) as $wave |
-            $current + {($id): $wave}
-          else
-            $current
-          end
-        )
-      )
-    ) as $computed |
-
-    # Compare computed waves against stored wave fields
-    [
-      $root.userStories[] |
-      . as $story |
-      ($computed[$story.id] // null) as $computed_wave |
-      ($story.wave // null) as $stored_wave |
-      select(
-        ($computed_wave != null and $stored_wave != null and $computed_wave != $stored_wave) or
-        ($computed_wave != null and $stored_wave == null)
-      ) |
-      {
-        id: $story.id,
-        storedWave: $stored_wave,
-        computedWave: $computed_wave
-      }
-    ] as $mismatches |
-
-    if ($mismatches | length) == 0 then
-      {valid: true, errors: []}
-    else
-      {valid: false, errors: [$mismatches[] | "Wave mismatch: \(.id) stored=\(.storedWave) computed=\(.computedWave)"]}
-    end
-  ' "$tasks_file"
+  # NO exit-status handling, and that is not an omission to tidy up. This body
+  # ended at its jq call before the port and ends at the crossing now, so an
+  # invalid verdict still exits 0 -- the verdict is in `.valid`, never in `$?`.
+  # test-aimi-cli-part1-core.sh asserts the 0 against a wave-mismatch fixture.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-waves --tasks-file "$tasks_file"
 }
 
 # Validate tasks file citation fields

@@ -3,17 +3,19 @@
 THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py
 and test_story_merge.py.
 
-`golden_from_jq.json` holds three blocks for this module, each captured by
+`golden_from_jq.json` holds four blocks for this module, each captured by
 running the jq implementations that used to live in aimi-cli.sh, BEFORE they
 were deleted: `tasks_read_cases` (151 cases, the six read verbs),
-`tasks_ready_cases` (128, list-ready and next-story) and `tasks_write_cases`
-(91, the seven locked writers). Like the story-merge capture all three record
-each case's INPUT, so every one is replayable: test_the_port_reproduces_the_jq,
-test_the_ready_port_reproduces_the_jq and test_the_write_port_reproduces_the_jq
-re-run the whole corpus through the CLI and compare every field. Those three
+`tasks_ready_cases` (128, list-ready and next-story), `tasks_write_cases`
+(91, the seven locked writers) and `tasks_validate_cases` (328 -- 82
+adversarial documents through all four validators). Like the story-merge
+capture all four record each case's INPUT, so every one is replayable:
+test_the_port_reproduces_the_jq, test_the_ready_port_reproduces_the_jq,
+test_the_write_port_reproduces_the_jq and test_the_validate_port_reproduces_the_jq
+re-run the whole corpus through the CLI and compare every field. Those four
 tests are the evidence the port changed nothing, and they are why the rest of
 this file can stay short -- it asserts the properties a reader would otherwise
-have to reconstruct from 370 recordings by eye.
+have to reconstruct from 698 recordings by eye.
 
 The write block compares two fields the read blocks have no use for: `file`,
 the WHOLE resulting tasks.json, and `tree`, the whole .aimi listing. For a
@@ -48,6 +50,7 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
 CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
 READY = {c["label"]: c for c in GOLDEN["tasks_ready_cases"]}
 WRITE = {c["label"]: c for c in GOLDEN["tasks_write_cases"]}
+VALIDATE = {c["label"]: c for c in GOLDEN["tasks_validate_cases"]}
 
 
 def _labels(*prefixes):
@@ -709,6 +712,326 @@ def test_a_number_written_back_is_rendered_the_way_jq_rendered_it():
 
 
 # ---------------------------------------------------------------------------
+# The four validators: a verdict and an exit status, over an adversarial corpus
+# ---------------------------------------------------------------------------
+
+# The 39 cases `_comment_tasks_validate` names, in the ten groups the engine's
+# own messages fall into. Every one is jq aborting mid-expression, so what was
+# recorded is an ENGINE message at an engine exit status (5 runtime, 4 parse),
+# not a rule anyone wrote. Everything NOT in this table must match byte for byte.
+VALIDATE_DIVERGENCES = {}
+for _verb in ("deps", "stories", "ids", "waves"):
+    for _stem in ("sem-userstories", "us-null", "us-string"):
+        VALIDATE_DIVERGENCES[_stem + "-" + _verb] = (
+            "jq aborted iterating a userStories that is absent, null or a string"
+        )
+    VALIDATE_DIVERGENCES["doc-array-" + _verb] = "jq aborted indexing a document that is an array"
+    VALIDATE_DIVERGENCES["doc-malformado-" + _verb] = "jq's own parse error, at its own exit 4"
+for _label in ("sem-criterios-stories", "criterios-null-stories"):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted iterating an acceptanceCriteria that is not a list"
+for _label in ("deps-numero-deps", "deps-numero-waves"):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted iterating a dependsOn that is a number"
+for _label in ("historia-string-deps", "historia-string-ids", "historia-string-waves"):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted indexing a story that is a string"
+for _label in ("historia-string-stories", "gate-nao-objeto-stories"):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted asking whether a string has a key"
+for _label in (
+    "historia-null-stories", "titulo-null-stories",
+    "projeto-numero-stories", "skills-elemento-numero-stories",
+):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted matching a value that is not a string"
+# validate-waves' alone: it builds `{(.id): ...}` before anything else runs, so
+# an id that cannot be an object key kills that verb where the other three answer.
+for _label in (
+    "historia-null-waves", "id-ausente-waves", "id-numero-waves", "id-array-waves",
+):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted using an id that is not a string as an object key"
+for _label in ("deps-heterogeneo-waves", "deps-array-elemento-waves"):
+    VALIDATE_DIVERGENCES[_label] = "jq aborted asking whether an object has a non-string key"
+
+
+@pytest.mark.parametrize("label", sorted(VALIDATE), ids=sorted(VALIDATE))
+def test_the_validate_port_reproduces_the_jq(label, tmp_path):
+    case = VALIDATE[label]
+    actual = _replay(case, tmp_path)
+    if label in VALIDATE_DIVERGENCES:
+        pytest.skip(VALIDATE_DIVERGENCES[label])
+    for field in ("exit", "stdout", "stderr", "state_after"):
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_the_validate_divergence_table_names_only_cases_that_exist():
+    assert set(VALIDATE_DIVERGENCES) <= set(VALIDATE)
+    assert len(VALIDATE_DIVERGENCES) == 39, "the capture's comment names 39; keep the two in step"
+
+
+@pytest.mark.parametrize(
+    "label", sorted(VALIDATE_DIVERGENCES), ids=sorted(VALIDATE_DIVERGENCES)
+)
+def test_each_excused_validate_case_still_refuses(label, tmp_path):
+    """The excuse buys the engine's wording and its exit number. Nothing else.
+
+    All 39 are refusals that wrote nothing to stdout, and an excused case must
+    not become one that quietly answers: a validator that started printing
+    `{valid: true}` for a document jq refused would hand /aimi:plan a pass it
+    never earned.
+    """
+    recorded = VALIDATE[label]
+    assert recorded["stderr"].startswith(("jq:", "parse error:")), label
+    assert recorded["exit"] in (4, 5), label
+    assert recorded["stdout"] == "", label
+
+    actual = _replay(recorded, tmp_path)
+    assert actual["exit"] != 0, label + ": an excused case still has to refuse"
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["stderr"].startswith("Error: "), label
+    assert actual["state_after"] == recorded["state_after"], label
+
+
+def _verdict(label):
+    """The verdict the RECORDING holds. Read off the capture, never recomputed --
+    an anti-vacuum check that asked tasks.py what it thinks would be satisfied by
+    any answer it gave."""
+    return json.loads(VALIDATE[label]["stdout"])
+
+
+def _errors(label):
+    return _verdict(label)["errors"]
+
+
+def test_no_validator_writes_anything_on_any_path_the_corpus_walks():
+    """The property this block exists for, over all 328 recordings at once.
+
+    These four take no lock, and the only thing that makes that safe is that
+    they write nothing at all. `state_after` is empty in every case -- pass,
+    refusal and engine abort alike -- so a validator that grew a cache, a temp
+    file or a state write would fail here rather than in whatever ran next.
+    """
+    assert len(VALIDATE) == 328
+    assert all(case["state_after"] == {} for case in VALIDATE.values())
+    body = _code()
+    for op in ("op_validate_deps", "op_validate_stories", "op_validate_ids", "op_validate_waves"):
+        assert op in body
+        assert "write_docs_atomically" not in body.split("def " + op, 1)[1].split("\ndef ", 1)[0]
+
+
+def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
+    """Eleven buckets, each read off the RECORDING. A corpus that only ever
+    passed would let the replay above pass on nothing, and these four verbs
+    exist precisely to fail on bad input."""
+    # 1. validate-deps: a dangling reference, a self-reference, a cycle
+    assert _errors("dep-pendurada-deps") == [
+        "Missing ID: US-001 depends on US-999 which does not exist"
+    ]
+    assert _errors("auto-referencia-deps") == [
+        "Self-reference: US-001 depends on itself",
+        "Circular dependency: US-001 is part of a dependency cycle",
+    ]
+    assert _errors("ciclo-deps") == [
+        "Circular dependency: US-001 is part of a dependency cycle",
+        "Circular dependency: US-002 is part of a dependency cycle",
+    ]
+    # 2. validate-ids: a malformed id, in file order, with the documented wording
+    assert _errors("id-malformado-ids") == [
+        "Invalid story ID: " + bad + " (expected US-NNN)"
+        for bad in ("us-002", "US-3", "US-0001", "US-001A", "US-001 ")
+    ]
+    # 3. validate-waves: a stale wave, and an absent one
+    assert _errors("wave-lacuna-waves") == ["Wave mismatch: US-002 stored=5 computed=1"]
+    assert _errors("wave-ausente-waves") == ["Wave mismatch: US-002 stored=null computed=1"]
+    # 4. a story missing a required field
+    assert _errors("sem-status-stories") == [
+        "US-001: missing required field: status — run normalize-status to fix"
+    ]
+    # 5. skills over 10 entries, and 6. an explicitly empty skills array, which is legal
+    assert _errors("skills-excede-stories") == ["US-001: skills array exceeds 10 entries"]
+    assert _verdict("skills-vazio-stories")["valid"] is True
+    # 7. the plural `gates` field -- and NO quotes around either word, because the
+    #    jq lived in a bash single-quoted string and the ones the author typed
+    #    closed and reopened it. This is the string /aimi:plan matches on.
+    assert _errors("gates-plural-stories") == [
+        "US-001: gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+    ]
+    # 8. a gate object missing each of type, status and prompt IN TURN
+    for key in ("type", "status", "prompt"):
+        assert _errors("gate-sem-" + key + "-stories") == [
+            "US-001: gate: missing required field " + key
+        ]
+    assert _errors("gate-sem-nada-stories") == [
+        "US-001: gate: missing required field " + key for key in ("type", "status", "prompt")
+    ]
+    # 9. a bare-string verification, em dash and all
+    assert _errors("verificacao-string-stories") == [
+        "US-001: verification must be an object {strategy, status, url, expect}; "
+        "found bare string — run normalize-verification to fix"
+    ]
+    # 10. every remaining validate-stories string, one document each, so no rule
+    #     in that verb rests on the replay alone
+    for label, expected in (
+        ("titulo-longo", "title exceeds 200 chars"),
+        ("descricao-longa", "description exceeds 500 chars"),
+        ("criterio-longo", "acceptance criterion exceeds 5000 chars"),
+        ("titulo-suspeito", "title contains suspicious content"),
+        ("descricao-suspeita", "description contains suspicious content"),
+        ("projeto-absoluto", "project must not be an absolute path"),
+        ("projeto-traversal", "project must not contain path traversal (..)"),
+        ("projeto-metachar", "project contains shell metacharacters"),
+        ("projeto-invalido", "project contains invalid characters"),
+        ("skills-nao-array", "skills must be an array"),
+        ("skills-duplicado", "skills contains duplicate entry a"),
+        ("tasks-nao-array", "tasks must be an array"),
+        ("tasks-vazio", "tasks must be omitted when empty"),
+        ("tasks-excede", "tasks array exceeds 50 entries"),
+        ("tasks-longo", "tasks[] entry exceeds 5000 chars"),
+        ("tasks-suspeito", "tasks[] entry contains suspicious content"),
+    ):
+        assert _errors(label + "-stories") == ["US-001: " + expected], label
+    assert _errors("skills-caminho-stories") == [
+        "US-001: skills[a/b] contains invalid characters",
+        "US-001: skills[a/b] must not contain path components",
+    ]
+    assert _errors("tasks-elemento-nao-string-stories") == [
+        "US-001: tasks[] element must be a string"
+    ] * 2
+    # 11. and a PASS for each of the four, so none of them is merely a refuser
+    for verb in ("deps", "stories", "ids", "waves"):
+        assert _verdict("limpo-" + verb)["valid"] is True
+        assert VALIDATE["limpo-" + verb]["exit"] == 0
+
+
+def test_validate_ids_keeps_its_asymmetric_shape_and_its_accepted_suffix():
+    """THE two traps of the verb that had zero assertions before outline:02.
+
+    The pass branch carries `count` and no `errors`; the failure branch carries
+    `errors` and no `count`. And the regex accepts a lowercase suffix while the
+    message says `(expected US-NNN)` -- the regex is the contract and the
+    message describes the common case, so neither may move to agree with the
+    other: /aimi:plan matches on that wording.
+    """
+    passed = _verdict("id-sufixo-ids")
+    assert passed == {"valid": True, "count": 3} and "errors" not in passed
+    assert VALIDATE["id-sufixo-ids"]["exit"] == 0, "US-001a and US-012a are ACCEPTED"
+    failed = _verdict("id-malformado-ids")
+    assert set(failed) == {"valid", "errors"} and "count" not in failed
+    assert VALIDATE["id-malformado-ids"]["exit"] == 1
+    # an empty userStories still answers with a count, not with an error list
+    assert _verdict("vazio-ids") == {"valid": True, "count": 0}
+    # and a story with no id reaches the regex as the four characters `null`,
+    # because `jq -r` rendered it that way before bash ever saw it
+    assert _errors("id-ausente-ids") == ["Invalid story ID: null (expected US-NNN)"]
+    assert T.STORY_ID_PATTERN == "^US-[0-9]{3}[a-z]?$", "the bash regex, verbatim"
+
+
+def test_validate_waves_exits_zero_even_when_the_verdict_is_invalid():
+    """The one sibling with no `return 1`, pinned so it cannot be tidied.
+
+    cmd_validate_waves' bash body ended at its jq call, so the verdict has
+    always lived in `.valid` and never in `$?`. A caller branching on the exit
+    status sees a pass today; "fixing" that would break it silently.
+    """
+    for label in ("wave-lacuna-waves", "wave-ausente-waves", "wave-string-waves",
+                  "wave-true-waves", "wave-false-waves"):
+        assert _verdict(label)["valid"] is False, label
+        assert VALIDATE[label]["exit"] == 0, label + ": an invalid verdict still exits 0"
+    # and its three siblings do the opposite, so the asymmetry is deliberate
+    for label in ("ciclo-deps", "sem-status-stories", "id-malformado-ids"):
+        assert VALIDATE[label]["exit"] == 1, label
+
+
+def test_a_duplicated_story_id_is_flagged_by_none_of_the_four():
+    """Recorded as the deliberate pass it is, not as an oversight.
+
+    validate-ids checks FORMAT and validate-deps checks REFERENCES; neither
+    looks for a repeated id, and validate-stories and validate-waves have no
+    opinion either. Pinning the pass means a later change that starts flagging
+    it shows up as a golden diff rather than as a silent contract change.
+    """
+    for verb in ("deps", "stories", "ids", "waves"):
+        assert _verdict("id-duplicado-" + verb)["valid"] is True, verb
+        assert VALIDATE["id-duplicado-" + verb]["exit"] == 0, verb
+    assert _verdict("id-duplicado-ids")["count"] == 2, "both copies are counted"
+
+
+def test_a_cycle_and_a_dangling_id_hide_their_story_from_validate_waves():
+    """Two more recorded passes that read like misses and are the contract.
+
+    A story the wave walk never places has a computed wave of null, and both
+    arms of the select require a non-null one -- so a cyclic file and a file
+    with a dangling dependsOn are both `{valid: true}` here. Reporting them is
+    validate-deps' job, and it does.
+    """
+    assert _verdict("wave-ciclo-waves") == {"valid": True, "errors": []}
+    assert _verdict("dep-pendurada-waves") == {"valid": True, "errors": []}
+    assert _verdict("wave-ciclo-deps")["valid"] is False
+    assert _verdict("dep-pendurada-deps")["valid"] is False
+
+
+def test_the_places_a_naive_python_would_have_diverged_from_jq():
+    """Four rules that are not Python's, each with the recorded case behind it."""
+    # `unique` inside validate-deps' cycle reduce, over a heterogeneous dependsOn.
+    # Python's own sorted() raises here; jq_sort_key is why this one does not.
+    with pytest.raises(TypeError):
+        sorted([None, 3, "US-001"])
+    assert T.jq_unique([None, 3, "US-001", 3]) == [None, 3, "US-001"]
+    assert _errors("deps-heterogeneo-deps") == [
+        "Missing ID: US-002 depends on null which does not exist",
+        "Missing ID: US-002 depends on 3 which does not exist",
+    ]
+    # `==` puts a boolean and a number in different types, so `wave: true` IS a
+    # mismatch against a computed 1 where Python's `1 == True` would hide it.
+    assert (1 == True) is True and T.jq_equal(1, True) is False
+    assert T.jq_equal(1, 1.0) is True and T.jq_equal([1], [True]) is False
+    assert _errors("wave-true-waves") == ["Wave mismatch: US-002 stored=true computed=1"]
+    # `index` searches for a contiguous SUBSEQUENCE when the needle is an array,
+    # so a dependsOn holding ["US-001"] resolves rather than dangling.
+    assert T.jq_index_in(["US-001", "US-002"], ["US-001"]) == 0
+    assert T.jq_index_in(["US-001", ["US-002"]], ["US-002"]) is None
+    assert T.jq_index_in(["US-001"], []) is None
+    assert _verdict("deps-array-elemento-deps")["valid"] is True
+    # `jq -r` unquotes a string and pretty-prints everything else, and bash read
+    # that output a LINE at a time -- so one array id is four malformed ids, one
+    # id holding a newline is two well-formed ones, and an empty id is neither.
+    assert T.jq_raw("US-001") == "US-001" and T.jq_raw([1, 2]) == "[\n  1,\n  2\n]"
+    assert _errors("id-array-ids") == [
+        "Invalid story ID: " + line + " (expected US-NNN)"
+        for line in ("[", "  1,", "  2", "]")
+    ]
+    assert _verdict("id-newline-ids") == {"valid": True, "count": 2}
+    assert _verdict("id-vazio-ids") == {"valid": True, "count": 1}, "the empty id is not counted"
+
+
+def test_an_empty_file_and_a_two_document_file_answer_the_way_bash_made_them():
+    """Two whole-file behaviours the `echo` around the jq owned, not the rule.
+
+    Command substitution strips every trailing newline and `echo` puts one back,
+    so a stream of no verdicts prints a BLANK LINE; and the exit status came
+    from re-reading that text, so two valid documents give validate-deps two
+    lines of `true` that never equal the one word it compared against.
+    """
+    for label in ("doc-vazio-deps", "doc-vazio-stories"):
+        assert VALIDATE[label]["stdout"] == "\n" and VALIDATE[label]["exit"] == 1, label
+    assert _verdict("doc-vazio-ids") == {"valid": True, "count": 0}
+    assert VALIDATE["doc-vazio-waves"]["stdout"] == "" and VALIDATE["doc-vazio-waves"]["exit"] == 0
+
+    assert VALIDATE["dois-documentos-validos-deps"]["stdout"].count('"valid": true') == 2
+    assert VALIDATE["dois-documentos-validos-deps"]["exit"] == 1, "two lines never equal `true`"
+    assert VALIDATE["dois-documentos-validos-stories"]["exit"] == 0, "`jq -e` read the LAST one"
+    # validate-ids pooled BOTH documents' ids into one verdict rather than two
+    assert _errors("dois-documentos-ids") == ["Invalid story ID: us-002 (expected US-NNN)"]
+
+
+def test_the_suspicious_content_screen_has_one_definition_for_its_three_call_sites():
+    """The jq wrote this regex out three times -- title, description, tasks[] --
+    and three copies of a prompt-injection screen are three chances to fix two of
+    them. The same collapse clamp_max_concurrency got, for the same reason."""
+    source = _source()
+    assert len(re.findall(r"^SUSPICIOUS = \($", source, re.M)) == 1
+    assert source.count("SUSPICIOUS") == 4, "one definition plus three call sites"
+    for label in ("titulo-suspeito", "descricao-suspeita", "tasks-suspeito"):
+        assert _verdict(label + "-stories")["valid"] is False, label
+
+
+# ---------------------------------------------------------------------------
 # The clamp: ONE function, jq's whole value space
 # ---------------------------------------------------------------------------
 
@@ -943,6 +1266,10 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "count-pending",
         "list-ready",
         "next-story",
+        "validate-deps",
+        "validate-stories",
+        "validate-ids",
+        "validate-waves",
         "validate-story-exists",
         "mark-complete",
         "mark-failed",
