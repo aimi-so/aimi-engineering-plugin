@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only tasks.json document logic for aimi-cli.sh.
+"""tasks.json document logic for aimi-cli.sh.
 
 WHY THIS FILE EXISTS, AND WHAT IT IS ALLOWED TO DO
 ==================================================
@@ -10,12 +10,23 @@ tasks file lives, reading .aimi/state/ -- and this file owns what a verb then
 computes over the document it was handed. The boundary is one crossing per
 verb: bash resolves the path, calls here once, and prints whatever comes back.
 
-It holds READ-ONLY verbs and nothing else: `status` (both branches),
-`metadata`, `get-story`, `current-story`, `get-state`, `count-pending`,
-`list-ready` and `next-story`, plus `validate-story-exists`, which is a twin of
-a bash gate rather than a verb and is explained below. Nothing here takes a
-lock and nothing here writes, which is why these could be the first crossings
--- there is no writer to get the lock ordering wrong.
+The read-only verbs came first: `status` (both branches), `metadata`,
+`get-story`, `current-story`, `get-state`, `count-pending`, `list-ready` and
+`next-story`, plus `validate-story-exists`, which is a twin of a bash gate
+rather than a verb and is explained below. They could be the first crossings
+because they take no lock and there is no writer to get the lock ordering
+wrong.
+
+The seven LOCKED WRITERS followed: `mark-complete`, `mark-failed`,
+`mark-in-progress`, `mark-skipped`, `update-field`, `normalize-status` and
+`normalize-verification`. They were chosen as the first writers because they
+were already correct -- every one of them already did its whole read, decide
+and write inside the lock -- so the wrapper shape could be established at
+almost no behavioural risk. THE LOCK ITSELF IS STILL BASH'S: the wrapper is
+`( _lock "$f.lock"; python3 tasks.py <op> ... ) 200>"$f.lock"`, one crossing
+inside the lock, and nothing in this file acquires or releases anything.
+Reimplementing `_lock` here -- two strategies, `flock -x 200` and an `mkdir`
+spinlock -- would be the exact duplication the port exists to remove.
 
 WHAT THESE SLICES ACTUALLY COLLAPSED
 ------------------------------------
@@ -50,10 +61,15 @@ WHAT THIS FILE MUST NOT BECOME
     identity is asserted, not assumed: test_tasks.py runs both and compares
     stderr. The bash copy is deleted by whichever slice moves its last caller,
     and this op's message dies with it.
-  * A writer. Nothing here opens a file for writing, and in particular nothing
-    here touches .aimi/state/ -- read_state/write_state carry their own
-    .state.lock and their own path confinement, and cmd_get_state hands the
-    four values it already read in as flags for exactly that reason.
+  * A writer of anything but the ONE tasks file it was handed. In particular
+    nothing here touches .aimi/state/ -- read_state/write_state carry their own
+    .state.lock and their own path confinement, cmd_get_state hands the four
+    values it already read in as flags for exactly that reason, and the four
+    mark-* verbs still run their own write_state/clear_state_file lines in bash
+    after the crossing returns.
+  * A lock. See above: `_lock` stays in aimi-cli.sh, both strategies intact,
+    and every writer here is called from inside a subshell that already holds
+    it. A second opinion about locking is worse than none.
   * A second self-resolver. cmd_init_session runs `resolve_path "$0"` and feeds
     the result to write_state "cli-path" AND write_global_cli_cache. Inside
     this file `$0` is tasks.py, so porting it would put a Python module's path
@@ -72,13 +88,20 @@ it cannot handle. Each of those is reproduced deliberately below -- jq_index,
 clamp_max_concurrency's comparison, read_docs, jq_length, jq_all_over, and
 MalformedTasks -- and the one place fidelity is impossible (the engine's own
 wording and exit status) is recorded case by case in
-tests/golden_from_jq.json's `tasks_read_cases` and `tasks_ready_cases`, whose
-`_comment_tasks_read` and `_comment_tasks_ready` name every divergence and what
-it cost.
+tests/golden_from_jq.json's `tasks_read_cases`, `tasks_ready_cases` and
+`tasks_write_cases`, whose `_comment_tasks_read`, `_comment_tasks_ready` and
+`_comment_tasks_write` name every divergence and what it cost.
+
+Three more of jq's habits belong to the writers alone: `. + {…}` treats null as
+the empty object, `.a.b = v` BUILDS the intermediates it walks through, and
+`map` over an object yields an ARRAY. jq_add_object, jq_setpath and the two
+normalize rules reproduce all three.
 """
 
 import json
+import os
 import sys
+import tempfile
 
 # jq's number rendering and jq's cross-type ordering, both already solved for
 # roadmap.json and neither of them roadmap-specific. Importing beats a second
@@ -219,6 +242,57 @@ def jq_all_over(elements, outputs_for):
     return True
 
 
+def jq_add_object(value, patch, owner):
+    """jq's `. + {…}`, as the four mark-* verbs used it.
+
+    null is the empty object on the left of `+`, so a null story SELECTED by
+    the update would come back as the patch alone. Nothing else non-object can:
+    jq refuses to add an object to a string or a number, and so does this.
+    """
+    if value is None:
+        return dict(patch)
+    if isinstance(value, dict):
+        merged = dict(value)
+        merged.update(patch)
+        return merged
+    raise MalformedTasks(owner + ": cannot add an object to " + _json_type(value))
+
+
+def jq_setpath(value, segments, new_value, owner):
+    """jq's `.a.b.c = $v`, which BUILDS every intermediate it walks through.
+
+    Two behaviours update-field depends on, both recorded:
+
+      * a dotted path whose intermediates are absent (or null) creates them as
+        objects, so `novo.ramo.folha` lands three levels down in a story that
+        had no `novo` -- update-field-cria-intermediarios.
+      * a path THROUGH a non-object fails and writes nothing at all, so
+        `verification.status` on a story whose verification is the string
+        "manual" leaves the document untouched --
+        update-field-intermediario-nao-objeto.
+
+    Returns a new object rather than mutating, so a failure deeper in the path
+    cannot leave a half-assigned story behind for the caller to write out.
+    """
+    head = segments[0]
+    if segments[1:]:
+        child = jq_setpath(
+            jq_index(value, head, owner), segments[1:], new_value, owner + "." + head
+        )
+    else:
+        child = new_value
+    if value is None:
+        return {head: child}
+    if isinstance(value, dict):
+        # Same as jq's `.k = v`: an existing key keeps its position, a new one
+        # is appended. update-field's own echo-back printed the result, so the
+        # order was always visible.
+        updated = dict(value)
+        updated[head] = child
+        return updated
+    raise MalformedTasks(owner + "." + head + ": cannot index " + _json_type(value))
+
+
 def clamp_max_concurrency(value):
     """metadata.maxConcurrency, defaulted and floor-guarded, in ONE place.
 
@@ -318,6 +392,45 @@ def read_docs(path, verb):
         return die("Error: " + verb + ": cannot read tasks file " + path + ": " + str(err))
     except ValueError as err:
         return die("Error: " + verb + ": malformed JSON in tasks file " + path + ": " + str(err))
+
+
+def write_docs_atomically(path, docs):
+    """The whole STREAM back, into a temp file beside the target, then rename.
+
+    roadmap.py's write_doc_atomically discipline exactly -- NamedTemporaryFile
+    in the target's OWN directory (so the rename is within one filesystem and
+    therefore atomic), fully written and closed, then os.replace, and on any
+    exception the temp file is closed and unlinked before the exception
+    propagates. A half-written tasks.json is the worst failure this port could
+    introduce: /aimi:execute reads this file after every story.
+
+    Not imported from roadmap.py, and this is the reason: jq read a stream and
+    wrote a stream, so a tasks file holding two concatenated documents came
+    back with BOTH of them rewritten. write_doc_atomically writes one value.
+    mark-complete-dois-documentos records what jq produced and this reproduces
+    it; the pre-port mktemp-then-mv it replaces is gone from bash entirely.
+
+    jq_numbers on the way out for the same reason _emit applies it on the way
+    to stdout: jq put every number through a double before printing it, so a
+    priority someone wrote as 3.0 came back out of a rewrite as 3.
+    """
+    directory = os.path.dirname(path) or "."
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=directory, prefix=os.path.basename(path) + ".", delete=False
+    )
+    try:
+        for doc in docs:
+            json.dump(jq_numbers(doc), handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+        handle.close()
+        os.replace(handle.name, path)
+    except BaseException:
+        handle.close()
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +655,148 @@ def next_story(doc):
 
 
 # ---------------------------------------------------------------------------
+# The write rules -- seven verbs, all of them called from inside bash's lock
+# ---------------------------------------------------------------------------
+
+
+def _story_slots(doc):
+    """`.userStories` and the keys an update can write back through.
+
+    jq's `(.userStories[] | select(...)) |= f` is a PATH expression: it updates
+    in place, and it does so for an object exactly as for an array, which is
+    why `userStories: {"a": {...}}` comes back an object while `map` (the
+    normalizers' verb) turns the same input into an array. Both are recorded.
+
+    jq_iterate is called for its refusal alone, so a userStories the readers
+    cannot iterate is refused here over the same field and in the same words.
+    """
+    container = jq_index(doc, "userStories")
+    jq_iterate(container, ".userStories")
+    keys = range(len(container)) if isinstance(container, list) else list(container)
+    return container, keys
+
+
+def _selected_slots(doc, story_id):
+    """The `select(.id == $id)` half, over every slot.
+
+    Every story is indexed, not only the matching ones -- that is jq's own
+    order of business and it is why a userStories carrying a bare string is
+    refused even when the story being marked sits before it.
+    """
+    container, keys = _story_slots(doc)
+    return container, [key for key in keys if jq_index(container[key], "id", STORY) == story_id]
+
+
+def mark_stories(doc, story_id, patch):
+    """`(.userStories[] | select(.id == $id)) |= . + $patch`, the four mark-*.
+
+    Every match is updated, not the first: a tasks file carrying the same id
+    twice had both stories marked, and mark-complete-id-duplicado records it.
+    """
+    container, selected = _selected_slots(doc, story_id)
+    for key in selected:
+        container[key] = jq_add_object(container[key], patch, STORY)
+
+
+def assign_field(doc, story_id, segments, value):
+    """`(.userStories[] | select(.id == $id) | .a.b) = $val` -- update-field.
+
+    `value` arrives as a str and is assigned as one. jq passed it with --arg,
+    so "3" stayed the string "3" and "true" stayed the string "true"; a caller
+    that wanted a number never got one and still does not.
+    """
+    container, selected = _selected_slots(doc, story_id)
+    for key in selected:
+        container[key] = jq_setpath(container[key], segments, value, STORY)
+
+
+def field_payload(doc, story_id, top):
+    """`.userStories[] | select(.id == $id) | {id, <top>}`, read back AFTER the
+    write -- one object per match, and jq's shorthand emits a key holding null
+    when the story has no such field."""
+    return [
+        {"id": jq_index(story, "id", STORY), top: jq_index(story, top, STORY)}
+        for story in stories_with_id(doc, story_id)
+    ]
+
+
+def _status_defaulted(story):
+    """`.status //= "pending"` on one story.
+
+    `//=` is `. = (. // "pending")`, so it ALWAYS assigns: a story whose status
+    is null or false gets "pending", one whose status is the empty string keeps
+    "" (jq's `//` fires on null and false alone), and a story that had no
+    status at all ends up with one. Assignment onto null builds the object, so
+    a null STORY comes back as {"status": "pending"} -- recorded as
+    normalize-status-historia-null.
+    """
+    value = jq_alternative(jq_index(story, "status", STORY), "pending")
+    if story is None:
+        return {"status": value}
+    updated = dict(story)
+    updated["status"] = value
+    return updated
+
+
+def _verification_migrated(story):
+    """The one rewrite normalize-verification performs, and only that one.
+
+    A string-typed verification (including the EMPTY string, which is not null)
+    becomes the four-key object; every other shape -- absent, null, a number,
+    an array, an object already -- is returned untouched, null stories
+    included.
+    """
+    verification = jq_index(story, "verification", STORY)
+    if verification is None or not isinstance(verification, str):
+        return story
+    updated = dict(story)
+    updated["verification"] = {
+        "strategy": verification,
+        "status": "pending",
+        "url": None,
+        "expect": None,
+    }
+    return updated
+
+
+def _mapped_stories(doc, rule):
+    """`.userStories |= map(rule)`, which yields an ARRAY whatever it was given.
+
+    That is jq's `map`, not a detail of this port: `userStories: {"a": …}`
+    normalizes into a LIST of stories, and the two -us-objeto cases record it.
+    """
+    stories = [rule(story) for story in jq_iterate(jq_index(doc, "userStories"), ".userStories")]
+    doc["userStories"] = stories
+    return stories
+
+
+def _counted(stories, predicate):
+    """The `[…] | length` report both normalizers print, read off the document
+    the write just produced rather than off a second read of the file."""
+    return len([story for story in stories if predicate(story)])
+
+
+def normalize_status(doc):
+    """map, then `[.userStories[] | select(has("status"))] | length`.
+
+    The count is always the story count once the map has run, because `//=`
+    gives every story the key. It is computed rather than assumed so that a
+    rule change shows up in the number.
+    """
+    return _counted(_mapped_stories(doc, _status_defaulted), lambda s: "status" in s)
+
+
+def normalize_verification(doc):
+    """map, then the count of stories whose verification is a non-null OBJECT
+    -- which includes the ones that were already objects before the run, and
+    excludes a number or an array that this verb declines to touch."""
+    return _counted(
+        _mapped_stories(doc, _verification_migrated),
+        lambda s: isinstance(jq_index(s, "verification", STORY), dict),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Ops -- one per verb (plus the one twin), each handed an already-resolved path
 # ---------------------------------------------------------------------------
 
@@ -678,6 +933,104 @@ def op_validate_story_exists(argv):
     return 0
 
 
+# The four mark-* verbs differed in one string, and mark-failed in one more
+# field. They were four near-identical jq programs in aimi-cli.sh; here they are
+# one op built four times, so a fifth status could not acquire a fifth spelling.
+MARK_STATUS = {
+    "mark-complete": "completed",
+    "mark-failed": "failed",
+    "mark-in-progress": "in_progress",
+    "mark-skipped": "skipped",
+}
+
+
+def _mark_op(verb):
+    """One locked mark, read-decide-write in the single crossing bash makes.
+
+    Prints NOTHING. All four verbs keep their own `printf` line in bash,
+    together with the write_state/clear_state_file calls that belong to
+    .aimi/state/ -- this op owns the tasks file and nothing else.
+    """
+    status = MARK_STATUS[verb]
+
+    def op(argv):
+        path = _flag(argv, "--tasks-file")
+        story_id = _flag(argv, "--story-id")
+        if not path or story_id is None:
+            die(
+                "Usage: tasks.py " + verb + " --tasks-file <path> --story-id <id>"
+                + (" [--notes <text>]" if status == "failed" else "")
+            )
+        patch = {"status": status}
+        if status == "failed":
+            # jq's `--arg notes "$notes"`: always a string, "" when the caller
+            # gave none, and it lands beside status in one merge.
+            patch["notes"] = _flag(argv, "--notes") or ""
+        docs = read_docs(path, verb)
+        for doc in docs:
+            mark_stories(doc, story_id, patch)
+        write_docs_atomically(path, docs)
+        return 0
+
+    return op
+
+
+def op_update_field(argv):
+    """The write and the echo-back, in one crossing.
+
+    They were two jq programs over the same file, the second re-reading what
+    the first had just written. The field path is NOT re-validated here:
+    validate_field_path gates it in bash before the lock is taken, and in
+    Python there is no filter to inject into -- the segments index a dict.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    field_path = _flag(argv, "--field-path")
+    # --value LAST on the command line, and read by name: it is the one
+    # argument bash has not pattern-checked, so a value that looks like a flag
+    # must not be able to answer for one. Every earlier flag wins its own
+    # lookup because _flag takes the FIRST occurrence.
+    value = _flag(argv, "--value")
+    if not path or story_id is None or not field_path or value is None:
+        die(
+            "Usage: tasks.py update-field --tasks-file <path> --story-id <id> "
+            "--field-path <a.b> --value <text>"
+        )
+    segments = field_path.split(".")
+    docs = read_docs(path, "update-field")
+    for doc in docs:
+        assign_field(doc, story_id, segments, value)
+    write_docs_atomically(path, docs)
+    for doc in docs:
+        for payload in field_payload(doc, story_id, segments[0]):
+            _emit(payload)
+    return 0
+
+
+def _normalize_op(verb, rule):
+    """Both normalizers: map, write, and report the count from the SAME call.
+
+    The count used to be a second jq run after the lock had been released,
+    which made it a re-read of a document another writer could already have
+    changed. Folding it into the crossing makes it a read of what this write
+    produced; in the single-process case the value is identical, which is why
+    the golden is delta zero here.
+    """
+
+    def op(argv):
+        path = _flag(argv, "--tasks-file")
+        if not path:
+            die("Usage: tasks.py " + verb + " --tasks-file <path>")
+        docs = read_docs(path, verb)
+        counts = [rule(doc) for doc in docs]
+        write_docs_atomically(path, docs)
+        for count in counts:
+            _emit({"normalized": count})
+        return 0
+
+    return op
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -688,6 +1041,13 @@ _OPS = {
     "list-ready": op_list_ready,
     "next-story": op_next_story,
     "validate-story-exists": op_validate_story_exists,
+    "mark-complete": _mark_op("mark-complete"),
+    "mark-failed": _mark_op("mark-failed"),
+    "mark-in-progress": _mark_op("mark-in-progress"),
+    "mark-skipped": _mark_op("mark-skipped"),
+    "update-field": op_update_field,
+    "normalize-status": _normalize_op("normalize-status", normalize_status),
+    "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
 }
 
 # No _VERB_FOR_OP table, unlike roadmap.py: every op here is named after the

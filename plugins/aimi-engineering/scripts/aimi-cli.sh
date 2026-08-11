@@ -145,12 +145,12 @@ check_jq() {
 }
 
 # Ensure python3 is available. Mirrors check_jq, and is called by the roadmap
-# verbs, story-merge and the six read-only tasks.json verbs -- every other verb
-# in this file is pure bash + jq and must keep working on a host without
-# python3.
+# verbs, story-merge and the tasks.json verbs that have crossed -- the eight
+# readers and the seven locked writers. Every other verb in this file is pure
+# bash + jq and must keep working on a host without python3.
 check_python3() {
   if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 is required by the roadmap verbs, story-merge and the tasks.json read verbs but is not installed." >&2
+    echo "Error: python3 is required by the roadmap verbs, story-merge and the tasks.json verbs but is not installed." >&2
     echo "Install with: brew install python (macOS) or apt install python3 (Linux)" >&2
     exit 1
   fi
@@ -158,7 +158,7 @@ check_python3() {
 
 # Absolute path to a Python module that sits beside this script -- roadmap.py
 # for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
-# read-only tasks.json verbs.
+# tasks.json verbs.
 #
 # Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
 # one directory up. It has to be resolved rather than assumed because this file
@@ -176,7 +176,7 @@ _aimi_roadmap_py() {
   _aimi_script_py roadmap.py
 }
 
-# Same, for the read-only tasks.json verbs. Built on the shared resolver above
+# Same, for the tasks.json verbs. Built on the shared resolver above
 # rather than repeating the BASH_SOURCE idiom, which is the whole reason
 # _aimi_script_py was split out of _aimi_roadmap_py in the first place.
 _aimi_tasks_py() {
@@ -1143,19 +1143,23 @@ cmd_mark_in_progress() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  # BEFORE the lock, deliberately, and every mark-* verb keeps it there. Moving
+  # it inside would close a TOCTOU window that is ranked and owned elsewhere;
+  # closing it here by accident is exactly what test-tasks-concurrency.sh
+  # exists to catch.
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  # One crossing, inside the lock -- read, decide, write and return, all in the
+  # single call cmd_roadmap_set_status' comment describes. No stdin payload
+  # here, so the two-crossing exemption roadmap-init holds does not apply. The
+  # temp file is tasks.py's now (same directory, then os.replace), which is why
+  # the mktemp and the mv that used to bracket this block are gone.
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "in_progress"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-in-progress \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   write_state "current-story" "$story_id"
 
@@ -1175,19 +1179,15 @@ cmd_mark_complete() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "completed"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-complete \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "success"
@@ -1211,17 +1211,15 @@ cmd_mark_failed() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" --arg notes "$notes" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "failed", notes: $notes}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    # --notes last: it is the one argument no pattern gates, and tasks.py reads
+    # each flag by its FIRST occurrence so a note shaped like a flag cannot
+    # answer for one.
+    python3 "$(_aimi_tasks_py)" mark-failed \
+      --tasks-file "$tasks_file" --story-id "$story_id" --notes "$notes"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "failed"
@@ -1244,17 +1242,12 @@ cmd_mark_skipped() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "skipped"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-skipped \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "skipped"
@@ -1490,28 +1483,19 @@ cmd_normalize_verification() {
     exit 1
   fi
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '
-      .userStories |= map(
-        if (.verification != null and (.verification | type) == "string") then
-          .verification = {strategy: .verification, status: "pending", url: null, expect: null}
-        else
-          .
-        end
-      )
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  local exit_code=$?
-  rm -f "$tmp_file" 2>/dev/null
-  [ $exit_code -ne 0 ] && exit $exit_code
-
-  # Report how many stories were normalized
-  local normalized_count
-  normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
-  jq -n --argjson count "$normalized_count" '{normalized: $count}'
+  # One crossing, inside the lock. The count comes back from the same call that
+  # performed the write -- it used to be a second jq run after the lock had
+  # been released, i.e. a re-read of a document another writer could already
+  # have changed. Same value in a single process; one less window.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-verification --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Normalize status fields: default any story missing the status field to "pending"
@@ -1539,22 +1523,17 @@ cmd_normalize_status() {
     exit 1
   fi
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '
-      .userStories |= map(.status //= "pending")
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  local exit_code=$?
-  rm -f "$tmp_file" 2>/dev/null
-  [ $exit_code -ne 0 ] && exit $exit_code
-
-  # Report how many stories were healed (now have status field)
-  local healed_count
-  healed_count=$(jq '[.userStories[] | select(has("status"))] | length' "$tasks_file")
-  jq -n --argjson count "$healed_count" '{normalized: $count}'
+  # One crossing, inside the lock. Same shape, and same reason, as
+  # cmd_normalize_verification above.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-status --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -10415,36 +10394,38 @@ cmd_update_field() {
   fi
 
   validate_story_id "$story_id"
-  # Ahead of the jq_path build loop below, so neither the write filter nor the
-  # echo-back filter at the end of this function can ever see an unvalidated
-  # value. One placement closes both interpolation sites.
+  # The gate that used to stand between the caller's argument and a jq program
+  # built out of it. There is no such program any more -- tasks.py splits the
+  # path and indexes a dict with the segments -- so this is now the SOLE gate
+  # on the field path, and it stays exactly where it was, ahead of every reader
+  # of that argument.
   validate_field_path "$field_path"
 
   local tasks_file
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Build jq path from dotted notation (e.g., "verification.status" -> .verification.status)
-  # IFS-split on a herestring is trailing-newline-safe; avoids read returning non-zero
-  # on the final unterminated segment when piping through sed, which dropped the leaf.
-  local jq_path _parts _p
-  IFS=. read -ra _parts <<< "$field_path"
-  jq_path=''
-  for _p in "${_parts[@]}"; do
-    jq_path+=".$_p"
-  done
-
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" --arg val "$value" \
-      "(.userStories[] | select(.id == \$id) | ${jq_path}) = \$val" \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" ".userStories[] | select(.id == \$id) | {id, ${field_path%%.*}}" "$tasks_file"
+  # One crossing, inside the lock. The assignment and the {id, <top-segment>}
+  # echo-back were two jq programs over the same file, the second re-reading
+  # what the first had just written; they are one call now, and the payload
+  # comes back from it. --value goes last -- see the note in cmd_mark_failed.
+  #
+  # No `|| exit $?`, and the two normalizers keep theirs, because that is the
+  # shape each verb already had. It is not a difference in behaviour: `set -euo
+  # pipefail` ends the script on the failing assignment either way, at the same
+  # status and before the payload is printed. update-field-lock-inutilizavel
+  # and update-field-intermediario-nao-objeto record both halves of that.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" update-field \
+        --tasks-file "$tasks_file" --story-id "$story_id" \
+        --field-path "$field_path" --value "$value"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
 }
 
 # Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches

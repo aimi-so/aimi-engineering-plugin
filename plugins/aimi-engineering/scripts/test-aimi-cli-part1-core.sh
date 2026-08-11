@@ -328,6 +328,104 @@ test_init_session_self_resolution_stays_in_bash() {
     "boundary: tasks.py names the cli-path cache nowhere outside the docstring forbidding it"
 }
 
+# The body of one cmd_* function, comments stripped.
+#
+# Comments are stripped because these wrappers EXPLAIN what they replaced --
+# "two jq programs over the same file" is prose about a deletion, not a
+# surviving call, and a grep that could not tell them apart would force the
+# explanation out of the file.
+_cmd_body() {
+  awk -v fn="^$1\\\\(\\\\) \\\\{" '
+    $0 ~ fn { inside = 1 }
+    inside   { print }
+    inside && /^\}$/ { exit }
+  ' "$CLI" | grep -v '^[[:space:]]*#'
+}
+
+test_locked_writers_cross_once_and_keep_the_lock_in_bash() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the seven locked writers cross once, inside bash's lock ==="
+
+  # THE SHAPE, asserted per verb rather than described. Each of the seven
+  # wrappers must make EXACTLY ONE python3 call, hold ZERO jq, and place that
+  # call between `_lock` and the FD-200 redirect that closes the subshell --
+  # which is what "one crossing, inside the lock" means operationally. A second
+  # call would re-read a document the first already held; a call outside the
+  # subshell would read it with no lock at all.
+  local fn body jq_count py_count lock_line py_line fd_line ordered
+  local mktemp_total=0 gate_before_lock=""
+
+  for fn in cmd_mark_complete cmd_mark_failed cmd_mark_in_progress cmd_mark_skipped \
+            cmd_update_field cmd_normalize_status cmd_normalize_verification; do
+    body=$(_cmd_body "$fn")
+
+    py_count=$(printf '%s\n' "$body" | grep -c 'python3 ' || true)
+    assert_eq "1" "$py_count" "writers: $fn makes exactly one python3 call"
+
+    # ONE jq legitimately survives, in the two normalizers only: the `jq empty`
+    # preflight that refuses a malformed tasks file BEFORE the lock, with its
+    # own message. It is not part of the read-decide-write -- it is the same
+    # class of pre-lock gate as validate_story_exists, and moving it inside the
+    # crossing would change both the message and the moment of the refusal. It
+    # is excluded here by name and asserted present below, so dropping it
+    # cannot pass as tidying.
+    jq_count=$(printf '%s\n' "$body" | grep -v 'jq empty "\$tasks_file"' | grep -c '\bjq\b' || true)
+    assert_eq "0" "$jq_count" "writers: $fn has no jq left in its read-decide-write"
+
+    lock_line=$(printf '%s\n' "$body" | grep -n '_lock "\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    py_line=$(printf '%s\n' "$body" | grep -n 'python3 ' | head -1 | cut -d: -f1)
+    fd_line=$(printf '%s\n' "$body" | grep -n ') 200>"\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    ordered=no
+    if [ -n "$lock_line" ] && [ -n "$py_line" ] && [ -n "$fd_line" ] &&
+       [ "$lock_line" -lt "$py_line" ] && [ "$py_line" -lt "$fd_line" ]; then
+      ordered=yes
+    fi
+    assert_eq "yes" "$ordered" "writers: $fn's crossing sits inside the lock subshell"
+
+    mktemp_total=$((mktemp_total + $(printf '%s\n' "$body" | grep -c 'mktemp' || true)))
+  done
+
+  # The temp file is tasks.py's now -- same directory, then os.replace, and
+  # unlinked on the way out of any failure. The bash mktemp that used to
+  # bracket each of these leaked its file whenever `set -e` ended the script
+  # before the matching `rm -f`; three golden cases record that it did.
+  assert_eq "0" "$mktemp_total" "writers: no wrapper mktemps a temp file of its own any more"
+
+  # THE GATE THAT MUST NOT MOVE. validate_story_exists stays in bash and stays
+  # BEFORE the lock in all five story-scoped writers. Moving it inside would
+  # close a TOCTOU window that is ranked and owned by its own change -- and
+  # would do it silently, which is the opposite of how that window should
+  # close. Reported as a list so a failure names the verb.
+  for fn in cmd_mark_complete cmd_mark_failed cmd_mark_in_progress cmd_mark_skipped \
+            cmd_update_field; do
+    body=$(_cmd_body "$fn")
+    lock_line=$(printf '%s\n' "$body" | grep -n '_lock "\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    py_line=$(printf '%s\n' "$body" | grep -n 'validate_story_exists ' | head -1 | cut -d: -f1)
+    if [ -z "$py_line" ] || [ -z "$lock_line" ] || [ "$py_line" -ge "$lock_line" ]; then
+      gate_before_lock="$gate_before_lock $fn"
+    fi
+  done
+  assert_eq "" "$gate_before_lock" "writers: validate_story_exists still runs in bash before the lock"
+
+  # The preflight the loop above excluded by name, asserted present. Both
+  # normalizers take a path from the caller rather than from get_tasks_file, so
+  # they are the two verbs that can be handed a file that is not JSON at all,
+  # and both refuse it before taking the lock.
+  for fn in cmd_normalize_status cmd_normalize_verification; do
+    assert_eq "1" "$(_cmd_body "$fn" | grep -c 'jq empty "\$tasks_file"' || true)" \
+      "writers: $fn still refuses a malformed tasks file before the lock"
+  done
+
+  # And the lock itself is untouched, both strategies intact: flock where it
+  # exists, the mkdir spinlock where it does not. Reimplementing either in
+  # Python would be the duplication this port removes, and a Python flock on a
+  # host that falls back to the spinlock would not even be the same lock.
+  assert_eq "1" "$(grep -c '^    flock -x 200$' "$CLI" || true)" \
+    "writers: _lock still takes flock on FD 200 in bash"
+  assert_eq "1" "$(grep -c '^    while ! mkdir "\$lockdir" 2>/dev/null; do$' "$CLI" || true)" \
+    "writers: _lock still carries its mkdir spinlock fallback in bash"
+}
+
 test_current_story() {
   echo ""
   echo "=== Testing current-story command ==="
@@ -6890,6 +6988,7 @@ main() {
   test_metadata
   test_metadata_max_concurrency_default
   test_init_session_self_resolution_stays_in_bash
+  test_locked_writers_cross_once_and_keep_the_lock_in_bash
   test_current_story
   test_get_branch
   test_get_state

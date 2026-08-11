@@ -3,18 +3,25 @@
 THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py
 and test_story_merge.py.
 
-`golden_from_jq.json` holds two blocks for this module, each captured by
+`golden_from_jq.json` holds three blocks for this module, each captured by
 running the jq implementations that used to live in aimi-cli.sh, BEFORE they
-were deleted: `tasks_read_cases` (151 cases, the six read verbs) and
-`tasks_ready_cases` (128, list-ready and next-story). Like the story-merge
-capture both record each case's INPUT, so every one is replayable:
-test_the_port_reproduces_the_jq and test_the_ready_port_reproduces_the_jq
-re-run the whole corpus through the CLI and compare every field. Those two
+were deleted: `tasks_read_cases` (151 cases, the six read verbs),
+`tasks_ready_cases` (128, list-ready and next-story) and `tasks_write_cases`
+(91, the seven locked writers). Like the story-merge capture all three record
+each case's INPUT, so every one is replayable: test_the_port_reproduces_the_jq,
+test_the_ready_port_reproduces_the_jq and test_the_write_port_reproduces_the_jq
+re-run the whole corpus through the CLI and compare every field. Those three
 tests are the evidence the port changed nothing, and they are why the rest of
 this file can stay short -- it asserts the properties a reader would otherwise
-have to reconstruct from 279 recordings by eye.
+have to reconstruct from 370 recordings by eye.
 
-Neither must ever be regenerated from tasks.py. If a case here goes red, either
+The write block compares two fields the read blocks have no use for: `file`,
+the WHOLE resulting tasks.json, and `tree`, the whole .aimi listing. For a
+writer that is the contract -- a refusal that wrote something anyway, or a temp
+file nobody removed, has nowhere to hide in a comparison that reads the
+document back.
+
+None must ever be regenerated from tasks.py. If a case here goes red, either
 the port drifted or a rule genuinely changed; in the second case the golden file
 changes in the same commit as the rule, with the reason in the message.
 """
@@ -40,6 +47,7 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
 
 CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
 READY = {c["label"]: c for c in GOLDEN["tasks_ready_cases"]}
+WRITE = {c["label"]: c for c in GOLDEN["tasks_write_cases"]}
 
 
 def _labels(*prefixes):
@@ -406,6 +414,301 @@ def test_get_story_is_the_verb_the_bash_gate_kept_identical():
 
 
 # ---------------------------------------------------------------------------
+# The seven locked writers: the same evidence, plus the document they left
+# ---------------------------------------------------------------------------
+
+WRITE_FIELDS = ("exit", "stdout", "stderr", "file", "tree", "state_after")
+
+_TEMP_SUFFIX = re.compile(r"^(?P<stem>.*-tasks\.json)\.[A-Za-z0-9]{6}$")
+_BASH_LINE = re.compile(r"(aimi-cli\.sh): line \d+:")
+
+
+def _replay_write(case, tmp_path):
+    """Like _replay, and separate from it on purpose.
+
+    Two of these cases hand the verb a .lock that is a DIRECTORY, so bash's own
+    `200>` redirect fails and reports the offending line of aimi-cli.sh. That
+    message carries an absolute path and a line number, neither of which is a
+    property of the verb -- the capture normalized both and so does this. The
+    read blocks never produce either, and rewriting their helper to handle
+    something they cannot emit would only put a comparison of 279 passing cases
+    at risk.
+    """
+    root = os.path.realpath(str(tmp_path))
+    given = case["input"]
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    for extra in given["dirs"]:
+        os.makedirs(os.path.join(root, extra), exist_ok=True)
+    target = None
+    if given["tasks_file"]:
+        target = os.path.join(root, ".aimi", "tasks", given["tasks_file"])
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(given["tasks"])
+    for key, value in given["state"].items():
+        with open(os.path.join(root, ".aimi", key), "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+
+    proc = subprocess.run(
+        ["bash", CLI] + case["args"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+
+    def normalize(text):
+        text = text.replace(root, "/TMP").replace(CLI, "/CLI/aimi-cli.sh")
+        return _BASH_LINE.sub(r"\1: line <N>:", text)
+
+    contents = None
+    if target and os.path.isfile(target):
+        with open(target, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        try:
+            contents = json.loads(text)
+        except ValueError:
+            contents = text.replace(root, "/TMP")
+
+    aimi = os.path.join(root, ".aimi")
+    state_after = {}
+    for name in sorted(os.listdir(aimi)):
+        path = os.path.join(aimi, name)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                state_after[name] = handle.read().replace(root, "/TMP")
+
+    tree = []
+    for dirpath, dirnames, filenames in os.walk(aimi):
+        dirnames.sort()
+        for name in sorted(dirnames):
+            tree.append(os.path.relpath(os.path.join(dirpath, name), root) + "/")
+        for name in sorted(filenames):
+            rel = os.path.relpath(os.path.join(dirpath, name), root)
+            match = _TEMP_SUFFIX.match(rel)
+            tree.append(match.group("stem") + ".XXXXXX" if match else rel)
+
+    return {
+        "exit": proc.returncode,
+        "stdout": normalize(proc.stdout),
+        "stderr": normalize(proc.stderr),
+        "file": contents,
+        "tree": sorted(tree),
+        "state_after": state_after,
+    }
+
+
+# The 8 cases `_comment_tasks_write` names, in the two classes it groups them
+# by. Neither class is a rule anyone wrote: one is jq's engine message at jq's
+# own exit status, the other is a temp file the pre-port bash created and, under
+# `set -euo pipefail`, aborted before removing. Every field NOT listed here must
+# match byte for byte, which is why the excuse is per-field rather than
+# per-case: an excused case still has to agree about the document it left.
+WRITE_DIVERGENCES = {}
+for _label in (
+    "mark-complete-lock-inutilizavel",
+    "update-field-lock-inutilizavel",
+    "normalize-status-lock-inutilizavel",
+):
+    WRITE_DIVERGENCES[_label] = ("tree",)
+for _label in (
+    "update-field-intermediario-nao-objeto",
+    "normalize-status-historia-string",
+    "normalize-status-sem-userstories",
+    "normalize-verification-historia-string",
+    "normalize-verification-sem-userstories",
+):
+    WRITE_DIVERGENCES[_label] = ("exit", "stderr", "tree")
+
+
+@pytest.mark.parametrize("label", sorted(WRITE), ids=sorted(WRITE))
+def test_the_write_port_reproduces_the_jq(label, tmp_path):
+    case = WRITE[label]
+    actual = _replay_write(case, tmp_path)
+    excused = WRITE_DIVERGENCES.get(label, ())
+    for field in WRITE_FIELDS:
+        if field in excused:
+            continue
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_the_write_divergence_table_names_only_cases_that_exist():
+    assert set(WRITE_DIVERGENCES) <= set(WRITE)
+    assert len(WRITE_DIVERGENCES) == 8, "the capture's comment names 8; keep the two in step"
+
+
+@pytest.mark.parametrize("label", sorted(WRITE_DIVERGENCES), ids=sorted(WRITE_DIVERGENCES))
+def test_each_excused_write_case_still_refuses_and_writes_nothing(label, tmp_path):
+    """An excused case may lose jq's wording, its exit status and its litter.
+    It may not gain a side effect.
+
+    All eight are refusals, and what makes them safe to excuse is that the
+    document survives them untouched -- which is compared above, because `file`
+    is never in the excused list for any of them.
+    """
+    recorded = WRITE[label]
+    assert recorded["exit"] != 0, label
+    assert recorded["stdout"] == "", label
+    actual = _replay_write(recorded, tmp_path)
+    assert actual["exit"] != 0, label + ": an excused case still has to refuse"
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["file"] == recorded["file"], label + ": and leaves the document alone"
+
+
+def test_no_ported_case_leaves_a_temp_file_behind(tmp_path):
+    """The property the tree field exists for, on every path the corpus walks.
+
+    jq's own recording fails this in the five aborts and the three unusable
+    locks -- bash had already run `mktemp` and `set -e` ended the script before
+    the `rm -f`. tasks.py owns the temp file now and unlinks it inside its own
+    `except`, so the answer is uniform: success, refusal or mid-write failure,
+    nothing named `<tasks>.XXXXXX` is left in the directory.
+    """
+    leaked = []
+    for label, case in sorted(WRITE.items()):
+        if not any(entry.endswith(".XXXXXX") for entry in case["tree"]):
+            continue
+        actual = _replay_write(case, tmp_path / label.replace("/", "_"))
+        leaked += [label for entry in actual["tree"] if entry.endswith(".XXXXXX")]
+    assert leaked == []
+    # and the recording really did carry them, so the check above is not vacuous
+    assert sum(
+        any(e.endswith(".XXXXXX") for e in c["tree"]) for c in WRITE.values()
+    ) == len(WRITE_DIVERGENCES)
+
+
+def test_the_write_corpus_exercises_every_case_it_claims_to():
+    """Seven buckets, each read off the RECORDING rather than recomputed. A
+    corpus missing any one of them would let the replay above pass on nothing."""
+    # 1. a successful mark, and the state files that go with it
+    assert WRITE["mark-complete-sucesso"]["file"]["userStories"][0]["status"] == "completed"
+    assert WRITE["mark-complete-sucesso"]["state_after"]["last-result"] == "success\n"
+    # 2. a mark on a story that is not there: the message, and NO side effect
+    refused = WRITE["mark-complete-inexistente"]
+    assert refused["stderr"].endswith("Error: Story US-999 not found in /TMP/.aimi/tasks/"
+                                      "2020-01-01-corpus-tasks.json\n")
+    assert refused["file"] == json.loads(refused["input"]["tasks"])
+    assert refused["state_after"] == {} and refused["tree"] == [
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+    ]
+    # 3. a mark on a story ALREADY in that status: a no-op that still reports
+    for verb, status in T.MARK_STATUS.items():
+        case = WRITE[verb + "-ja-nesse-status"]
+        assert case["exit"] == 0 and case["file"]["userStories"][0]["status"] == status
+    # 4. normalize-status where stories lack the field, plus the shapes `//`
+    #    does and does not replace
+    healed = WRITE["normalize-status-sucesso"]["file"]["userStories"]
+    assert [s.get("status") for s in healed] == ["pending", "completed", "pending", "pending", ""]
+    assert json.loads(WRITE["normalize-status-sucesso"]["stdout"]) == {"normalized": 5}
+    # 5. normalize-verification against the string-typed shape it exists to migrate
+    migrated = WRITE["normalize-verification-formas"]["file"]["userStories"]
+    assert migrated[0]["verification"] == {
+        "strategy": "manual",
+        "status": "pending",
+        "url": None,
+        "expect": None,
+    }
+    assert migrated[4]["verification"]["strategy"] == "", "the empty string migrates too"
+    assert migrated[2]["verification"] is None and "verification" not in migrated[1]
+    assert [migrated[5]["verification"], migrated[6]["verification"]] == [5, []]
+    # 6. each normalizer over an already-normalized file: unchanged, still counted
+    for label in ("normalize-status-ja-normalizado", "normalize-verification-ja-normalizado"):
+        assert WRITE[label]["file"] == json.loads(WRITE[label]["input"]["tasks"])
+    assert json.loads(WRITE["normalize-status-ja-normalizado"]["stdout"]) == {"normalized": 2}
+    assert json.loads(WRITE["normalize-verification-ja-normalizado"]["stdout"]) == {"normalized": 1}
+    # 7. update-field's four jq semantics, each its own recorded case
+    assert json.loads(WRITE["update-field-valor-numerico-fica-string"]["stdout"])["priority"] == "3"
+    assert WRITE["update-field-cria-intermediarios"]["file"]["userStories"][0]["novo"] == {
+        "ramo": {"folha": "valor"}
+    }
+    assert WRITE["update-field-intermediario-nao-objeto"]["exit"] != 0
+    assert WRITE["update-field-caminho-jq"]["stderr"].startswith("Error: Invalid field path: ")
+
+
+def test_the_field_path_refusal_is_the_gate_outline_01_put_in_bash():
+    """01's message, byte for byte, and still coming from bash: tasks.py never
+    sees a path that failed it, and does not re-validate the ones that pass --
+    there is no jq program left to inject into."""
+    expected = (
+        "Error: Invalid field path: %s (expected dotted identifiers, "
+        "e.g. verification.status)\n"
+    )
+    for label, given in (
+        ("update-field-caminho-jq", "verification.status) | .metadata"),
+        ("update-field-caminho-traversal", "../notes"),
+        ("update-field-caminho-espaco", "a b"),
+        ("update-field-caminho-indice", "acceptanceCriteria[0]"),
+    ):
+        assert WRITE[label]["stderr"] == expected % given, label
+        assert WRITE[label]["exit"] == 1 and WRITE[label]["stdout"] == ""
+    body = _body()
+    assert "Invalid field path" not in body, "the refusal has exactly one home, and it is bash"
+
+
+def test_the_payload_emits_null_for_a_top_level_key_the_story_does_not_have():
+    """jq's `{id, <top>}` shorthand, which the echo-back could not actually
+    reach: with `set -euo pipefail` a failed write ended the script before the
+    second jq ran, so every RECORDED payload names a key the assignment had just
+    created. The branch is still in the projection, and this is what it does."""
+    doc = {"userStories": [{"id": "US-001"}]}
+    assert T.field_payload(doc, "US-001", "verification") == [
+        {"id": "US-001", "verification": None}
+    ]
+
+
+def test_a_dotted_assignment_builds_its_intermediates_and_refuses_to_walk_a_string():
+    """Both halves of jq_setpath, away from the corpus: null and absent
+    intermediates are created as objects, a non-object one is a refusal that
+    returns no document at all -- so nothing half-assigned can reach the write.
+    """
+    assert T.jq_setpath({"id": "US-001"}, ["a", "b"], "v", T.STORY) == {
+        "id": "US-001",
+        "a": {"b": "v"},
+    }
+    assert T.jq_setpath({"a": None}, ["a", "b"], "v", T.STORY) == {"a": {"b": "v"}}
+    assert T.jq_setpath(None, ["a"], "v", T.STORY) == {"a": "v"}
+    with pytest.raises(T.MalformedTasks):
+        T.jq_setpath({"a": "texto"}, ["a", "b"], "v", T.STORY)
+    # an existing key keeps its position; a new one is appended
+    assert list(T.jq_setpath({"a": 1, "b": 2}, ["a"], "v", T.STORY)) == ["a", "b"]
+    assert list(T.jq_setpath({"a": 1}, ["z"], "v", T.STORY)) == ["a", "z"]
+
+
+def test_map_yields_an_array_whatever_userstories_was():
+    """jq's `map` over an object gives a LIST, so both normalizers turn a
+    userStories object into an array while the mark-* verbs -- which update
+    through a path expression, not map -- leave it an object. Both shapes are
+    recorded; this is the rule they come from."""
+    assert WRITE["normalize-status-us-objeto"]["file"]["userStories"] == [
+        {"id": "US-001", "title": "Story 1", "status": "pending"},
+        {"id": "US-002", "title": "Story 2", "status": "pending"},
+    ]
+    assert isinstance(WRITE["mark-complete-us-objeto"]["file"]["userStories"], dict)
+
+
+def test_every_match_of_a_duplicated_story_id_is_written_and_echoed():
+    """`(.userStories[] | select(.id == $id)) |= f` is a filter over a stream,
+    not a lookup: a tasks file carrying the same id twice had BOTH stories
+    marked, and update-field printed its payload twice."""
+    marked = WRITE["mark-complete-id-duplicado"]["file"]["userStories"]
+    assert [s["status"] for s in marked] == ["completed", "pending", "completed"]
+    assert WRITE["update-field-id-duplicado"]["stdout"].count('"id": "US-001"') == 2
+
+
+def test_the_writer_gives_every_document_in_the_file_back():
+    """jq read a STREAM and wrote one, so a tasks file holding two concatenated
+    documents came back with both of them rewritten. It is why the writer here
+    is write_docs_atomically and not roadmap.py's single-value one."""
+    written = WRITE["mark-complete-dois-documentos"]["file"]
+    assert isinstance(written, str), "two documents do not parse as one"
+    assert written.count('"status": "completed"') == 4, "US-001 and US-002, twice over"
+
+
+def test_a_number_written_back_is_rendered_the_way_jq_rendered_it():
+    """The corpus carries `"priority": 3.0`, and every verb that rewrites the
+    file printed it as 3. Python would write 3.0 without jq_numbers, and the
+    difference would land in a file /aimi:execute reads after every story."""
+    assert WRITE["mark-complete-sucesso"]["file"]["userStories"][2]["priority"] == 3
+    assert '"priority": 3.0' not in json.dumps(WRITE["normalize-status-corpus"]["file"])
+
+
+# ---------------------------------------------------------------------------
 # The clamp: ONE function, jq's whole value space
 # ---------------------------------------------------------------------------
 
@@ -462,6 +765,17 @@ def _body():
     return _source().split('"""', 2)[2]
 
 
+def _code():
+    """_body with every FUNCTION docstring gone too.
+
+    The same guard-tripping problem one level down: op_get_state explains that
+    .aimi/state/ carries its own .state.lock, and a scan for `.lock` that could
+    not tell an explanation from an implementation would force the explanation
+    out of the file. Only the executable text is scanned for the forbidden
+    machinery."""
+    return re.sub(r'"""(?:.|\n)*?"""', "", _body())
+
+
 def test_the_clamp_has_exactly_one_definition_and_all_three_call_sites_use_it():
     """The three jq copies collapsed into one function. Two status branches and
     metadata_view call it; nothing else may re-express the default."""
@@ -488,18 +802,60 @@ def test_tasks_py_never_names_the_cli_path_cache():
     assert "resolve_path" not in body
 
 
-def test_tasks_py_opens_nothing_for_writing_and_takes_no_lock():
-    """Read-only verbs, every one of them -- list-ready and next-story included,
-    which is why neither closed a race when it crossed. The one open() in the
-    file is read mode, the only writes go to the two standard streams, and none
-    of the machinery every writer in roadmap.py and story_merge.py needs is
-    here."""
-    body = _body()
-    assert body.count("open(") == 1
-    assert 'open(path, "r", encoding="utf-8")' in body
-    assert set(re.findall(r"([\w.]+)\.write\(", body)) == {"sys.stdout", "sys.stderr"}
-    for forbidden in ("flock", "tempfile", "os.replace", "os.rename", "os.remove", "mkdir"):
-        assert forbidden not in body, "tasks.py must not " + forbidden
+def test_tasks_py_takes_no_lock_of_its_own():
+    """THE boundary the seven writers had to respect to be portable at all.
+
+    `_lock` stays in aimi-cli.sh with both of its strategies -- `flock -x 200`
+    and the `mkdir` spinlock with its stale-lock break -- and every op here runs
+    inside a subshell that already holds it. A second lock implementation would
+    be the duplication this port exists to remove, and a Python `flock` on a
+    host that fell back to the spinlock would not even be the same lock.
+    """
+    code = _code()
+    for forbidden in ("flock", "fcntl", "lockf", "os.mkdir", "makedirs", ".lock"):
+        assert forbidden not in code, "tasks.py must not " + forbidden
+
+
+def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
+    """One reader, one writer, and the writer is atomic.
+
+    open() appears once and in read mode; the single write path is
+    write_docs_atomically, which is a NamedTemporaryFile in the TARGET's own
+    directory followed by os.replace -- never a truncate-and-write, which is the
+    one failure that could leave /aimi:execute reading half a tasks.json. And
+    nothing here goes near .aimi/state/: those files have their own lock and
+    their own confinement in bash, and the mark-* verbs still write them there.
+    """
+    code = _code()
+    assert code.count("open(") == 1
+    assert 'open(path, "r", encoding="utf-8")' in code
+    assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
+    assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
+    assert "os.unlink(" in code, "the temp file goes away on the failing path too"
+    assert set(re.findall(r"([\w.]+)\.write\(", code)) == {
+        "sys.stdout",
+        "sys.stderr",
+        "handle",
+    }
+    # Two os.path calls, both inside write_docs_atomically, so the module names
+    # no path of its own -- not .aimi/state/, not a lock, not a sibling file.
+    assert code.count("os.path.") == 2
+
+    # and the atomicity is real, not merely spelled: the target is replaced by
+    # a file that was complete before it had the target's name.
+    target = tmp_path / "x-tasks.json"
+    target.write_text('{"userStories": []}\n', encoding="utf-8")
+    T.write_docs_atomically(str(target), [{"userStories": [{"id": "US-001"}]}])
+    assert json.loads(target.read_text(encoding="utf-8"))["userStories"][0]["id"] == "US-001"
+    assert sorted(os.listdir(str(tmp_path))) == ["x-tasks.json"]
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(TypeError):
+        T.write_docs_atomically(str(target), [{"bad": Unserializable()}])
+    assert sorted(os.listdir(str(tmp_path))) == ["x-tasks.json"], "no temp file survives a failure"
+    assert json.loads(target.read_text(encoding="utf-8"))["userStories"][0]["id"] == "US-001"
 
 
 def test_every_op_is_named_after_the_verb_that_calls_it():
@@ -520,7 +876,23 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "list-ready",
         "next-story",
         "validate-story-exists",
+        "mark-complete",
+        "mark-failed",
+        "mark-in-progress",
+        "mark-skipped",
+        "update-field",
+        "normalize-status",
+        "normalize-verification",
     }
+    # The four mark-* ops are one implementation built four times rather than
+    # four near-copies of one jq program, which is what they were.
+    assert set(T.MARK_STATUS) == {
+        "mark-complete",
+        "mark-failed",
+        "mark-in-progress",
+        "mark-skipped",
+    }
+    assert len(re.findall(r"^def _mark_op\(", _source(), re.M)) == 1
 
 
 def test_an_unknown_op_is_refused_with_a_usage_line_and_exit_2():
