@@ -1547,6 +1547,46 @@ def spec_contains(spec_path, needle, section, normalize):
     return needle_bytes in body
 
 
+def confined_spec_path(project_root, relative):
+    """Resolve a spec path against PROJECT_ROOT and REFUSE one that escapes it.
+
+    THE ONE PLACE THIS IS DECIDED, and it is decided rather than left. A tasks
+    file is a document /aimi:plan wrote, but it is also a file a human edits and
+    a file that arrives in a branch, so `metadata.designBundle.designSpec` is an
+    attacker-supplied path in exactly the sense that matters: before this,
+    `"designSpec": "../../etc/passwd"` was opened and read, and whether its
+    contents matched a citation was reported back. Confinement turns that from a
+    hole the validator walked through into a rule it enforces.
+
+    It lives HERE, in Python, and not beside get_tasks_file's own
+    validate_path_in_project in bash, because these two paths are only visible
+    after the crossing -- they come out of the parsed document. Confining them in
+    bash would mean reading the document a second time, which is the shape this
+    whole port exists to remove. The rule is bash's, reproduced: resolve to an
+    absolute path (following symlinks, so a link out of the tree is caught too),
+    and accept only the project root itself or something beneath it. A path that
+    does not exist is resolved through its parent, exactly as
+    validate_path_in_project does, so a missing file is still reported as
+    missing rather than as an escape.
+
+    Returns (path, inside). The caller reports the refusal as a validation error
+    naming the path, rather than exiting: the point is to tell whoever ran
+    /aimi:plan which field is wrong, and one bad spec path should not hide the
+    other fourteen rules' findings.
+    """
+    path = project_root + "/" + relative
+    if os.path.exists(path):
+        resolved = os.path.realpath(path)
+    else:
+        parent = os.path.dirname(path)
+        if os.path.exists(parent):
+            resolved = os.path.join(os.path.realpath(parent), os.path.basename(path))
+        else:
+            resolved = path
+    root = os.path.realpath(project_root)
+    return path, resolved == root or resolved.startswith(root + os.sep)
+
+
 def _to_entries(value, owner):
     """jq's `to_entries[]`, which refuses anything with no keys.
 
@@ -1719,8 +1759,12 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     if design_spec and int(fields["prototype_count"]) > 0:
         # The path is CONCATENATED, never joined: a designSpec that is already
         # absolute lands under the project root anyway and is simply not found.
-        design_spec_path = project_root + "/" + design_spec
-        if not os.path.isfile(design_spec_path):
+        design_spec_path, inside = confined_spec_path(project_root, design_spec)
+        if not inside:
+            errors.append(
+                tasks_file + ": DesignSpec path escapes the project root: " + design_spec
+            )
+        elif not os.path.isfile(design_spec_path):
             errors.append(tasks_file + ": DesignSpec file not found: " + design_spec)
         else:
             for line in _visual_ac_lines(docs):
@@ -1737,8 +1781,12 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     # R5/R6 through R11 -- the BusinessSpec scan, gated on frontendOnly AND a spec
     business_spec = fields["business_spec"]
     if fields["frontend_only"] == "true" and business_spec:
-        business_spec_path = project_root + "/" + business_spec
-        if not os.path.isfile(business_spec_path):
+        business_spec_path, inside = confined_spec_path(project_root, business_spec)
+        if not inside:
+            errors.append(
+                tasks_file + ": BusinessSpec path escapes the project root: " + business_spec
+            )
+        elif not os.path.isfile(business_spec_path):
             errors.append(tasks_file + ": BusinessSpec file not found: " + business_spec)
         else:
             _validate_endpoints(docs, tasks_file, business_spec_path, errors, warn)

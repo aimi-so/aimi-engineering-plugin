@@ -1059,6 +1059,18 @@ VALIDATE_TASKS_DIVERGENCES = {
     "dois-documentos-endpoints": "bash's own complaint about a two-line endpoint count",
 }
 
+# The ONE deliberate behaviour change, kept apart from the six engine-message
+# excuses above because it is nothing like them. These two recordings show the
+# jq READING a spec file one directory outside the project root and reporting
+# on its contents; the commit that added confined_spec_path refuses that path
+# instead. The recordings are not regenerated -- they are what the jq did, and
+# that is the finding. test_a_spec_path_outside_the_project_root_is_refused
+# asserts the new answer in full, so neither case is merely skipped.
+CONFINEMENT_DIVERGENCES = {
+    "ds-caminho-para-fora": "confined: a designSpec above the project root is now refused",
+    "bs-caminho-para-fora": "confined: a businessSpec above the project root is now refused",
+}
+
 
 def _replay_validate(case, tmp_path):
     """Like _replay, plus the two things only this verb has: spec fixtures on
@@ -1115,6 +1127,8 @@ def test_the_validate_tasks_port_reproduces_the_jq(label, tmp_path):
     actual = _replay_validate(case, tmp_path)
     if label in VALIDATE_TASKS_DIVERGENCES:
         pytest.skip(VALIDATE_TASKS_DIVERGENCES[label])
+    if label in CONFINEMENT_DIVERGENCES:
+        pytest.skip(CONFINEMENT_DIVERGENCES[label])
     for field in ("exit", "stdout", "stderr", "state_after"):
         assert actual[field] == case[field], label + " . " + field
 
@@ -1122,6 +1136,10 @@ def test_the_validate_tasks_port_reproduces_the_jq(label, tmp_path):
 def test_the_validate_tasks_divergence_table_names_only_cases_that_exist():
     assert set(VALIDATE_TASKS_DIVERGENCES) <= set(VALIDATE_TASKS)
     assert len(VALIDATE_TASKS_DIVERGENCES) == 6, "the capture's comment names 6; keep the two in step"
+    assert set(CONFINEMENT_DIVERGENCES) <= set(VALIDATE_TASKS)
+    assert not set(CONFINEMENT_DIVERGENCES) & set(VALIDATE_TASKS_DIVERGENCES), (
+        "a deliberate rule change is not an engine-message excuse; keep the two tables apart"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1320,12 +1338,13 @@ def test_a_dotted_key_is_refused_even_when_both_halves_are_in_the_subsection():
 
 
 def test_the_two_traversal_recordings_show_a_file_outside_the_root_being_read():
-    """Recorded permissive on purpose. The confinement is its own commit.
+    """What the jq did, which is the finding the confinement answers.
 
-    Each of these names a spec one directory ABOVE the project root and comes
-    back valid -- and it can only come back valid if that file was opened, since
-    the literal and the field name appear nowhere inside the root. That is the
-    read primitive, stated as evidence rather than as a worry.
+    Each of these names a spec one directory ABOVE the project root and the
+    RECORDING comes back valid -- and it can only come back valid if that file
+    was opened, since the literal and the field name appear nowhere inside the
+    root. That is the read primitive, stated as evidence rather than as a worry,
+    and it is why the recordings are kept rather than regenerated.
     """
     for label, needle in (
         ("ds-caminho-para-fora", "Segredo de fora do projeto"),
@@ -1337,11 +1356,106 @@ def test_the_two_traversal_recordings_show_a_file_outside_the_root_being_read():
         assert all(needle not in content for content in given["files"].values()), label
         assert _vt(label)["valid"] is True, label
 
-    # the other half already holds: an absolute path is CONCATENATED onto the
+    # the other half already held: an absolute path is CONCATENATED onto the
     # root, so it lands nowhere and is reported missing rather than read.
     assert _vt_errors("ds-caminho-absoluto-para-fora") == [
         "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: DesignSpec file not found: /etc/hostname"
     ]
+
+
+@pytest.mark.parametrize(
+    "label,field",
+    [("ds-caminho-para-fora", "DesignSpec"), ("bs-caminho-para-fora", "BusinessSpec")],
+)
+def test_a_spec_path_outside_the_project_root_is_refused(label, field, tmp_path):
+    """The deliberate change, asserted in full rather than skipped.
+
+    Both cases now come back invalid with ONE error naming the offending path
+    and nothing else -- not a "file not found", which would be a lie about a
+    file that exists, and not a citation verdict, which would mean it had been
+    read. The file outside the root is left on disk by the fixture and is never
+    opened, so nothing about its contents can reach stdout.
+    """
+    case = VALIDATE_TASKS[label]
+    actual = _replay_validate(case, tmp_path)
+    relative = [name for name in _spec_names(case["input"]["tasks"]) if name.startswith("../")]
+    assert actual["exit"] == 1
+    assert json.loads(actual["stdout"]) == {
+        "valid": False,
+        "errors": [
+            "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: "
+            + field + " path escapes the project root: " + relative[0]
+        ],
+    }
+    for content in case["input"]["outside"].values():
+        for word in content.split():
+            assert word not in actual["stdout"] or word in relative[0], word
+
+
+def test_confinement_still_lets_an_ordinary_relative_spec_through(tmp_path):
+    """A guard that refused everything would pass the test above and break every
+    real tasks file. The whole corpus is the counterweight -- every other spec
+    path in it is relative, inside the root, and still read -- and these are the
+    rows that say so directly."""
+    parent = os.path.realpath(str(tmp_path))
+    root = os.path.join(parent, "proj")
+    os.makedirs(os.path.join(root, "specs"))
+    os.makedirs(os.path.join(parent, "fora"))
+    for target in (
+        os.path.join(root, "specs", "DesignSpec.md"),
+        os.path.join(parent, "fora", "Segredo.md"),
+    ):
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("# spec\n")
+    for accepted in ("specs/DesignSpec.md", "./specs/DesignSpec.md", "a/../specs/DesignSpec.md"):
+        assert confined(accepted, root) is True, accepted
+    # Refused whenever the target or its parent is really there -- which is
+    # exactly when a read could have succeeded.
+    for refused in ("../fora/Segredo.md", "../fora/naoexiste.md", "specs/../../fora/Segredo.md"):
+        assert confined(refused, root) is False, refused
+    # An absolute value is concatenated, not joined, so it stays inside and is
+    # simply not found -- unchanged by the confinement, and ds-caminho-absoluto-
+    # para-fora is still the recording that says so.
+    assert confined("/etc/hostname", root) is True
+    assert _vt_errors("ds-caminho-absoluto-para-fora")[0].endswith("not found: /etc/hostname")
+
+
+def test_a_path_whose_parent_does_not_exist_falls_back_the_way_bash_does():
+    """validate_path_in_project resolves the PARENT when the target is missing,
+    and the raw string when the parent is missing too -- at which point
+    `$PROJECT_ROOT/../x` still matches its `"$PROJECT_ROOT"/*` glob. That
+    fallback is reproduced rather than tightened, and it costs nothing: a path
+    whose parent does not exist names no file, so there is nothing to open. The
+    read this commit closes needs the file to BE there, and `exists` then
+    resolves the `..` before the comparison is made.
+    """
+    assert confined("../fora/x.md", "/no/such/project") is True, "bash's own fallback"
+    assert not os.path.exists("/no/such/project/../fora/x.md"), "and it names nothing"
+
+
+def confined(relative, root):
+    return T.confined_spec_path(root, relative)[1]
+
+
+def test_a_symlink_out_of_the_tree_is_caught_too(tmp_path):
+    """`realpath` resolves links, so a spec path that is inside the root only
+    until the kernel follows it is refused as well. The bash rule this
+    reproduces (validate_path_in_project) resolves the same way, and a
+    confinement that compared strings would miss this entirely."""
+    root = os.path.realpath(str(tmp_path / "proj"))
+    os.makedirs(os.path.join(root, "specs"))
+    outside = str(tmp_path / "outside.md")
+    with open(outside, "w", encoding="utf-8") as handle:
+        handle.write("# outside\n")
+    os.symlink(outside, os.path.join(root, "specs", "link.md"))
+
+    assert confined("specs/link.md", root) is False
+    with open(os.path.join(root, "specs", "real.md"), "w", encoding="utf-8") as handle:
+        handle.write("# inside\n")
+    assert confined("specs/real.md", root) is True
+    # and a path that does not exist at all is resolved through its parent, so
+    # it is still reported as missing rather than as an escape
+    assert confined("specs/gone.md", root) is True
 
 
 def _spec_names(tasks_text):
@@ -1586,12 +1700,16 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "sys.stderr",
         "handle",
     }
-    # Four os.path calls: two inside write_docs_atomically and one isfile() per
-    # spec in validate-tasks. The module still names no path of its own -- not
-    # .aimi/state/, not a lock, not a sibling file; every path it touches
-    # arrived as an argument or was concatenated onto one that did.
-    assert code.count("os.path.") == 4
+    # Twelve os.path calls, and the module still names no path of its own --
+    # not .aimi/state/, not a lock, not a sibling file. Two live in
+    # write_docs_atomically, two are validate-tasks' isfile() per spec, and the
+    # remaining eight are confined_spec_path resolving and comparing. Every
+    # path any of them touches arrived as an argument or was concatenated onto
+    # one that did.
+    assert code.count("os.path.") == 12
     assert code.count("os.path.isfile(") == 2
+    confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
+    assert confinement.count("os.path.") == 8
 
     # and the atomicity is real, not merely spelled: the target is replaced by
     # a file that was complete before it had the target's name.

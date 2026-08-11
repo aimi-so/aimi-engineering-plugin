@@ -6090,6 +6090,148 @@ TASKEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+# A designSpec/businessSpec value is a PATH read out of the tasks file, and a
+# tasks file is edited by hand and arrives in branches. Before confinement,
+# "../<something>" was resolved, opened and reported on -- a read primitive
+# pointed anywhere the CLI's own user could read. Both halves are asserted
+# against a spec that really exists one directory above the project root, so a
+# guard that merely failed to find the file would not pass these.
+test_validate_tasks_designspec_outside_project_root_refused() {
+  echo ""
+  echo "=== Testing validate-tasks: a designSpec above the project root is refused, not read ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-73-validate-tasks-ds-escape.json"
+  local outside_dir="$TEST_DIR/../vt-escape-$$"
+  mkdir -p "$outside_dir"
+  cat > "$outside_dir/Fora.md" << 'SPECEOF'
+# Fora
+
+## 3.1 Secao fora
+
+O texto Segredo de fora do projeto mora aqui.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: escape",
+    "type": "feat",
+    "branchName": "feat/escape",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "designSpec": "OUTSIDE_PLACEHOLDER/Fora.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Visual story",
+      "description": "Cites the outside spec",
+      "acceptanceCriteria": [
+        "\"Segredo de fora do projeto\" (DesignSpec § 3.1 L5) MUST appear."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": { "strategy": "visual", "status": "pending" }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|OUTSIDE_PLACEHOLDER|../vt-escape-$$|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks ds escape: returns valid=false"
+  assert_contains 'DesignSpec path escapes the project root' "$output" \
+    "validate-tasks ds escape: names the rule"
+  assert_contains '../vt-escape' "$output" "validate-tasks ds escape: names the offending path"
+  local leaked
+  leaked=$(printf '%s' "$output" | grep -c 'missing DesignSpec citation' || true)
+  assert_eq "0" "$leaked" "validate-tasks ds escape: the outside file was never read"
+  assert_exit_code "1" "$exit_code" "validate-tasks ds escape: exits non-zero"
+
+  rm -rf "$outside_dir"
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_businessspec_outside_project_root_refused() {
+  echo ""
+  echo "=== Testing validate-tasks: a businessSpec above the project root is refused, not read ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-72-validate-tasks-bs-escape.json"
+  local outside_dir="$TEST_DIR/../vt-escape-bs-$$"
+  mkdir -p "$outside_dir"
+  cat > "$outside_dir/Fora.md" << 'SPECEOF'
+# Fora
+
+## 5.3 Portfolio
+
+Aqui mora campoDeFora.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: escape bs",
+    "type": "feat",
+    "branchName": "feat/escape-bs",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "businessSpec": "OUTSIDE_PLACEHOLDER/Fora.md"
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "path": "/api/x",
+          "method": "GET",
+          "source": "BusinessSpec § 5.3 L5",
+          "responseShape": { "campoDeFora": { "type": "number" } }
+        }
+      ]
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|OUTSIDE_PLACEHOLDER|../vt-escape-bs-$$|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks bs escape: returns valid=false"
+  assert_contains 'BusinessSpec path escapes the project root' "$output" \
+    "validate-tasks bs escape: names the rule"
+  local leaked
+  leaked=$(printf '%s' "$output" | grep -c 'field name not found' || true)
+  assert_eq "0" "$leaked" "validate-tasks bs escape: the outside file was never read"
+  assert_exit_code "1" "$exit_code" "validate-tasks bs escape: exits non-zero"
+
+  rm -rf "$outside_dir"
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_mark_complete_preserves_new_fields() {
   echo ""
   echo "=== Testing mark-complete preserves gate, verification, implementation, and wave fields ==="
@@ -7260,6 +7402,8 @@ main() {
   test_validate_tasks_backendspec_missing_source
   test_validate_tasks_backendspec_invented_field
   test_validate_tasks_backendspec_derived_escape_hatch
+  test_validate_tasks_designspec_outside_project_root_refused
+  test_validate_tasks_businessspec_outside_project_root_refused
   test_mark_complete_preserves_new_fields
   test_update_field_nested_path
   test_update_field_single_segment
