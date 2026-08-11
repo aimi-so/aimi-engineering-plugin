@@ -1987,6 +1987,412 @@ def test_the_declared_list_is_read_the_way_jq_r_and_mapfile_read_it():
 
 
 # ---------------------------------------------------------------------------
+# archive-task: the same evidence, over a filesystem instead of a document
+# ---------------------------------------------------------------------------
+
+ARCHIVE = {c["label"]: c for c in GOLDEN["archive_cases"]}
+
+# Six fields, and `tree` is the load-bearing one. For a verb that moves and
+# deletes, a comparison of stdout and an exit code would pass just as happily
+# while the task file was being removed instead of relocated, and a refusal
+# that had already deleted something would look identical to one that had not.
+ARCHIVE_FIELDS = ("exit", "stdout", "stderr", "file", "tree", "outside_after")
+
+
+def _archive_listing(top, root, base, skip=None):
+    """The capture's own listing, rebuilt: directories with a trailing slash,
+    symlinks as `path -> target`, everything relative to `top` and sorted."""
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
+        dirnames.sort()
+        for name in list(dirnames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, top)
+            if skip and (rel == skip or rel.startswith(skip + os.sep)):
+                dirnames.remove(name)
+                continue
+            if os.path.islink(full):
+                dirnames.remove(name)
+                entries.append(rel + " -> " + _archive_norm(os.readlink(full), root, base))
+            else:
+                entries.append(rel + "/")
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, top)
+            if skip and rel.startswith(skip + os.sep):
+                continue
+            if os.path.islink(full):
+                entries.append(rel + " -> " + _archive_norm(os.readlink(full), root, base))
+            else:
+                entries.append(rel)
+    return sorted(entries)
+
+
+def _archive_norm(text, root, base):
+    text = text.replace(root, "/TMP").replace(base, "/OUTSIDE").replace(CLI, "/CLI/aimi-cli.sh")
+    return _BASH_LINE.sub(r"\1: line <N>:", text)
+
+
+def _replay_archive(case, tmp_path):
+    """Rebuild the case's WHOLE base directory -- the project root and the
+    fixtures beside it -- run the CLI, and read the filesystem back.
+
+    Separate from _replay_write because the unit under test is not the
+    document: `proj/` is the project root, `fora/` sits outside it, /TMP and
+    /OUTSIDE stand for the two on the way in and on the way out, and what is
+    compared afterwards is every path under both.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    given = case["input"]
+
+    def sub(text):
+        return text.replace("/TMP", root).replace("/OUTSIDE", base)
+
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    for rel, text in sorted(given["outside"].items()):
+        full = os.path.join(base, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(sub(text))
+    target = None
+    if given["tasks_file"]:
+        target = os.path.join(root, ".aimi", "tasks", given["tasks_file"])
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(sub(given["tasks"]))
+    for rel, text in sorted(given["files"].items()):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(sub(text))
+    for rel in given["dirs"]:
+        os.makedirs(os.path.join(root, rel), exist_ok=True)
+    for rel, dest in sorted(given["symlinks"].items()):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        os.symlink(sub(dest), full)
+
+    proc = subprocess.run(
+        ["bash", CLI] + [sub(a) for a in case["args"]],
+        cwd=root, capture_output=True, text=True, timeout=120,
+    )
+
+    contents = None
+    if target and os.path.isfile(target):
+        with open(target, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        try:
+            contents = json.loads(text)
+        except ValueError:
+            contents = _archive_norm(text, root, base)
+
+    outside_after = {}
+    for rel in _archive_listing(base, root, base, skip="proj"):
+        full = os.path.join(base, rel)
+        if os.path.isfile(full) and not os.path.islink(full):
+            with open(full, encoding="utf-8", errors="replace") as handle:
+                outside_after[rel] = _archive_norm(handle.read(), root, base)
+        else:
+            outside_after[rel] = None
+
+    return {
+        "exit": proc.returncode,
+        "stdout": _archive_norm(proc.stdout, root, base),
+        "stderr": _archive_norm(proc.stderr, root, base),
+        "file": contents,
+        "tree": _archive_listing(root, root, base),
+        "outside_after": outside_after,
+    }
+
+
+# The 5 cases `_comment_archive` names, per field, in two classes. Neither is a
+# rule anyone wrote. (1) jq aborted and `set -euo pipefail` took the script
+# down with it, at jq's own exit status and with jq's message swallowed by the
+# 2>/dev/null on the assignment that ran it -- so the recording is of an ENGINE
+# abort with EMPTY stderr, and the port refuses at 1 with a message naming the
+# file. (2) bash's `[` was handed one count per document and could not compare
+# them; the port branches instead, so it archives the same file in silence.
+# Every field NOT listed here must match byte for byte -- `file`, `tree` and
+# `outside_after` are excused for nothing, which is what keeps the excuse from
+# covering a side effect.
+ARCHIVE_DIVERGENCES = {
+    "archive-sem-userstories": ("exit", "stderr"),
+    "archive-userstories-nao-lista": ("exit", "stderr"),
+    "archive-json-malformado": ("exit", "stderr"),
+    "archive-dois-documentos": ("stderr",),
+    "archive-dois-documentos-um-aberto": ("stderr",),
+}
+
+
+@pytest.mark.parametrize("label", sorted(ARCHIVE), ids=sorted(ARCHIVE))
+def test_the_archive_port_reproduces_the_bash(label, tmp_path):
+    case = ARCHIVE[label]
+    actual = _replay_archive(case, tmp_path)
+    excused = ARCHIVE_DIVERGENCES.get(label, ())
+    for field in ARCHIVE_FIELDS:
+        if field in excused:
+            continue
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_every_archive_record_carries_all_seven_fields():
+    """`tree` is why this block exists, so a record that lost it would quietly
+    turn the replay above into a comparison of stdout."""
+    for label, case in sorted(ARCHIVE.items()):
+        for field in ("label", "verb", "exit", "stdout", "stderr", "file", "tree"):
+            assert field in case, label + " is missing " + field
+        assert isinstance(case["tree"], list) and case["tree"], label
+    assert len(ARCHIVE) == 41
+
+
+def test_the_archive_divergence_table_names_only_cases_that_exist():
+    assert set(ARCHIVE_DIVERGENCES) <= set(ARCHIVE)
+    assert len(ARCHIVE_DIVERGENCES) == 5, "the capture's comment names 5; keep the two in step"
+
+
+@pytest.mark.parametrize("label", sorted(ARCHIVE_DIVERGENCES), ids=sorted(ARCHIVE_DIVERGENCES))
+def test_each_excused_archive_case_keeps_its_side_effects(label, tmp_path):
+    """An excused case may lose the engine's wording and its exit status. It
+    may not gain -- or lose -- a single file.
+
+    The three aborts recorded EMPTY stderr at jq's own status and still have to
+    refuse. The two stream cases recorded bash's complaint at exit 0 and still
+    have to archive. Either way `tree`, `file` and `outside_after` are compared
+    in the replay above, so the excuse can never cover a side effect.
+    """
+    recorded = ARCHIVE[label]
+    actual = _replay_archive(recorded, tmp_path)
+    assert actual["tree"] == recorded["tree"], label
+    if label.startswith("archive-dois-documentos"):
+        assert recorded["stderr"].startswith("/CLI/aimi-cli.sh: line <N>: [:"), label
+        assert recorded["exit"] == 0 and actual["exit"] == 0, label
+        assert actual["stderr"] == "", label + ": the complaint had no rule behind it"
+        return
+    assert recorded["stderr"] == "" and recorded["exit"] in (4, 5), label
+    assert actual["exit"] != 0, label + ": an excused case still has to refuse"
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["stderr"].startswith("Error: archive-task: "), label
+
+
+def test_the_archive_corpus_exercises_every_case_it_claims_to():
+    """Nine buckets, every verdict read off the RECORDING rather than
+    recomputed. A corpus that only ever archived successfully would let the
+    41-case replay above pass on nothing."""
+    archived = lambda label: json.loads(ARCHIVE[label]["stdout"])["archived"]  # noqa: E731
+
+    # 1. an archive that happens, and the file that is no longer where it was
+    assert archived("archive-sucesso")["task"] == "/TMP/.aimi/archive/" \
+        "2020-01-01-corpus-tasks.json"
+    assert ARCHIVE["archive-sucesso"]["file"] is None
+    assert ".aimi/tasks/2020-01-01-corpus-tasks.json" not in ARCHIVE["archive-sucesso"]["tree"]
+    # 2. one refused for a story that is not terminal, with NOTHING touched
+    refused = ARCHIVE["archive-nao-terminal"]
+    assert refused["exit"] == 1 and refused["file"] == json.loads(refused["input"]["tasks"])
+    assert refused["stderr"] == "Error: Task file has non-terminal stories — cannot archive\n"
+    assert ".aimi/tasks/2020-01-01-corpus-tasks.json" in refused["tree"]
+    # 3. a researchPath naming a file that is not there: skipped, and NOT counted
+    assert archived("archive-research-ausente")["researchCleaned"] == 1
+    assert archived("archive-research-e-prototype") == {
+        "task": "/TMP/.aimi/archive/2020-01-01-corpus-tasks.json",
+        "brainstorm": None, "researchCleaned": 2, "prototypeCleaned": 1,
+    }
+    # 4. a researchPath outside the project: refused, and the target still there
+    escape = ARCHIVE["archive-research-absoluto-fora"]
+    assert escape["exit"] == 1
+    assert escape["stderr"].startswith("Error: Path escapes project root")
+    assert escape["outside_after"]["fora/absoluto.md"] == "alvo absoluto\n"
+    # ... AFTER the task file has already moved. A refusal with a side effect.
+    assert ".aimi/archive/2020-01-01-corpus-tasks.json" in escape["tree"]
+    # 5. the -N suffix, twice over, and its split on the FIRST dot
+    assert archived("archive-colisao")["task"].endswith("2020-01-01-corpus-tasks-2.json")
+    assert archived("archive-colisao-multipla")["task"].endswith("2020-01-01-corpus-tasks-3.json")
+    assert archived("archive-colisao-ponto-precoce")["task"].endswith("corpus-2.v2-tasks.json")
+    # 6. the companion lock, which the archive directory ends up holding
+    assert ".aimi/archive/2020-01-01-corpus-tasks.json.lock" in ARCHIVE[
+        "archive-lock-acompanha"]["tree"]
+    assert ".aimi/tasks/2020-01-01-corpus-tasks.json.lock" not in ARCHIVE[
+        "archive-lock-acompanha"]["tree"]
+    # 7. .aimi/archive that did not exist, made on the way past
+    assert ".aimi/archive/" in ARCHIVE["archive-sem-diretorio-archive"]["tree"]
+    # 8. a directory named as a file to delete: refused, contents intact
+    directory = ARCHIVE["archive-research-diretorio"]
+    assert directory["exit"] == 1
+    assert directory["stderr"] == (
+        "rm: cannot remove '/TMP/.aimi/research/pasta': Is a directory\n"
+    )
+    assert ".aimi/research/pasta/sub/dentro-2.md" in directory["tree"]
+    # 9. userStories: [] -- archived here, and NOT listed by list-archivable
+    assert ARCHIVE["archive-userstories-vazio"]["exit"] == 0
+
+
+# --- the deletion tests: own fixture tree, decoys, survivors as a SET -------
+
+_ESCAPES = {
+    # label -> the metadata value, and the fixture that makes it reachable
+    "absoluto": "/OUTSIDE/fora/alvo.md",
+    "traversal": "../fora/alvo.md",
+    "symlink": ".aimi/research/link.md",
+}
+
+
+def _escape_tree(tmp_path, key, field):
+    """One project root with three decoys and one escaping path, built here
+    rather than borrowed, because what these assert is what SURVIVED."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    os.makedirs(os.path.join(root, ".aimi", "research"))
+    os.makedirs(os.path.join(base, "fora"))
+    with open(os.path.join(base, "fora", "alvo.md"), "w", encoding="utf-8") as handle:
+        handle.write("o alvo, intocado\n")
+    for rel, text in (
+        (".aimi/research/nao-listado.md", "decoy\n"),
+        (".aimi/archive/ja-arquivado.md", "decoy\n"),
+        ("fora-do-aimi.txt", "decoy\n"),
+    ):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    if key == "symlink":
+        os.symlink(os.path.join(base, "fora", "alvo.md"),
+                   os.path.join(root, ".aimi", "research", "link.md"))
+    tasks = os.path.join(root, ".aimi", "tasks", "t-tasks.json")
+    with open(tasks, "w", encoding="utf-8") as handle:
+        json.dump({
+            "schemaVersion": "3.3",
+            "metadata": {"title": "t", field: [_ESCAPES[key].replace("/OUTSIDE", base)]},
+            "userStories": [{"id": "US-001", "status": "completed"}],
+        }, handle)
+    with open(tasks + ".lock", "w", encoding="utf-8") as handle:
+        handle.write("")
+    proc = subprocess.run(["bash", CLI, "archive-task", ".aimi/tasks/t-tasks.json"],
+                          cwd=root, capture_output=True, text=True, timeout=120)
+    return base, root, proc
+
+
+@pytest.mark.parametrize("key", sorted(_ESCAPES), ids=sorted(_ESCAPES))
+@pytest.mark.parametrize("field", ("researchPaths", "prototypePaths"))
+def test_an_escaping_document_path_is_refused_and_its_target_survives(key, field, tmp_path):
+    """Three ways out of the project root, through both fields that delete.
+
+    An absolute path outside it, a ../ traversal, and a symlink living INSIDE
+    the project whose target resolves outside it -- the last is why the check
+    has to realpath rather than string-match, and why it is asserted here
+    rather than assumed from the other two.
+
+    Each also pins the exact partial state the refusal leaves behind. The
+    confinement runs after the task file and its lock have already moved, so
+    the refusal HAS a side effect; a test that only checked the message would
+    hide it.
+    """
+    base, root, proc = _escape_tree(tmp_path, key, field)
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert proc.stderr.startswith("Error: Path escapes project root — access denied\n")
+    assert proc.stderr.rstrip().endswith("Project root: " + root)
+    # the target is still there, byte for byte
+    with open(os.path.join(base, "fora", "alvo.md"), encoding="utf-8") as handle:
+        assert handle.read() == "o alvo, intocado\n"
+    # and the partial state is exactly this -- set equality, decoys included
+    assert set(_archive_listing(root, root, base)) == {
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/archive/t-tasks.json",
+        ".aimi/archive/t-tasks.json.lock",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt",
+    } | ({".aimi/research/link.md -> /OUTSIDE/fora/alvo.md"} if key == "symlink" else set())
+
+
+def test_a_directory_named_as_a_file_to_delete_is_refused_and_keeps_its_contents(tmp_path):
+    """THE worst thing this port could have done, asserted rather than trusted.
+
+    `rm -f` refuses a directory and `set -e` ended the run there. If the port
+    had reached for shutil.rmtree the verb would have succeeded and taken a
+    whole tree with it, and every other assertion in this file would still
+    pass. So the survivors are compared as a SET, and the set includes two
+    files nested inside the directory.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    os.makedirs(os.path.join(root, ".aimi", "research", "pasta", "sub"))
+    for rel, text in (
+        (".aimi/research/pasta/dentro-1.md", "sobrevive 1\n"),
+        (".aimi/research/pasta/sub/dentro-2.md", "sobrevive 2\n"),
+        (".aimi/research/nao-listado.md", "decoy\n"),
+        (".aimi/archive/ja-arquivado.md", "decoy\n"),
+        ("fora-do-aimi.txt", "decoy\n"),
+    ):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    tasks = os.path.join(root, ".aimi", "tasks", "t-tasks.json")
+    with open(tasks, "w", encoding="utf-8") as handle:
+        json.dump({
+            "schemaVersion": "3.3",
+            "metadata": {"title": "t", "researchPaths": [".aimi/research/pasta"]},
+            "userStories": [{"id": "US-001", "status": "completed"}],
+        }, handle)
+
+    proc = subprocess.run(["bash", CLI, "archive-task", ".aimi/tasks/t-tasks.json"],
+                          cwd=root, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 1
+    assert proc.stderr == (
+        "rm: cannot remove '" + root + "/.aimi/research/pasta': Is a directory\n"
+    )
+    assert set(_archive_listing(root, root, base)) == {
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/archive/t-tasks.json",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/research/pasta/",
+        ".aimi/research/pasta/dentro-1.md",
+        ".aimi/research/pasta/sub/",
+        ".aimi/research/pasta/sub/dentro-2.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt",
+    }
+
+
+def test_the_archive_verb_owns_no_recursive_delete_anywhere_in_the_file():
+    """The structural half of the test above: `rm -f` is one syscall and stays
+    one. A future edit that reached for a recursive helper would be caught
+    here even if it never ran against a directory in any fixture."""
+    code = _code()
+    for forbidden in ("rmtree", "removedirs", "os.walk", "shutil.rmtree"):
+        assert forbidden not in code, forbidden + " has no business in tasks.py"
+    body = _code().split("def _rm_f", 1)[1].split("\ndef ", 1)[0]
+    assert body.count("os.unlink") == 1 and "shutil" not in body
+
+
+def test_archive_task_crosses_into_python_once_and_keeps_the_argument_gate_in_bash():
+    """The split the port is built on, asserted on both sides.
+
+    Bash keeps validate_path_in_project over the <path> ARGUMENT -- it exists
+    before the document is read, so an escaping argument is refused without
+    python3 starting at all. tasks.py owns the paths that only exist after the
+    crossing. One crossing, and no lock, because cmd_archive_task never took
+    one; the lock it MOVES is the defect the docstring names and the follow-up
+    owns.
+    """
+    body = dict(_wrappers())["cmd_archive_task"]
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "validate_path_in_project" in body
+    assert body.index("validate_path_in_project") < body.index(_TASKS_CROSSING)
+    assert "_lock " not in body and "jq " not in body
+    # and the ported half names the rule it reproduces rather than reinventing
+    assert "def require_in_project" in _source()
+
+
+# ---------------------------------------------------------------------------
 # The clamp: ONE function, jq's whole value space
 # ---------------------------------------------------------------------------
 
@@ -2088,10 +2494,24 @@ def test_tasks_py_takes_no_lock_of_its_own():
     inside a subshell that already holds it. A second lock implementation would
     be the duplication this port exists to remove, and a Python `flock` on a
     host that fell back to the spinlock would not even be the same lock.
+
+    archive-task moved two words off the forbidden list and onto a counted one,
+    so the guard narrowed rather than weakened. `makedirs` is now legal exactly
+    once, for .aimi/archive, which `mkdir -p` made in bash; `.lock` is legal
+    exactly once, naming the companion file the verb MOVES rather than one it
+    acquires. Both are pinned by their whole line below, so a second use has to
+    change this test. The spinlock's own shape -- a lock path built by
+    suffixing another path, then `os.mkdir` on it -- is still caught outright.
     """
     code = _code()
-    for forbidden in ("flock", "fcntl", "lockf", "os.mkdir", "makedirs", ".lock"):
+    for forbidden in ("flock", "fcntl", "lockf", "os.mkdir"):
         assert forbidden not in code, "tasks.py must not " + forbidden
+    assert [line.strip() for line in code.splitlines() if "makedirs" in line] == [
+        "os.makedirs(archive_dir, exist_ok=True)"
+    ]
+    assert [line.strip() for line in code.splitlines() if ".lock" in line] == [
+        'lock = path + ".lock"'
+    ]
 
 
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
@@ -2108,12 +2528,18 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     any of these four in a writing mode, is a new capability and has to be
     argued for rather than appear.
 
-    The single write path is write_docs_atomically, a NamedTemporaryFile in the
-    TARGET's own directory followed by os.replace -- never a truncate-and-write,
-    which is the one failure that could leave /aimi:execute reading half a
-    tasks.json. And nothing here goes near .aimi/state/: those files have their
-    own lock and their own confinement in bash, and the mark-* verbs still
-    write them there.
+    The single BYTE-writing path is write_docs_atomically, a NamedTemporaryFile
+    in the TARGET's own directory followed by os.replace -- never a
+    truncate-and-write, which is the one failure that could leave /aimi:execute
+    reading half a tasks.json. And nothing here goes near .aimi/state/: those
+    files have their own lock and their own confinement in bash, and the mark-*
+    verbs still write them there.
+
+    archive-task added the only writes here that put no bytes anywhere: one
+    move and one delete. Both are counted rather than merely allowed, because
+    this is the one verb that can destroy a user's files -- a second
+    shutil.move, a third os.unlink or a second os.makedirs is a new capability
+    in it and has to change this test to arrive.
     """
     code = _code()
     assert code.count("open(") == 4
@@ -2125,25 +2551,40 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
-    assert "os.unlink(" in code, "the temp file goes away on the failing path too"
+    assert code.count("os.unlink(") == 2, "the temp file, and _rm_f's single delete"
     assert set(re.findall(r"([\w.]+)\.write\(", code)) == {
         "sys.stdout",
         "sys.stderr",
         "handle",
     }
-    # Fifteen os.path calls, and the module still names no path of its own --
-    # not .aimi/state/, not a lock, not a sibling file. Two live in
+    # The two writes that move bytes instead of producing them, each exactly
+    # once and each pinned to its whole line.
+    assert [line.strip() for line in code.splitlines() if "shutil." in line] == [
+        "shutil.move(src, dest)"
+    ]
+    assert [line.strip() for line in code.splitlines() if "os.unlink(" in line] == [
+        "os.unlink(handle.name)",
+        "os.unlink(path)",
+    ]
+    # Twenty-eight os.path calls, and the module still names no path of its own
+    # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
-    # are confined_spec_path resolving and comparing, and the last three arrived
-    # with get-story-context: two isfile() probes for a skill (the bare
-    # directory, then OpenCode's aimi- prefixed one) and one for the brainstorm.
-    # Every path any of them touches arrived as an argument or was concatenated
-    # onto one that did -- the skills base directory and PROJECT_ROOT are both
-    # bash's answers, handed in as flags.
-    assert code.count("os.path.") == 15
-    assert code.count("os.path.isfile(") == 5
+    # are confined_spec_path resolving and comparing, three arrived with
+    # get-story-context (two isfile() probes for a skill -- the bare directory,
+    # then OpenCode's aimi- prefixed one -- and one for the brainstorm), and the
+    # last thirteen with archive-task: five in require_in_project, which is
+    # validate_path_in_project's three arms ported whole, four in archive_move
+    # probing for a free destination, three in the op itself and one in the
+    # basename(1) twin. Every path any of them touches arrived as an argument or
+    # was concatenated onto one that did -- the skills base directory,
+    # PROJECT_ROOT and the archive directory are all bash's answers, handed in
+    # as flags.
+    assert code.count("os.path.") == 28
+    assert code.count("os.path.isfile(") == 6
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
+    archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
+    assert archive_confinement.count("os.path.") == 5
 
     # and the atomicity is real, not merely spelled: the target is replaced by
     # a file that was complete before it had the target's name.
@@ -2263,6 +2704,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "normalize-verification",
         "cascade-skip",
         "reset-orphaned",
+        "archive-task",
         "gate-pass",
         "gate-fail",
     }

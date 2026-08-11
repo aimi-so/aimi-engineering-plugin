@@ -564,6 +564,129 @@ test_detect_parent_branch_per_repo_scoping() {
 # Archive Task Tests
 # ============================================================================
 
+# Build a project root under mktemp holding a terminal task file, the three
+# decoys every archive test needs -- an unlisted sibling research file, a file
+# already in .aimi/archive/, and a file outside .aimi/ entirely -- and a
+# companion .lock. Echoes the root. Callers rm -rf it.
+_archive_fixture() {
+  local basename="$1"
+  local dir
+  dir=$(mktemp -d)
+  mkdir -p "$dir/.aimi/tasks" "$dir/.aimi/research" "$dir/.aimi/archive"
+  printf 'decoy: never named in metadata\n' > "$dir/.aimi/research/nao-listado.md"
+  printf 'decoy: already in the archive\n' > "$dir/.aimi/archive/ja-arquivado.md"
+  printf 'decoy: outside .aimi entirely\n' > "$dir/fora-do-aimi.txt"
+  printf '' > "$dir/.aimi/tasks/$basename.lock"
+  cat > "$dir/.aimi/tasks/$basename" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Archive collision",
+    "type": "feat",
+    "branchName": "feat/archive-collision",
+    "maxConcurrency": 1,
+    "researchPaths": [".aimi/research/listado.md"]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "status": "completed",
+      "dependsOn": []
+    }
+  ]
+}
+TASKEOF
+  printf 'listado\n' > "$dir/.aimi/research/listado.md"
+  echo "$dir"
+}
+
+test_archive_task_collision_suffix() {
+  echo ""
+  echo "=== Testing archive-task: -N collision suffix, and its split on the first dot ==="
+
+  local stdout exit_code archived kept arch_dir
+
+  # A destination that is already taken, with the companion lock taken too.
+  arch_dir=$(_archive_fixture "2026-02-01-collide-tasks.json")
+  printf 'ja estava aqui\n' > "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json"
+  printf '' > "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json.lock"
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/2026-02-01-collide-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task collision: exit code"
+  archived=$(printf '%s' "$stdout" | jq -r '.archived.task')
+  assert_eq "2026-02-01-collide-tasks-2.json" "$(basename "$archived")" \
+    "archive-task collision: the task lands on the -2 suffix"
+
+  # The file that was already there keeps its own bytes -- the suffix exists so
+  # that an archive is never overwritten.
+  kept=$(cat "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json")
+  assert_eq "ja estava aqui" "$kept" "archive-task collision: the occupant is not overwritten"
+
+  # The companion lock is MOVED into the archive rather than left behind, and
+  # finds its own free slot independently of the task's.
+  local lock_moved="no"
+  [ -f "$arch_dir/.aimi/archive/2026-02-01-collide-tasks-2.json.lock" ] && lock_moved="yes"
+  assert_eq "yes" "$lock_moved" "archive-task collision: the companion lock moves into the archive"
+
+  local lock_left="yes"
+  [ -e "$arch_dir/.aimi/tasks/2026-02-01-collide-tasks.json.lock" ] || lock_left="no"
+  assert_eq "no" "$lock_left" "archive-task collision: and nothing is left in .aimi/tasks/"
+
+  rm -rf "$arch_dir"
+
+  # The suffix splits the basename on the FIRST dot, so everything from that
+  # dot onward counts as the extension.
+  arch_dir=$(_archive_fixture "collide.v2-tasks.json")
+  printf 'ja estava aqui\n' > "$arch_dir/.aimi/archive/collide.v2-tasks.json"
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/collide.v2-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task collision (early dot): exit code"
+  archived=$(printf '%s' "$stdout" | jq -r '.archived.task')
+  assert_eq "collide-2.v2-tasks.json" "$(basename "$archived")" \
+    "archive-task collision (early dot): the suffix goes before the FIRST dot"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_survivors() {
+  echo ""
+  echo "=== Testing archive-task: what SURVIVES, as a set rather than a spot check ==="
+
+  local stdout exit_code research_cleaned survivors arch_dir
+
+  arch_dir=$(_archive_fixture "2026-02-02-survivors-tasks.json")
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/2026-02-02-survivors-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task survivors: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "1" "$research_cleaned" \
+    "archive-task survivors: only the file metadata named is counted"
+
+  # Set equality, decoys included. A delete that reached one directory too far
+  # would show up here and nowhere else in this file.
+  survivors=$(cd "$arch_dir" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')
+  assert_eq ".aimi .aimi/archive .aimi/archive/2026-02-02-survivors-tasks.json \
+.aimi/archive/2026-02-02-survivors-tasks.json.lock .aimi/archive/ja-arquivado.md \
+.aimi/research .aimi/research/nao-listado.md .aimi/tasks fora-do-aimi.txt " \
+    "$survivors" "archive-task survivors: the exact surviving tree"
+
+  rm -rf "$arch_dir"
+}
+
 test_archive_task_with_research_paths() {
   echo ""
   echo "=== Testing archive-task: deletes research files and reports count ==="
@@ -6534,6 +6657,8 @@ main() {
   # Archive-task tests — each creates its own isolated temp dir
   echo ""
   echo "--- Archive Task Tests ---"
+  test_archive_task_collision_suffix
+  test_archive_task_survivors
   test_archive_task_with_research_paths
   test_archive_task_without_research_paths
   test_archive_task_missing_research_files

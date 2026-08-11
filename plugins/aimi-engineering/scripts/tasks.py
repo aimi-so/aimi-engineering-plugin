@@ -136,6 +136,7 @@ normalize rules reproduce all three.
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 
@@ -3056,6 +3057,286 @@ def _gate_op(verb, status):
     return op
 
 
+# ---------------------------------------------------------------------------
+# archive-task -- the one verb here that moves and deletes a user's files
+# ---------------------------------------------------------------------------
+
+
+def _basename(path):
+    """basename(1), which strips trailing slashes before taking the last
+    component. os.path.basename does not, and bash ran the command."""
+    stripped = path.rstrip("/")
+    return os.path.basename(stripped) if stripped else path
+
+
+def joined_document_path(project_root, given):
+    """`[ "${p#/}" = "$p" ]` -- a relative path is joined to PROJECT_ROOT, an
+    absolute one is taken as it stands.
+
+    Plain concatenation with one "/", exactly as bash wrote it, because this
+    string is what `rm` was handed and therefore what `rm`'s own message
+    quoted. Normalizing it here would change a diagnostic a user has seen for
+    as long as the verb has existed.
+    """
+    return given if given.startswith("/") else project_root + "/" + given
+
+
+def require_in_project(project_root, target):
+    """validate_path_in_project, ported whole -- message, layout and exit
+    status included.
+
+    IT LIVES HERE FOR THE REASON confined_spec_path does. These paths come out
+    of metadata.brainstormPath, metadata.researchPaths[] and
+    metadata.prototypePaths[], so they exist only after the crossing; sending
+    them back to bash to be checked would mean reading the document a second
+    time, which is the shape this port exists to remove. The <path> ARGUMENT
+    stays bash's: cmd_archive_task still calls validate_path_in_project on it
+    before python3 is started at all, so the CLI-supplied path is refused
+    without this file ever being reached.
+
+    Three arms, all of them bash's. An existing target resolves through
+    realpath, so a symlink pointing out of the tree is caught by its TARGET. A
+    missing one resolves through its parent plus the basename. And when the
+    parent is missing too, the unresolved string stands -- which means
+    "$PROJECT_ROOT/../fora/x" is ACCEPTED as long as ../fora was never
+    created, because the string still starts with the root. That last arm is a
+    hole, it is reproduced rather than closed, and the corpus pins both sides
+    of it: archive-research-traversal is refused and
+    archive-research-fora-inexistente is not, over the same path.
+    """
+    if os.path.exists(target):
+        resolved = os.path.realpath(target)
+    else:
+        parent = os.path.dirname(target)
+        resolved = (
+            os.path.realpath(parent) + "/" + _basename(target)
+            if os.path.exists(parent)
+            else target
+        )
+    if resolved == project_root or resolved.startswith(project_root + "/"):
+        return
+    sys.stderr.write("Error: Path escapes project root — access denied\n")
+    sys.stderr.write("  Path:         " + resolved + "\n")
+    sys.stderr.write("  Project root: " + project_root + "\n")
+    sys.exit(1)
+
+
+def archive_move(archive_dir, src):
+    """bash's nested _archive_move: the destination, the -N suffix, and mv.
+
+    `${basename%%.*}` splits on the FIRST dot, so the extension a collision
+    keeps is everything from that dot onward. corpus.v2-tasks.json becomes
+    corpus-2.v2-tasks.json rather than corpus.v2-tasks-2.json, and a companion
+    x.json.lock keeps ".json.lock". Reproduced rather than tidied: the archive
+    directory is a place people browse, and changing the rule would rename the
+    NEXT collision beside files already named the old way.
+
+    The lock's suffix is computed by a separate call to this function, so a
+    task that lands on -2 and a lock that finds its own slot free are only
+    paired by coincidence. That is bash's arithmetic too, and
+    archive-colisao-com-lock records where it happens to agree.
+    """
+    name = _basename(src)
+    dest = os.path.join(archive_dir, name)
+    if not os.path.exists(dest):
+        return _move(src, dest)
+    stem = name.split(".", 1)[0]
+    ext = name[len(stem):]
+    number = 2
+    while True:
+        dest = os.path.join(archive_dir, stem + "-" + str(number) + ext)
+        if not os.path.exists(dest):
+            return _move(src, dest)
+        number += 1
+
+
+def _move(src, dest):
+    """`mv`. shutil.move because mv crosses filesystems and os.rename does not
+    -- a brainstorm can live anywhere under the project root. dest is known
+    not to exist, so shutil's move-INTO-a-directory special case is
+    unreachable."""
+    try:
+        shutil.move(src, dest)
+    except OSError as err:
+        die("mv: cannot move '" + src + "' to '" + dest + "': " + _reason(err))
+    return dest
+
+
+def _rm_f(path):
+    """`rm -f`, and DELIBERATELY not one step further.
+
+    os.unlink and nothing else: no shutil.rmtree, no os.removedirs, no
+    recursion of any kind. A directory named in researchPaths ends the run
+    here the way `rm -f` ended it -- GNU rm's own line, rebuilt from the errno
+    so the wording a user has seen does not move under them -- with the task
+    file already in the archive and the directory untouched.
+
+    Turning a non-recursive delete into a recursive one while nobody was
+    looking is the worst outcome this port could have. The guard is that this
+    function is four lines long and every delete in the file goes through it.
+    """
+    try:
+        os.unlink(path)
+    except OSError as err:
+        die("rm: cannot remove '" + path + "': " + _reason(err))
+
+
+def _reason(err):
+    return os.strerror(err.errno) if err.errno else str(err)
+
+
+def _metadata(doc):
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def document_path_lines(docs, key):
+    """`jq -r '.metadata.<key>[]? // empty'`, as bash's `read -r` loop saw it.
+
+    Three properties come from the pipeline rather than from the values, and
+    all three are observable. `[]?` swallows a field that is not an array, so
+    a researchPaths holding a string yields no paths instead of an error
+    (archive-research-nao-lista). `// empty` drops null and false. And the
+    loop read LINES, so a value carrying a newline arrives as two paths and an
+    empty one is skipped by the loop's own `[ -z ] && continue`.
+    """
+    lines = []
+    for doc in docs:
+        values = _metadata(doc).get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if value is None or value is False:
+                continue
+            lines.extend(jq_raw(value).split("\n"))
+    return [line for line in lines if line]
+
+
+def document_scalar(docs, key):
+    """`jq -r '.metadata.<key> // empty'` over the whole stream -- one line per
+    document, joined, which is the single string bash's `$(...)` captured."""
+    lines = []
+    for doc in docs:
+        value = _metadata(doc).get(key)
+        if value is None or value is False:
+            continue
+        lines.append(jq_raw(value))
+    return "\n".join(lines)
+
+
+def op_archive_task(argv):
+    """Move the task file (and its lock, and its brainstorm) to .aimi/archive/,
+    delete the research and prototype files it names, and say what happened.
+
+    ONE CROSSING, AND NO LOCK -- because cmd_archive_task never took one. THE
+    LOCK IS MOVED RATHER THAN HELD, and that is preserved here on purpose
+    rather than inherited by accident. `<tasks>.lock` is relocated into the
+    archive directory alongside the document; a writer that is holding flock
+    on that inode keeps holding it while a writer arriving a moment later
+    opens `<tasks>.lock` at the ORIGINAL path, creates it fresh, and acquires
+    an uncontended lock on a different inode. The two then have no mutual
+    exclusion at all. The fix is deliberately out of scope for this slice:
+    everything this port is worth rests on demonstrating that the one verb
+    that deletes files changed nothing, and folding a concurrency fix into the
+    same diff would destroy that proof exactly where it matters most. It is
+    deferred to its own labelled behaviour-change commit, whose bar is a test
+    that fails against the behaviour recorded in archive-lock-acompanha.
+
+    The order is bash's and every step of it is observable: refuse a
+    non-terminal document, make the archive directory, move the task, move the
+    lock, move the brainstorm, delete the research paths, delete the prototype
+    paths, print. Everything after the first move happens with the document
+    already gone from .aimi/tasks/, which is why an escaping researchPath
+    refuses with a side effect already committed -- recorded, not hidden, in
+    the corpus `tree` of every escape case.
+
+    The lock move is guarded by `[ -f ]`, so a companion lock that is a
+    DIRECTORY is left where it is rather than moved -- archive-lock-e-diretorio
+    ends with the document archived and the directory still in .aimi/tasks/.
+    (That sentence lives here rather than beside the code because
+    test_tasks_py_takes_no_lock_of_its_own scans the executable text for a lock
+    and cannot tell an explanation from an implementation.)
+    """
+    path = _flag(argv, "--tasks-file")
+    project_root = _flag(argv, "--project-root")
+    archive_dir = _flag(argv, "--archive-dir")
+    if not path or not project_root or not archive_dir:
+        die(
+            "Usage: tasks.py archive-task --tasks-file <path> "
+            "--project-root <path> --archive-dir <path>"
+        )
+
+    docs = read_docs(path, "archive-task")
+    counts = [
+        len(
+            [
+                story
+                for story in _stories(doc)
+                if jq_index(story, "status", ".userStories[]") not in ("completed", "skipped")
+            ]
+        )
+        for doc in docs
+    ]
+    # bash tested ONE string holding jq's whole output -- one count per
+    # document -- so both arms below are string arms rather than numeric ones.
+    # An empty tasks file yields no counts and is refused (for having
+    # non-terminal stories, which is the wrong sentence for the input and is
+    # the behaviour: archive-arquivo-vazio). A stream of two or more documents
+    # yields a value `[ ... -ne 0 ]` cannot compare; it reported "integer
+    # expression expected", returned 2, and an `if` read that as false, so the
+    # archive went ahead whatever the later documents said. Reproduced with a
+    # branch rather than an error, and pinned by
+    # archive-dois-documentos-um-aberto, which archives an in_progress story.
+    if not counts or (len(counts) == 1 and counts[0] != 0):
+        sys.stderr.write("Error: Task file has non-terminal stories — cannot archive\n")
+        return 1
+
+    os.makedirs(archive_dir, exist_ok=True)
+    archived_task = archive_move(archive_dir, path)
+    lock = path + ".lock"
+    if os.path.isfile(lock):
+        archive_move(archive_dir, lock)
+
+    archived_brainstorm = ""
+    brainstorm = document_scalar(docs, "brainstormPath")
+    if brainstorm:
+        target = joined_document_path(project_root, brainstorm)
+        # CONFINED ONLY WHEN IT EXISTS, and that asymmetry against the two
+        # loops below is bash's own call-site ordering rather than an
+        # oversight of this port: an escaping brainstormPath naming nothing is
+        # skipped in silence (archive-brainstorm-fora-inexistente) where an
+        # escaping researchPath is refused before anyone asks whether it is
+        # there.
+        if os.path.exists(target):
+            require_in_project(project_root, target)
+            archived_brainstorm = archive_move(archive_dir, target)
+
+    cleaned = {}
+    for key in ("researchPaths", "prototypePaths"):
+        count = 0
+        for given in document_path_lines(docs, key):
+            target = joined_document_path(project_root, given)
+            # CONFINED BEFORE THE EXISTENCE CHECK, so a path that escapes is
+            # refused whether or not it is there.
+            require_in_project(project_root, target)
+            if os.path.exists(target):
+                _rm_f(target)
+                count += 1
+        cleaned[key] = count
+
+    _emit(
+        {
+            "archived": {
+                "task": archived_task,
+                "brainstorm": archived_brainstorm or None,
+                "researchCleaned": cleaned["researchPaths"],
+                "prototypeCleaned": cleaned["prototypePaths"],
+            }
+        }
+    )
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -3083,6 +3364,7 @@ _OPS = {
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),
+    "archive-task": op_archive_task,
 }
 
 # No _VERB_FOR_OP table, unlike roadmap.py: every op here is named after the

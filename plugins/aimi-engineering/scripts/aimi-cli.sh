@@ -10314,6 +10314,16 @@ cmd_list_archivable() {
 
 # Archive a task file (and linked brainstorm) to .aimi/archive/
 # Usage: archive-task <path>
+#
+# THE ONLY VERB IN THIS FILE THAT DELETES A USER'S FILES, and the split of
+# responsibility reflects it. Bash keeps the <path> ARGUMENT: it exists before
+# the document is read, so validate_path_in_project stays the sole authority
+# over it and refuses an escaping argument without python3 ever starting.
+# tasks.py owns the paths that come OUT of the document -- brainstormPath,
+# researchPaths[], prototypePaths[] -- because those exist only after the
+# crossing, and routing them back here would mean reading the file twice.
+# require_in_project over there is an exact port of validate_path_in_project,
+# refusal message and exit status included.
 cmd_archive_task() {
   local task_path="$1"
 
@@ -10332,123 +10342,11 @@ cmd_archive_task() {
   resolved_task=$(resolve_path "$task_path")
   validate_path_in_project "$resolved_task"
 
-  # Verify all stories are terminal
-  local non_terminal
-  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$resolved_task" 2>/dev/null)
-  if [ -z "$non_terminal" ] || [ "$non_terminal" -ne 0 ]; then
-    echo "Error: Task file has non-terminal stories — cannot archive" >&2
-    exit 1
-  fi
-
-  # Create archive directory
-  local archive_dir="$AIMI_DIR/archive"
-  mkdir -p "$archive_dir"
-
-  # Helper: move a file to archive with collision handling
-  # Usage: _archive_move <source_path>
-  # Outputs the destination path
-  _archive_move() {
-    local src="$1"
-    local basename
-    basename=$(basename "$src")
-    local dest="$archive_dir/$basename"
-
-    if [ ! -e "$dest" ]; then
-      mv "$src" "$dest"
-      printf '%s' "$dest"
-      return
-    fi
-
-    # Handle collision: append -N suffix before extension
-    local name_no_ext ext
-    # Split on first dot for files like foo-tasks.json
-    name_no_ext="${basename%%.*}"
-    ext="${basename#"$name_no_ext"}"  # includes leading dot(s)
-
-    local n=2
-    while true; do
-      dest="$archive_dir/${name_no_ext}-${n}${ext}"
-      if [ ! -e "$dest" ]; then
-        mv "$src" "$dest"
-        printf '%s' "$dest"
-        return
-      fi
-      n=$((n + 1))
-    done
-  }
-
-  # Move the task file
-  local archived_task
-  archived_task=$(_archive_move "$resolved_task")
-
-  # Move companion .lock file if it exists
-  if [ -f "${resolved_task}.lock" ]; then
-    _archive_move "${resolved_task}.lock" > /dev/null
-  fi
-
-  # Move linked brainstorm if specified in metadata
-  local brainstorm_path archived_brainstorm=""
-  brainstorm_path=$(jq -r '.metadata.brainstormPath // empty' "$archived_task" 2>/dev/null)
-
-  if [ -n "$brainstorm_path" ]; then
-    # Resolve relative to project root
-    local resolved_brainstorm
-    if [ "${brainstorm_path#/}" = "$brainstorm_path" ]; then
-      # Relative path — resolve from project root
-      resolved_brainstorm="$PROJECT_ROOT/$brainstorm_path"
-    else
-      resolved_brainstorm="$brainstorm_path"
-    fi
-
-    # Validate brainstorm path stays within project root
-    if [ -e "$resolved_brainstorm" ]; then
-      validate_path_in_project "$resolved_brainstorm"
-      archived_brainstorm=$(_archive_move "$resolved_brainstorm")
-    fi
-  fi
-
-  # Delete linked research files (ephemeral — rm -f, not archived)
-  local research_cleaned=0
-  while IFS= read -r rpath; do
-    [ -z "$rpath" ] && continue
-    local resolved_research
-    if [ "${rpath#/}" = "$rpath" ]; then
-      # Relative path — resolve from project root
-      resolved_research="$PROJECT_ROOT/$rpath"
-    else
-      resolved_research="$rpath"
-    fi
-    validate_path_in_project "$resolved_research"
-    if [ -e "$resolved_research" ]; then
-      rm -f "$resolved_research"
-      research_cleaned=$((research_cleaned + 1))
-    fi
-  done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
-
-  # Delete linked prototype files (ephemeral — rm -f, not archived)
-  local prototype_cleaned=0
-  while IFS= read -r ppath; do
-    [ -z "$ppath" ] && continue
-    local resolved_prototype
-    if [ "${ppath#/}" = "$ppath" ]; then
-      # Relative path — resolve from project root
-      resolved_prototype="$PROJECT_ROOT/$ppath"
-    else
-      resolved_prototype="$ppath"
-    fi
-    validate_path_in_project "$resolved_prototype"
-    if [ -e "$resolved_prototype" ]; then
-      rm -f "$resolved_prototype"
-      prototype_cleaned=$((prototype_cleaned + 1))
-    fi
-  done < <(jq -r '.metadata.prototypePaths[]? // empty' "$archived_task" 2>/dev/null)
-
-  # Output result as JSON
-  jq -n --arg task "$archived_task" \
-    --arg brainstorm "${archived_brainstorm:-}" \
-    --argjson researchCleaned "$research_cleaned" \
-    --argjson prototypeCleaned "$prototype_cleaned" \
-    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
+  check_python3
+  python3 "$(_aimi_tasks_py)" archive-task \
+    --tasks-file "$resolved_task" \
+    --project-root "$PROJECT_ROOT" \
+    --archive-dir "$AIMI_DIR/archive"
 }
 
 # Usage: research-lookup [--ignore-missing-cited-paths] <path>
