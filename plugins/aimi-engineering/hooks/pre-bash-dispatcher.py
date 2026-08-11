@@ -446,6 +446,19 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
         _allow()
 
     # Read maxConcurrency from metadata.
+    #
+    # A DELIBERATE fourth copy of the default. scripts/tasks.py collapsed the
+    # three that aimi-cli.sh spelled out (both cmd_status branches and
+    # cmd_metadata) into clamp_max_concurrency, and this one stayed out of it
+    # for two reasons. It is a separate process Claude Code spawns on every
+    # Bash call, with no import path to scripts/ and no guarantee the CLI is
+    # even resolvable at hook time -- importing that module would put a
+    # plugin-path resolution on the hot path of every command the user runs.
+    # And it does NOT implement the same rule: `isinstance(raw, int)` accepts a
+    # negative budget where the clamp turns anything <= 0 into 20, so
+    # collapsing the two would be a behaviour change rather than a refactor,
+    # and belongs to its own slice. The comment at DEFAULT_MAX_CONCURRENCY in
+    # tasks.py names this end, so the divergence is visible from either side.
     max_concurrency = 20
     try:
         tasks_data = json.loads(tasks_path.read_text())

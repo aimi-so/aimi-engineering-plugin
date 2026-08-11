@@ -250,10 +250,31 @@ test_metadata_max_concurrency_default() {
   echo ""
   echo "=== Testing metadata: maxConcurrency defaulting ==="
 
-  # cmd_metadata carries exactly one rule beyond "print .metadata":
-  # `.maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)`.
-  # Both of its branches are pinned here, because a port that dropped the
-  # clamp would still pass every other metadata assertion in this file.
+  # cmd_metadata carries exactly one rule beyond "print .metadata": the
+  # maxConcurrency default. Both of its branches are pinned here, because a
+  # port that dropped the clamp would still pass every other metadata
+  # assertion in this file.
+  #
+  # The rule used to be a jq expression written out THREE times in aimi-cli.sh
+  # -- once here and once in each branch of cmd_status. All three call sites
+  # are verbs tasks.py now serves, so the rule left this file entirely instead
+  # of being reduced to one bash copy, and the two static assertions below say
+  # so from both ends. They are the retargeted form of a grep that used to
+  # count the jq copies, following the roadmap precedent in part3
+  # ("exactly one cv_identity definition in roadmap.py"): scan the Python file
+  # ALONE, because unlike the shell class there is no explanatory bash copy
+  # that legitimately survives here. Two assertions rather than one, so a
+  # re-introduced copy in either file fails on its own line.
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: no jq copy of the default may come back.
+  assert_eq "0" "$(grep -c 'maxConcurrency // 20' "$CLI" || true)" \
+    "metadata: no jq copy of the maxConcurrency default survives in aimi-cli.sh"
+  # Scans tasks.py: exactly one definition, which is where it went.
+  assert_eq "1" "$(grep -c '^def clamp_max_concurrency(' "$tasks_py" || true)" \
+    "metadata: exactly one clamp_max_concurrency definition in tasks.py"
+
   local mc_fixture="$TASKS_DIR/9999-99-93-metadata-mc.json"
 
   # (a) absent -> 20
@@ -274,6 +295,37 @@ test_metadata_max_concurrency_default() {
 
   rm -f "$mc_fixture"
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_init_session_self_resolution_stays_in_bash() {
+  echo ""
+  echo "=== Testing tasks.py boundary: init-session's cli-path writes stay in bash ==="
+
+  # THE ONE THING THIS PORT MUST NEVER DO. cmd_init_session runs
+  # `resolve_path "$0"` and feeds the result to BOTH write_state "cli-path" and
+  # write_global_cli_cache. Inside tasks.py `$0` is the .py file, so porting it
+  # would put a Python module's path into ~/.config/aimi/cli-path -- and every
+  # later $AIMI_CLI resolution would then load a .py as a shell script. The
+  # plugin dies on the NEXT session, long after the test run that passed, which
+  # is exactly why this is pinned statically rather than left to a behavioural
+  # test that would still be green.
+  local tasks_py tasks_body
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: both writes still execute in bash, off the self-resolved
+  # path, and neither moved behind a python3 crossing.
+  assert_eq "1" "$(grep -c 'write_state "cli-path" "\$self_path"' "$CLI" || true)" \
+    "boundary: init-session still writes cli-path state from bash"
+  assert_eq "1" "$(grep -c 'write_global_cli_cache "\$self_path"' "$CLI" || true)" \
+    "boundary: init-session still writes the global cli-path cache from bash"
+
+  # Scans tasks.py, minus its module docstring -- the docstring NAMES the cache
+  # in order to forbid it, so scanning the whole file would make the
+  # explanation trip its own guard. Function docstrings are indented and so are
+  # never in the deleted range.
+  tasks_body=$(sed '/^"""/,/^"""/d' "$tasks_py")
+  assert_eq "0" "$(printf '%s\n' "$tasks_body" | grep -c 'cli-path' || true)" \
+    "boundary: tasks.py names the cli-path cache nowhere outside the docstring forbidding it"
 }
 
 test_current_story() {
@@ -6805,6 +6857,7 @@ main() {
   test_init_session
   test_metadata
   test_metadata_max_concurrency_default
+  test_init_session_self_resolution_stays_in_bash
   test_current_story
   test_get_branch
   test_get_state

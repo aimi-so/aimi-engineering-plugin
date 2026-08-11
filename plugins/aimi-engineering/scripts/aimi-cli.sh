@@ -145,18 +145,20 @@ check_jq() {
 }
 
 # Ensure python3 is available. Mirrors check_jq, and is called by the roadmap
-# verbs and story-merge only -- every other verb in this file is pure bash + jq
-# and must keep working on a host without python3.
+# verbs, story-merge and the six read-only tasks.json verbs -- every other verb
+# in this file is pure bash + jq and must keep working on a host without
+# python3.
 check_python3() {
   if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 is required by the roadmap verbs and story-merge but is not installed." >&2
+    echo "Error: python3 is required by the roadmap verbs, story-merge and the tasks.json read verbs but is not installed." >&2
     echo "Install with: brew install python (macOS) or apt install python3 (Linux)" >&2
     exit 1
   fi
 }
 
 # Absolute path to a Python module that sits beside this script -- roadmap.py
-# for the roadmap verbs, story_merge.py for story-merge.
+# for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
+# read-only tasks.json verbs.
 #
 # Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
 # one directory up. It has to be resolved rather than assumed because this file
@@ -172,6 +174,13 @@ _aimi_script_py() {
 # them had to change when a second module arrived.
 _aimi_roadmap_py() {
   _aimi_script_py roadmap.py
+}
+
+# Same, for the read-only tasks.json verbs. Built on the shared resolver above
+# rather than repeating the BASH_SOURCE idiom, which is the whole reason
+# _aimi_script_py was split out of _aimi_roadmap_py in the first place.
+_aimi_tasks_py() {
+  _aimi_script_py tasks.py
 }
 
 # Ensure state directory exists
@@ -798,41 +807,22 @@ cmd_status() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  if [ "$counts_only" = true ]; then
-    jq '{
-      schemaVersion: .schemaVersion,
-      title: .metadata.title,
-      branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
-      pending: [.userStories[] | select(.status == "pending")] | length,
-      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-      completed: [.userStories[] | select(.status == "completed")] | length,
-      failed: [.userStories[] | select(.status == "failed")] | length,
-      skipped: [.userStories[] | select(.status == "skipped")] | length,
-      total: .userStories | length
-    }' "$tasks_file"
-  else
-    jq '{
-      schemaVersion: .schemaVersion,
-      title: .metadata.title,
-      branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
-      pending: [.userStories[] | select(.status == "pending")] | length,
-      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-      completed: [.userStories[] | select(.status == "completed")] | length,
-      failed: [.userStories[] | select(.status == "failed")] | length,
-      skipped: [.userStories[] | select(.status == "skipped")] | length,
-      total: .userStories | length,
-      userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
-    }' "$tasks_file"
-  fi
+  # The two branches used to be two 11-line jq programs whose first ten lines
+  # were identical -- including a copy each of the maxConcurrency clamp. Both
+  # are now one flag on one crossing; tasks.py's status_view omits one key.
+  local counts_args=()
+  [ "$counts_only" = true ] && counts_args=(--counts-only)
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" status --tasks-file "$tasks_file" "${counts_args[@]}"
 }
 
 # Get metadata only
 cmd_metadata() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
 }
 
 # List stories that are ready to execute
@@ -914,13 +904,16 @@ cmd_current_story() {
   local story_id tasks_file
   story_id=$(read_state "current-story")
 
+  # No pointer at all is answered without opening the tasks file, and stays in
+  # bash for that reason: .aimi/state/ is read_state's, not tasks.py's.
   if [ -z "$story_id" ]; then
     echo "null"
     return
   fi
 
   tasks_file=$(get_tasks_file)
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" current-story --tasks-file "$tasks_file" --story-id "$story_id"
 }
 
 # Get full story object by ID (read-only)
@@ -933,12 +926,15 @@ cmd_get_story() {
     exit 1
   fi
 
+  # Both gates stay in bash: the id's format and its existence are questions
+  # about the ARGUMENT and about which file is current, not about the document.
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" get-story --tasks-file "$tasks_file" --story-id "$story_id"
 }
 
 # Resolve the skills base directory for the current host.
@@ -1304,7 +1300,8 @@ cmd_set_execution_mode() {
 cmd_count_pending() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '[.userStories[] | select(.status == "pending")] | length' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" count-pending --tasks-file "$tasks_file"
 }
 
 # Validate dependencies in a tasks file
@@ -1686,6 +1683,11 @@ cmd_get_branch() {
 }
 
 # Get all state as JSON
+#
+# The four reads stay here and the VALUES cross, never the paths: read_state
+# carries validate_path_in_project and .aimi/state/ has its own .state.lock,
+# neither of which tasks.py is allowed to acquire a second opinion about. All
+# the op does is the "" -> null mapping that used to be four jq conditionals.
 cmd_get_state() {
   local tasks branch story last
   tasks=$(read_state "current-tasks")
@@ -1693,17 +1695,9 @@ cmd_get_state() {
   story=$(read_state "current-story")
   last=$(read_state "last-result")
 
-  jq -n \
-    --arg tasks "$tasks" \
-    --arg branch "$branch" \
-    --arg story "$story" \
-    --arg last "$last" \
-    '{
-      tasks: (if $tasks == "" then null else $tasks end),
-      branch: (if $branch == "" then null else $branch end),
-      story: (if $story == "" then null else $story end),
-      last: (if $last == "" then null else $last end)
-    }'
+  check_python3
+  python3 "$(_aimi_tasks_py)" get-state \
+    --tasks "$tasks" --branch "$branch" --story "$story" --last "$last"
 }
 
 # Shared `--project`/git-repository entry guard. Fourteen commands each
