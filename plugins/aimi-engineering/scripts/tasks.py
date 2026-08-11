@@ -337,18 +337,23 @@ def jq_has(value, key, owner):
     return key in value
 
 
-def jq_test(value, pattern, owner):
-    """jq's `test(re; "i")`. Case-insensitive at every one of its call sites.
+def jq_test(value, pattern, owner, ignore_case=True):
+    """jq's `test(re)`, with or without the "i" validate-stories always passed.
 
     jq refuses a non-string input rather than treating it as no match, which is
     why a story whose `project` is a number aborts validate-stories instead of
     being reported -- projeto-numero records the abort.
+
+    validate-tasks' url charset test is the one call site with NO flag, and it
+    passes ignore_case=False rather than relying on its allowlist spelling both
+    cases out. The two are the same answer today; a later edit to the allowlist
+    should not be able to change that quietly.
     """
     if not isinstance(value, str):
         raise MalformedTasks(
             owner + ": " + _json_type(value) + " cannot be matched, as it is not a string"
         )
-    return re.search(pattern, value, re.IGNORECASE) is not None
+    return re.search(pattern, value, re.IGNORECASE if ignore_case else 0) is not None
 
 
 def jq_index_in(array, needle):
@@ -1238,6 +1243,642 @@ def validate_waves(doc):
 
 
 # ---------------------------------------------------------------------------
+# validate-tasks: fifteen rules, and the three pieces of scaffolding that died
+# ---------------------------------------------------------------------------
+#
+# THIS IS THE VERB THE PORT WAS JUSTIFIED ON, so it is worth saying what stood
+# where the next forty lines stand.
+#
+# cmd_validate_tasks read eight scalar metadata fields, and it read them with
+# ONE `jq -r '[...] | @tsv'` rather than eight, because a jq process cost ~18ms
+# to start and ~1ms to read a 46KB tasks file -- eight separate reads of the
+# same document paid ~8x the startup and bought nothing. Batching them saved
+# roughly 140ms per invocation and cost three pieces of scaffolding, each
+# defending the packing rather than any rule:
+#
+#   * `\037` as the delimiter instead of the tab @tsv emits. A tab is IFS
+#     WHITESPACE, and bash collapses runs of it -- so two adjacent empty fields
+#     (the common case: no designBundle, no execution) vanished and every later
+#     value landed in the wrong variable.
+#   * `// ""` at every position and never `// empty`, because `empty` emits no
+#     field at all and shifts every following field one place left. Nothing
+#     errored; the wrong branchName was simply validated against the pattern.
+#   * `_vt_probe`, a ninth variable with no ninth field, asserted empty so that
+#     a future edit adding fields without adding variables could not pass
+#     silently -- the assertion being on what the SHELL parsed, never on what
+#     jq emitted.
+#
+# All three answer questions that exist only while a document crosses a process
+# boundary flattened onto one line. Below, the document is parsed once and the
+# eight questions are eight expressions over a dict: there is no position to
+# preserve, nothing to tell apart, and no split to probe. Every guarantee the
+# scaffolding bought still holds, by construction rather than by convention --
+# absent still reads as the empty string, and no field can be mistaken for its
+# neighbour because no two of them are ever adjacent.
+#
+# @tsv's own ESCAPING is not scaffolding and is reproduced below: it is
+# observable. A designSpec holding a backslash or a tab reached the filesystem
+# in its escaped form and the "file not found" message quoted the escaped path.
+
+_TSV_ESCAPES = (("\\", "\\\\"), ("\t", "\\t"), ("\n", "\\n"), ("\r", "\\r"))
+
+
+def jq_tsv_cell(value, owner):
+    """One cell of jq's `@tsv`: its rendering, then its four escapes.
+
+    @tsv takes scalars only -- an array or an object is jq's "is not valid in a
+    csv row" abort, which is why a `branchName` holding a list stops the verb
+    rather than being reported. null renders as the EMPTY string, which is what
+    made `// ""` look redundant and is not: `//` fires on false too.
+    """
+    if value is None:
+        rendered = ""
+    elif isinstance(value, bool):
+        rendered = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        rendered = jq_tostring(value)
+    elif isinstance(value, str):
+        rendered = value
+    else:
+        raise MalformedTasks(owner + ": " + jq_type(value) + " is not valid in a csv row")
+    for raw, escaped in _TSV_ESCAPES:
+        rendered = rendered.replace(raw, escaped)
+    return rendered
+
+
+def _read_ifs_whitespace(line, count, separator="\t"):
+    """bash's `IFS=$'\\t' read -r a b c`, tab-collapse and all.
+
+    THE BUG THE `\\037` DELIMITER EXISTED TO AVOID, still live in the two scans
+    that never got the treatment: a tab is IFS whitespace, so bash drops leading
+    and trailing runs of it and treats an interior run as ONE delimiter. A
+    visual story whose id is "" therefore yields `\\t0\\ttext`, which splits into
+    two fields -- story_id becomes the AC INDEX and the text is lost -- and the
+    citation in it is never checked. ds-id-vazio and url-id-nulo record both
+    halves of that; reproduced rather than fixed, because which of the two the
+    author meant is a decision and not a port.
+
+    The last name takes the remainder, minus the trailing run bash already
+    stripped.
+    """
+    stripped = line.strip(separator)
+    fields = []
+    rest = stripped
+    run = re.compile(re.escape(separator) + "+")
+    for _ in range(count - 1):
+        found = run.search(rest)
+        if found is None:
+            fields.append(rest)
+            rest = ""
+        else:
+            fields.append(rest[: found.start()])
+            rest = rest[found.end() :]
+    fields.append(rest)
+    return fields
+
+
+def _vc_order(byte):
+    """gnulib's `order()`: `~` first, then digits, then letters, then the rest."""
+    if 0x30 <= byte <= 0x39:
+        return 0
+    if (0x41 <= byte <= 0x5A) or (0x61 <= byte <= 0x7A):
+        return byte
+    if byte == 0x7E:
+        return -1
+    return byte + 0x100 + 1
+
+
+def _verrevcmp(left, right):
+    """gnulib's verrevcmp, over bytes: the core of `sort -V`."""
+    i = j = 0
+    n, m = len(left), len(right)
+    while i < n or j < m:
+        first_diff = 0
+        while (i < n and not 0x30 <= left[i] <= 0x39) or (j < m and not 0x30 <= right[j] <= 0x39):
+            a = 0 if i == n else _vc_order(left[i])
+            b = 0 if j == m else _vc_order(right[j])
+            if a != b:
+                return a - b
+            i += 1
+            j += 1
+        while i < n and left[i] == 0x30:
+            i += 1
+        while j < m and right[j] == 0x30:
+            j += 1
+        while i < n and j < m and 0x30 <= left[i] <= 0x39 and 0x30 <= right[j] <= 0x39:
+            if not first_diff:
+                first_diff = left[i] - right[j]
+            i += 1
+            j += 1
+        if i < n and 0x30 <= left[i] <= 0x39:
+            return 1
+        if j < m and 0x30 <= right[j] <= 0x39:
+            return -1
+        if first_diff:
+            return first_diff
+    return 0
+
+
+_FILE_SUFFIX = re.compile(rb"(?:\.[A-Za-z~][A-Za-z0-9~]*)*\Z")
+
+
+def _filevercmp(left, right):
+    """gnulib's filevercmp, over bytes, which is the key `sort -V` sorts on."""
+    if not left:
+        return -1 if right else 0
+    if not right:
+        return 1
+    one_pass_only = False
+    if left[:1] == b".":
+        if right[:1] != b".":
+            return -1
+        for dots in (b".", b".."):
+            if left == dots:
+                return 0 if right == dots else -1
+            if right == dots:
+                return 1
+        left, right = left[1:], right[1:]
+        one_pass_only = True
+    elif right[:1] == b".":
+        return 1
+
+    left_prefix = len(left) if one_pass_only else _FILE_SUFFIX.search(left).start()
+    right_prefix = len(right) if one_pass_only else _FILE_SUFFIX.search(right).start()
+    result = _verrevcmp(left[:left_prefix], right[:right_prefix])
+    if result or (left_prefix == len(left) and right_prefix == len(right)):
+        return result
+    return _verrevcmp(left, right)
+
+
+def sort_v_first(left, right):
+    """`printf '%s\\n' "$a" "$b" | sort -V | head -n1`, which is the whole of R1.
+
+    The gate is a two-line sort, not a comparison anyone wrote, so what it
+    accepts is filevercmp's business rather than semver's: "abc" sorts ABOVE
+    "3.3" and passes the gate, while "3.10" also passes and "3.03" does not.
+    schema-lixo records the first of those.
+
+    `sort` falls back to comparing whole lines when its key ties, which is why
+    the byte comparison is here and not an afterthought.
+    """
+    left_bytes = left.encode("utf-8", "surrogateescape")
+    right_bytes = right.encode("utf-8", "surrogateescape")
+    order = _filevercmp(left_bytes, right_bytes)
+    if order == 0:
+        order = (left_bytes > right_bytes) - (left_bytes < right_bytes)
+    return left if order <= 0 else right
+
+
+# The sed chain _validate_designspec_citation applied to BOTH sides, in the
+# order it wrote them -- and the order is load-bearing, because sed runs every
+# -e over the same pattern space in turn, so `&amp;nbsp;` becomes `&nbsp;`
+# becomes a space. Bytes rather than text because sed matched bytes.
+_NORMALIZATIONS = tuple(
+    (raw.encode("utf-8"), cooked.encode("utf-8"))
+    for raw, cooked in (
+        ("“", '"'),
+        ("”", '"'),
+        ("‘", "'"),
+        ("’", "'"),
+        ("—", "-"),
+        (" ", " "),
+        ("&amp;", "&"),
+        ("&nbsp;", " "),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", '"'),
+    )
+)
+
+# awk's [[:space:]] in a record that can hold no newline.
+_AWK_SPACE = rb"[ \t\v\f\r]"
+_HEADING = re.compile(rb"^#+" + _AWK_SPACE)
+
+
+def _normalize_text(raw):
+    for pattern, replacement in _NORMALIZATIONS:
+        raw = raw.replace(pattern, replacement)
+    return raw
+
+
+def subsection_body(spec_bytes, section, normalize):
+    """The awk heading-boundary scanner, ONCE, for both specs.
+
+    It was copy-pasted between _validate_designspec_citation and
+    _validate_businessspec_field, identical to the character, and the two
+    differed only in what they did afterwards -- the DesignSpec side normalized
+    both sides, the BusinessSpec side did not. That asymmetry is PRE-EXISTING
+    and is preserved rather than tidied: normalizing the field-name lookup too
+    would change which responseShape keys validate.
+
+    The rule: from the first heading whose text is the cited section, collect
+    every line until a heading of equal or SHALLOWER level. A deeper heading is
+    collected along with its body, which is why a literal under 2.1.1 satisfies
+    a citation of 2.1. `section` goes into the regex unescaped, exactly as awk
+    interpolated it, so the `.` in "2.1" is a wildcard and matches a heading
+    reading "2X1" -- ds-secao-ponto-curinga-sozinha records that.
+
+    Returns b"" for a section that is not there, which the callers read as "not
+    found" -- the same conflation `[ -z "$subsection_body" ]` made, so a section
+    that exists but holds only blank lines is reported as missing too.
+    """
+    heading_matches = re.compile(
+        rb"^(?:\xc2\xa7" + _AWK_SPACE + rb"*)?" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+    )
+    heading_anywhere = re.compile(
+        rb"\xc2\xa7" + _AWK_SPACE + rb"*" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+    )
+    lines = spec_bytes.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+
+    collected = []
+    in_section = False
+    heading_level = 0
+    for line in lines:
+        if _HEADING.match(line):
+            level = len(line) - len(line.lstrip(b"#"))
+            if not in_section:
+                heading_text = re.sub(rb"^" + _AWK_SPACE + rb"+", b"", line[level:])
+                if heading_matches.search(heading_text) or heading_anywhere.search(heading_text):
+                    in_section = True
+                    heading_level = level
+                    continue
+            elif level <= heading_level:
+                break
+        if in_section:
+            collected.append(line)
+
+    # `$(awk …)` stripped every trailing newline, and _normalize_text's own
+    # command substitution stripped them again afterwards.
+    body = b"\n".join(collected).rstrip(b"\n")
+    if normalize:
+        body = _normalize_text(body).rstrip(b"\n")
+    return body
+
+
+def spec_contains(spec_path, needle, section, normalize):
+    """`grep -qF` against the cited subsection: fixed-string containment, and
+    nothing else.
+
+    THE responseShape CONTRACT DEPENDS ON THIS STAYING DUMB. /aimi:plan
+    documents a flat-key rule (commands/plan.md § "responseShape contract") and
+    it holds only because the key is one opaque literal here: nothing splits on
+    ".", nothing walks a path, and no regex is ever built out of the key. A
+    subsection naming `portfolio` and `totalUsinas` separately still rejects
+    `portfolio.totalUsinas`, which is what makes the rejection meaningful.
+
+    grep is line-oriented and the needle can hold no newline, so containment
+    over the whole body is the same answer for less machinery.
+    """
+    try:
+        with open(spec_path, "rb") as handle:
+            spec_bytes = handle.read()
+    except OSError:
+        # awk printed its own complaint and produced nothing; the callers'
+        # `[ -z … ]` then read that as "section not found".
+        return False
+    body = subsection_body(spec_bytes, section.encode("utf-8", "surrogateescape"), normalize)
+    if not body:
+        return False
+    needle_bytes = needle.encode("utf-8", "surrogateescape")
+    if normalize:
+        needle_bytes = _normalize_text(needle_bytes).rstrip(b"\n")
+    return needle_bytes in body
+
+
+def _to_entries(value, owner):
+    """jq's `to_entries[]`, which refuses anything with no keys.
+
+    An acceptanceCriteria that is absent or null is jq's "has no keys" abort,
+    and that abort is REACHED BEFORE the execution, branchName and url rules --
+    so a file carrying both a null acceptanceCriteria and a bad branchName is
+    refused without the branch ever being looked at. aborta-antes-das-regras-
+    finais records exactly that, and it is why this port evaluates the rules in
+    the order bash ran them rather than all fifteen unconditionally.
+    """
+    if isinstance(value, list):
+        return list(enumerate(value))
+    if isinstance(value, dict):
+        return list(value.items())
+    raise MalformedTasks(owner + ": " + jq_type(value) + " has no keys")
+
+
+CITATION = re.compile(r'"([^"]+)" \(DesignSpec § ([0-9]+\.[0-9]+) L([0-9]+)\)')
+BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
+URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
+SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
+SOURCE_SECTION = re.compile(r"§ [0-9]+(\.[0-9]+)?")
+
+VALIDATE_METADATA_FIELDS = (
+    "schema_version",
+    "design_spec",
+    "prototype_count",
+    "frontend_only",
+    "business_spec",
+    "execution",
+    "has_phase",
+    "branch_name",
+)
+
+
+def validate_tasks_metadata(doc):
+    """The eight fields, as eight expressions. See the note above this section.
+
+    Each one is exactly the jq that produced its position in the packed array,
+    so `// ""` survives as jq_alternative and "absent" still arrives as the
+    empty string every consumer below already tested for.
+    """
+    meta = jq_index(doc, "metadata", "")
+
+    def bundle(key):
+        return jq_index(jq_index(meta, "designBundle", ".metadata"), key, ".metadata.designBundle")
+
+    def prototype_count():
+        prototypes = jq_index(meta, "prototypePaths", ".metadata")
+        if jq_type(prototypes) != "array":
+            return 0
+        return jq_length(prototypes, ".metadata.prototypePaths")
+
+    # Written out IN ORDER, and evaluated in order, because a document that
+    # aborts one of them aborts there rather than at whichever expression a
+    # rearrangement happened to reach first.
+    values = (
+        jq_alternative(
+            jq_alternative(jq_index(meta, "schemaVersion", ".metadata"), jq_index(doc, "schemaVersion", "")),
+            "0",
+        ),
+        jq_alternative(bundle("designSpec"), ""),
+        jq_tostring(prototype_count()),
+        jq_tostring(jq_alternative(jq_index(meta, "frontendOnly", ".metadata"), False)),
+        jq_alternative(bundle("businessSpec"), ""),
+        jq_alternative(jq_index(meta, "execution", ".metadata"), ""),
+        "false" if jq_equal(jq_alternative(jq_index(meta, "phase", ".metadata"), None), None) else "true",
+        jq_alternative(jq_index(meta, "branchName", ".metadata"), ""),
+    )
+    owners = (
+        ".metadata.schemaVersion",
+        ".metadata.designBundle.designSpec",
+        ".metadata.prototypePaths",
+        ".metadata.frontendOnly",
+        ".metadata.designBundle.businessSpec",
+        ".metadata.execution",
+        ".metadata.phase",
+        ".metadata.branchName",
+    )
+    return dict(
+        zip(
+            VALIDATE_METADATA_FIELDS,
+            [jq_tsv_cell(value, owner) for value, owner in zip(values, owners)],
+        )
+    )
+
+
+def _visual_ac_lines(docs):
+    """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
+    over the whole STREAM -- unlike the metadata above, which took line one."""
+    lines = []
+    for doc in docs:
+        for story in _stories(doc):
+            verification = jq_index(story, "verification", ".userStories[]")
+            strategy = jq_index(verification, "strategy", ".userStories[].verification")
+            if not jq_equal(strategy, "visual"):
+                continue
+            criteria = jq_index(story, "acceptanceCriteria", ".userStories[]")
+            for key, value in _to_entries(criteria, ".userStories[].acceptanceCriteria"):
+                lines.append(
+                    "\t".join(
+                        (
+                            jq_tsv_cell(jq_index(story, "id", ".userStories[]"), ".userStories[].id"),
+                            jq_tsv_cell(jq_tostring(key), ".userStories[].acceptanceCriteria"),
+                            jq_tsv_cell(value, ".userStories[].acceptanceCriteria[]"),
+                        )
+                    )
+                )
+    return lines
+
+
+def _bad_url_lines(docs):
+    """The verification.url charset scan, whose own `@tsv` carries the same
+    tab-collapse the citation scan does -- a story with a null id hands its URL
+    to the id position and reports an empty one. url-id-nulo records it."""
+    lines = []
+    for doc in docs:
+        for story in _stories(doc):
+            verification = jq_index(story, "verification", ".userStories[]")
+            if jq_type(verification) != "object":
+                continue
+            url = jq_index(verification, "url", ".userStories[].verification")
+            if jq_type(url) != "string" or url == "":
+                continue
+            if jq_test(url, URL_CHARSET, ".userStories[].verification.url", ignore_case=False):
+                continue
+            lines.append(
+                "\t".join(
+                    (
+                        jq_tsv_cell(jq_index(story, "id", ".userStories[]"), ".userStories[].id"),
+                        jq_tsv_cell(url, ".userStories[].verification.url"),
+                    )
+                )
+            )
+    return lines
+
+
+def _grep_lines(text, pattern):
+    """`grep -oE` over a value command substitution has already de-newlined:
+    every match on the whole text, which for these one-line values is the
+    same list grep printed."""
+    return pattern.findall(text)
+
+
+def _endpoints(doc):
+    backend = jq_index(jq_index(doc, "metadata", ""), "backendSpec", ".metadata")
+    endpoints = jq_index(backend, "endpoints", ".metadata.backendSpec")
+    if jq_type(endpoints) != "array":
+        return None
+    return endpoints
+
+
+def validate_tasks(docs, tasks_file, project_root, fields, warn):
+    """R2 through R15, in the order bash ran them, over the parsed stream.
+
+    THE ORDER IS PART OF THE CONTRACT, not a rendering detail. Every scan below
+    could abort -- jq did, and this raises MalformedTasks where it did -- and an
+    abort inside the DesignSpec walk means the execution, branchName and url
+    rules are never reached at all. Evaluating all fifteen unconditionally would
+    report errors on a document the pre-port CLI refused outright.
+
+    `fields` is the metadata row the caller already read, and R1 has already
+    fired or not by the time this runs. Returns the error list; warnings go to
+    `warn` as they are produced, in the order stderr received them.
+    """
+    errors = []
+
+    # R2/R3/R4 -- the DesignSpec scan, gated on a spec AND at least one prototype
+    design_spec = fields["design_spec"]
+    if design_spec and int(fields["prototype_count"]) > 0:
+        # The path is CONCATENATED, never joined: a designSpec that is already
+        # absolute lands under the project root anyway and is simply not found.
+        design_spec_path = project_root + "/" + design_spec
+        if not os.path.isfile(design_spec_path):
+            errors.append(tasks_file + ": DesignSpec file not found: " + design_spec)
+        else:
+            for line in _visual_ac_lines(docs):
+                story_id, ac_index, ac_text = _read_ifs_whitespace(line, 3)
+                if not story_id:
+                    continue
+                for literal, section, _line_number in _grep_lines(ac_text, CITATION):
+                    if not spec_contains(design_spec_path, literal, section, normalize=True):
+                        errors.append(
+                            tasks_file + ": " + story_id + " AC[" + ac_index + "]: "
+                            "missing DesignSpec citation for \"" + literal + "\" in section § " + section
+                        )
+
+    # R5/R6 through R11 -- the BusinessSpec scan, gated on frontendOnly AND a spec
+    business_spec = fields["business_spec"]
+    if fields["frontend_only"] == "true" and business_spec:
+        business_spec_path = project_root + "/" + business_spec
+        if not os.path.isfile(business_spec_path):
+            errors.append(tasks_file + ": BusinessSpec file not found: " + business_spec)
+        else:
+            _validate_endpoints(docs, tasks_file, business_spec_path, errors, warn)
+
+    # R12 -- the execution enum. Absent is valid; every tasks.json written
+    # before the field existed defaults to inline.
+    execution = fields["execution"]
+    if execution and execution not in ("container", "inline"):
+        errors.append(
+            tasks_file + ": metadata.execution has invalid value \"" + execution
+            + "\" (expected \"container\" or \"inline\")"
+        )
+
+    # R13 -- execution and phase are mutually exclusive: a phase-scoped file
+    # always executes inside its own phase container, so execution is dead data.
+    if fields["has_phase"] == "true" and execution:
+        errors.append(
+            tasks_file + ": metadata.execution and metadata.phase cannot both be present "
+            "(phase-scoped files never carry metadata.execution)"
+        )
+
+    # R14 -- branchName, the same charset cmd_init_session and open-pr.md
+    # enforce, because git and gh consume it downstream. Absent fails too: the
+    # pattern needs a leading alphanumeric and the empty string has none.
+    branch_name = fields["branch_name"]
+    if not BRANCH_NAME.fullmatch(branch_name):
+        errors.append(
+            tasks_file + ": metadata.branchName \"" + branch_name
+            + "\" does not match the required pattern ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$"
+        )
+
+    # R15 -- verification.url against a conservative allowlist. A story with no
+    # verification object, or a null/empty/non-string url, is ignored.
+    for line in _bad_url_lines(docs):
+        story_id, bad_url = _read_ifs_whitespace(line, 2)
+        if not story_id:
+            continue
+        errors.append(
+            tasks_file + ": " + story_id + " verification.url \"" + bad_url
+            + "\" contains characters outside the allowed charset"
+        )
+
+    return errors
+
+
+def _validate_endpoints(docs, tasks_file, business_spec_path, errors, warn):
+    """R7 through R11, over `metadata.backendSpec.endpoints`.
+
+    The loop bound came from `[ "$ep_index" -lt "$endpoint_count" ]`, and
+    `endpoint_count` was one jq run over the WHOLE stream -- so a file holding
+    two documents handed bash two numbers on two lines and the test refused
+    them as a non-integer, skipping every endpoint rule. Reproduced by bounding
+    on the stream having exactly one document; the shell's own complaint about
+    the non-integer is named in the golden as a divergence, because it quotes a
+    line number in a file that no longer holds that line.
+    """
+    per_document = [_endpoints(doc) for doc in docs]
+    counts = "\n".join(str(0 if found is None else len(found)) for found in per_document) or "0"
+    if not counts.isdigit():
+        return
+    endpoints = per_document[0] or []
+
+    for index, endpoint in enumerate(endpoints[: int(counts)]):
+        where = tasks_file + ": backendSpec.endpoints[" + str(index) + "]"
+        source = jq_alternative(
+            jq_index(endpoint, "source", ".metadata.backendSpec.endpoints[]"), None
+        )
+        # `jq -r … // empty` printed nothing for an absent, null or false
+        # source, and command substitution then stripped the trailing newlines
+        # a multi-line pretty-print left behind.
+        source_text = "" if source is None else jq_raw(source).rstrip("\n")
+        if not source_text:
+            errors.append(where + ": missing source field")
+            continue
+
+        if _any_line(source_text, lambda text: text.startswith("derived:")):
+            warn(where + ": derived source — manual review required")
+            continue
+
+        if not _any_line(source_text, SOURCE_CITATION.match):
+            errors.append(
+                where + ": malformed source \"" + source_text
+                + "\" (expected 'BusinessSpec § N[.N] L<line>' or 'derived: ...')"
+            )
+            continue
+
+        endpoint_section = _sections(source_text)
+        shape = jq_index(endpoint, "responseShape", ".metadata.backendSpec.endpoints[]")
+        if jq_type(shape) != "object":
+            continue
+
+        # jq's `keys` SORTS, so two invented fields are reported alphabetically
+        # rather than in the order the author wrote them. bs-campos-ordem pins it.
+        for field_name in _named_lines(sorted(shape)):
+            if not field_name:
+                continue
+            field = shape[field_name] if field_name in shape else None
+            field_source = None
+            if jq_type(field) == "object":
+                field_source = jq_alternative(
+                    jq_index(field, "source", ".metadata.backendSpec.endpoints[].responseShape[]"), None
+                )
+            field_text = "" if field_source is None else jq_raw(field_source).rstrip("\n")
+            field_where = where + ".responseShape." + field_name
+
+            if field_text:
+                if _any_line(field_text, lambda text: text.startswith("derived:")):
+                    warn(field_where + ": derived source — manual review required")
+                    continue
+                if not _any_line(field_text, SOURCE_CITATION.match):
+                    errors.append(field_where + ": malformed source \"" + field_text + "\"")
+                    continue
+                section = _sections(field_text)
+            else:
+                section = endpoint_section
+
+            if not spec_contains(business_spec_path, field_name, section, normalize=False):
+                errors.append(
+                    field_where + ": field name not found in BusinessSpec § " + section
+                )
+
+
+def _any_line(text, predicate):
+    """grep is line-oriented: one matching line is a match for the whole value."""
+    return any(predicate(line) for line in text.split("\n"))
+
+
+def _sections(text):
+    """`grep -oE '§ N[.N]' | sed 's/§ //'` -- every match, newline-joined, which
+    for a well-formed one-line source is one section."""
+    return "\n".join(match.group(0)[2:] for match in SOURCE_SECTION.finditer(text))
+
+
+def _named_lines(values):
+    """`jq -r` printed one value per line and `read` took them back a line at a
+    time, so a key holding a newline arrives as two names."""
+    return "\n".join(jq_raw(value) for value in values).split("\n") if values else []
+
+
+# ---------------------------------------------------------------------------
 # The write rules -- seven verbs, all of them called from inside bash's lock
 # ---------------------------------------------------------------------------
 
@@ -1747,6 +2388,57 @@ def op_validate_waves(argv):
     return 0
 
 
+def op_validate_tasks(argv):
+    """The fifteen rules, one crossing, no lock -- and the errors array built
+    the way bash built it.
+
+    `printf '%s\\n' "${errors[@]}" | jq -R . | jq -s .` fed jq LINES, so an
+    error message carrying a newline became several array entries rather than
+    one with an escape in it. A multi-line endpoint source is how that is
+    reached and bs-endpoint-source-objeto records the three entries it yields.
+
+    --project-root is a flag rather than a lookup because PROJECT_ROOT is
+    bash's: find_aimi_root exports it and validate_path_in_project gates the
+    tasks file against it before this is called. The spec paths cannot get the
+    same treatment there -- they are read out of metadata.designBundle, which
+    only exists on this side of the crossing.
+    """
+    path = _flag(argv, "--tasks-file")
+    project_root = _flag(argv, "--project-root")
+    if not path or not project_root:
+        die("Usage: tasks.py validate-tasks --tasks-file <path> --project-root <path>")
+
+    docs = read_docs(path, "validate-tasks")
+    # ONE read of the metadata, which is the whole point. The empty-stream row
+    # is what `if [ -n "$_vt_meta" ]` left every variable holding.
+    fields = (
+        validate_tasks_metadata(docs[0]) if docs else dict.fromkeys(VALIDATE_METADATA_FIELDS, "")
+    )
+
+    # R1 -- the schemaVersion gate. Below 3.3, one line on stderr and exit 0.
+    if sort_v_first(fields["schema_version"], "3.3") != "3.3":
+        sys.stderr.write(
+            "skipping citation validation (schemaVersion " + fields["schema_version"]
+            + " pre-dates citation enforcement)\n"
+        )
+        return 0
+
+    def warn(message):
+        sys.stderr.write(message + "\n")
+
+    errors = validate_tasks(docs, path, project_root, fields, warn)
+    if not errors:
+        sys.stdout.write('{"valid": true, "errors": []}\n')
+        return 0
+
+    lines = []
+    for error in errors:
+        lines.extend(error.split("\n"))
+    rendered = json.dumps(lines, indent=2, ensure_ascii=False)
+    sys.stdout.write('{"valid": false, "errors": ' + rendered + "}\n")
+    return 1
+
+
 def op_validate_story_exists(argv):
     """aimi-cli.sh's validate_story_exists, in Python, for the verbs that have
     already crossed. NOT a verb -- the twin of a bash gate that ten call sites
@@ -1963,6 +2655,7 @@ _OPS = {
     "validate-stories": op_validate_stories,
     "validate-ids": op_validate_ids,
     "validate-waves": op_validate_waves,
+    "validate-tasks": op_validate_tasks,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),
     "mark-failed": _mark_op("mark-failed"),

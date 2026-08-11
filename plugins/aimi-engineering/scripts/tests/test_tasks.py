@@ -3,19 +3,28 @@
 THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py
 and test_story_merge.py.
 
-`golden_from_jq.json` holds four blocks for this module, each captured by
+`golden_from_jq.json` holds five blocks for this module, each captured by
 running the jq implementations that used to live in aimi-cli.sh, BEFORE they
 were deleted: `tasks_read_cases` (151 cases, the six read verbs),
 `tasks_ready_cases` (128, list-ready and next-story), `tasks_write_cases`
-(91, the seven locked writers) and `tasks_validate_cases` (328 -- 82
-adversarial documents through all four validators). Like the story-merge
-capture all four record each case's INPUT, so every one is replayable:
-test_the_port_reproduces_the_jq, test_the_ready_port_reproduces_the_jq,
-test_the_write_port_reproduces_the_jq and test_the_validate_port_reproduces_the_jq
-re-run the whole corpus through the CLI and compare every field. Those four
-tests are the evidence the port changed nothing, and they are why the rest of
-this file can stay short -- it asserts the properties a reader would otherwise
-have to reconstruct from 698 recordings by eye.
+(91, the seven locked writers), `tasks_validate_cases` (328 -- 82
+adversarial documents through all four validators) and `validate_tasks_cases`
+(121, validate-tasks alone -- fifteen rules, and the only verb that reads files
+other than tasks.json). Like the story-merge capture all five record each
+case's INPUT, so every one is replayable: test_the_port_reproduces_the_jq,
+test_the_ready_port_reproduces_the_jq, test_the_write_port_reproduces_the_jq,
+test_the_validate_port_reproduces_the_jq and
+test_the_validate_tasks_port_reproduces_the_jq re-run the whole corpus through
+the CLI and compare every field. Those five tests are the evidence the port
+changed nothing, and they are why the rest of this file can stay short -- it
+asserts the properties a reader would otherwise have to reconstruct from 819
+recordings by eye.
+
+`validate_tasks_cases` carries two fields the others have no use for: `files`,
+the spec fixtures written inside the project root, and `outside`, the ones
+written one directory ABOVE it. The second exists for two recordings alone, and
+they are the point of it -- a designSpec of `../fora/...` comes back valid
+because the file outside the root was opened and read.
 
 The write block compares two fields the read blocks have no use for: `file`,
 the WHOLE resulting tasks.json, and `tree`, the whole .aimi listing. For a
@@ -51,6 +60,7 @@ CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
 READY = {c["label"]: c for c in GOLDEN["tasks_ready_cases"]}
 WRITE = {c["label"]: c for c in GOLDEN["tasks_write_cases"]}
 VALIDATE = {c["label"]: c for c in GOLDEN["tasks_validate_cases"]}
+VALIDATE_TASKS = {c["label"]: c for c in GOLDEN["validate_tasks_cases"]}
 
 
 def _labels(*prefixes):
@@ -1032,6 +1042,411 @@ def test_the_suspicious_content_screen_has_one_definition_for_its_three_call_sit
 
 
 # ---------------------------------------------------------------------------
+# validate-tasks: fifteen rules, and the scaffolding that did not survive
+# ---------------------------------------------------------------------------
+
+# The 6 cases `_comment_validate_tasks` names. Five are jq aborting with its own
+# message swallowed by the `2>/dev/null` on the assignment that ran it, so the
+# recording holds an engine exit status and an EMPTY stderr. The sixth is not jq
+# at all -- it is bash's `[` refusing a two-line number, quoting a line of
+# aimi-cli.sh that no longer exists.
+VALIDATE_TASKS_DIVERGENCES = {
+    "ds-ac-null": "jq aborted running to_entries on a null acceptanceCriteria",
+    "aborta-antes-das-regras-finais": "jq aborted before the later rules were reached",
+    "historias-ausente": "jq aborted iterating a userStories that is absent",
+    "metadata-string": "jq aborted indexing a metadata that is a string",
+    "json-malformado": "jq's own parse error, at its own exit 4",
+    "dois-documentos-endpoints": "bash's own complaint about a two-line endpoint count",
+}
+
+
+def _replay_validate(case, tmp_path):
+    """Like _replay, plus the two things only this verb has: spec fixtures on
+    disk, and fixtures OUTSIDE the project root.
+
+    The root is a subdirectory of tmp_path rather than tmp_path itself so that
+    `../fora/...` has somewhere real to land -- which is what makes the two
+    path-traversal recordings mean anything.
+    """
+    parent = os.path.realpath(str(tmp_path))
+    root = os.path.join(parent, "proj")
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    given = case["input"]
+    with open(os.path.join(tasks_dir, given["tasks_file"]), "w", encoding="utf-8") as handle:
+        handle.write(given["tasks"])
+    for base, files in ((root, given["files"]), (parent, given["outside"])):
+        for relative, content in files.items():
+            target = os.path.join(base, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(content)
+    for key, value in given["state"].items():
+        with open(os.path.join(root, ".aimi", key), "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+
+    proc = subprocess.run(
+        ["bash", CLI] + case["args"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+
+    state_after = {}
+    aimi = os.path.join(root, ".aimi")
+    for name in sorted(os.listdir(aimi)):
+        path = os.path.join(aimi, name)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                state_after[name] = _normalize(handle.read(), root, parent)
+
+    return {
+        "exit": proc.returncode,
+        "stdout": _normalize(proc.stdout, root, parent),
+        "stderr": _normalize(proc.stderr, root, parent),
+        "state_after": state_after,
+    }
+
+
+def _normalize(text, root, parent):
+    return text.replace(root, "/TMP").replace(parent, "/OUT").replace(CLI, "/CLI/aimi-cli.sh")
+
+
+@pytest.mark.parametrize("label", sorted(VALIDATE_TASKS), ids=sorted(VALIDATE_TASKS))
+def test_the_validate_tasks_port_reproduces_the_jq(label, tmp_path):
+    case = VALIDATE_TASKS[label]
+    actual = _replay_validate(case, tmp_path)
+    if label in VALIDATE_TASKS_DIVERGENCES:
+        pytest.skip(VALIDATE_TASKS_DIVERGENCES[label])
+    for field in ("exit", "stdout", "stderr", "state_after"):
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_the_validate_tasks_divergence_table_names_only_cases_that_exist():
+    assert set(VALIDATE_TASKS_DIVERGENCES) <= set(VALIDATE_TASKS)
+    assert len(VALIDATE_TASKS_DIVERGENCES) == 6, "the capture's comment names 6; keep the two in step"
+
+
+@pytest.mark.parametrize(
+    "label", sorted(VALIDATE_TASKS_DIVERGENCES), ids=sorted(VALIDATE_TASKS_DIVERGENCES)
+)
+def test_each_excused_validate_tasks_case_keeps_its_answer(label, tmp_path):
+    """The excuse buys the engine's wording and its number. Never its verdict.
+
+    The five jq aborts refused and still refuse, writing nothing to stdout. The
+    bash one did NOT refuse -- it printed a complaint and carried on to a valid
+    verdict -- so what it has to keep is that verdict, which is the half a
+    caller branching on `$?` can see.
+    """
+    recorded = VALIDATE_TASKS[label]
+    actual = _replay_validate(recorded, tmp_path)
+    assert actual["stdout"] == recorded["stdout"], label + ": the verdict may not move"
+    assert actual["state_after"] == recorded["state_after"], label
+
+    if label == "dois-documentos-endpoints":
+        assert recorded["exit"] == 0 and actual["exit"] == 0, label
+        assert recorded["stderr"].startswith("/CLI/aimi-cli.sh: line "), label
+        assert actual["stderr"] == "", label
+        return
+
+    assert recorded["stderr"] == "", label + ": jq's message went to /dev/null"
+    assert recorded["exit"] in (4, 5), label
+    assert actual["exit"] != 0, label + ": an excused case still has to refuse"
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["stderr"].startswith("Error: validate-tasks: "), label
+
+
+def _vt(label):
+    """The verdict the RECORDING holds, never one recomputed from tasks.py."""
+    return json.loads(VALIDATE_TASKS[label]["stdout"])
+
+
+def _vt_errors(label):
+    return _vt(label)["errors"]
+
+
+def test_validate_tasks_writes_nothing_on_any_path_the_corpus_walks():
+    """A pure reader, over all 121 recordings at once.
+
+    It takes no lock, and the only thing that makes that safe is that it writes
+    nothing at all -- so `state_after` is empty in every case, pass, refusal and
+    engine abort alike. The wrapper is asserted to make ONE crossing and to hold
+    no lock in test_every_locked_tasks_verb_crosses_into_python_exactly_once,
+    which lists the locked verbs exhaustively and does not list this one.
+    """
+    assert len(VALIDATE_TASKS) == 121
+    assert all(case["state_after"] == {} for case in VALIDATE_TASKS.values())
+    body = _code().split("def op_validate_tasks", 1)[1].split("\ndef ", 1)[0]
+    assert "write_docs_atomically" not in body and "_lock" not in body
+
+
+def test_every_one_of_the_fifteen_rules_has_a_case_that_trips_it_and_one_that_does_not():
+    """THE anti-vacuum check, and it matters more here than anywhere: a corpus
+    that only ever passed would let the 121-case replay above pass on nothing.
+    Every verdict below is read off the recording."""
+    valid = lambda label: _vt(label)["valid"]  # noqa: E731
+
+    # R1 -- the schemaVersion gate. Both sides of 3.3, and the skip is a STDERR
+    # line at exit 0 rather than a verdict at all.
+    assert VALIDATE_TASKS["schema-32-pula"]["exit"] == 0
+    assert VALIDATE_TASKS["schema-32-pula"]["stdout"] == ""
+    assert "pre-dates citation enforcement" in VALIDATE_TASKS["schema-32-pula"]["stderr"]
+    assert VALIDATE_TASKS["schema-34-nao-pula"]["stderr"] == "" and not valid("schema-34-nao-pula")
+
+    # R2 -- the DesignSpec gate. Each of the four ways it stays shut leaves a
+    # MISSING spec file unreported, which is the only way to see a gate close.
+    for label in (
+        "ds-gate-sem-prototipos", "ds-gate-prototipos-ausente",
+        "ds-gate-prototipos-nao-array", "ds-gate-sem-designspec", "ds-gate-designspec-vazio",
+    ):
+        assert valid(label), label
+    # R3 -- and open, with the file gone
+    assert _vt_errors("ds-arquivo-ausente")[0].endswith(
+        "DesignSpec file not found: specs/NaoExiste.md"
+    )
+    assert valid("ds-arquivo-presente")
+
+    # R4 -- the citation walk, both ways, including the boundary in both
+    # directions: a deeper subsection is INSIDE the cited one, a sibling is not.
+    assert valid("ds-citacao-ok") and valid("ds-citacao-unicode")
+    assert valid("ds-citacao-subsecao-mais-profunda")
+    assert not valid("ds-citacao-fronteira") and not valid("ds-citacao-parafrase")
+    assert not valid("ds-citacao-secao-ausente")
+    assert _vt_errors("ds-ac-segundo-indice") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001 AC[1]: "
+        'missing DesignSpec citation for "Some daqui" in section § 2.1'
+    ]
+    assert valid("ds-nao-visual"), "a non-visual story's citation is not checked"
+
+    # R5 -- the BusinessSpec gate, shut three ways and open on a STRING "true"
+    for label in (
+        "bs-gate-frontendonly-falso", "bs-gate-frontendonly-ausente",
+        "bs-gate-frontendonly-numero", "bs-gate-sem-businessspec",
+    ):
+        assert valid(label), label
+    assert _vt_errors("bs-gate-frontendonly-string") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: "
+        "backendSpec.endpoints[0]: missing source field"
+    ]
+    # R6
+    assert _vt_errors("bs-arquivo-ausente")[0].endswith("BusinessSpec file not found: specs/Nada.md")
+
+    # R7 -- a source that is absent, null, empty or false is all one message
+    for label in (
+        "bs-endpoint-sem-source", "bs-endpoint-source-null",
+        "bs-endpoint-source-vazia", "bs-endpoint-source-falsa",
+    ):
+        assert _vt_errors(label)[0].endswith("backendSpec.endpoints[0]: missing source field"), label
+
+    # R8 -- derived: warns and SKIPS, which is why its invented field survives
+    assert valid("bs-endpoint-derived")
+    assert VALIDATE_TASKS["bs-endpoint-derived"]["stderr"].endswith(
+        "backendSpec.endpoints[0]: derived source — manual review required\n"
+    )
+
+    # R9 -- the literal source format, with and without a minor section number
+    assert not valid("bs-endpoint-malformado") and not valid("bs-endpoint-source-numero")
+    assert valid("bs-endpoint-secao-sem-ponto")
+
+    # R10 -- a field-level source warns, errors, and selects the FIELD's section
+    assert valid("bs-campo-source-derived")
+    assert "derived source" in VALIDATE_TASKS["bs-campo-source-derived"]["stderr"]
+    assert not valid("bs-campo-source-malformada")
+    assert valid("bs-campo-source-secao-propria"), "the field's own § is the one looked up"
+    assert not valid("bs-campo-source-secao-propria-errada")
+
+    # R11 -- a field with no source of its own, against the endpoint's section
+    assert valid("bs-campo-sem-source-ok") and not valid("bs-campo-inventado")
+
+    # R12/R13 -- the enum and the exclusivity, each alone and both together
+    assert all(valid(label) for label in ("exec-container", "exec-inline", "exec-ausente"))
+    assert not valid("exec-invalido") and valid("fase-sozinha")
+    assert len(_vt_errors("exec-fase-conflito")) == 1
+    assert len(_vt_errors("exec-fase-invalido-duplo")) == 2
+
+    # R14 -- branchName, including the two ways an ABSENT one still fails
+    assert valid("branch-com-barra") and not valid("branch-invalido")
+    assert _vt_errors("branch-ausente") == _vt_errors("branch-vazio") == _vt_errors("branch-null")
+
+    # R15 -- the url charset, and the four shapes that are ignored rather than judged
+    assert valid("url-ok") and valid("url-charset-limite") and not valid("url-invalida")
+    for label in ("url-null", "url-vazia", "url-numero", "url-sem-verificacao"):
+        assert valid(label), label
+    assert len(_vt_errors("url-duas-ruins")) == 2
+
+
+def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
+    """commands/plan.md § "responseShape contract (frontend-only mode)" prints
+    one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
+    rejection is the half /aimi:plan's frontend-only mode depends on."""
+    accepted = json.loads(VALIDATE_TASKS["bs-plan-chave-plana"]["input"]["tasks"])
+    shape = accepted["metadata"]["backendSpec"]["endpoints"][0]["responseShape"]
+    assert shape == {
+        "portfolio": {
+            "type": "{ totalUsinas: number; totalKWp: number }",
+            "source": "BusinessSpec § 5.3 L145",
+        }
+    }
+    assert _vt("bs-plan-chave-plana")["valid"] is True
+
+    rejected = json.loads(VALIDATE_TASKS["bs-plan-chave-pontilhada"]["input"]["tasks"])
+    assert list(rejected["metadata"]["backendSpec"]["endpoints"][0]["responseShape"]) == [
+        "portfolio.totalUsinas"
+    ]
+    assert _vt_errors("bs-plan-chave-pontilhada") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: "
+        "backendSpec.endpoints[0].responseShape.portfolio.totalUsinas: "
+        "field name not found in BusinessSpec § 5.3"
+    ]
+
+
+def test_a_dotted_key_is_refused_even_when_both_halves_are_in_the_subsection():
+    """The rejection has to be fixed-string containment and nothing cleverer.
+
+    The subsection bs-plan-chave-pontilhada cites names `portfolio`,
+    `totalUsinas` and `totalKWp` -- separately, in one sentence. A lookup that
+    split on '.', walked a path, or built a regex out of the key would find
+    both halves and PASS, and plan.md's flat-key contract would stop being one.
+    """
+    subsection = VALIDATE_TASKS["bs-plan-chave-pontilhada"]["input"]["files"]["specs/BusinessSpec.md"]
+    assert "portfolio" in subsection and "totalUsinas" in subsection
+    assert "portfolio.totalUsinas" not in subsection
+    assert _vt("bs-plan-chave-pontilhada")["valid"] is False
+
+    # and directly against the rule, away from the corpus plumbing
+    body = b"## 5.3 Portfolio\n\nO resumo carrega portfolio com totalUsinas.\n"
+    assert T.subsection_body(body, b"5.3", normalize=False).find(b"portfolio") >= 0
+    assert b"portfolio.totalUsinas" not in T.subsection_body(body, b"5.3", normalize=False)
+    source = _source()
+    lookup = source.split("def spec_contains", 1)[1].split("\ndef ", 1)[0]
+    assert '.split(".")' not in lookup and "re.compile" not in lookup
+
+
+def test_the_two_traversal_recordings_show_a_file_outside_the_root_being_read():
+    """Recorded permissive on purpose. The confinement is its own commit.
+
+    Each of these names a spec one directory ABOVE the project root and comes
+    back valid -- and it can only come back valid if that file was opened, since
+    the literal and the field name appear nowhere inside the root. That is the
+    read primitive, stated as evidence rather than as a worry.
+    """
+    for label, needle in (
+        ("ds-caminho-para-fora", "Segredo de fora do projeto"),
+        ("bs-caminho-para-fora", "portfolioDeFora"),
+    ):
+        given = VALIDATE_TASKS[label]["input"]
+        assert any(name.startswith("../") for name in _spec_names(given["tasks"])), label
+        assert any(needle in content for content in given["outside"].values()), label
+        assert all(needle not in content for content in given["files"].values()), label
+        assert _vt(label)["valid"] is True, label
+
+    # the other half already holds: an absolute path is CONCATENATED onto the
+    # root, so it lands nowhere and is reported missing rather than read.
+    assert _vt_errors("ds-caminho-absoluto-para-fora") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: DesignSpec file not found: /etc/hostname"
+    ]
+
+
+def _spec_names(tasks_text):
+    bundle = json.loads(tasks_text)["metadata"].get("designBundle", {})
+    return [value for value in bundle.values() if isinstance(value, str)]
+
+
+def test_the_three_pieces_of_scaffolding_are_gone_from_the_shell():
+    """THE reviewable evidence that the port bought something.
+
+    cmd_validate_tasks carried ~30 lines defending a `\\037` delimiter, a
+    never-`// empty` rule and a `_vt_probe` sentinel -- all three existing only
+    because reading one document eight times cost eight jq startups. This
+    asserts they left the tree, and that what replaced them is one metadata read
+    in Python rather than a second copy of the same idea somewhere else.
+
+    Retargeted rather than deleted: the grep that used to find this machinery in
+    aimi-cli.sh now finds the function that made it unnecessary.
+    """
+    with open(CLI, encoding="utf-8") as handle:
+        shell = handle.read()
+    for token in ("_vt_probe", "_vt_meta", "\\037", "@tsv"):
+        assert token not in shell, token + " survives in aimi-cli.sh"
+    assert "_validate_designspec_citation" not in shell
+    assert "_validate_businessspec_field" not in shell
+
+    source = _source()
+    assert len(re.findall(r"^def validate_tasks_metadata\(", source, re.M)) == 1
+    # ONE scanner for both specs, where bash had the awk program twice.
+    assert len(re.findall(r"^def subsection_body\(", source, re.M)) == 1
+    assert source.count("subsection_body(") == 2, "one def plus the single call site"
+
+    wrapper = dict(_wrappers())["cmd_validate_tasks"]
+    assert wrapper.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in wrapper and "jq " not in wrapper
+
+
+def test_the_version_gate_is_sort_v_and_not_an_approximation_of_it():
+    """R1 is `sort -V | head -n1`, so it accepts what filevercmp accepts rather
+    than what semver would. The reconstruction was fuzzed against the real
+    `sort -V` over 5540 comparisons with zero mismatches; these are the rows
+    that decide whether a tasks file is validated at all."""
+    assert T.sort_v_first("3.3", "3.3") == "3.3"
+    assert T.sort_v_first("3.4", "3.3") == "3.3"
+    assert T.sort_v_first("3.10", "3.3") == "3.3"
+    assert T.sort_v_first("10.0", "3.3") == "3.3"
+    assert T.sort_v_first("3.2", "3.3") == "3.2"
+    assert T.sort_v_first("3.03", "3.3") == "3.03"
+    assert T.sort_v_first("0", "3.3") == "0"
+    assert T.sort_v_first("", "3.3") == ""
+    # and the row that looks like a defect: letters sort ABOVE digits, so a
+    # schemaVersion of "abc" is validated rather than skipped. schema-lixo.
+    assert T.sort_v_first("abc", "3.3") == "3.3"
+    assert _vt("schema-lixo")["valid"] is False
+
+
+def test_the_tab_collapse_the_unit_separator_existed_to_prevent_is_still_live_in_both_scans():
+    """The metadata read got `\\037` and the two scans never did, so both still
+    hand bash a row that loses its leading empty field.
+
+    Reproduced rather than fixed: a visual story with an empty id has its
+    citation silently unchecked, and a story with a null id reports its URL in
+    the id position and an empty url. Which of the two readings the author meant
+    is a decision, and a decision is not a port.
+    """
+    assert T._read_ifs_whitespace("\t0\ttexto", 3) == ["0", "texto", ""]
+    assert T._read_ifs_whitespace("US-001\t0\ttexto", 3) == ["US-001", "0", "texto"]
+    assert T._read_ifs_whitespace("US-001\t\ttexto", 3) == ["US-001", "texto", ""]
+    assert T._read_ifs_whitespace("a\tb\tc\td", 3) == ["a", "b", "c\td"]
+    assert _vt("ds-id-vazio")["valid"] is True, "the citation was never checked"
+    assert _vt_errors("url-id-nulo") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: "
+        'http://x/`a` verification.url "" contains characters outside the allowed charset'
+    ]
+
+
+def test_a_multi_line_error_becomes_several_entries_because_jq_r_read_lines():
+    """`printf '%s\\n' "${errors[@]}" | jq -R . | jq -s .` fed jq LINES, so a
+    message carrying a newline came back as several array entries rather than
+    one string with an escape in it. An endpoint whose source is an object is
+    how that is reached: `jq -r` pretty-prints it over three lines."""
+    assert _vt_errors("bs-endpoint-source-objeto") == [
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: "
+        'backendSpec.endpoints[0]: malformed source "{',
+        '  "cite": "BusinessSpec § 5.3 L7"',
+        "}\" (expected 'BusinessSpec § N[.N] L<line>' or 'derived: ...')",
+    ]
+
+
+def test_the_subsection_scanner_keeps_the_asymmetry_between_the_two_specs():
+    """One function where bash had the awk program twice -- and the difference
+    that was NOT in the awk stays: the DesignSpec side normalizes curly quotes,
+    em-dashes, NBSP and HTML entities on both sides, the BusinessSpec side does
+    not. Normalizing the field-name lookup too would change which responseShape
+    keys validate, which is a rule change wearing a tidy-up's clothes."""
+    spec = "## 3.1 T\n\nCurly: “Aspas”, travessao — assim e &amp; entidade.\n".encode("utf-8")
+    assert b'"Aspas"' in T.subsection_body(spec, b"3.1", normalize=True)
+    assert b'"Aspas"' not in T.subsection_body(spec, b"3.1", normalize=False)
+    # the sed chain ran every -e over the same pattern space in turn, so a
+    # doubly-encoded entity is decoded twice
+    assert T._normalize_text(b"&amp;nbsp;") == b" "
+    assert _vt("ds-citacao-unicode")["valid"] is True
+
+
+# ---------------------------------------------------------------------------
 # The clamp: ONE function, jq's whole value space
 # ---------------------------------------------------------------------------
 
@@ -1140,18 +1555,29 @@ def test_tasks_py_takes_no_lock_of_its_own():
 
 
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
-    """One reader, one writer, and the writer is atomic.
+    """One writer, and the writer is atomic.
 
-    open() appears once and in read mode; the single write path is
-    write_docs_atomically, which is a NamedTemporaryFile in the TARGET's own
-    directory followed by os.replace -- never a truncate-and-write, which is the
-    one failure that could leave /aimi:execute reading half a tasks.json. And
-    nothing here goes near .aimi/state/: those files have their own lock and
-    their own confinement in bash, and the mark-* verbs still write them there.
+    open() appears twice and BOTH are read mode. The second arrived with
+    validate-tasks, the one verb that reads a file other than the tasks file --
+    the DesignSpec or BusinessSpec named in metadata.designBundle, discovered
+    after the crossing and therefore unreachable from bash's own confinement.
+    It is read-only and it is scoped to that one call site, which is what this
+    asserts: a THIRD open, or either of these two in a writing mode, is a new
+    capability and has to be argued for rather than appear.
+
+    The single write path is write_docs_atomically, a NamedTemporaryFile in the
+    TARGET's own directory followed by os.replace -- never a truncate-and-write,
+    which is the one failure that could leave /aimi:execute reading half a
+    tasks.json. And nothing here goes near .aimi/state/: those files have their
+    own lock and their own confinement in bash, and the mark-* verbs still
+    write them there.
     """
     code = _code()
-    assert code.count("open(") == 1
+    assert code.count("open(") == 2
     assert 'open(path, "r", encoding="utf-8")' in code
+    assert 'open(spec_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 2
+    assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
     assert "os.unlink(" in code, "the temp file goes away on the failing path too"
@@ -1160,9 +1586,12 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "sys.stderr",
         "handle",
     }
-    # Two os.path calls, both inside write_docs_atomically, so the module names
-    # no path of its own -- not .aimi/state/, not a lock, not a sibling file.
-    assert code.count("os.path.") == 2
+    # Four os.path calls: two inside write_docs_atomically and one isfile() per
+    # spec in validate-tasks. The module still names no path of its own -- not
+    # .aimi/state/, not a lock, not a sibling file; every path it touches
+    # arrived as an argument or was concatenated onto one that did.
+    assert code.count("os.path.") == 4
+    assert code.count("os.path.isfile(") == 2
 
     # and the atomicity is real, not merely spelled: the target is replaced by
     # a file that was complete before it had the target's name.
@@ -1270,6 +1699,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-stories",
         "validate-ids",
         "validate-waves",
+        "validate-tasks",
         "validate-story-exists",
         "mark-complete",
         "mark-failed",
