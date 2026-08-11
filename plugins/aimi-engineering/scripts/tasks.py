@@ -1927,6 +1927,295 @@ def _named_lines(values):
 
 
 # ---------------------------------------------------------------------------
+# get-story-context -- the payload every spawned story executor reads first
+# ---------------------------------------------------------------------------
+#
+# 155 lines of bash and 8 fixed jq calls plus one per skill. It is the ONLY
+# verb a story-executor agent runs, once per story, so its cost is paid inside
+# every agent /aimi:execute spawns and its SHAPE is what every one of them
+# parses. The measurement is in op_get_story_context's docstring, beside the
+# code it measures.
+#
+# THREE RULES CHANGED HERE ON PURPOSE, and the golden file's
+# `_comment_story_context` states each one beside what it cost:
+#
+#   1. The cap counts BYTES. `${#skill_content}` counted bytes under LC_ALL=C
+#      and characters under LC_ALL=C.UTF-8, so the same skill set was kept on
+#      one host and evicted on another. cap-multibyte-c and
+#      cap-multibyte-c-utf-8 are the same input recorded under both locales and
+#      they disagree; a payload cap defends a payload, so bytes is the reading
+#      that was kept.
+#   2. A skill whose OWN body exceeds the cap is dropped up front, before the
+#      aggregate loop. The pop-from-the-end loop used to drain the whole array
+#      behind it -- and then abort the verb, because `(( total -= n ))` yielding
+#      0 exits 1 under `set -e`. cap-gigante-primeiro records that: one oversized
+#      skill declared first cost two legitimate ones AND the entire payload.
+#   3. `skillsDropped[]` is emitted, always, `[]` when nothing was dropped. The
+#      warnings stay on stderr where they were, but a caller running this verb
+#      with `2>/dev/null` -- which a JSON-parsing caller reasonably does -- could
+#      not previously tell a hydrated skill set from a halved one.
+#
+# Everything else is the bash reproduced, aborts included, and the abort classes
+# are named in the golden comment rather than reproduced: there is no shell
+# pipeline left to raise SIGPIPE and no `set -e` to trip.
+
+SKILLS_CAP = 102400
+
+# `head -c 65536` on the decisions pipeline. Bytes, like the cap above, and for
+# a stronger reason: head counts bytes and never had a locale to depend on.
+DECISIONS_CAP = 65536
+
+DECISIONS_HEADING = b"## Design Decisions"
+
+# The two tag-breakout escapes, in the order the per-skill `sed` applied them.
+# Order matters and is not alphabetical: the closing form has to go first, or
+# the opening rule would already have eaten its `<` and left `&lt;/…` unescaped.
+TAG_BREAKOUT = (("</required_skills", "&lt;/required_skills"),
+                ("<required_skills", "&lt;required_skills"))
+
+
+def _raw_lines(values):
+    """`jq -r` over a stream, then `$( )`: every value on its own line, with the
+    trailing newlines stripped -- and a value jq -r PRETTY-PRINTS arrives as
+    several lines rather than one. Same rule _named_lines states, over a stream
+    of documents rather than over the keys of one object."""
+    return "\n".join(jq_raw(value) for value in values).rstrip("\n")
+
+
+def declared_skill_names(docs, story_id):
+    """`(.userStories[] | select(.id == $id) | .skills // []) | @json` piped into
+    `jq -r '.[]' 2>/dev/null` and read back by `mapfile -t`.
+
+    Three of that pipeline's habits are load-bearing and none of them is
+    obvious. It runs over the WHOLE stream, so a two-document tasks file
+    contributes both documents' skills to one payload whose story and metadata
+    come from the first (dois-documentos). The second jq's stderr is discarded
+    and its exit status is never read, so a `skills` that cannot be iterated --
+    a string, a number -- silently yields NO skills rather than a refusal
+    (skills-string, skills-numero), while an OBJECT iterates to its values
+    (skills-objeto). And `-r` pretty-prints a non-string element over as many
+    lines as it takes, each of which `mapfile` then treats as a skill name:
+    skills-item-array records `["alpha"]` becoming the three names `[`,
+    `  "alpha"` and `]`.
+
+    jq streams its output, so an element that aborts the iteration keeps
+    whatever was already printed -- the loop below stops at the first refusal
+    instead of discarding what came before it.
+    """
+    printed = []
+    for doc in docs:
+        for story in stories_with_id(doc, story_id):
+            declared = jq_alternative(jq_index(story, "skills", ".userStories[]"), [])
+            try:
+                elements = jq_iterate(declared, ".skills")
+            except MalformedTasks:
+                return printed
+            for element in elements:
+                printed.extend(jq_raw(element).split("\n"))
+    return printed
+
+
+def resolve_skill(base_dir, name, warn):
+    """The bare directory, then the `aimi-` prefixed one, then a warning.
+
+    OpenCode's install.sh writes `aimi-<skill>` while a story declares the bare
+    name; Claude Code's cache is unprefixed and resolves on the first try, so
+    the fallback is host-agnostic rather than host-gated. The path REPORTED is
+    the bare plugin-relative one either way -- it names what the story asked
+    for, not where this host happened to keep it.
+    """
+    relative = "skills/" + name + "/SKILL.md"
+    if not base_dir:
+        # bash could not resolve a skills directory at all. The pre-port loop
+        # `continue`d without a word and so does this: on a host with no plugin
+        # install there is nothing to report per skill that the empty array does
+        # not already say.
+        return relative, None
+    path = base_dir + "/" + name + "/SKILL.md"
+    if not os.path.isfile(path):
+        prefixed = base_dir + "/aimi-" + name + "/SKILL.md"
+        if os.path.isfile(prefixed):
+            path = prefixed
+        else:
+            warn("skill " + name + " not found at " + relative + " — skipped")
+            return relative, None
+    return relative, path
+
+
+def read_skill(path):
+    """The per-skill `sed` and the command substitution that swallowed it.
+
+    `$(sed …)` strips EVERY trailing newline, so a SKILL.md ending in one comes
+    back without it -- every recording in the corpus shows that, and a consumer
+    diffing content against the file on disk needs to know it is not a bug.
+    Malformed UTF-8 is replaced rather than refused because jq's `--arg` did
+    exactly that; no recording reaches it, so it is stated here instead of
+    claimed to be tested.
+    """
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        content = handle.read()
+    for pattern, replacement in TAG_BREAKOUT:
+        content = content.replace(pattern, replacement)
+    return content.rstrip("\n")
+
+
+def skills_payload(names, base_dir, warn):
+    """The skills array and the drop report, one pass over the declared names.
+
+    THE QUADRATIC IS THE POINT OF THIS FUNCTION. The pre-port loop re-fed the
+    whole accumulated array back through `jq -n --argjson existing` on every
+    iteration, so N skills serialized N(N+1)/2 bodies; here each body is
+    appended once and the array is serialized once, by the single `_emit` at the
+    end of the verb.
+
+    The cap runs in two explicit passes and the ORDER is the rule, not an
+    implementation detail: a skill too big on its own is dropped first, then the
+    aggregate is trimmed from the end. Declaration order stays priority order --
+    what a story lists first is what survives -- which is precisely what the
+    single reverse-pop loop could not offer once an oversized entry was in the
+    array ahead of the others.
+    """
+    kept = []
+    dropped = []
+    for name in names:
+        relative, path = resolve_skill(base_dir, name, warn)
+        if path is None:
+            continue
+        content = read_skill(path)
+        size = len(content.encode("utf-8"))
+        if size > SKILLS_CAP:
+            warn(
+                "skill " + name + " dropped — " + str(size)
+                + " bytes exceeds the 100KB skills cap on its own"
+            )
+            dropped.append({"name": name, "bytes": size, "reason": "oversized"})
+            continue
+        kept.append(({"name": name, "path": relative, "content": content}, size))
+
+    aggregate = sum(size for _, size in kept)
+    while aggregate > SKILLS_CAP and kept:
+        entry, size = kept.pop()
+        warn("skill " + entry["name"] + " dropped — aggregate skills context exceeded 100KB")
+        dropped.append({"name": entry["name"], "bytes": size, "reason": "aggregate"})
+        aggregate -= size
+
+    return [entry for entry, _ in kept], dropped
+
+
+def design_decisions(brainstorm_bytes):
+    """The awk/sed/awk/sed/head pipeline, in one pass over the file's bytes.
+
+    From `## Design Decisions` (a PREFIX match, so a heading with a suffix opens
+    the section too -- brainstorm-heading-sufixado) to the next `## ` heading or
+    end of file. A deeper `### ` heading stays inside. A SECOND
+    `## Design Decisions` does not close the section: awk tested that rule
+    first and `next`ed past the closing rule, so the two sections merge, which
+    brainstorm-secao-duplicada records.
+
+    Bytes throughout, like validate-tasks' subsection scanner and for the same
+    reason: awk, sed and `head -c` all counted them.
+
+    The blank-line SQUEEZE is not implemented and its absence is the port being
+    honest. `awk 'NF || prev_nf'` collapsed runs of blank lines to one, and the
+    `sed '/^$/d'` immediately after it then deleted the survivor too -- the
+    composition drops every blank line, and writing the squeeze out would be
+    dead code pretending to be a rule.
+    """
+    lines = brainstorm_bytes.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+
+    collected = []
+    in_section = False
+    for line in lines:
+        if line.startswith(DECISIONS_HEADING):
+            in_section = True
+            continue
+        if in_section and line.startswith(b"## "):
+            break
+        if in_section:
+            # `sed 's/^[[:space:]]*//;s/[[:space:]]*$//'`, over a record that can
+            # hold no newline.
+            stripped = line.strip(b" \t\v\f\r")
+            if stripped:
+                collected.append(stripped)
+
+    stream = b"".join(line + b"\n" for line in collected)
+    return stream[:DECISIONS_CAP].rstrip(b"\n").decode("utf-8", "replace")
+
+
+BUNDLE_GUIDANCE = (
+    "Apply design bundle fidelity rules. Read the spec files cited below using "
+    "the Read tool before authoring implementation code.\n"
+    "\nBundle root: {root}\nDesignSpec: {design}\nBusinessSpec: {business}"
+)
+
+
+def bundle_guidance(docs):
+    """The four `jq -r` reads of metadata.designBundle, in bash's order.
+
+    The first one decided whether the block fires at all: `// empty` under `-r`,
+    so null and false and an absent key produce nothing and an EMPTY OBJECT
+    produces `{}` -- two characters, non-empty, gate open, three `(none)`s
+    (bundle-vazio). The three that follow each default to the literal `(none)`
+    rather than to the empty string, which is why a partial bundle reads as
+    three labelled lines instead of three blanks.
+
+    Each read ran over the whole STREAM, so a two-document file contributes two
+    lines to a single field. Faithful rather than sensible: nothing downstream
+    parses this text, it is prose handed to an agent.
+    """
+    present = _raw_lines(
+        value
+        for doc in docs
+        for value in [jq_index(jq_index(doc, "metadata"), "designBundle")]
+        if value is not None and value is not False
+    )
+    if not present:
+        return ""
+
+    def field(key):
+        return _raw_lines(
+            jq_alternative(
+                jq_index(jq_index(jq_index(doc, "metadata"), "designBundle"), key), "(none)"
+            )
+            for doc in docs
+        )
+
+    return BUNDLE_GUIDANCE.format(
+        root=field("root"), design=field("designSpec"), business=field("businessSpec")
+    )
+
+
+def design_context(docs, project_root):
+    """`{decisions, bundleGuidance}`, both always present and both always
+    strings -- never null, never absent. The story-executor prompt interpolates
+    them directly, so an absent key and an empty one are not the same thing to
+    the only consumer there is.
+
+    The brainstorm path is NOT confined to the project root, and that is the
+    pre-port rule reproduced rather than an oversight: an absolute
+    `metadata.brainstormPath` is used as given and a relative one is joined onto
+    PROJECT_ROOT with no traversal check. validate-tasks' spec paths were
+    confined in their own commit, with their own diff; doing the same here on
+    the way past would hide a rule change inside a port.
+    """
+    relative = _raw_lines(
+        value
+        for doc in docs
+        for value in [jq_index(jq_index(doc, "metadata"), "brainstormPath")]
+        if value is not None and value is not False
+    )
+    decisions = ""
+    if relative:
+        path = relative if relative.startswith("/") else project_root + "/" + relative
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                decisions = design_decisions(handle.read())
+    return {"decisions": decisions, "bundleGuidance": bundle_guidance(docs)}
+
+
+# ---------------------------------------------------------------------------
 # The write rules -- seven verbs, all of them called from inside bash's lock
 # ---------------------------------------------------------------------------
 
@@ -2487,6 +2776,83 @@ def op_validate_tasks(argv):
     return 1
 
 
+def op_get_story_context(argv):
+    """One crossing, no lock, and the assembly order bash ran in.
+
+    MEASURED, NOT ESTIMATED. 20 calls per sample after two discarded warm-ups,
+    four samples of each build, alternating, both builds run from the same
+    directory on the same host (Linux 6.8.0 x86_64, 16 cores) against the same
+    fixture -- one story declaring five skills, a brainstorm with a Design
+    Decisions section, a full designBundle:
+
+        pre-port   medians 445.2 / 446.0 / 448.7 / 464.2 ms -> 447.4 ms
+        post-port  medians 141.3 / 142.9 / 143.7 / 143.8 ms -> 143.3 ms
+        ratio 3.1x
+
+    Whole-CLI wall time, deliberately: bash startup, find_aimi_root's `git
+    rev-parse`, get_tasks_file, validate_story_exists' own jq and python3's
+    interpreter start are all still in both numbers, because all of them are
+    what the agent actually waits for. The arithmetic that motivated this slice
+    (13 jq startups at ~16.4 ms against one Python crossing at ~36 ms, about 6x)
+    was about the FUNCTION; 3.1x is what the caller gets once the four gates
+    that did not move are paid for too.
+
+    --skills-base-dir and --project-root arrive as flags because both are
+    bash's: _resolve_skills_base_dir globs the Claude Code plugin cache or reads
+    $AIMI_PLUGIN_DIR (host detection this file has no business repeating), and
+    PROJECT_ROOT is find_aimi_root's export. An empty --skills-base-dir means
+    bash could not resolve one, and the answer to that is an empty skills array,
+    silently -- the same answer the pre-port loop gave.
+
+    The order is not cosmetic: skills first, then the brainstorm, then the
+    bundle. Each of those stages can meet a document shape jq aborted on, and
+    which one aborts first is what a caller sees -- metadata-string is recorded
+    with the BRAINSTORM read's message because the skills read never touches
+    `.metadata`, and bundle-string with the bundle's for the same reason.
+
+    A pure reader: no lock, no temp file, nothing opened for writing. The two
+    files it does open -- a SKILL.md and a brainstorm -- are read-only and are
+    named by the document, which is why they are opened here rather than in
+    bash.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    project_root = _flag(argv, "--project-root")
+    skills_base_dir = _flag(argv, "--skills-base-dir")
+    if not path or story_id is None or not project_root or skills_base_dir is None:
+        die(
+            "Usage: tasks.py get-story-context --tasks-file <path> --story-id <id> "
+            "--project-root <path> --skills-base-dir <path>"
+        )
+
+    docs = read_docs(path, "get-story-context")
+
+    def warn(message):
+        sys.stderr.write(message + "\n")
+
+    skills, dropped = skills_payload(
+        declared_skill_names(docs, story_id), skills_base_dir, warn
+    )
+    context = design_context(docs, project_root)
+
+    # `--slurpfile tf` then `$tf[0]`: the story and the metadata come from the
+    # FIRST document alone, however many the file holds. `select` is a filter
+    # over a stream rather than a lookup, so a duplicated id emits the whole
+    # payload twice -- id-duplicado records both objects.
+    first = docs[0] if docs else None
+    for story in stories_with_id(first, story_id):
+        _emit(
+            {
+                "story": story,
+                "metadata": jq_index(first, "metadata"),
+                "skills": skills,
+                "designContext": context,
+                "skillsDropped": dropped,
+            }
+        )
+    return 0
+
+
 def op_validate_story_exists(argv):
     """aimi-cli.sh's validate_story_exists, in Python, for the verbs that have
     already crossed. NOT a verb -- the twin of a bash gate that ten call sites
@@ -2694,6 +3060,7 @@ _OPS = {
     "status": op_status,
     "metadata": op_metadata,
     "get-story": op_get_story,
+    "get-story-context": op_get_story_context,
     "current-story": op_current_story,
     "get-state": op_get_state,
     "count-pending": op_count_pending,

@@ -3,22 +3,36 @@
 THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py
 and test_story_merge.py.
 
-`golden_from_jq.json` holds five blocks for this module, each captured by
+`golden_from_jq.json` holds six blocks for this module, each captured by
 running the jq implementations that used to live in aimi-cli.sh, BEFORE they
 were deleted: `tasks_read_cases` (151 cases, the six read verbs),
 `tasks_ready_cases` (128, list-ready and next-story), `tasks_write_cases`
 (91, the seven locked writers), `tasks_validate_cases` (328 -- 82
-adversarial documents through all four validators) and `validate_tasks_cases`
+adversarial documents through all four validators), `validate_tasks_cases`
 (121, validate-tasks alone -- fifteen rules, and the only verb that reads files
-other than tasks.json). Like the story-merge capture all five record each
-case's INPUT, so every one is replayable: test_the_port_reproduces_the_jq,
+other than tasks.json) and `story_context_cases` (57, get-story-context). Like
+the story-merge capture all six record each case's INPUT, so every one is
+replayable: test_the_port_reproduces_the_jq,
 test_the_ready_port_reproduces_the_jq, test_the_write_port_reproduces_the_jq,
-test_the_validate_port_reproduces_the_jq and
-test_the_validate_tasks_port_reproduces_the_jq re-run the whole corpus through
-the CLI and compare every field. Those five tests are the evidence the port
+test_the_validate_port_reproduces_the_jq,
+test_the_validate_tasks_port_reproduces_the_jq and
+test_the_story_context_port_reproduces_the_jq re-run the whole corpus through
+the CLI and compare every field. Those six tests are the evidence the port
 changed nothing, and they are why the rest of this file can stay short -- it
-asserts the properties a reader would otherwise have to reconstruct from 819
+asserts the properties a reader would otherwise have to reconstruct from 876
 recordings by eye.
+
+`story_context_cases` IS THE ONE BLOCK THAT PROVES LESS THAN THE OTHERS, and it
+says so here rather than being quoted as if it proved the same. The five before
+it recorded jq PROGRAMS; get-story-context's logic was bash arrays and a shell
+loop, so the recording pins the payload's SHAPE -- which keys, in which order,
+holding what when a skill is missing or empty or oversized -- and the
+hand-written tests beside it carry the fidelity argument. It is also the one
+block whose port changed rules on purpose: three of them, named in
+CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
+engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
+comparison strips one key (`skillsDropped`) from the actual stdout before
+comparing, and everything else still has to match the recording byte for byte.
 
 `validate_tasks_cases` carries two fields the others have no use for: `files`,
 the spec fixtures written inside the project root, and `outside`, the ones
@@ -61,6 +75,7 @@ READY = {c["label"]: c for c in GOLDEN["tasks_ready_cases"]}
 WRITE = {c["label"]: c for c in GOLDEN["tasks_write_cases"]}
 VALIDATE = {c["label"]: c for c in GOLDEN["tasks_validate_cases"]}
 VALIDATE_TASKS = {c["label"]: c for c in GOLDEN["validate_tasks_cases"]}
+CONTEXT = {c["label"]: c for c in GOLDEN["story_context_cases"]}
 
 
 def _labels(*prefixes):
@@ -1561,6 +1576,417 @@ def test_the_subsection_scanner_keeps_the_asymmetry_between_the_two_specs():
 
 
 # ---------------------------------------------------------------------------
+# get-story-context: the payload every spawned executor reads, shape and all
+# ---------------------------------------------------------------------------
+
+# The run-length collapse the capture applied, reproduced here so both sides of
+# every comparison go through it. A 100KB skill of one repeated letter pins
+# nothing the marker does not, and recording it verbatim would have added most
+# of a megabyte to the golden file.
+_RUN = re.compile(r"(.)\1{255,}", re.S)
+
+# The one key the payload gained. It is stripped from the ACTUAL stdout before
+# the corpus comparison, so everything else -- key order, indentation, the
+# trailing newline -- still has to match the recording byte for byte rather
+# than merely parse to the same object.
+_DROPPED_KEY = re.compile(r',\n  "skillsDropped": (?:\[\]|\[\n(?:.|\n)*?\n  \])\n\}', re.S)
+
+
+def _rle(text):
+    return _RUN.sub(lambda m: "<<" + m.group(1) + "*" + str(len(m.group(0))) + ">>", text)
+
+
+def _without_dropped(text):
+    return _DROPPED_KEY.sub("\n}", text)
+
+
+def _replay_context(case, tmp_path):
+    """Rebuild the case's root -- tasks file, skills tree, brainstorm, state --
+    and run the CLI the way the capture ran it.
+
+    `plugin_dir` is how a fixture reaches _resolve_skills_base_dir at all:
+    CLAUDECODE unset plus AIMI_PLUGIN_DIR pointing at the root makes
+    <root>/skills the base directory. `env` carries LC_ALL for the two multibyte
+    twins, and nothing else.
+    """
+    root = os.path.realpath(str(tmp_path))
+    given = case["input"]
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    if given["tasks_file"]:
+        target = os.path.join(tasks_dir, given["tasks_file"])
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(given["tasks"].replace("/ABS/", root + "/"))
+    for relative, content in given["files"].items():
+        path = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    for relative, spec in given["repeat"].items():
+        path = os.path.join(root, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write((spec[2] if len(spec) > 2 else "") + spec[0] * spec[1])
+    for key, value in given["state"].items():
+        with open(os.path.join(root, ".aimi", key), "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+
+    env = dict(os.environ)
+    env.pop("CLAUDECODE", None)
+    env.pop("AIMI_PLUGIN_DIR", None)
+    if given["plugin_dir"]:
+        env["AIMI_PLUGIN_DIR"] = root
+    env.update(given["env"])
+
+    proc = subprocess.run(
+        ["bash", CLI] + case["args"], cwd=root, capture_output=True, text=True,
+        timeout=300, env=env,
+    )
+
+    state_after = {}
+    aimi = os.path.join(root, ".aimi")
+    for name in sorted(os.listdir(aimi)):
+        path = os.path.join(aimi, name)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                state_after[name] = handle.read().replace(root, "/TMP")
+
+    def norm(text):
+        return _rle(text.replace(root, "/TMP").replace(CLI, "/CLI/aimi-cli.sh"))
+
+    return {
+        "exit": proc.returncode,
+        "stdout": norm(proc.stdout),
+        "stderr": norm(proc.stderr),
+        "state_after": state_after,
+    }
+
+
+# The 6 aborts `_comment_story_context` names. Not one of them is a rule anyone
+# wrote: three are jq's own message at jq's own exit status, two are `set -e`
+# reacting to `((expr))` returning 1 for a zero result, and one is SIGPIPE
+# promoted by `pipefail`. There is no shell pipeline left to abort and no jq
+# left to complain, so none of them is reproducible on purpose.
+CONTEXT_ABORTS = {
+    "skill-vazio": "set -e killed the verb when the running byte total was still 0",
+    "skill-so-newlines": "set -e killed the verb when the running byte total was still 0",
+    "brainstorm-truncagem-64k": "head -c closed the pipe and pipefail promoted SIGPIPE",
+    "bundle-string": "jq aborted indexing a designBundle that is a string",
+    "metadata-string": "jq aborted indexing a metadata that is a string",
+    "arquivo-vazio": "jq aborted iterating .userStories of a null document",
+}
+
+# KEPT SEPARATE FROM THE TABLE ABOVE, deliberately and for the same reason
+# CONFINEMENT_DIVERGENCES is: a rule that changed on purpose is not an excuse,
+# and filing it beside six engine messages would let it read like one. Each of
+# these three is asserted in full below rather than skipped.
+CONTEXT_DECISIONS = {
+    "cap-multibyte-c": "the cap counts bytes; under LC_ALL=C it already did",
+    "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
+    "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
+}
+
+
+@pytest.mark.parametrize("label", sorted(CONTEXT), ids=sorted(CONTEXT))
+def test_the_story_context_port_reproduces_the_jq(label, tmp_path):
+    case = CONTEXT[label]
+    actual = _replay_context(case, tmp_path)
+    if label in CONTEXT_ABORTS:
+        pytest.skip(CONTEXT_ABORTS[label])
+    if label in CONTEXT_DECISIONS:
+        pytest.skip(CONTEXT_DECISIONS[label])
+    for field in ("exit", "stderr", "state_after"):
+        assert actual[field] == case[field], label + " . " + field
+    assert _without_dropped(actual["stdout"]) == case["stdout"], label + " . stdout"
+
+
+def test_the_story_context_tables_name_only_cases_that_exist():
+    assert set(CONTEXT_ABORTS) <= set(CONTEXT)
+    assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
+    assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
+    assert len(CONTEXT) == 57
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 9, "48 of 57 match; keep this in step"
+
+
+def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
+    """A pure reader, over all 57 recordings at once, and the wrapper to match.
+
+    It takes no lock and it writes nothing at all -- pass, refusal and engine
+    abort alike -- so a port that started writing a temp file would have nowhere
+    to hide. The wrapper is asserted to make ONE crossing and to hold no lock in
+    test_every_locked_tasks_verb_crosses_into_python_exactly_once, which lists
+    the locked verbs exhaustively and does not list this one.
+    """
+    assert all(case["state_after"] == {} for case in CONTEXT.values())
+    body = _code().split("def op_get_story_context", 1)[1].split("\ndef ", 1)[0]
+    assert "write_docs_atomically" not in body and "_lock" not in body
+
+
+@pytest.mark.parametrize("label", sorted(CONTEXT_ABORTS), ids=sorted(CONTEXT_ABORTS))
+def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, tmp_path):
+    """The excuse is only good while the RECORDING still shows an abort.
+
+    Every one of these six was recorded with no payload at all -- an engine
+    message at an engine exit status, or the shell dying quietly. If a future
+    capture edit turns one into an ordinary answer, it stops belonging in the
+    table, and this is what notices. The other half is that an excused case must
+    not merely stop failing: each one is asserted to produce a SPECIFIC answer
+    now, because "the port does something different here" is not a statement
+    anyone can review.
+
+    They split three and three, and the split is the finding. bundle-string,
+    metadata-string and arquivo-vazio were jq refusing, and the port refuses
+    too. skill-vazio, skill-so-newlines and brainstorm-truncagem-64k were the
+    SHELL dying on a payload that was perfectly well-formed -- an empty
+    SKILL.md, a long Design Decisions section -- and those now succeed, which is
+    the bug fix that falls out of there being no shell pipeline left to kill.
+    """
+    assert CONTEXT[label]["exit"] != 0, label + ": the recording has to show an abort"
+    assert CONTEXT[label]["stdout"] == "", label + ": an abort produced no payload"
+
+    actual = _replay_context(CONTEXT[label], tmp_path)
+    if label in ("bundle-string", "metadata-string", "arquivo-vazio"):
+        assert actual["exit"] == 1, label
+        assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+        assert actual["stderr"].startswith("Error: get-story-context: "), label
+        return
+
+    assert actual["exit"] == 0, label + ": the shell that killed this is gone"
+    payload = json.loads(actual["stdout"])
+    if label == "brainstorm-truncagem-64k":
+        assert payload["designContext"]["decisions"] == "<<d*65536>>", "truncated, not fatal"
+    else:
+        assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
+        assert payload["skillsDropped"] == []
+
+
+def test_no_jq_survives_in_the_wrapper_and_it_crosses_once():
+    """AC1's mechanical half: 13 jq invocations on a five-skill story became 0.
+
+    Counting `jq` in the function body is the check a reviewer can actually run,
+    and it is what stops one creeping back the next time a field is added to the
+    payload -- a second reader of this document would put the two implementations
+    of one rule back beside each other, which is the whole thing the port
+    removed.
+    """
+    body = dict(_wrappers())["cmd_get_story_context"]
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    # The five lines bash keeps, and why each one is bash's: the argument, its
+    # format, which file is current, whether the story is in it, and which host
+    # this is. Nothing here reads the document.
+    for kept in ("validate_story_id", "get_tasks_file", "validate_story_exists",
+                 "_resolve_skills_base_dir", "check_python3"):
+        assert kept in body, kept
+
+
+def _context_stdout(label, tmp_path):
+    actual = _replay_context(CONTEXT[label], tmp_path)
+    assert actual["exit"] == 0, label
+    return actual, json.loads(actual["stdout"])
+
+
+def test_the_payload_carries_five_keys_in_the_order_a_consumer_reads_them(tmp_path):
+    """The shape IS the contract here: this payload is parsed by an agent, not
+    by a caller who can read a diff. skillsDropped is appended LAST so the four
+    keys that were always there keep their positions."""
+    _, payload = _context_stdout("skills-tres", tmp_path)
+    assert list(payload) == ["story", "metadata", "skills", "designContext", "skillsDropped"]
+    assert [list(skill) for skill in payload["skills"]] == [["name", "path", "content"]] * 3
+    assert list(payload["designContext"]) == ["decisions", "bundleGuidance"]
+    assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta", "gama"]
+
+
+def test_skills_dropped_is_present_and_empty_when_nothing_was_dropped(tmp_path):
+    """`[]` rather than an absent key, on every path -- including the ones with
+    no skills at all. A consumer that has to test for presence before reading is
+    a consumer that will forget to."""
+    for label in ("sem-skills", "skills-vazio", "skills-tres", "skill-ausente",
+                  "skills-base-nao-resolvida", "cap-fronteira-exata"):
+        _, payload = _context_stdout(label, tmp_path / label)
+        assert payload["skillsDropped"] == [], label
+
+    # and the recordings prove the key is genuinely NEW rather than renamed:
+    # nothing in the pre-port corpus ever printed it.
+    assert not any("skillsDropped" in case["stdout"] for case in CONTEXT.values())
+
+
+def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
+    """The corpus comparison removes skillsDropped textually, which is only
+    honest if removing it leaves the recording exactly. Asserted once, in full,
+    against a case that drops nothing."""
+    actual, _ = _context_stdout("skills-tres", tmp_path)
+    assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
+    assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
+    """DECISION 1, asserted from both sides.
+
+    One 34200-character body of em-dashes is 102600 bytes. `${#skill_content}`
+    read the first number under LC_ALL=C.UTF-8 and the second under LC_ALL=C, so
+    the same skill set was hydrated on one host and evicted on another -- and
+    the SKILL.md files in this repo are full of em-dashes and arrows, which is
+    what made it reachable rather than theoretical. The recordings disagree; the
+    port does not.
+    """
+    assert CONTEXT["cap-multibyte-c"]["exit"] == 1, "pre-port: drained, then aborted"
+    assert CONTEXT["cap-multibyte-c"]["stdout"] == ""
+    assert json.loads(CONTEXT["cap-multibyte-c-utf-8"]["stdout"])["skills"][0]["name"] == "mb"
+
+    answers = {}
+    for label in ("cap-multibyte-c", "cap-multibyte-c-utf-8"):
+        actual, payload = _context_stdout(label, tmp_path / label)
+        answers[label] = actual["stdout"]
+        assert [skill["name"] for skill in payload["skills"]] == ["pequeno"]
+        assert payload["skillsDropped"] == [
+            {"name": "mb", "bytes": 102600, "reason": "oversized"}
+        ]
+        assert "102600 bytes exceeds the 100KB skills cap" in actual["stderr"]
+    assert answers["cap-multibyte-c"] == answers["cap-multibyte-c-utf-8"]
+
+    # The unit under the verb, without a process: len() counts characters and is
+    # the reading that was NOT kept.
+    body = "—" * 34200
+    assert len(body) == 34200 and len(body.encode("utf-8")) == 102600
+    assert T.SKILLS_CAP == 102400
+
+
+def test_an_oversized_skill_is_dropped_without_draining_its_siblings(tmp_path):
+    """DECISION 2. [oversized, small, small] used to lose everything.
+
+    The pre-port loop popped from the END until the aggregate fit, so the two
+    legitimate skills went first and the oversized one last -- and the verb then
+    died at the zero total, so the agent received no payload at all. Declaration
+    order is priority order only if the entry that cannot fit is removed before
+    the loop that trims the rest.
+    """
+    assert CONTEXT["cap-gigante-primeiro"]["exit"] == 1, "pre-port: drained, then aborted"
+    assert CONTEXT["cap-gigante-primeiro"]["stderr"].count("dropped") == 3
+
+    actual, payload = _context_stdout("cap-gigante-primeiro", tmp_path)
+    assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta"]
+    assert payload["skillsDropped"] == [
+        {"name": "gigante", "bytes": 102401, "reason": "oversized"}
+    ]
+    assert actual["stderr"] == (
+        "skill gigante dropped — 102401 bytes exceeds the 100KB skills cap on its own\n"
+    )
+
+
+def test_the_aggregate_cap_and_its_boundary_are_untouched(tmp_path):
+    """The half that did NOT change, checked rather than assumed -- three
+    recordings that still match byte for byte, including the wording of the
+    warning the bash suite greps for and the `>` that makes exactly 102400 fit.
+    """
+    assert CONTEXT["cap-fronteira-exata"]["stderr"] == ""
+    assert CONTEXT["cap-fronteira-mais-um"]["stderr"] == (
+        "skill beta dropped — aggregate skills context exceeded 100KB\n"
+    )
+    _, exact = _context_stdout("cap-fronteira-exata", tmp_path / "exata")
+    assert [skill["name"] for skill in exact["skills"]] == ["alpha", "beta"]
+    actual, over = _context_stdout("cap-fronteira-mais-um", tmp_path / "mais-um")
+    assert [skill["name"] for skill in over["skills"]] == ["alpha"]
+    assert over["skillsDropped"] == [{"name": "beta", "bytes": 51201, "reason": "aggregate"}]
+    assert actual["stderr"] == CONTEXT["cap-fronteira-mais-um"]["stderr"]
+
+
+def test_eight_skills_are_read_once_each_and_assembled_in_declaration_order(tmp_path):
+    """The quadratic's own case, run rather than described.
+
+    Eight bodies in, eight entries out, in the order the story declared them,
+    each file opened exactly once. The pre-port loop produced the same eight
+    entries -- which is exactly why this cannot be an output comparison and why
+    the structural assertion below it exists.
+    """
+    base = tmp_path / "skills"
+    names = ["um", "dois", "tres", "quatro", "cinco", "seis", "sete", "oito"]
+    for name in names:
+        (base / name).mkdir(parents=True)
+        (base / name / "SKILL.md").write_text("corpo de " + name + "\n", encoding="utf-8")
+
+    warnings = []
+    entries, dropped = T.skills_payload(names, str(base), warnings.append)
+    assert [entry["name"] for entry in entries] == names
+    assert [entry["path"] for entry in entries] == [
+        "skills/" + name + "/SKILL.md" for name in names
+    ]
+    assert [entry["content"] for entry in entries] == ["corpo de " + name for name in names]
+    assert dropped == [] and warnings == []
+
+
+def test_the_skills_array_is_serialized_once_rather_than_once_per_skill():
+    """The quadratic, asserted structurally because it cannot be asserted from
+    the outside: the payload of an N-skill story looks identical either way.
+
+    The pre-port loop fed the whole accumulated array back through
+    `jq -n --argjson existing "$skills_json"` on every iteration, so N skills
+    serialized N(N+1)/2 bodies. Here a body is appended to a list once and the
+    list reaches JSON exactly once, in the single _emit at the end of the verb.
+    """
+    payload = _code().split("def skills_payload", 1)[1].split("\ndef ", 1)[0]
+    assert "json.dumps" not in payload and "_emit" not in payload
+    assert payload.count("kept.append(") == 1
+    op = _code().split("def op_get_story_context", 1)[1].split("\ndef ", 1)[0]
+    assert op.count("_emit(") == 1
+
+
+def test_the_decisions_scanner_is_the_awk_pipeline_and_truncates_at_65536():
+    """The unit, over the shapes the corpus records: a `### ` heading stays
+    inside the section, a `## ` heading closes it, a second `## Design Decisions`
+    does NOT (awk tested that rule first and skipped the closing one), the match
+    is a PREFIX so a suffixed heading opens the section, blank lines go, and the
+    truncation counts bytes because `head -c` did."""
+    assert T.design_decisions(b"## Design Decisions\num\n### Sub\ndois\n## Fim\ntres\n") == (
+        "um\n### Sub\ndois"
+    )
+    assert T.design_decisions(b"## Design Decisions e mais\num\n") == "um"
+    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == "um\ndois"
+    assert T.design_decisions(b"## Outra\num\n") == ""
+    assert T.design_decisions(b"## Design Decisions\n\n  recuada  \n\n\nfim\n") == "recuada\nfim"
+    assert T.design_decisions(b"## Design Decisions\n" + b"d" * 70000) == "d" * 65536
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_the_tag_breakout_escape_is_the_seds_two_rules_in_the_seds_order(tmp_path):
+    """Both forms, and the order between them. Reversed, the opening rule would
+    consume the `<` of `</required_skills` and leave `&lt;/…` behind unescaped --
+    which is a tag breakout that reads as if it had been handled."""
+    _, payload = _context_stdout("skill-tag-breakout", tmp_path)
+    assert payload["skills"][0]["content"] == (
+        "before &lt;required_skills> middle &lt;/required_skills> after\n"
+        "&lt;required_skills\n&lt;/required_skills"
+    )
+    assert T.TAG_BREAKOUT[0][0] == "</required_skills"
+
+
+def test_the_declared_list_is_read_the_way_jq_r_and_mapfile_read_it():
+    """The unit for the shapes `jq -r '.[]' 2>/dev/null | mapfile -t` flattened.
+
+    A string or a number yields NOTHING and no complaint, an object yields its
+    VALUES, and a non-string element is PRETTY-printed over as many lines as it
+    takes -- each of which mapfile then treats as a skill name of its own.
+    """
+    def named(skills):
+        return T.declared_skill_names([{"userStories": [{"id": "US-001", "skills": skills}]}],
+                                      "US-001")
+
+    assert named(["alpha", "beta"]) == ["alpha", "beta"]
+    assert named("alpha") == []
+    assert named(7) == []
+    assert named(None) == []
+    assert named({"k": "alpha"}) == ["alpha"]
+    assert named([["alpha"]]) == ["[", '  "alpha"', "]"]
+    assert named(["a\nb"]) == ["a", "b"]
+    # A story with no skills key at all is `// []`, and a MISSING story is no
+    # stream to iterate rather than an error.
+    assert T.declared_skill_names([{"userStories": [{"id": "US-001"}]}], "US-001") == []
+    assert T.declared_skill_names([{"userStories": []}], "US-001") == []
+
+
+# ---------------------------------------------------------------------------
 # The clamp: ONE function, jq's whole value space
 # ---------------------------------------------------------------------------
 
@@ -1671,13 +2097,16 @@ def test_tasks_py_takes_no_lock_of_its_own():
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     """One writer, and the writer is atomic.
 
-    open() appears twice and BOTH are read mode. The second arrived with
-    validate-tasks, the one verb that reads a file other than the tasks file --
-    the DesignSpec or BusinessSpec named in metadata.designBundle, discovered
-    after the crossing and therefore unreachable from bash's own confinement.
-    It is read-only and it is scoped to that one call site, which is what this
-    asserts: a THIRD open, or either of these two in a writing mode, is a new
-    capability and has to be argued for rather than appear.
+    open() appears four times and ALL FOUR are read mode. The second arrived
+    with validate-tasks, the one verb that reads a file other than the tasks
+    file -- the DesignSpec or BusinessSpec named in metadata.designBundle,
+    discovered after the crossing and therefore unreachable from bash's own
+    confinement. The third and fourth arrived with get-story-context for the
+    same reason: a SKILL.md under the skills base directory bash resolved, and
+    the brainstorm named by metadata.brainstormPath. Each is read-only and each
+    is scoped to its own call site, which is what this asserts: a FIFTH open, or
+    any of these four in a writing mode, is a new capability and has to be
+    argued for rather than appear.
 
     The single write path is write_docs_atomically, a NamedTemporaryFile in the
     TARGET's own directory followed by os.replace -- never a truncate-and-write,
@@ -1687,10 +2116,12 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     write them there.
     """
     code = _code()
-    assert code.count("open(") == 2
+    assert code.count("open(") == 4
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 2
+    assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
+    assert 'open(path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 4
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -1700,14 +2131,17 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "sys.stderr",
         "handle",
     }
-    # Twelve os.path calls, and the module still names no path of its own --
+    # Fifteen os.path calls, and the module still names no path of its own --
     # not .aimi/state/, not a lock, not a sibling file. Two live in
-    # write_docs_atomically, two are validate-tasks' isfile() per spec, and the
-    # remaining eight are confined_spec_path resolving and comparing. Every
-    # path any of them touches arrived as an argument or was concatenated onto
-    # one that did.
-    assert code.count("os.path.") == 12
-    assert code.count("os.path.isfile(") == 2
+    # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
+    # are confined_spec_path resolving and comparing, and the last three arrived
+    # with get-story-context: two isfile() probes for a skill (the bare
+    # directory, then OpenCode's aimi- prefixed one) and one for the brainstorm.
+    # Every path any of them touches arrived as an argument or was concatenated
+    # onto one that did -- the skills base directory and PROJECT_ROOT are both
+    # bash's answers, handed in as flags.
+    assert code.count("os.path.") == 15
+    assert code.count("os.path.isfile(") == 5
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
 
@@ -1808,6 +2242,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "status",
         "metadata",
         "get-story",
+        "get-story-context",
         "current-story",
         "get-state",
         "count-pending",

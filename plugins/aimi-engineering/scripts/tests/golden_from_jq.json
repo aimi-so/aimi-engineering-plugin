@@ -31404,5 +31404,1278 @@
       "state_after": {}
     }
   ],
-  "_comment_validate_tasks": "validate-tasks -- cmd_validate_tasks plus its two spec helpers, ~290 lines and the largest single function in this port -- captured exactly the way the four blocks before it were, and before its jq was deleted: 121 cases at commit 3350206. Recorded per case: the argv, the tasks file the run was given, the PROJECT_ROOT-relative spec fixtures on disk (`files`), the fixtures written OUTSIDE the project root (`outside`, one directory up) and the .aimi/state/ files it started with -- `input`, so every case is REPLAYABLE rather than merely described -- then exit code, stdout, stderr and every .aimi/ file left behind (`state_after`). All 121 `state_after` values are empty and that is this block's own evidence: validate-tasks is a pure reader, takes no lock, writes no temp file and touches no document, so a port that started writing one would have nowhere to hide. Each case ran in its own throwaway root; three normalizations fired (the root to /TMP, its parent to /OUT, the CLI's own path to /CLI/aimi-cli.sh) and nothing else in the recording is non-deterministic. 473 of 484 field comparisons identical after the port; 115 of the 121 cases matched on all four fields, and EVERY stdout and EVERY state_after matched in all 121. The 11 fields that differ fall in 6 cases, are exit code and stderr ONLY, and are all of one kind: an ENGINE aborting where no code of ours ran. Five are jq (exit 5 for a runtime error, 4 for a parse error) with its message swallowed by the `2>/dev/null` on the assignment that invoked it, so the pre-port recording shows an exit status and an EMPTY stderr; ds-ac-null and aborta-antes-das-regras-finais are to_entries against a null acceptanceCriteria, historias-ausente is `.userStories[]` against an absent userStories, metadata-string is indexing a metadata that is a string, and json-malformado is jq's own parse error at its own exit 4. Each is now a refusal that writes nothing to stdout, at `Error: validate-tasks: <file>: <expression>: <what went wrong>` and exit 1 -- only the wording and the number moved. The sixth, dois-documentos-endpoints, is not jq at all: `endpoint_count` was one jq run over the WHOLE stream, so a file holding two documents handed bash two numbers on two lines and `[ \"$ep_index\" -lt \"$endpoint_count\" ]` refused them, printing bash's own `[: 1\\n2: integer expression expected` naming aimi-cli.sh line 10430 -- a line number in a function that no longer exists. The port reproduces the CONSEQUENCE (the endpoint rules are skipped, stdout and exit identical) and not the complaint, because synthesizing an engine's diagnostic about a line of a deleted function is not a thing to write on purpose. THE CORPUS FAILS ON PURPOSE, which is the only way a validator corpus proves anything: each of the fifteen rule checkpoints has at least one input that TRIPS it and at least one that does not. R1 schemaVersion gate: schema-32-pula/schema-30-pula/schema-ausente/schema-null/arquivo-vazio skip, limpo/schema-34-nao-pula/schema-so-no-topo/schema-numero/schema-lixo proceed. R2 DesignSpec gate: ds-gate-sem-prototipos, ds-gate-prototipos-ausente, ds-gate-prototipos-nao-array, ds-gate-sem-designspec and ds-gate-designspec-vazio all leave a MISSING spec file unreported, which is what proves the gate closed; ds-arquivo-ausente opens it. R3 missing file: ds-arquivo-ausente and bs-arquivo-ausente against ds-arquivo-presente. R4 citations: ds-citacao-ok, ds-citacao-unicode, ds-citacao-subsecao-mais-profunda, ds-secao-ponto-curinga-sozinha and ds-secao-com-simbolo pass; ds-citacao-parafrase, ds-citacao-secao-ausente, ds-citacao-fronteira, ds-citacao-ponto-curinga, ds-secao-com-simbolo-irma, ds-ac-segundo-indice and ds-dois-visuais fail; ds-nao-visual, ds-verificacao-ausente, ds-ac-vazia, ds-citacao-sem-espaco and ds-secao-inteira-sem-ponto reach the walk and produce nothing. R5 BusinessSpec gate: bs-gate-frontendonly-falso, bs-gate-frontendonly-ausente, bs-gate-frontendonly-numero and bs-gate-sem-businessspec leave a missing source unreported; bs-gate-frontendonly-string opens the gate on the STRING \"true\", which `tostring` makes indistinguishable from the boolean. R6: bs-arquivo-ausente. R7 missing source: bs-endpoint-sem-source, bs-endpoint-source-null, bs-endpoint-source-vazia and bs-endpoint-source-falsa fail where bs-plan-chave-plana does not. R8 derived:: bs-endpoint-derived warns on stderr, stays valid AND skips its own invented responseShape field, which is the half that makes it an escape hatch. R9 endpoint source format: bs-endpoint-malformado, bs-endpoint-source-numero and bs-endpoint-source-objeto fail; bs-endpoint-secao-sem-ponto passes with a section that has no minor number. R10 field-level source: bs-campo-source-derived warns and skips, bs-campo-source-malformada errors, and bs-campo-source-secao-propria passes against a section the ENDPOINT does not cite while bs-campo-source-secao-propria-errada fails against one it does -- the pair is what proves the field-level section is the one used. R11 field without its own source: bs-campo-sem-source-ok and bs-plan-chave-plana pass, bs-campo-inventado, bs-campo-escalar, bs-campos-ordem, bs-dois-endpoints-mesmo-campo, bs-secao-ausente-no-spec and bs-plan-chave-pontilhada fail. R12 execution enum: exec-container/exec-inline/exec-ausente/exec-null/exec-vazio valid, exec-invalido/exec-numero invalid. R13 exclusivity: exec-fase-conflito and fase-zero trip it, fase-sozinha/fase-null/fase-falsa do not, and exec-fase-invalido-duplo trips R12 and R13 together. R14 branchName: branch-com-barra/branch-numero/branch-so-alfanumerico pass; branch-invalido/branch-lider-hifen/branch-ausente/branch-vazio/branch-null fail, the last three because the pattern needs a leading alphanumeric and the empty string has none. R15 verification.url: url-ok/url-barra-inicial/url-charset-limite pass, url-invalida/url-espaco/url-primeiro-char/url-duas-ruins fail, and url-null/url-vazia/url-numero/url-sem-verificacao/url-verificacao-string are ignored rather than judged. muitos-erros trips four rules at once and pins the ORDER they are reported in; bs-e-ds-juntos runs both spec scans in one document. FIVE CONTRACT DETAILS ARE PINNED HERE BECAUSE EACH LOOKS LIKE A DEFECT AND EACH WOULD BE A REGRESSION TO 'CORRECT'. (1) plan.md's own two responseShape examples are in the corpus with the outcomes plan.md states: bs-plan-chave-plana ACCEPTS the flat key `portfolio` typed as \"{ totalUsinas: number; totalKWp: number }\", and bs-plan-chave-pontilhada REJECTS `portfolio.totalUsinas` against a subsection that names `portfolio`, `totalUsinas` and `totalKWp` separately. The lookup is fixed-string containment and nothing else -- no split on '.', no path walk, no regex built from the key -- and /aimi:plan's frontend-only mode depends on the refusal. (2) ds-id-vazio and url-id-nulo record a tab-collapse: both scans hand bash their rows through `IFS=$'\\t' read`, a tab is IFS WHITESPACE, and bash therefore drops a leading empty field and shifts every later one left. A visual story with an empty id has its citation silently unchecked, and a story with a null id reports its URL in the id position and an empty url. This is the exact bug the `\\037` delimiter was introduced to fix in the metadata read, still live in the two scans that never got the treatment; it is reproduced, not fixed, because which of the two readings the author meant is a decision. (3) schema-lixo passes the R1 gate: the gate is `sort -V | head -n1`, so what it accepts is filevercmp's business rather than semver's and \"abc\" sorts ABOVE \"3.3\". The port reconstructs filevercmp rather than approximating it, and the reconstruction was fuzzed against the real `sort -V` over 5540 comparisons with zero mismatches. (4) ds-secao-ponto-curinga-sozinha records that the cited section number goes into the heading regex UNESCAPED, exactly as awk interpolated it, so \"2.1\" matches a heading reading \"2X1\". The section can only ever be digits and dots (the citation regex says so), so this is a wildcard and never an injection. (5) bs-endpoint-source-objeto records that an error message carrying a newline becomes SEVERAL entries in the errors array rather than one string with an escape in it: the array was built by `printf '%s\\n' \"${errors[@]}\" | jq -R . | jq -s .`, and jq -R reads lines. TWO CASES ARE HERE FOR A SECURITY FINDING RATHER THAN FOR THE PORT, and they record the PERMISSIVE behaviour deliberately: ds-caminho-para-fora and bs-caminho-para-fora each name a spec at `../fora/...`, one directory ABOVE the project root, and each comes back valid because the citation and the field name were found in a file outside the root. That is the evidence that the file was opened, and it is the read primitive the confinement commit that follows this one closes -- with its own tests and its own diff, so this block stays a record of what the jq did rather than of what anyone wished it did. THAT COMMIT HAS SINCE LANDED, AND ITS DIVERGENCE IS NAMED HERE RATHER THAN ABSORBED: ds-caminho-para-fora and bs-caminho-para-fora are the only two cases where the port now answers differently for a reason that is not an engine message. Both recorded `{\"valid\": true, \"errors\": []}` at exit 0, having read a file outside the project root; both now answer `{\"valid\": false}` at exit 1 with one error naming the offending path -- `<file>: DesignSpec path escapes the project root: ../fora/DesignSpecFora.md` and its BusinessSpec twin -- and the outside file is never opened. The recordings are NOT regenerated: they are what the jq did, and what the jq did is the finding. test_a_spec_path_outside_the_project_root_is_refused asserts the new answer in full so neither case is merely skipped, and CONFINEMENT_DIVERGENCES in test_tasks.py is kept separate from the six engine-message excuses precisely because a deliberate rule change is not an excuse. ds-caminho-absoluto-para-fora shows the other half already holding: an absolute designSpec is CONCATENATED onto the root and is simply not found."
+  "_comment_validate_tasks": "validate-tasks -- cmd_validate_tasks plus its two spec helpers, ~290 lines and the largest single function in this port -- captured exactly the way the four blocks before it were, and before its jq was deleted: 121 cases at commit 3350206. Recorded per case: the argv, the tasks file the run was given, the PROJECT_ROOT-relative spec fixtures on disk (`files`), the fixtures written OUTSIDE the project root (`outside`, one directory up) and the .aimi/state/ files it started with -- `input`, so every case is REPLAYABLE rather than merely described -- then exit code, stdout, stderr and every .aimi/ file left behind (`state_after`). All 121 `state_after` values are empty and that is this block's own evidence: validate-tasks is a pure reader, takes no lock, writes no temp file and touches no document, so a port that started writing one would have nowhere to hide. Each case ran in its own throwaway root; three normalizations fired (the root to /TMP, its parent to /OUT, the CLI's own path to /CLI/aimi-cli.sh) and nothing else in the recording is non-deterministic. 473 of 484 field comparisons identical after the port; 115 of the 121 cases matched on all four fields, and EVERY stdout and EVERY state_after matched in all 121. The 11 fields that differ fall in 6 cases, are exit code and stderr ONLY, and are all of one kind: an ENGINE aborting where no code of ours ran. Five are jq (exit 5 for a runtime error, 4 for a parse error) with its message swallowed by the `2>/dev/null` on the assignment that invoked it, so the pre-port recording shows an exit status and an EMPTY stderr; ds-ac-null and aborta-antes-das-regras-finais are to_entries against a null acceptanceCriteria, historias-ausente is `.userStories[]` against an absent userStories, metadata-string is indexing a metadata that is a string, and json-malformado is jq's own parse error at its own exit 4. Each is now a refusal that writes nothing to stdout, at `Error: validate-tasks: <file>: <expression>: <what went wrong>` and exit 1 -- only the wording and the number moved. The sixth, dois-documentos-endpoints, is not jq at all: `endpoint_count` was one jq run over the WHOLE stream, so a file holding two documents handed bash two numbers on two lines and `[ \"$ep_index\" -lt \"$endpoint_count\" ]` refused them, printing bash's own `[: 1\\n2: integer expression expected` naming aimi-cli.sh line 10430 -- a line number in a function that no longer exists. The port reproduces the CONSEQUENCE (the endpoint rules are skipped, stdout and exit identical) and not the complaint, because synthesizing an engine's diagnostic about a line of a deleted function is not a thing to write on purpose. THE CORPUS FAILS ON PURPOSE, which is the only way a validator corpus proves anything: each of the fifteen rule checkpoints has at least one input that TRIPS it and at least one that does not. R1 schemaVersion gate: schema-32-pula/schema-30-pula/schema-ausente/schema-null/arquivo-vazio skip, limpo/schema-34-nao-pula/schema-so-no-topo/schema-numero/schema-lixo proceed. R2 DesignSpec gate: ds-gate-sem-prototipos, ds-gate-prototipos-ausente, ds-gate-prototipos-nao-array, ds-gate-sem-designspec and ds-gate-designspec-vazio all leave a MISSING spec file unreported, which is what proves the gate closed; ds-arquivo-ausente opens it. R3 missing file: ds-arquivo-ausente and bs-arquivo-ausente against ds-arquivo-presente. R4 citations: ds-citacao-ok, ds-citacao-unicode, ds-citacao-subsecao-mais-profunda, ds-secao-ponto-curinga-sozinha and ds-secao-com-simbolo pass; ds-citacao-parafrase, ds-citacao-secao-ausente, ds-citacao-fronteira, ds-citacao-ponto-curinga, ds-secao-com-simbolo-irma, ds-ac-segundo-indice and ds-dois-visuais fail; ds-nao-visual, ds-verificacao-ausente, ds-ac-vazia, ds-citacao-sem-espaco and ds-secao-inteira-sem-ponto reach the walk and produce nothing. R5 BusinessSpec gate: bs-gate-frontendonly-falso, bs-gate-frontendonly-ausente, bs-gate-frontendonly-numero and bs-gate-sem-businessspec leave a missing source unreported; bs-gate-frontendonly-string opens the gate on the STRING \"true\", which `tostring` makes indistinguishable from the boolean. R6: bs-arquivo-ausente. R7 missing source: bs-endpoint-sem-source, bs-endpoint-source-null, bs-endpoint-source-vazia and bs-endpoint-source-falsa fail where bs-plan-chave-plana does not. R8 derived:: bs-endpoint-derived warns on stderr, stays valid AND skips its own invented responseShape field, which is the half that makes it an escape hatch. R9 endpoint source format: bs-endpoint-malformado, bs-endpoint-source-numero and bs-endpoint-source-objeto fail; bs-endpoint-secao-sem-ponto passes with a section that has no minor number. R10 field-level source: bs-campo-source-derived warns and skips, bs-campo-source-malformada errors, and bs-campo-source-secao-propria passes against a section the ENDPOINT does not cite while bs-campo-source-secao-propria-errada fails against one it does -- the pair is what proves the field-level section is the one used. R11 field without its own source: bs-campo-sem-source-ok and bs-plan-chave-plana pass, bs-campo-inventado, bs-campo-escalar, bs-campos-ordem, bs-dois-endpoints-mesmo-campo, bs-secao-ausente-no-spec and bs-plan-chave-pontilhada fail. R12 execution enum: exec-container/exec-inline/exec-ausente/exec-null/exec-vazio valid, exec-invalido/exec-numero invalid. R13 exclusivity: exec-fase-conflito and fase-zero trip it, fase-sozinha/fase-null/fase-falsa do not, and exec-fase-invalido-duplo trips R12 and R13 together. R14 branchName: branch-com-barra/branch-numero/branch-so-alfanumerico pass; branch-invalido/branch-lider-hifen/branch-ausente/branch-vazio/branch-null fail, the last three because the pattern needs a leading alphanumeric and the empty string has none. R15 verification.url: url-ok/url-barra-inicial/url-charset-limite pass, url-invalida/url-espaco/url-primeiro-char/url-duas-ruins fail, and url-null/url-vazia/url-numero/url-sem-verificacao/url-verificacao-string are ignored rather than judged. muitos-erros trips four rules at once and pins the ORDER they are reported in; bs-e-ds-juntos runs both spec scans in one document. FIVE CONTRACT DETAILS ARE PINNED HERE BECAUSE EACH LOOKS LIKE A DEFECT AND EACH WOULD BE A REGRESSION TO 'CORRECT'. (1) plan.md's own two responseShape examples are in the corpus with the outcomes plan.md states: bs-plan-chave-plana ACCEPTS the flat key `portfolio` typed as \"{ totalUsinas: number; totalKWp: number }\", and bs-plan-chave-pontilhada REJECTS `portfolio.totalUsinas` against a subsection that names `portfolio`, `totalUsinas` and `totalKWp` separately. The lookup is fixed-string containment and nothing else -- no split on '.', no path walk, no regex built from the key -- and /aimi:plan's frontend-only mode depends on the refusal. (2) ds-id-vazio and url-id-nulo record a tab-collapse: both scans hand bash their rows through `IFS=$'\\t' read`, a tab is IFS WHITESPACE, and bash therefore drops a leading empty field and shifts every later one left. A visual story with an empty id has its citation silently unchecked, and a story with a null id reports its URL in the id position and an empty url. This is the exact bug the `\\037` delimiter was introduced to fix in the metadata read, still live in the two scans that never got the treatment; it is reproduced, not fixed, because which of the two readings the author meant is a decision. (3) schema-lixo passes the R1 gate: the gate is `sort -V | head -n1`, so what it accepts is filevercmp's business rather than semver's and \"abc\" sorts ABOVE \"3.3\". The port reconstructs filevercmp rather than approximating it, and the reconstruction was fuzzed against the real `sort -V` over 5540 comparisons with zero mismatches. (4) ds-secao-ponto-curinga-sozinha records that the cited section number goes into the heading regex UNESCAPED, exactly as awk interpolated it, so \"2.1\" matches a heading reading \"2X1\". The section can only ever be digits and dots (the citation regex says so), so this is a wildcard and never an injection. (5) bs-endpoint-source-objeto records that an error message carrying a newline becomes SEVERAL entries in the errors array rather than one string with an escape in it: the array was built by `printf '%s\\n' \"${errors[@]}\" | jq -R . | jq -s .`, and jq -R reads lines. TWO CASES ARE HERE FOR A SECURITY FINDING RATHER THAN FOR THE PORT, and they record the PERMISSIVE behaviour deliberately: ds-caminho-para-fora and bs-caminho-para-fora each name a spec at `../fora/...`, one directory ABOVE the project root, and each comes back valid because the citation and the field name were found in a file outside the root. That is the evidence that the file was opened, and it is the read primitive the confinement commit that follows this one closes -- with its own tests and its own diff, so this block stays a record of what the jq did rather than of what anyone wished it did. THAT COMMIT HAS SINCE LANDED, AND ITS DIVERGENCE IS NAMED HERE RATHER THAN ABSORBED: ds-caminho-para-fora and bs-caminho-para-fora are the only two cases where the port now answers differently for a reason that is not an engine message. Both recorded `{\"valid\": true, \"errors\": []}` at exit 0, having read a file outside the project root; both now answer `{\"valid\": false}` at exit 1 with one error naming the offending path -- `<file>: DesignSpec path escapes the project root: ../fora/DesignSpecFora.md` and its BusinessSpec twin -- and the outside file is never opened. The recordings are NOT regenerated: they are what the jq did, and what the jq did is the finding. test_a_spec_path_outside_the_project_root_is_refused asserts the new answer in full so neither case is merely skipped, and CONFINEMENT_DIVERGENCES in test_tasks.py is kept separate from the six engine-message excuses precisely because a deliberate rule change is not an excuse. ds-caminho-absoluto-para-fora shows the other half already holding: an absolute designSpec is CONCATENATED onto the root and is simply not found.",
+  "story_context_cases": [
+    {
+      "label": "sem-skills",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-vazio",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": []\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": []\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-tres",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"beta\",\n        \"gama\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n",
+          "skills/gama/SKILL.md": "Gama skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"beta\",\n      \"gama\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    },\n    {\n      \"name\": \"gama\",\n      \"path\": \"skills/gama/SKILL.md\",\n      \"content\": \"Gama skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-ausente",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"fantasma\",\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"fantasma\",\n      \"beta\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill fantasma not found at skills/fantasma/SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "skill-vazio",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"vazio\",\n        \"alpha\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/vazio/SKILL.md": "",
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-vazio-depois",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"vazio\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/vazio/SKILL.md": "",
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"vazio\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"vazio\",\n      \"path\": \"skills/vazio/SKILL.md\",\n      \"content\": \"\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-so-newlines",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"nl\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/nl/SKILL.md": "\n\n\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-sem-newline-final",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"nn\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/nn/SKILL.md": "sem newline final"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"nn\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"nn\",\n      \"path\": \"skills/nn/SKILL.md\",\n      \"content\": \"sem newline final\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-prefixo-opencode",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"architecture-foundation\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/aimi-architecture-foundation/SKILL.md": "Prefixed skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"architecture-foundation\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"architecture-foundation\",\n      \"path\": \"skills/architecture-foundation/SKILL.md\",\n      \"content\": \"Prefixed skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-base-nao-resolvida",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": false,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-tag-breakout",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"breakout\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/breakout/SKILL.md": "before <required_skills> middle </required_skills> after\n<required_skills\n</required_skills\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"breakout\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"breakout\",\n      \"path\": \"skills/breakout/SKILL.md\",\n      \"content\": \"before &lt;required_skills> middle &lt;/required_skills> after\\n&lt;required_skills\\n&lt;/required_skills\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-unicode",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"uni\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/uni/SKILL.md": "traço — seta → aspas “x” ok\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"uni\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"uni\",\n      \"path\": \"skills/uni/SKILL.md\",\n      \"content\": \"traço — seta → aspas “x” ok\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-string",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": \"alpha\"\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": \"alpha\"\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-numero",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": 7\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": 7\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-null",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": null\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": null\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-objeto",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": {\n        \"k\": \"alpha\"\n      }\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": {\n      \"k\": \"alpha\"\n    }\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skills-item-null",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        null,\n        \"alpha\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      null,\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill null not found at skills/null/SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "skills-item-numero",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        7,\n        \"alpha\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      7,\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill 7 not found at skills/7/SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "skills-item-array",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        [\n          \"alpha\"\n        ]\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      [\n        \"alpha\"\n      ]\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill [ not found at skills/[/SKILL.md — skipped\nskill   \"alpha\" not found at skills/  \"alpha\"/SKILL.md — skipped\nskill ] not found at skills/]/SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "skills-item-vazio",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"\",\n        \"alpha\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"\",\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill  not found at skills//SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "skills-item-com-newline",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\\nbeta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\\nbeta\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "skill-nome-travessia",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"../fora\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "fora/SKILL.md": "Conteudo fora da base de skills.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"../fora\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill ../fora not found at skills/../fora/SKILL.md — skipped\n",
+      "state_after": {}
+    },
+    {
+      "label": "cap-tres-40k",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"beta\",\n        \"gama\"\n      ]\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {
+          "skills/alpha/SKILL.md": [
+            "x",
+            40960
+          ],
+          "skills/beta/SKILL.md": [
+            "y",
+            40960
+          ],
+          "skills/gama/SKILL.md": [
+            "z",
+            40960
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"beta\",\n      \"gama\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"<<x*40960>>\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"<<y*40960>>\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill gama dropped — aggregate skills context exceeded 100KB\n",
+      "state_after": {}
+    },
+    {
+      "label": "cap-fronteira-exata",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {
+          "skills/alpha/SKILL.md": [
+            "x",
+            51200
+          ],
+          "skills/beta/SKILL.md": [
+            "y",
+            51200
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"beta\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"<<x*51200>>\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"<<y*51200>>\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "cap-fronteira-mais-um",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\",\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {
+          "skills/alpha/SKILL.md": [
+            "x",
+            51200
+          ],
+          "skills/beta/SKILL.md": [
+            "y",
+            51201
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\",\n      \"beta\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"<<x*51200>>\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "skill beta dropped — aggregate skills context exceeded 100KB\n",
+      "state_after": {}
+    },
+    {
+      "label": "cap-gigante-primeiro",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"gigante\",\n        \"alpha\",\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n"
+        },
+        "repeat": {
+          "skills/gigante/SKILL.md": [
+            "x",
+            102401
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "skill beta dropped — aggregate skills context exceeded 100KB\nskill alpha dropped — aggregate skills context exceeded 100KB\nskill gigante dropped — aggregate skills context exceeded 100KB\n",
+      "state_after": {}
+    },
+    {
+      "label": "cap-multibyte-c",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"mb\",\n        \"pequeno\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/pequeno/SKILL.md": "pequeno\n"
+        },
+        "repeat": {
+          "skills/mb/SKILL.md": [
+            "—",
+            34200
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {
+          "LC_ALL": "C"
+        }
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "skill pequeno dropped — aggregate skills context exceeded 100KB\nskill mb dropped — aggregate skills context exceeded 100KB\n",
+      "state_after": {}
+    },
+    {
+      "label": "cap-multibyte-c-utf-8",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"mb\",\n        \"pequeno\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/pequeno/SKILL.md": "pequeno\n"
+        },
+        "repeat": {
+          "skills/mb/SKILL.md": [
+            "—",
+            34200
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {
+          "LC_ALL": "C.UTF-8"
+        }
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"mb\",\n      \"pequeno\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"mb\",\n      \"path\": \"skills/mb/SKILL.md\",\n      \"content\": \"<<—*34200>>\"\n    },\n    {\n      \"name\": \"pequeno\",\n      \"path\": \"skills/pequeno/SKILL.md\",\n      \"content\": \"pequeno\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-com-decisoes",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "# Brainstorm\n\n## Overview\n\nSome overview text.\n\n## Design Decisions\n\nUse approach A over approach B.\nPrefer jq for JSON manipulation.\n\n## Next Steps\n\nDo the implementation.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"Use approach A over approach B.\\nPrefer jq for JSON manipulation.\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-sem-secao",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "# Brainstorm\n\n## Overview\n\nNada aqui.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-arquivo-ausente",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/nao-existe.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/nao-existe.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-secao-ate-o-fim",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "# B\n\n## Design Decisions\n\nUltima linha.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"Ultima linha.\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-espacos-e-brancos",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "## Design Decisions\n\n   recuada   \n\n\n\tcom tab\t\n   \nfim\n\n## Outra\n\nnao.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"recuada\\ncom tab\\nfim\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-secao-duplicada",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "## Design Decisions\n\nprimeira\n\n## Design Decisions\n\nsegunda\n\n## Fim\n\nnao.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"primeira\\nsegunda\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-subsecao",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "## Design Decisions\n\nantes\n\n### Sub\n\ndentro\n\n## Fim\n\nnao.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"antes\\n### Sub\\ndentro\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-heading-sufixado",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "## Design Decisions e mais\n\ndentro\n\n## Fim\n\nnao.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"dentro\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-truncagem-64k",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {
+          ".aimi/brainstorms/b.md": [
+            "d",
+            200000,
+            "## Design Decisions\n"
+          ]
+        },
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 141,
+      "stdout": "",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-absoluto",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \"/ABS/.aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "# Brainstorm\n\n## Overview\n\nSome overview text.\n\n## Design Decisions\n\nUse approach A over approach B.\nPrefer jq for JSON manipulation.\n\n## Next Steps\n\nDo the implementation.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \"/TMP/.aimi/brainstorms/b.md\"\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"Use approach A over approach B.\\nPrefer jq for JSON manipulation.\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-null",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": null\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-numero",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": 7\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": 7\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "brainstorm-objeto",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": {\n      \"a\": 1\n    }\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": {\n      \"a\": 1\n    }\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-completo",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\",\n      \"designSpec\": \".aimi/design/b/design-spec.md\",\n      \"businessSpec\": \".aimi/design/b/business-spec.md\"\n    }\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\",\n      \"designSpec\": \".aimi/design/b/design-spec.md\",\n      \"businessSpec\": \".aimi/design/b/business-spec.md\"\n    }\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.\\n\\nBundle root: .aimi/design/b\\nDesignSpec: .aimi/design/b/design-spec.md\\nBusinessSpec: .aimi/design/b/business-spec.md\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-parcial",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\"\n    }\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\"\n    }\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.\\n\\nBundle root: .aimi/design/b\\nDesignSpec: (none)\\nBusinessSpec: (none)\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-vazio",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {}\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": {}\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.\\n\\nBundle root: (none)\\nDesignSpec: (none)\\nBusinessSpec: (none)\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-null",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": null\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": null\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-string",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"designBundle\": \"x\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:26): Cannot index string with string \"root\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "bundle-e-brainstorm",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\",\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\",\n      \"designSpec\": \".aimi/design/b/design-spec.md\",\n      \"businessSpec\": \".aimi/design/b/business-spec.md\"\n    }\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/brainstorms/b.md": "# Brainstorm\n\n## Overview\n\nSome overview text.\n\n## Design Decisions\n\nUse approach A over approach B.\nPrefer jq for JSON manipulation.\n\n## Next Steps\n\nDo the implementation.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\",\n    \"designBundle\": {\n      \"root\": \".aimi/design/b\",\n      \"designSpec\": \".aimi/design/b/design-spec.md\",\n      \"businessSpec\": \".aimi/design/b/business-spec.md\"\n    }\n  },\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"Use approach A over approach B.\\nPrefer jq for JSON manipulation.\",\n    \"bundleGuidance\": \"Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.\\n\\nBundle root: .aimi/design/b\\nDesignSpec: .aimi/design/b/design-spec.md\\nBusinessSpec: .aimi/design/b/business-spec.md\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "metadata-ausente",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": null,\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "metadata-string",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": \"nope\",\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:18): Cannot index string with string \"brainstormPath\"\n",
+      "state_after": {}
+    },
+    {
+      "label": "metadata-null",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": null,\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": null,\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "id-duplicado",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\"\n      ]\n    },\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Segunda\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Segunda\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"beta\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "dois-documentos",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"alpha\"\n      ]\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0,\n      \"skills\": [\n        \"beta\"\n      ]\n    }\n  ]\n}\n",
+        "files": {
+          "skills/alpha/SKILL.md": "Alpha skill content.\n",
+          "skills/beta/SKILL.md": "Beta skill content.\n"
+        },
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0,\n    \"skills\": [\n      \"alpha\"\n    ]\n  },\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"skills\": [\n    {\n      \"name\": \"alpha\",\n      \"path\": \"skills/alpha/SKILL.md\",\n      \"content\": \"Alpha skill content.\"\n    },\n    {\n      \"name\": \"beta\",\n      \"path\": \"skills/beta/SKILL.md\",\n      \"content\": \"Beta skill content.\"\n    }\n  ],\n  \"designContext\": {\n    \"decisions\": \"\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stderr": "",
+      "state_after": {}
+    },
+    {
+      "label": "json-malformado",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Story US-001 not found in /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n",
+      "state_after": {}
+    },
+    {
+      "label": "arquivo-vazio",
+      "args": [
+        "get-story-context",
+        "US-001"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <unknown>): Cannot iterate over null (null)\n",
+      "state_after": {}
+    },
+    {
+      "label": "historia-inexistente",
+      "args": [
+        "get-story-context",
+        "US-999"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Story US-999 not found in /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n",
+      "state_after": {}
+    },
+    {
+      "label": "id-invalido",
+      "args": [
+        "get-story-context",
+        "INVALIDO"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Invalid story ID format: INVALIDO (expected US-NNN)\n",
+      "state_after": {}
+    },
+    {
+      "label": "sem-argumento",
+      "args": [
+        "get-story-context"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"planPath\": null,\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story US-001\",\n      \"description\": \"As a user, I want US-001.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"status\": \"pending\",\n      \"priority\": 1,\n      \"dependsOn\": [],\n      \"wave\": 0\n    }\n  ]\n}\n",
+        "files": {},
+        "repeat": {},
+        "state": {},
+        "plugin_dir": true,
+        "env": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Usage: aimi-cli.sh get-story-context <story-id>\n",
+      "state_after": {}
+    }
+  ],
+  "_comment_story_context": "get-story-context -- cmd_get_story_context, 155 lines of bash running 8 fixed jq calls plus one per skill, captured exactly the way the five blocks before it were and before its bash was deleted: 57 cases at commit bdaa0ad. THE VERB EVERY SPAWNED STORY EXECUTOR RUNS FIRST, which is why its SHAPE is recorded case by case rather than described -- a downstream agent silently receiving an empty payload, or a key it did not expect, shows up as a confused agent and never as a red test. Recorded per case: the argv, the tasks file, the fixtures on disk (`files` verbatim, `repeat` as [unit, count] or [unit, count, prefix] so a 100KB skill costs the golden a line instead of 100KB), whether AIMI_PLUGIN_DIR was exported (`plugin_dir`, the only way to point _resolve_skills_base_dir at a fixture), the environment overrides (`env` -- LC_ALL, for the two multibyte twins) and the .aimi/state/ files it started with -- `input`, so every case is REPLAYABLE rather than merely described -- then exit code, stdout, stderr and every .aimi/ file left behind (`state_after`). All 57 `state_after` values are empty and that is this block's own evidence: get-story-context is a pure reader, takes no lock, writes no temp file and touches no document. Each case ran in its own throwaway root; three normalizations fired (the root to /TMP, the CLI's own path to /CLI/aimi-cli.sh, and a run-length collapse of any run of 256+ identical characters to `<<c*N>>`, applied to BOTH sides of every comparison so the cap fixtures cost kilobytes instead of a megabyte) and nothing else in the recording is non-deterministic -- two consecutive full captures were byte-identical. THIS CAPTURE PROVES LESS THAN THE FIVE BEFORE IT AND THE TEST MODULE SAYS SO: this function's logic was bash arrays and a shell loop rather than a jq program, so the recording pins payload SHAPE and the hand-written tests, not the corpus, carry the fidelity argument here. 48 of the 57 cases are identical after the port on all four fields, once the new skillsDropped key is removed from the actual stdout -- everything else, key order included, matches byte for byte. THE 9 THAT DIFFER SPLIT IN TWO GROUPS, and the second is not an excuse. GROUP ONE -- SIX ABORTS, NO CODE OF OURS RAN, and three of them are findings rather than trivia. (a) skill-vazio and skill-so-newlines: an EMPTY SKILL.md returned exit 1 with an empty stdout AND an empty stderr -- the agent got nothing at all, with no diagnostic anywhere. `(( skill_aggregate_chars += ${#skill_content} ))` evaluates to the new total, `((expr))` returns 1 when that total is 0, and `set -e` killed the verb; a skill file that is empty (or holds only newlines, which the command substitution strips to empty) triggers it only while the running total is still zero, which is to say when it is declared FIRST. skill-vazio-depois is the control: the same empty file declared second is harmless and matches byte for byte. The port emits it with `content: \"\"`. (b) brainstorm-truncagem-64k: exit 141, SIGPIPE. `head -c 65536` closes the pipe and `set -o pipefail` promotes the signal, so the 64KB truncation that pipeline was written for is UNREACHABLE -- anything large enough to reach it kills the verb first, and around the pipe-buffer boundary it is not even deterministic (70000 bytes gave exit 0 and exit 141 on the same host in the same minute; the recorded case uses 200000, which was stable across runs). The port truncates at 65536 bytes as the pipeline intended. (c) bundle-string, metadata-string and arquivo-vazio are jq's own message at jq's own exit 5, each now `Error: get-story-context: <file>: <expression>: <what went wrong>` at exit 1 -- only the wording and the number moved, and metadata-string is recorded with the BRAINSTORM read's message rather than the bundle's because the port keeps bash's evaluation order. GROUP TWO -- THE THREE RULES THAT CHANGED ON PURPOSE. (1) THE CAP COUNTS BYTES. cap-multibyte-c and cap-multibyte-c-utf-8 are the same input through the same CLI under two locales and they disagree, which is the whole argument: `${#skill_content}` counted bytes under LC_ALL=C (102600 for a 34200-character body of em-dashes, over the cap, so the reverse-pop loop drained pequeno and mb and then aborted at the zero total -- exit 1, no payload) and characters under LC_ALL=C.UTF-8 (34200, under the cap, both skills kept). The SKILL.md files in this repo are full of em-dashes and arrows, so the divergence was real and reachable rather than theoretical. Both locales now answer identically. Python's len() on a str counts characters and would have been no more faithful than the other reading, so this is a decision, not a translation: a payload cap defends a payload, and a payload is bytes. (2) A SKILL WHOSE OWN BODY EXCEEDS THE CAP IS DROPPED UP FRONT, before the aggregate loop, with its own warning naming it and its size. cap-gigante-primeiro records what that replaces: [oversized, small, small] drained the whole array from the end -- three warnings, the two legitimate skills lost first -- and then aborted the verb at the same zero total, so the caller got nothing. Post-port the oversized one is dropped and both small ones survive, which is what makes declaration order priority order. (3) skillsDropped[] IS EMITTED, always, `[]` when nothing was dropped, each entry {name, bytes, reason} with reason `oversized` or `aggregate`. The warnings stay on stderr where they were -- stdout is parsed by every consumer there is -- but a caller running this verb with 2>/dev/null could not previously tell a hydrated skill set from a halved one. THE AGGREGATE CAP ITSELF IS UNCHANGED AND THAT IS CHECKED RATHER THAN ASSUMED: cap-tres-40k (three 40KB skills, gama evicted from the end), cap-fronteira-exata (102400 bytes exactly, nothing evicted, because the test is `>` and not `>=`) and cap-fronteira-mais-um (one byte over, beta evicted) all match byte for byte, warning wording included. THE CORPUS EXERCISES THE SHAPES A CONSUMER BRANCHES ON, which is the anti-vacuum half. Skills: sem-skills and skills-vazio both give `[]`; skills-tres hydrates three in declaration order; skill-ausente reports `skill <name> not found at skills/<name>/SKILL.md — skipped` on stderr and keeps its two siblings; skill-prefixo-opencode resolves the aimi- prefixed directory OpenCode installs while still reporting the bare path; skills-base-nao-resolvida (no AIMI_PLUGIN_DIR, no CLAUDECODE) gives `[]` with NO warning at all; skill-tag-breakout pins both escapes and their order (the closing form first, or the opening rule would eat its `<` and leave `&lt;/…` unescaped); skill-sem-newline-final and every other recording show that `$(sed …)` stripped the trailing newline off every body. What the declared list may hold is pinned too, because `jq -r '.[]' 2>/dev/null` swallowed all of it: skills-string and skills-numero yield NO skills and no complaint, skills-objeto iterates an object to its VALUES, skills-item-null and skills-item-numero look up `skills/null/` and `skills/7/`, skills-item-vazio looks up `skills//SKILL.md`, and skills-item-array records `[\"alpha\"]` pretty-printed by `-r` over three lines and read back by `mapfile` as the three skill names `[`, `  \"alpha\"` and `]`. skill-nome-travessia records the permissive half deliberately: a declared name of `../fora` is looked up at `skills/../fora/SKILL.md` with no confinement, exactly as bash did, and porting it unchanged keeps this block a record of what the code did rather than of what anyone wished it did. designContext: brainstorm-com-decisoes, brainstorm-sem-secao, brainstorm-arquivo-ausente, brainstorm-null, brainstorm-numero and brainstorm-objeto cover the gate; brainstorm-secao-ate-o-fim, brainstorm-subsecao (a `### ` heading stays INSIDE), brainstorm-heading-sufixado (the match is a prefix, so `## Design Decisions e mais` opens the section) and brainstorm-secao-duplicada (a SECOND `## Design Decisions` does NOT close the section -- awk tested that rule first and `next`ed past the closing one, so the two merge) cover the scanner; brainstorm-espacos-e-brancos pins the per-line whitespace strip and the blank-line removal; brainstorm-absoluto pins that an absolute path is used as given while a relative one is joined onto PROJECT_ROOT, neither of them confined. bundle-completo, bundle-parcial (the three fields default to the literal `(none)`, not to blanks), bundle-vazio (`{}` is two characters, so the gate OPENS on an empty object and prints three `(none)`s), bundle-null and bundle-e-brainstorm cover the other half of designContext. And the document itself: metadata-ausente and metadata-null both emit `metadata: null` rather than omitting the key; id-duplicado emits the WHOLE payload twice because `select` is a filter over a stream and not a lookup; dois-documentos takes its story and metadata from the first document while the skills read ran over both; json-malformado is refused by bash's own validate_story_exists before Python is reached at all, as are historia-inexistente, id-invalido and sem-argumento."
 }

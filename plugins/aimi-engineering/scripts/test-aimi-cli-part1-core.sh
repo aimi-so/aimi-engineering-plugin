@@ -1397,6 +1397,84 @@ TASKSEOF
   rm -rf "$tmp_dir"
 }
 
+test_get_story_context_skills_dropped() {
+  echo ""
+  echo "=== Testing get-story-context skillsDropped: always present, and what it names ==="
+
+  # The eviction warnings go to stderr and always did, because stdout is piped
+  # straight into a JSON parse by every consumer there is. A caller running this
+  # verb with 2>/dev/null could not tell a hydrated skill set from a halved one,
+  # so the payload now carries the drop report itself.
+
+  # (1) Nothing dropped: the key is [], never absent. The standard fixture's
+  # stories declare no skills at all, which is the emptiest path there is.
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  local output
+  output=$("$CLI" get-story-context US-001 2>/dev/null)
+  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
+    "skills_dropped: the key is an empty array when nothing was dropped"
+
+  # (2) An individually oversized skill is dropped BEFORE the aggregate loop, so
+  # the two small siblings declared after it survive. The pre-port loop popped
+  # from the end until the total fit, which took both of them down first and then
+  # aborted the verb outright — the agent received no payload at all.
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+  mkdir -p "$tmp_dir/skills/gigante" "$tmp_dir/skills/alpha" "$tmp_dir/skills/beta"
+  python3 -c "import sys; sys.stdout.write('x' * 102401)" > "$tmp_dir/skills/gigante/SKILL.md"
+  printf 'Alpha skill content.\n' > "$tmp_dir/skills/alpha/SKILL.md"
+  printf 'Beta skill content.\n' > "$tmp_dir/skills/beta/SKILL.md"
+
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-oversized-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: oversized skill",
+    "type": "feat",
+    "branchName": "feat/oversized",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story declaring an oversized skill first",
+      "description": "Test story",
+      "acceptanceCriteria": ["Small siblings survive"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["gigante", "alpha", "beta"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  local stderr_file exit_code
+  stderr_file=$(mktemp)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>"$stderr_file")
+  exit_code=$?
+  local stderr_output
+  stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "skills_dropped: an oversized skill does not sink the payload"
+  assert_eq '["alpha","beta"]' "$(printf '%s' "$output" | jq -c '[.skills[].name]')" \
+    "skills_dropped: both small siblings survive an oversized skill declared first"
+  assert_eq '[{"name":"gigante","bytes":102401,"reason":"oversized"}]' \
+    "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
+    "skills_dropped: the oversized skill is reported with its own size and reason"
+  assert_stderr_contains "exceeds the 100KB skills cap on its own" "$stderr_output" \
+    "skills_dropped: the oversized drop has its own warning, distinct from the aggregate one"
+
+  rm -rf "$tmp_dir"
+}
+
 test_get_story_context_design_context() {
   echo ""
   echo "=== Testing get-story-context populates designContext from brainstormPath + designBundle ==="
@@ -7243,6 +7321,7 @@ main() {
   test_get_story_context_skills_opencode_prefix
   test_get_story_context_skills_absent
   test_get_story_context_skills_cap_drop
+  test_get_story_context_skills_dropped
   test_get_story_context_design_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
