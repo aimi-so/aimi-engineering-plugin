@@ -144,13 +144,20 @@ check_jq() {
   fi
 }
 
-# Ensure python3 is available. Mirrors check_jq, and is called by the roadmap
-# verbs, story-merge and the tasks.json verbs that have crossed -- the eight
-# readers and the seven locked writers. Every other verb in this file is pure
-# bash + jq and must keep working on a host without python3.
+# Ensure python3 is available. Mirrors check_jq. Its scope is this SCRIPT, not
+# one family of verbs: the roadmap verbs, story-merge and every tasks.json verb
+# answer from a module beside this file, and that last group includes the
+# per-story hot path /aimi:execute runs -- mark-*, list-ready, next-story,
+# count-pending and get-story-context, the verb every spawned executor runs as
+# its first action. What still runs without python3 is the environment and
+# forge half (version, check-version, prime-cache, init-session, detect-*,
+# forge-*, setup-branch) plus estimate-payload and list-archivable, and that
+# residue is too small to be worth naming as the rule: assume aimi-cli.sh needs
+# python3. The whole-repo statement, including which host the requirement is
+# new on, is in the top-level CLAUDE.md § Testing.
 check_python3() {
   if ! command -v python3 &> /dev/null; then
-    echo "Error: python3 is required by the roadmap verbs, story-merge and the tasks.json verbs but is not installed." >&2
+    echo "Error: python3 is required by aimi-cli.sh but is not installed." >&2
     echo "Install with: brew install python (macOS) or apt install python3 (Linux)" >&2
     exit 1
   fi
