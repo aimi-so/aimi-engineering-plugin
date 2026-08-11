@@ -32677,5 +32677,1630 @@
       "state_after": {}
     }
   ],
-  "_comment_story_context": "get-story-context -- cmd_get_story_context, 155 lines of bash running 8 fixed jq calls plus one per skill, captured exactly the way the five blocks before it were and before its bash was deleted: 57 cases at commit bdaa0ad. THE VERB EVERY SPAWNED STORY EXECUTOR RUNS FIRST, which is why its SHAPE is recorded case by case rather than described -- a downstream agent silently receiving an empty payload, or a key it did not expect, shows up as a confused agent and never as a red test. Recorded per case: the argv, the tasks file, the fixtures on disk (`files` verbatim, `repeat` as [unit, count] or [unit, count, prefix] so a 100KB skill costs the golden a line instead of 100KB), whether AIMI_PLUGIN_DIR was exported (`plugin_dir`, the only way to point _resolve_skills_base_dir at a fixture), the environment overrides (`env` -- LC_ALL, for the two multibyte twins) and the .aimi/state/ files it started with -- `input`, so every case is REPLAYABLE rather than merely described -- then exit code, stdout, stderr and every .aimi/ file left behind (`state_after`). All 57 `state_after` values are empty and that is this block's own evidence: get-story-context is a pure reader, takes no lock, writes no temp file and touches no document. Each case ran in its own throwaway root; three normalizations fired (the root to /TMP, the CLI's own path to /CLI/aimi-cli.sh, and a run-length collapse of any run of 256+ identical characters to `<<c*N>>`, applied to BOTH sides of every comparison so the cap fixtures cost kilobytes instead of a megabyte) and nothing else in the recording is non-deterministic -- two consecutive full captures were byte-identical. THIS CAPTURE PROVES LESS THAN THE FIVE BEFORE IT AND THE TEST MODULE SAYS SO: this function's logic was bash arrays and a shell loop rather than a jq program, so the recording pins payload SHAPE and the hand-written tests, not the corpus, carry the fidelity argument here. 48 of the 57 cases are identical after the port on all four fields, once the new skillsDropped key is removed from the actual stdout -- everything else, key order included, matches byte for byte. THE 9 THAT DIFFER SPLIT IN TWO GROUPS, and the second is not an excuse. GROUP ONE -- SIX ABORTS, NO CODE OF OURS RAN, and three of them are findings rather than trivia. (a) skill-vazio and skill-so-newlines: an EMPTY SKILL.md returned exit 1 with an empty stdout AND an empty stderr -- the agent got nothing at all, with no diagnostic anywhere. `(( skill_aggregate_chars += ${#skill_content} ))` evaluates to the new total, `((expr))` returns 1 when that total is 0, and `set -e` killed the verb; a skill file that is empty (or holds only newlines, which the command substitution strips to empty) triggers it only while the running total is still zero, which is to say when it is declared FIRST. skill-vazio-depois is the control: the same empty file declared second is harmless and matches byte for byte. The port emits it with `content: \"\"`. (b) brainstorm-truncagem-64k: exit 141, SIGPIPE. `head -c 65536` closes the pipe and `set -o pipefail` promotes the signal, so the 64KB truncation that pipeline was written for is UNREACHABLE -- anything large enough to reach it kills the verb first, and around the pipe-buffer boundary it is not even deterministic (70000 bytes gave exit 0 and exit 141 on the same host in the same minute; the recorded case uses 200000, which was stable across runs). The port truncates at 65536 bytes as the pipeline intended. (c) bundle-string, metadata-string and arquivo-vazio are jq's own message at jq's own exit 5, each now `Error: get-story-context: <file>: <expression>: <what went wrong>` at exit 1 -- only the wording and the number moved, and metadata-string is recorded with the BRAINSTORM read's message rather than the bundle's because the port keeps bash's evaluation order. GROUP TWO -- THE THREE RULES THAT CHANGED ON PURPOSE. (1) THE CAP COUNTS BYTES. cap-multibyte-c and cap-multibyte-c-utf-8 are the same input through the same CLI under two locales and they disagree, which is the whole argument: `${#skill_content}` counted bytes under LC_ALL=C (102600 for a 34200-character body of em-dashes, over the cap, so the reverse-pop loop drained pequeno and mb and then aborted at the zero total -- exit 1, no payload) and characters under LC_ALL=C.UTF-8 (34200, under the cap, both skills kept). The SKILL.md files in this repo are full of em-dashes and arrows, so the divergence was real and reachable rather than theoretical. Both locales now answer identically. Python's len() on a str counts characters and would have been no more faithful than the other reading, so this is a decision, not a translation: a payload cap defends a payload, and a payload is bytes. (2) A SKILL WHOSE OWN BODY EXCEEDS THE CAP IS DROPPED UP FRONT, before the aggregate loop, with its own warning naming it and its size. cap-gigante-primeiro records what that replaces: [oversized, small, small] drained the whole array from the end -- three warnings, the two legitimate skills lost first -- and then aborted the verb at the same zero total, so the caller got nothing. Post-port the oversized one is dropped and both small ones survive, which is what makes declaration order priority order. (3) skillsDropped[] IS EMITTED, always, `[]` when nothing was dropped, each entry {name, bytes, reason} with reason `oversized` or `aggregate`. The warnings stay on stderr where they were -- stdout is parsed by every consumer there is -- but a caller running this verb with 2>/dev/null could not previously tell a hydrated skill set from a halved one. THE AGGREGATE CAP ITSELF IS UNCHANGED AND THAT IS CHECKED RATHER THAN ASSUMED: cap-tres-40k (three 40KB skills, gama evicted from the end), cap-fronteira-exata (102400 bytes exactly, nothing evicted, because the test is `>` and not `>=`) and cap-fronteira-mais-um (one byte over, beta evicted) all match byte for byte, warning wording included. THE CORPUS EXERCISES THE SHAPES A CONSUMER BRANCHES ON, which is the anti-vacuum half. Skills: sem-skills and skills-vazio both give `[]`; skills-tres hydrates three in declaration order; skill-ausente reports `skill <name> not found at skills/<name>/SKILL.md — skipped` on stderr and keeps its two siblings; skill-prefixo-opencode resolves the aimi- prefixed directory OpenCode installs while still reporting the bare path; skills-base-nao-resolvida (no AIMI_PLUGIN_DIR, no CLAUDECODE) gives `[]` with NO warning at all; skill-tag-breakout pins both escapes and their order (the closing form first, or the opening rule would eat its `<` and leave `&lt;/…` unescaped); skill-sem-newline-final and every other recording show that `$(sed …)` stripped the trailing newline off every body. What the declared list may hold is pinned too, because `jq -r '.[]' 2>/dev/null` swallowed all of it: skills-string and skills-numero yield NO skills and no complaint, skills-objeto iterates an object to its VALUES, skills-item-null and skills-item-numero look up `skills/null/` and `skills/7/`, skills-item-vazio looks up `skills//SKILL.md`, and skills-item-array records `[\"alpha\"]` pretty-printed by `-r` over three lines and read back by `mapfile` as the three skill names `[`, `  \"alpha\"` and `]`. skill-nome-travessia records the permissive half deliberately: a declared name of `../fora` is looked up at `skills/../fora/SKILL.md` with no confinement, exactly as bash did, and porting it unchanged keeps this block a record of what the code did rather than of what anyone wished it did. designContext: brainstorm-com-decisoes, brainstorm-sem-secao, brainstorm-arquivo-ausente, brainstorm-null, brainstorm-numero and brainstorm-objeto cover the gate; brainstorm-secao-ate-o-fim, brainstorm-subsecao (a `### ` heading stays INSIDE), brainstorm-heading-sufixado (the match is a prefix, so `## Design Decisions e mais` opens the section) and brainstorm-secao-duplicada (a SECOND `## Design Decisions` does NOT close the section -- awk tested that rule first and `next`ed past the closing one, so the two merge) cover the scanner; brainstorm-espacos-e-brancos pins the per-line whitespace strip and the blank-line removal; brainstorm-absoluto pins that an absolute path is used as given while a relative one is joined onto PROJECT_ROOT, neither of them confined. bundle-completo, bundle-parcial (the three fields default to the literal `(none)`, not to blanks), bundle-vazio (`{}` is two characters, so the gate OPENS on an empty object and prints three `(none)`s), bundle-null and bundle-e-brainstorm cover the other half of designContext. And the document itself: metadata-ausente and metadata-null both emit `metadata: null` rather than omitting the key; id-duplicado emits the WHOLE payload twice because `select` is a filter over a stream and not a lookup; dois-documentos takes its story and metadata from the first document while the skills read ran over both; json-malformado is refused by bash's own validate_story_exists before Python is reached at all, as are historia-inexistente, id-invalido and sem-argumento."
+  "_comment_story_context": "get-story-context -- cmd_get_story_context, 155 lines of bash running 8 fixed jq calls plus one per skill, captured exactly the way the five blocks before it were and before its bash was deleted: 57 cases at commit bdaa0ad. THE VERB EVERY SPAWNED STORY EXECUTOR RUNS FIRST, which is why its SHAPE is recorded case by case rather than described -- a downstream agent silently receiving an empty payload, or a key it did not expect, shows up as a confused agent and never as a red test. Recorded per case: the argv, the tasks file, the fixtures on disk (`files` verbatim, `repeat` as [unit, count] or [unit, count, prefix] so a 100KB skill costs the golden a line instead of 100KB), whether AIMI_PLUGIN_DIR was exported (`plugin_dir`, the only way to point _resolve_skills_base_dir at a fixture), the environment overrides (`env` -- LC_ALL, for the two multibyte twins) and the .aimi/state/ files it started with -- `input`, so every case is REPLAYABLE rather than merely described -- then exit code, stdout, stderr and every .aimi/ file left behind (`state_after`). All 57 `state_after` values are empty and that is this block's own evidence: get-story-context is a pure reader, takes no lock, writes no temp file and touches no document. Each case ran in its own throwaway root; three normalizations fired (the root to /TMP, the CLI's own path to /CLI/aimi-cli.sh, and a run-length collapse of any run of 256+ identical characters to `<<c*N>>`, applied to BOTH sides of every comparison so the cap fixtures cost kilobytes instead of a megabyte) and nothing else in the recording is non-deterministic -- two consecutive full captures were byte-identical. THIS CAPTURE PROVES LESS THAN THE FIVE BEFORE IT AND THE TEST MODULE SAYS SO: this function's logic was bash arrays and a shell loop rather than a jq program, so the recording pins payload SHAPE and the hand-written tests, not the corpus, carry the fidelity argument here. 48 of the 57 cases are identical after the port on all four fields, once the new skillsDropped key is removed from the actual stdout -- everything else, key order included, matches byte for byte. THE 9 THAT DIFFER SPLIT IN TWO GROUPS, and the second is not an excuse. GROUP ONE -- SIX ABORTS, NO CODE OF OURS RAN, and three of them are findings rather than trivia. (a) skill-vazio and skill-so-newlines: an EMPTY SKILL.md returned exit 1 with an empty stdout AND an empty stderr -- the agent got nothing at all, with no diagnostic anywhere. `(( skill_aggregate_chars += ${#skill_content} ))` evaluates to the new total, `((expr))` returns 1 when that total is 0, and `set -e` killed the verb; a skill file that is empty (or holds only newlines, which the command substitution strips to empty) triggers it only while the running total is still zero, which is to say when it is declared FIRST. skill-vazio-depois is the control: the same empty file declared second is harmless and matches byte for byte. The port emits it with `content: \"\"`. (b) brainstorm-truncagem-64k: exit 141, SIGPIPE. `head -c 65536` closes the pipe and `set -o pipefail` promotes the signal, so the 64KB truncation that pipeline was written for is UNREACHABLE -- anything large enough to reach it kills the verb first, and around the pipe-buffer boundary it is not even deterministic (70000 bytes gave exit 0 and exit 141 on the same host in the same minute; the recorded case uses 200000, which was stable across runs). The port truncates at 65536 bytes as the pipeline intended. (c) bundle-string, metadata-string and arquivo-vazio are jq's own message at jq's own exit 5, each now `Error: get-story-context: <file>: <expression>: <what went wrong>` at exit 1 -- only the wording and the number moved, and metadata-string is recorded with the BRAINSTORM read's message rather than the bundle's because the port keeps bash's evaluation order. GROUP TWO -- THE THREE RULES THAT CHANGED ON PURPOSE. (1) THE CAP COUNTS BYTES. cap-multibyte-c and cap-multibyte-c-utf-8 are the same input through the same CLI under two locales and they disagree, which is the whole argument: `${#skill_content}` counted bytes under LC_ALL=C (102600 for a 34200-character body of em-dashes, over the cap, so the reverse-pop loop drained pequeno and mb and then aborted at the zero total -- exit 1, no payload) and characters under LC_ALL=C.UTF-8 (34200, under the cap, both skills kept). The SKILL.md files in this repo are full of em-dashes and arrows, so the divergence was real and reachable rather than theoretical. Both locales now answer identically. Python's len() on a str counts characters and would have been no more faithful than the other reading, so this is a decision, not a translation: a payload cap defends a payload, and a payload is bytes. (2) A SKILL WHOSE OWN BODY EXCEEDS THE CAP IS DROPPED UP FRONT, before the aggregate loop, with its own warning naming it and its size. cap-gigante-primeiro records what that replaces: [oversized, small, small] drained the whole array from the end -- three warnings, the two legitimate skills lost first -- and then aborted the verb at the same zero total, so the caller got nothing. Post-port the oversized one is dropped and both small ones survive, which is what makes declaration order priority order. (3) skillsDropped[] IS EMITTED, always, `[]` when nothing was dropped, each entry {name, bytes, reason} with reason `oversized` or `aggregate`. The warnings stay on stderr where they were -- stdout is parsed by every consumer there is -- but a caller running this verb with 2>/dev/null could not previously tell a hydrated skill set from a halved one. THE AGGREGATE CAP ITSELF IS UNCHANGED AND THAT IS CHECKED RATHER THAN ASSUMED: cap-tres-40k (three 40KB skills, gama evicted from the end), cap-fronteira-exata (102400 bytes exactly, nothing evicted, because the test is `>` and not `>=`) and cap-fronteira-mais-um (one byte over, beta evicted) all match byte for byte, warning wording included. THE CORPUS EXERCISES THE SHAPES A CONSUMER BRANCHES ON, which is the anti-vacuum half. Skills: sem-skills and skills-vazio both give `[]`; skills-tres hydrates three in declaration order; skill-ausente reports `skill <name> not found at skills/<name>/SKILL.md — skipped` on stderr and keeps its two siblings; skill-prefixo-opencode resolves the aimi- prefixed directory OpenCode installs while still reporting the bare path; skills-base-nao-resolvida (no AIMI_PLUGIN_DIR, no CLAUDECODE) gives `[]` with NO warning at all; skill-tag-breakout pins both escapes and their order (the closing form first, or the opening rule would eat its `<` and leave `&lt;/…` unescaped); skill-sem-newline-final and every other recording show that `$(sed …)` stripped the trailing newline off every body. What the declared list may hold is pinned too, because `jq -r '.[]' 2>/dev/null` swallowed all of it: skills-string and skills-numero yield NO skills and no complaint, skills-objeto iterates an object to its VALUES, skills-item-null and skills-item-numero look up `skills/null/` and `skills/7/`, skills-item-vazio looks up `skills//SKILL.md`, and skills-item-array records `[\"alpha\"]` pretty-printed by `-r` over three lines and read back by `mapfile` as the three skill names `[`, `  \"alpha\"` and `]`. skill-nome-travessia records the permissive half deliberately: a declared name of `../fora` is looked up at `skills/../fora/SKILL.md` with no confinement, exactly as bash did, and porting it unchanged keeps this block a record of what the code did rather than of what anyone wished it did. designContext: brainstorm-com-decisoes, brainstorm-sem-secao, brainstorm-arquivo-ausente, brainstorm-null, brainstorm-numero and brainstorm-objeto cover the gate; brainstorm-secao-ate-o-fim, brainstorm-subsecao (a `### ` heading stays INSIDE), brainstorm-heading-sufixado (the match is a prefix, so `## Design Decisions e mais` opens the section) and brainstorm-secao-duplicada (a SECOND `## Design Decisions` does NOT close the section -- awk tested that rule first and `next`ed past the closing one, so the two merge) cover the scanner; brainstorm-espacos-e-brancos pins the per-line whitespace strip and the blank-line removal; brainstorm-absoluto pins that an absolute path is used as given while a relative one is joined onto PROJECT_ROOT, neither of them confined. bundle-completo, bundle-parcial (the three fields default to the literal `(none)`, not to blanks), bundle-vazio (`{}` is two characters, so the gate OPENS on an empty object and prints three `(none)`s), bundle-null and bundle-e-brainstorm cover the other half of designContext. And the document itself: metadata-ausente and metadata-null both emit `metadata: null` rather than omitting the key; id-duplicado emits the WHOLE payload twice because `select` is a filter over a stream and not a lookup; dois-documentos takes its story and metadata from the first document while the skills read ran over both; json-malformado is refused by bash's own validate_story_exists before Python is reached at all, as are historia-inexistente, id-invalido and sem-argumento.",
+  "archive_cases": [
+    {
+      "label": "archive-sucesso",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-caminho-absoluto",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-skipped-tambem-e-terminal",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story 2\",\n      \"status\": \"skipped\",\n      \"priority\": 2,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-sem-diretorio-archive",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-nao-terminal",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story 2\",\n      \"status\": \"in_progress\",\n      \"priority\": 2,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Task file has non-terminal stories — cannot archive\n",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus",
+          "type": "ref",
+          "branchName": "ref/corpus",
+          "createdAt": "2020-01-01",
+          "maxConcurrency": 4
+        },
+        "userStories": [
+          {
+            "id": "US-001",
+            "title": "Story 1",
+            "status": "completed",
+            "priority": 1,
+            "dependsOn": []
+          },
+          {
+            "id": "US-002",
+            "title": "Story 2",
+            "status": "in_progress",
+            "priority": 2,
+            "dependsOn": []
+          }
+        ]
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-nao-terminal-com-lock",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story 2\",\n      \"status\": \"in_progress\",\n      \"priority\": 2,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json.lock": ""
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Task file has non-terminal stories — cannot archive\n",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus",
+          "type": "ref",
+          "branchName": "ref/corpus",
+          "createdAt": "2020-01-01",
+          "maxConcurrency": 4
+        },
+        "userStories": [
+          {
+            "id": "US-001",
+            "title": "Story 1",
+            "status": "completed",
+            "priority": 1,
+            "dependsOn": []
+          },
+          {
+            "id": "US-002",
+            "title": "Story 2",
+            "status": "in_progress",
+            "priority": 2,
+            "dependsOn": []
+          }
+        ]
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json.lock",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-sem-userstories",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"metadata\": {\"title\": \"ref: corpus\"}}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus"
+        }
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-userstories-nao-lista",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": \"nope\"}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "file": {
+        "schemaVersion": "3.3",
+        "userStories": "nope"
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-json-malformado",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 4,
+      "stdout": "",
+      "stderr": "",
+      "file": "{\"schemaVersion\": \"3.3\", \"userStories\": [\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-arquivo-vazio",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Task file has non-terminal stories — cannot archive\n",
+      "file": "",
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-dois-documentos",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story 2\",\n      \"status\": \"skipped\",\n      \"priority\": 2,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "/CLI/aimi-cli.sh: line <N>: [: 0\n0: integer expression expected\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-dois-documentos-um-aberto",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    },\n    {\n      \"id\": \"US-002\",\n      \"title\": \"Story 2\",\n      \"status\": \"in_progress\",\n      \"priority\": 2,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "/CLI/aimi-cli.sh: line <N>: [: 0\n1: integer expression expected\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-arquivo-inexistente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/nao-existe.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Task file not found: .aimi/tasks/nao-existe.json\n",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus",
+          "type": "ref",
+          "branchName": "ref/corpus",
+          "createdAt": "2020-01-01",
+          "maxConcurrency": 4
+        },
+        "userStories": [
+          {
+            "id": "US-001",
+            "title": "Story 1",
+            "status": "completed",
+            "priority": 1,
+            "dependsOn": []
+          }
+        ]
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-sem-argumento",
+      "verb": "archive-task",
+      "args": [
+        "archive-task"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Usage: aimi-cli.sh archive-task <path>\n",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus",
+          "type": "ref",
+          "branchName": "ref/corpus",
+          "createdAt": "2020-01-01",
+          "maxConcurrency": 4
+        },
+        "userStories": [
+          {
+            "id": "US-001",
+            "title": "Story 1",
+            "status": "completed",
+            "priority": 1,
+            "dependsOn": []
+          }
+        ]
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-argumento-fora-do-projeto",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        "../fora/alheio-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/alheio-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n"
+        },
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/alheio-tasks.json\n  Project root: /TMP\n",
+      "file": {
+        "schemaVersion": "3.3",
+        "metadata": {
+          "title": "ref: corpus",
+          "type": "ref",
+          "branchName": "ref/corpus",
+          "createdAt": "2020-01-01",
+          "maxConcurrency": 4
+        },
+        "userStories": [
+          {
+            "id": "US-001",
+            "title": "Story 1",
+            "status": "completed",
+            "priority": 1,
+            "dependsOn": []
+          }
+        ]
+      },
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/alheio-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n"
+      }
+    },
+    {
+      "label": "archive-userstories-vazio",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": []\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-lock-acompanha",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json.lock": ""
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/2020-01-01-corpus-tasks.json.lock",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-lock-e-diretorio",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [
+          ".aimi/tasks/2020-01-01-corpus-tasks.json.lock"
+        ],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json.lock/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-colisao",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/archive/2020-01-01-corpus-tasks.json": "ja estava aqui\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks-2.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks-2.json",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-colisao-com-lock",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/archive/2020-01-01-corpus-tasks.json": "ja estava aqui\n",
+          ".aimi/archive/2020-01-01-corpus-tasks.json.lock": "",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json.lock": ""
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks-2.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks-2.json",
+        ".aimi/archive/2020-01-01-corpus-tasks-2.json.lock",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/2020-01-01-corpus-tasks.json.lock",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-colisao-multipla",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/archive/2020-01-01-corpus-tasks.json": "primeiro\n",
+          ".aimi/archive/2020-01-01-corpus-2-tasks.json": "nao colide\n",
+          ".aimi/archive/2020-01-01-corpus-tasks-2.json": "segundo\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks-3.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-2-tasks.json",
+        ".aimi/archive/2020-01-01-corpus-tasks-2.json",
+        ".aimi/archive/2020-01-01-corpus-tasks-3.json",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-colisao-ponto-precoce",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/corpus.v2-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "corpus.v2-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/archive/corpus.v2-tasks.json": "ja estava aqui\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/corpus-2.v2-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/corpus-2.v2-tasks.json",
+        ".aimi/archive/corpus.v2-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-ja-no-archive",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/archive/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": null,
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/archive/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks-2.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks-2.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-e-prototype",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \".aimi/research/r1.md\",\n      \".aimi/research/r2.md\"\n    ],\n    \"prototypePaths\": [\n      \".aimi/prototypes/p1.html\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/research/r1.md": "r1\n",
+          ".aimi/research/r2.md": "r2\n",
+          ".aimi/prototypes/p1.html": "<p1>\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 2,\n    \"prototypeCleaned\": 1\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/prototypes/",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-ausente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \".aimi/research/r1.md\",\n      \".aimi/research/sumiu.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/research/r1.md": "r1\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 1,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-lista-vazia",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [],\n    \"prototypePaths\": []\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-nao-lista",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": \"nao-e-lista\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-absoluto-dentro",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \"/TMP/.aimi/research/r1.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/research/r1.md": "r1\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 1,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-sem-metadata",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\"schemaVersion\": \"3.3\", \"userStories\": []}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-research-absoluto-fora",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \"/OUTSIDE/fora/absoluto.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/absoluto.md": "alvo absoluto\n"
+        },
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/absoluto.md\n  Project root: /TMP\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/absoluto.md": "alvo absoluto\n"
+      }
+    },
+    {
+      "label": "archive-research-traversal",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \"../fora/traversal.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/traversal.md": "alvo por traversal\n"
+        },
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/traversal.md\n  Project root: /TMP\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/traversal.md": "alvo por traversal\n"
+      }
+    },
+    {
+      "label": "archive-research-symlink-fora",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \".aimi/research/link.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/alvo-do-link.md": "alvo do symlink\n"
+        },
+        "symlinks": {
+          ".aimi/research/link.md": "/OUTSIDE/fora/alvo-do-link.md"
+        }
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/alvo-do-link.md\n  Project root: /TMP\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/link.md -> /OUTSIDE/fora/alvo-do-link.md",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/alvo-do-link.md": "alvo do symlink\n"
+      }
+    },
+    {
+      "label": "archive-research-fora-inexistente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \"../fora/nunca-existiu.md\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-prototype-fora-depois-do-research",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \".aimi/research/r1.md\"\n    ],\n    \"prototypePaths\": [\n      \"../fora/proto.html\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/research/r1.md": "r1\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/proto.html": "<proto>\n"
+        },
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/proto.html\n  Project root: /TMP\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/proto.html": "<proto>\n"
+      }
+    },
+    {
+      "label": "archive-research-diretorio",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"researchPaths\": [\n      \".aimi/research/pasta\"\n    ]\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/research/pasta/dentro-1.md": "sobrevive 1\n",
+          ".aimi/research/pasta/sub/dentro-2.md": "sobrevive 2\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "rm: cannot remove '/TMP/.aimi/research/pasta': Is a directory\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/research/pasta/",
+        ".aimi/research/pasta/dentro-1.md",
+        ".aimi/research/pasta/sub/",
+        ".aimi/research/pasta/sub/dentro-2.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-brainstorm",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/brainstorms/b.md": "brainstorm\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": \"/TMP/.aimi/archive/b.md\",\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/b.md",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/brainstorms/",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-brainstorm-absoluto",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \"/TMP/.aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/brainstorms/b.md": "brainstorm\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": \"/TMP/.aimi/archive/b.md\",\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/b.md",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/brainstorms/",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-brainstorm-ausente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/sumiu.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-brainstorm-fora-inexistente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \"../fora/nunca-existiu.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": null,\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    },
+    {
+      "label": "archive-brainstorm-fora-existente",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \"../fora/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n"
+        },
+        "dirs": [],
+        "outside": {
+          "fora/b.md": "brainstorm de fora\n"
+        },
+        "symlinks": {}
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: Path escapes project root — access denied\n  Path:         /OUTSIDE/fora/b.md\n  Project root: /TMP\n",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {
+        "fora/": null,
+        "fora/b.md": "brainstorm de fora\n"
+      }
+    },
+    {
+      "label": "archive-brainstorm-colide",
+      "verb": "archive-task",
+      "args": [
+        "archive-task",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "input": {
+        "tasks_file": "2020-01-01-corpus-tasks.json",
+        "tasks": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\",\n    \"createdAt\": \"2020-01-01\",\n    \"maxConcurrency\": 4,\n    \"brainstormPath\": \".aimi/brainstorms/b.md\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"Story 1\",\n      \"status\": \"completed\",\n      \"priority\": 1,\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+        "files": {
+          ".aimi/research/nao-listado.md": "decoy: never named in metadata\n",
+          ".aimi/archive/ja-arquivado.md": "decoy: already in the archive\n",
+          "fora-do-aimi.txt": "decoy: outside .aimi entirely\n",
+          ".aimi/brainstorms/b.md": "brainstorm\n",
+          ".aimi/archive/b.md": "ja havia um b.md\n"
+        },
+        "dirs": [],
+        "outside": {},
+        "symlinks": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"archived\": {\n    \"task\": \"/TMP/.aimi/archive/2020-01-01-corpus-tasks.json\",\n    \"brainstorm\": \"/TMP/.aimi/archive/b-2.md\",\n    \"researchCleaned\": 0,\n    \"prototypeCleaned\": 0\n  }\n}\n",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        ".aimi/",
+        ".aimi/archive/",
+        ".aimi/archive/2020-01-01-corpus-tasks.json",
+        ".aimi/archive/b-2.md",
+        ".aimi/archive/b.md",
+        ".aimi/archive/ja-arquivado.md",
+        ".aimi/brainstorms/",
+        ".aimi/research/",
+        ".aimi/research/nao-listado.md",
+        ".aimi/tasks/",
+        "fora-do-aimi.txt"
+      ],
+      "outside_after": {}
+    }
+  ],
+  "_comment_archive": "archive-task -- cmd_archive_task, captured the way the six tasks.json blocks before it were, by running the bash and jq that used to live in aimi-cli.sh BEFORE any of it was deleted: 38 cases at commit 30053d7. THIS IS THE ONLY VERB IN THE FILE THAT DELETES A USER'S FILES, so the record is of the FILESYSTEM and not only of stdout: `tree` is the whole project root listed relative to itself (directories with a trailing slash, symlinks shown as `path -> target`), `file` is the tasks document still sitting at its ORIGINAL path (null once it has been moved), and `outside_after` is every fixture written one directory ABOVE the project root, with its contents, so \"the escape target survived untouched\" is a comparison rather than a claim. A golden that recorded stdout alone would pass while the file was being deleted instead of moved. args/input make every case replayable; each ran in its own throwaway base holding proj/ (the project root, so PROJECT_ROOT resolves to it) beside fora/ (outside it), and two normalizations fire -- the project root to /TMP and its parent to /OUTSIDE, in that order -- applied to the inputs on the way in and to every recorded string on the way out. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Archived: a plain success (archive-sucesso), an absolute CLI argument (archive-caminho- absoluto), a document whose only other story is skipped (archive-skipped- tambem-e-terminal), and one where .aimi/archive does not exist at all so mkdir -p has to make it (archive-sem-diretorio-archive). Refused with nothing touched: a non-terminal story (archive-nao-terminal, and -com-lock), a missing file (archive-arquivo-inexistente), no argument at all (archive-sem- argumento), and a CLI argument that leaves the project root (archive- argumento-fora-do-projeto). Destination already occupied: archive-colisao, archive-colisao-multipla (two slots taken, lands on -3), archive-colisao-com- lock, archive-ja-no-archive (a file already IN the archive, archived again) and archive-brainstorm-colide. Deleting: archive-research-e-prototype, archive-research-ausente (a named path that does not exist is skipped silently and counts for nothing), archive-research-lista-vazia, archive- research-nao-lista, archive-research-absoluto-dentro and archive-sem-metadata. Escaping: an absolute path outside the root (archive-research-absoluto-fora), a ../ traversal (archive-research-traversal), a symlink inside the project whose target resolves outside it (archive-research-symlink-fora), the same through prototypePaths after the research delete has already run (archive- prototype-fora-depois-do-research), and the brainstorm equivalent (archive- brainstorm-fora-existente). Every deleting and escaping case carries the same three decoys -- an unlisted sibling research file, a file already in .aimi/archive/, and a file outside .aimi/ entirely -- so a survivor set can be compared rather than spot-checked. NINE THINGS THE CAPTURE ITSELF EXPOSED, recorded here so no one has to rediscover them from 38 recordings by eye. (1) THE LOCK IS MOVED INTO THE ARCHIVE. archive-lock-acompanha's tree shows .aimi/archive/<name>.json.lock where .aimi/tasks/<name>.json.lock used to be, and cmd_archive_task takes no lock of its own at any point: a writer holding flock on the moved inode has no mutual exclusion against a writer that arrives afterwards and creates a fresh lock at the original path. (2) A .lock THAT IS A DIRECTORY IS LEFT BEHIND instead, because the move is guarded by `[ -f ]` -- archive-lock-e-diretorio ends with the task in the archive and the lock directory still in .aimi/tasks/. (3) THE -N COLLISION SUFFIX SPLITS THE BASENAME ON THE FIRST DOT, not the last: archive-colisao-ponto-precoce sends corpus.v2-tasks.json to corpus-2.v2-tasks.json. The lock's own suffix is computed independently of the task's, so the two only stay paired by coincidence. (4) userStories: [] ARCHIVES HERE AND IS NOT LISTED BY list-archivable. archive-userstories-vazio records the success; _archivable_file_is_terminal, which list-archivable uses, additionally requires the array to be non-empty, and cmd_archive_task's inline copy of that check does not. One rule, two implementations, already disagreeing before any port -- ranked, not fixed here. (5) THE `[ -z \"$non_terminal\" ]` BRANCH IS REACHED BY EXACTLY ONE INPUT, and it is not the one it reads as if it guards. Under `set -euo pipefail` a jq that FAILS takes the assignment down with it before the test is ever reached, so a document with no userStories (archive-sem-userstories), one whose userStories is a string (archive-userstories-nao-lista) and a malformed one (archive-json-malformado) exit 5, 5 and 4 with EMPTY stderr -- jq's own status, its message swallowed by the 2>/dev/null on the assignment that ran it, and no diagnostic anywhere. The arm fires only for an EMPTY tasks file, where jq exits 0 having printed nothing: archive-arquivo-vazio is refused with the non-terminal message, which is the wrong sentence for the input but is the behaviour. (10) A TWO-DOCUMENT TASKS FILE IS ARCHIVED WHATEVER ITS SECOND DOCUMENT SAYS. jq reads a stream and printed one count per document, so `[ \"$non_terminal\" -ne 0 ]` was handed \"0 1\"; `[` reported \"integer expression expected\" and returned 2, which an `if` reads as FALSE. archive-dois-documentos-um-aberto has an in_progress story in its second document and is archived anyway, with bash's complaint the only trace. (6) validate_path_in_project LETS A NON-EXISTENT TRAVERSAL THROUGH when the parent directory does not exist either: it falls back to the unresolved string, which still starts with PROJECT_ROOT. archive-research-traversal (refused) and archive-research-fora-inexistente (allowed, then skipped as missing) are the same ../fora/... path and differ only in whether fora/ exists. (7) THE TWO CALL-SITE ORDERINGS DIFFER AND BOTH MATTER: researchPaths and prototypePaths are confined BEFORE their existence check, brainstormPath only INSIDE it -- so archive-brainstorm-fora-inexistente is silently skipped where archive-research-fora-inexistente would have been refused had its parent existed. (8) EVERY ESCAPE REFUSAL LANDS AFTER THE TASK FILE AND ITS LOCK HAVE ALREADY MOVED, and after any earlier delete has already happened -- archive-prototype-fora-depois-do-research exits 1 with the task in the archive and .aimi/research/r1.md already gone. A refusal with a side effect is visible in these records because `tree` is compared, and that is the field's whole reason for being here. (9) A DIRECTORY NAMED IN researchPaths ENDS THE RUN MID-ARCHIVE: `rm -f` refuses it, `set -e` does the rest, and archive-research-diretorio exits 1 with the task already archived and the directory and both files under it untouched. Nothing recurses, and nothing in the port may start."
 }
