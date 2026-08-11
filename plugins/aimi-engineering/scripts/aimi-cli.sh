@@ -597,6 +597,28 @@ validate_story_id() {
   fi
 }
 
+# Validate a dotted field path before it is concatenated into a jq program.
+#
+# update-field is the one verb that builds its jq filter out of an argument
+# rather than out of a fixed string, so the argument IS program text. Without
+# this gate a path shaped to close the filter's own parenthesis could open a
+# second one, and the assignment then landed on a field nobody named on the
+# command line -- another story, or metadata.branchName, which cmd_init_session
+# and cmd_validate_tasks both charset-gate precisely because git and gh consume
+# it downstream. Gating the argument is what keeps those two gates meaningful.
+#
+# The legitimate vocabulary is exactly a dotted chain of identifier segments;
+# every recorded call site passes the literal "verification.status". Anything
+# else is refused rather than escaped -- update-field is not a general nested
+# writer and this does not make it one.
+validate_field_path() {
+  local field_path="$1"
+  if ! [[ "$field_path" =~ ^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$ ]]; then
+    echo "Error: Invalid field path: $field_path (expected dotted identifiers, e.g. verification.status)" >&2
+    exit 1
+  fi
+}
+
 # Validate story ID exists in the tasks file
 validate_story_exists() {
   local story_id="$1"
@@ -10375,7 +10397,7 @@ cmd_gate_fail() {
 
 # Update a nested field on a story
 # Usage: update-field US-NNN field.path value
-# Supports dotted paths like "verification.status"
+# field.path is a dotted chain of identifier segments, e.g. "verification.status"
 cmd_update_field() {
   local story_id="$1"
   local field_path="$2"
@@ -10383,10 +10405,15 @@ cmd_update_field() {
 
   if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
     echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    echo "  <field.path> is a dotted chain of identifier segments, e.g. verification.status" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
+  # Ahead of the jq_path build loop below, so neither the write filter nor the
+  # echo-back filter at the end of this function can ever see an unvalidated
+  # value. One placement closes both interpolation sites.
+  validate_field_path "$field_path"
 
   local tasks_file
   tasks_file=$(get_tasks_file)
@@ -13344,7 +13371,9 @@ COMMANDS:
                               Pass a gate on a story; optionally store selected option
     gate-fail <id>            Fail a gate on a story
     update-field <id> <field.path> <value>
-                              Update a nested field on a story (e.g., verification.status passed)
+                              Update a nested field on a story (e.g., verification.status passed).
+                              <field.path> must be a dotted chain of identifier segments
+                              ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
     validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id>         Skip all stories depending on failed story

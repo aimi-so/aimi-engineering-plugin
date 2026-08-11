@@ -6342,8 +6342,16 @@ test_update_field_nested_path() {
   pre_url=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.url' "$TASKS_FILE")
   pre_expect=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.expect' "$TASKS_FILE")
 
-  # Run the update against the dotted path
-  "$CLI" update-field US-001 verification.status passed > /dev/null
+  # Run the update against the dotted path, keeping the trailing echo-back:
+  # it is a second jq program built from the same argument, so it is part of
+  # what "the legitimate path is unchanged" has to mean.
+  local echo_back
+  echo_back=$("$CLI" update-field US-001 verification.status passed | jq -c '.')
+
+  assert_eq \
+    '{"id":"US-001","verification":{"strategy":"test","status":"passed","url":"http://example.com","expect":"all green"}}' \
+    "$echo_back" \
+    "update-field nested: echo-back prints the whole {id, verification} object"
 
   # Assert the leaf changed
   local post_status
@@ -6359,6 +6367,49 @@ test_update_field_nested_path() {
   assert_eq "$pre_strategy" "$post_strategy" "update-field nested: verification.strategy sibling preserved"
   assert_eq "$pre_url" "$post_url" "update-field nested: verification.url sibling preserved"
   assert_eq "$pre_expect" "$post_expect" "update-field nested: verification.expect sibling preserved"
+}
+
+test_update_field_refuses_non_identifier_path() {
+  echo ""
+  echo "=== Testing update-field: a field path that is not dotted identifiers is refused ==="
+
+  reset_fixture
+
+  # The field path is concatenated into update-field's jq program, so it is
+  # program text. A path carrying a closing paren used to close the filter's
+  # own parenthesis and open a second one, landing the write somewhere nobody
+  # named on the command line. Snapshot the two things that must survive a
+  # refusal: metadata.branchName (charset-gated everywhere else because git
+  # and gh consume it) and every story except the one named.
+  local pre_branch pre_other_stories
+  pre_branch=$(jq -r '.metadata.branchName' "$TASKS_FILE")
+  pre_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+
+  local stderr_output exit_code
+
+  # (a) closing paren — the shape that made this a security fix rather than
+  # an input-validation nicety
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 'x) as $u | (.metadata.branchName' INJECTED 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: path containing a closing paren exits 1"
+  assert_stderr_contains "Invalid field path" "$stderr_output" \
+    "update-field: path containing a closing paren is refused by name on stderr"
+
+  # Containment, proven on disk rather than asserted in prose
+  local post_branch post_other_stories
+  post_branch=$(jq -r '.metadata.branchName' "$TASKS_FILE")
+  post_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+  assert_eq "$pre_branch" "$post_branch" \
+    "update-field: refused call leaves metadata.branchName unchanged on disk"
+  assert_eq "$pre_other_stories" "$post_other_stories" \
+    "update-field: refused call leaves every non-target story unchanged on disk"
+
+  # (b) a space — the same gate, reached by ordinary malformed input
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 'verification status' passed 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: path containing a space exits 1"
+  assert_stderr_contains "Invalid field path" "$stderr_output" \
+    "update-field: path containing a space is refused by name on stderr"
 }
 
 # ============================================================================
@@ -6585,6 +6636,7 @@ main() {
   test_validate_tasks_backendspec_derived_escape_hatch
   test_mark_complete_preserves_new_fields
   test_update_field_nested_path
+  test_update_field_refuses_non_identifier_path
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""
