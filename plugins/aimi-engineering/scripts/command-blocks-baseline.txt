@@ -80,8 +80,6 @@ unassigned	references/container-execution.md	CONTAINER_BASE
 unassigned	references/container-execution.md	EXEC_BRANCH
 unassigned	references/container-execution.md	EXEC_ROOT
 unassigned	references/container-execution.md	RAW_URL
-unassigned	references/container-execution.md	TASKS_PATH
-unassigned	references/execution-mode.md	TASKS_FILE
 unassigned	references/interactivity.md	AIMI_CLI
 unassigned	status.md	AIMI_CLI
 

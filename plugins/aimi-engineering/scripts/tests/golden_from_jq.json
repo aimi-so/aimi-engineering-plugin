@@ -44053,7 +44053,8 @@
       "line": 682,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.execution // \"inline\"",
-      "question": "does this tasks file run inline or inside a container"
+      "question": "does this tasks file run inline or inside a container",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.type // \"feat\"' \"$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json\" 2>/dev/null",
@@ -44097,7 +44098,8 @@
       "line": 1239,
       "operand": "$PHASE_ANCHOR_FILE",
       "program": ".metadata.splitGroup.total",
-      "question": "how many members does this project-split group declare"
+      "question": "how many members does this project-split group declare",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.siblings[]?' \"$PHASE_ANCHOR_FILE\"",
@@ -44108,7 +44110,8 @@
       "line": 1251,
       "operand": "$PHASE_ANCHOR_FILE",
       "program": ".metadata.splitGroup.siblings[]?",
-      "question": "which other files belong to this project-split group"
+      "question": "which other files belong to this project-split group",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq '[.userStories[]? | select((.status // \"pending\") != \"completed\")] | length' \"$split_file\"",
@@ -44119,7 +44122,8 @@
       "line": 1306,
       "operand": "$split_file",
       "program": "[.userStories[]? | select((.status // \"pending\") != \"completed\")] | length",
-      "question": "how many stories in this tasks file are not yet completed"
+      "question": "how many stories in this tasks file are not yet completed",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.project // \".\"' \"$split_file\"",
@@ -44130,7 +44134,8 @@
       "line": 1363,
       "operand": "$split_file",
       "program": ".metadata.splitGroup.project // \".\"",
-      "question": "which project does this split member's own marker name"
+      "question": "which project does this split member's own marker name",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.userStories[] | (.project // \".\")' \"$PHASE_MAIN_TASKS\"",
@@ -44185,7 +44190,8 @@
       "line": 1560,
       "operand": "$split_file",
       "program": ".metadata.splitGroup.project // \"\"",
-      "question": "which project does this split member's own marker name"
+      "question": "which project does this split member's own marker name",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq '[.userStories[]? | select(.verification | type == \"object\" and .strategy == \"visual\")] | length' \"$split_file\" 2>/dev/null",
@@ -44207,7 +44213,8 @@
       "line": 2034,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",
@@ -44218,7 +44225,8 @@
       "line": 2110,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\") | (.project // \"DEFAULT\")] | unique | .[]' \"$AIMI_ROOT/$TASKS_PATH\"",
@@ -44240,7 +44248,8 @@
       "line": 2350,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -c '[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\")][0]' \"$VISUAL_SOURCE\"",
@@ -44262,7 +44271,8 @@
       "line": 2428,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq '[.userStories[]? | select((.status // \"pending\") != \"completed\")] | length' \"$split_file\"",
@@ -44273,7 +44283,8 @@
       "line": 3195,
       "operand": "$split_file",
       "program": "[.userStories[]? | select((.status // \"pending\") != \"completed\")] | length",
-      "question": "how many stories in this tasks file are not yet completed"
+      "question": "how many stories in this tasks file are not yet completed",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.project // \".\"' \"$split_file\"",
@@ -44284,7 +44295,8 @@
       "line": 3251,
       "operand": "$split_file",
       "program": ".metadata.splitGroup.project // \".\"",
-      "question": "which project does this split member's own marker name"
+      "question": "which project does this split member's own marker name",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.userStories[] | (.project // \".\")' \"$PHASE_TASKS_PATH\"",
@@ -44306,7 +44318,8 @@
       "line": 3534,
       "operand": "$split_file",
       "program": ".metadata.splitGroup.project // \".\"",
-      "question": "which project does this split member's own marker name"
+      "question": "which project does this split member's own marker name",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.userStories[] | (.project // \".\")' \"$PHASE_TASKS_PATH\"",
@@ -44328,7 +44341,8 @@
       "line": 3595,
       "operand": "$split_file",
       "program": ".metadata.splitGroup.project // \".\"",
-      "question": "which project does this split member's own marker name"
+      "question": "which project does this split member's own marker name",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.userStories[] | (.project // \".\")' \"$PHASE_TASKS_PATH\"",
@@ -44350,7 +44364,8 @@
       "line": 3888,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
@@ -44372,7 +44387,8 @@
       "line": 173,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",
@@ -44383,7 +44399,8 @@
       "line": 195,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": ".metadata.branchName",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.execution // \"inline\"' \"$TASKS_FILE\"",
@@ -44394,7 +44411,8 @@
       "line": 45,
       "operand": "$TASKS_FILE",
       "program": ".metadata.execution // \"inline\"",
-      "question": "does this tasks file run inline or inside a container"
+      "question": "does this tasks file run inline or inside a container",
+      "retiredIn": "US-002"
     },
     {
       "expression": "jq -r '.metadata.branchName // empty' \"$TASKS_FILE\" 2>/dev/null",
@@ -44405,7 +44423,8 @@
       "line": 147,
       "operand": "$TASKS_FILE",
       "program": ".metadata.branchName // empty",
-      "question": "which branch does this tasks file target"
+      "question": "which branch does this tasks file target",
+      "retiredIn": "US-002"
     }
   ],
   "command_block_jq_cases": [
@@ -59802,5 +59821,5 @@
       "stdout": ""
     }
   ],
-  "_comment_command_block_jq": "Captured by running the 37 jq invocations that OPEN A FILE inside commands/**/*.md's ```bash blocks (never in aimi-cli.sh -- these live in the command layer, executed literally by an agent, one block per shell) against a 26-fixture adversarial tasks.json corpus, BEFORE story 02-04 replace any of them with a call to a CLI verb. Like story_merge_cases and list_archivable_roadmap_cases, this must NEVER be regenerated from the verbs that replace these sites -- regenerating it would turn the evidence into a snapshot of whatever the replacement does today, which is the opposite of what a golden file is for. EXTRACTION, NOT TRANSCRIPTION. capture-command-block-jq.sh sources the exact same extract_blocks() awk mechanism test-command-blocks.sh uses (factored into scripts/lib/extract-command-blocks.sh so the two can never see a different set of blocks), then scripts/tests/capture_command_block_jq.py walks every extracted block looking for a `jq [flags] 'PROGRAM' [args]` call whose LAST positional token is a bare $VAR reference -- the only file-operand shape any real site in this tree uses. A call with no such trailing token reads stdin (almost always `printf '%s' \"$var\" | jq ...`) and is excluded: it never opens a file. No file:line pair here was hand-picked; each was found because the parser said so, and a later run of the same harness against a changed commands/ tree will find a different set. THE COUNT IS 37, NOT 38. The planning census (see this story's own `notes`) estimated 38 by a mixture of grep and hand reading; the extractor's actual, mechanical count is 37, and per this story's own AC that is the number recorded -- the extractor was not tuned to reach 38. The single-largest reason for the gap: three jq lines the census counted (execute.md around STORY_VERIFICATION_URL, near the Wave Execution Loop) sit inside a *pseudocode* fence (``` with no \"bash\" info-string, opened at execute.md:2446) describing what the loop conceptually does -- extract_blocks() correctly never extracts them, because they are not bash. The extractor also originally missed two genuine sites (execute.md:458's nested `$(printf ... | jq -r '.file')` operand and :1499's `--arg p \"$GROUP_PROJECT\"` call) because shlex, unlike bash, has no line-continuation rule for a trailing backslash-newline; both are recovered by stripping `\\\\\\n` before tokenizing (the ORIGINAL text, continuation intact, is still what is recorded as each site's verbatim `expression`). DISTRIBUTION (recorded, machine-produced): execute.md=32, plan.md=1, references/container-execution.md=2, references/execution-mode.md=1, review.md=1. By question-group: branch-name=8, execution-mode=3, metadata-type=1, pending-count=2, project-grouping=7, split-group=8, verification-visual=8. This matches the qualitative shape the story's notes named -- execute.md dominant, plus container-execution.md (2), review.md (1), plan.md (1), execution-mode.md (1) -- with the count itself corrected by measurement rather than asserted from the plan. SEVEN QUESTION-GROUPS, EACH SHOWN TO DIFFER ACROSS THE CORPUS (not asserted in prose -- scripts/tests/test_command_block_jq.py computes the set of distinct (exit, shellValue) pairs per group from this very array and fails if any group collapses to one): branch-name (6 distinct answers), execution-mode (4), metadata-type (4), split-group (9), verification-visual (11), pending-count (4), project-grouping (10). TRAP 1, RECORDED NOT REASONED ABOUT. The `branchname-nonstring-array` fixture sets `metadata.branchName` to a 4-element JSON array. `jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"` on it exits 0 and prints the array pretty-printed across 6 lines (`[`, one line per element, `]`); every branch-name site's case against this fixture records `shellLines: 6` -- a real bash variable assigned by `$(...)` from this exact call would hold a 6-line value, not a single branch name, which is exactly the shape a prior slice found turning one array-valued id into four separate lines inside a bash read loop. TRAP 2, RECORDED NOT REASONED ABOUT. Every site's case against the `malformed-document` fixture (deliberately truncated, unparseable JSON) was OBSERVED, not predicted: jq exits 4, prints its parse error to stderr (`parse error: Unfinished JSON term at EOF ...`), stdout is empty, and the resulting shell variable is empty. No `set -euo pipefail` is in play in the probe shell (these blocks run in the agent's own shell, one block per shell, exactly as they do in commands/) -- the invocation simply fails and the rest of whatever block it lived in would keep running with an empty variable, unless that block's own prose checks for it. site-008 (execute.md:1229, `(.metadata.splitGroup | type) == \"object\" and ...`, the anchor-candidate type gate) is the cleanest illustration of jq -e's three-way exit: 0 only against the two `splitgroup-present-*` fixtures (a well-formed marker), 1 against every other well-formed document (the boolean test evaluates false), 4 against `malformed-document` (a parse failure, not a false test) -- three genuinely different outcomes a naive \"it either matches or it doesn't\" reading would collapse to two. REPLAYABILITY. Every case in command_block_jq_cases carries its own `input` (the fixture's full tasks.json text, or the malformed text for that one fixture) alongside `expression`, `exit`, `stdout`, `stderr`, `shellValue` and `shellLines`, following story_merge_cases' precedent -- test_command_block_jq.py replays every one directly (write `input` to the path the site's own operand resolves to, given the same variable bindings, run `expression` in a bare `bash -c`, compare every field) rather than describing it. Two consecutive captures of this exact set are byte-identical: the only source of nondeterminism (each probe's throwaway root, a fresh mktemp directory every run) is normalized to the literal string /FIXTURE-ROOT in stdout/stderr/shellValue before recording, and the sites/cases arrays are sorted (file, line, expression; then site, fixture) rather than left in discovery order. NEVER TOUCHES THE REPOSITORY'S OWN .aimi/tasks. Every fixture lives under a throwaway mktemp root the capture process creates and removes; each probe's subprocess environment is built from scratch with only PATH and HOME (pointed at that same throwaway root) -- AIMI_PLUGIN_DIR and CLAUDECODE are absent because they were never put there, not because something unset them."
+  "_comment_command_block_jq": "Captured by running the 37 jq invocations that OPEN A FILE inside commands/**/*.md's ```bash blocks (never in aimi-cli.sh -- these live in the command layer, executed literally by an agent, one block per shell) against a 26-fixture adversarial tasks.json corpus, BEFORE story 02-04 replace any of them with a call to a CLI verb. Like story_merge_cases and list_archivable_roadmap_cases, this must NEVER be regenerated from the verbs that replace these sites -- regenerating it would turn the evidence into a snapshot of whatever the replacement does today, which is the opposite of what a golden file is for. EXTRACTION, NOT TRANSCRIPTION. capture-command-block-jq.sh sources the exact same extract_blocks() awk mechanism test-command-blocks.sh uses (factored into scripts/lib/extract-command-blocks.sh so the two can never see a different set of blocks), then scripts/tests/capture_command_block_jq.py walks every extracted block looking for a `jq [flags] 'PROGRAM' [args]` call whose LAST positional token is a bare $VAR reference -- the only file-operand shape any real site in this tree uses. A call with no such trailing token reads stdin (almost always `printf '%s' \"$var\" | jq ...`) and is excluded: it never opens a file. No file:line pair here was hand-picked; each was found because the parser said so, and a later run of the same harness against a changed commands/ tree will find a different set. THE COUNT IS 37, NOT 38. The planning census (see this story's own `notes`) estimated 38 by a mixture of grep and hand reading; the extractor's actual, mechanical count is 37, and per this story's own AC that is the number recorded -- the extractor was not tuned to reach 38. The single-largest reason for the gap: three jq lines the census counted (execute.md around STORY_VERIFICATION_URL, near the Wave Execution Loop) sit inside a *pseudocode* fence (``` with no \"bash\" info-string, opened at execute.md:2446) describing what the loop conceptually does -- extract_blocks() correctly never extracts them, because they are not bash. The extractor also originally missed two genuine sites (execute.md:458's nested `$(printf ... | jq -r '.file')` operand and :1499's `--arg p \"$GROUP_PROJECT\"` call) because shlex, unlike bash, has no line-continuation rule for a trailing backslash-newline; both are recovered by stripping `\\\\\\n` before tokenizing (the ORIGINAL text, continuation intact, is still what is recorded as each site's verbatim `expression`). DISTRIBUTION (recorded, machine-produced): execute.md=32, plan.md=1, references/container-execution.md=2, references/execution-mode.md=1, review.md=1. By question-group: branch-name=8, execution-mode=3, metadata-type=1, pending-count=2, project-grouping=7, split-group=8, verification-visual=8. This matches the qualitative shape the story's notes named -- execute.md dominant, plus container-execution.md (2), review.md (1), plan.md (1), execution-mode.md (1) -- with the count itself corrected by measurement rather than asserted from the plan. SEVEN QUESTION-GROUPS, EACH SHOWN TO DIFFER ACROSS THE CORPUS (not asserted in prose -- scripts/tests/test_command_block_jq.py computes the set of distinct (exit, shellValue) pairs per group from this very array and fails if any group collapses to one): branch-name (6 distinct answers), execution-mode (4), metadata-type (4), split-group (9), verification-visual (11), pending-count (4), project-grouping (10). TRAP 1, RECORDED NOT REASONED ABOUT. The `branchname-nonstring-array` fixture sets `metadata.branchName` to a 4-element JSON array. `jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"` on it exits 0 and prints the array pretty-printed across 6 lines (`[`, one line per element, `]`); every branch-name site's case against this fixture records `shellLines: 6` -- a real bash variable assigned by `$(...)` from this exact call would hold a 6-line value, not a single branch name, which is exactly the shape a prior slice found turning one array-valued id into four separate lines inside a bash read loop. TRAP 2, RECORDED NOT REASONED ABOUT. Every site's case against the `malformed-document` fixture (deliberately truncated, unparseable JSON) was OBSERVED, not predicted: jq exits 4, prints its parse error to stderr (`parse error: Unfinished JSON term at EOF ...`), stdout is empty, and the resulting shell variable is empty. No `set -euo pipefail` is in play in the probe shell (these blocks run in the agent's own shell, one block per shell, exactly as they do in commands/) -- the invocation simply fails and the rest of whatever block it lived in would keep running with an empty variable, unless that block's own prose checks for it. site-008 (execute.md:1229, `(.metadata.splitGroup | type) == \"object\" and ...`, the anchor-candidate type gate) is the cleanest illustration of jq -e's three-way exit: 0 only against the two `splitgroup-present-*` fixtures (a well-formed marker), 1 against every other well-formed document (the boolean test evaluates false), 4 against `malformed-document` (a parse failure, not a false test) -- three genuinely different outcomes a naive \"it either matches or it doesn't\" reading would collapse to two. REPLAYABILITY. Every case in command_block_jq_cases carries its own `input` (the fixture's full tasks.json text, or the malformed text for that one fixture) alongside `expression`, `exit`, `stdout`, `stderr`, `shellValue` and `shellLines`, following story_merge_cases' precedent -- test_command_block_jq.py replays every one directly (write `input` to the path the site's own operand resolves to, given the same variable bindings, run `expression` in a bare `bash -c`, compare every field) rather than describing it. Two consecutive captures of this exact set are byte-identical: the only source of nondeterminism (each probe's throwaway root, a fresh mktemp directory every run) is normalized to the literal string /FIXTURE-ROOT in stdout/stderr/shellValue before recording, and the sites/cases arrays are sorted (file, line, expression; then site, fixture) rather than left in discovery order. NEVER TOUCHES THE REPOSITORY'S OWN .aimi/tasks. Every fixture lives under a throwaway mktemp root the capture process creates and removes; each probe's subprocess environment is built from scratch with only PATH and HOME (pointed at that same throwaway root) -- AIMI_PLUGIN_DIR and CLAUDECODE are absent because they were never put there, not because something unset them. RETIREMENT CONVENTION, FOR STORIES 02-05. A site whose read is replaced by a CLI verb call is never deleted from command_block_jq_sites and its cases in command_block_jq_cases are never touched -- the case is the evidence the replacement preserves behaviour, and deleting the site would strand it (test_every_case_references_a_known_site requires every case's `site` to still resolve). The retiring story instead adds a `retiredIn` field to that site object, valued with the story id that retired it (e.g. \"US-002\"), in the same commit that rewrites the command file -- never left for a later story to mark, the same rule command-blocks-baseline.txt already follows for its own rows. test_command_block_jq.py's two live-comparison tests (count and file distribution) then compare the live extractor against only the sites still carrying no `retiredIn` key, so the suite stays fully green at every story's own commit rather than red from 02 through 05: a site removed from commands/ without being marked `retiredIn` fails one of those tests, and marking one that is still live fails the other."
 }

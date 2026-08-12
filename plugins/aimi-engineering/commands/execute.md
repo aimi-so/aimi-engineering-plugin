@@ -676,10 +676,12 @@ If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mu
 
 ### Execution Mode Detection
 
-Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered:
+Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered, via the same guarded `metadata` call the rest of this document uses for the same file:
 
 ```bash
-EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+EXECUTION_MODE=$($AIMI_CLI metadata | jq -r '.execution // "inline"')
 ```
 
 Only the literal string `"container"` selects the container path; every other value (`"inline"`, absence, or anything unrecognized) resolves to `inline` — the same fail-safe default rule the reference doc defines.
@@ -1236,7 +1238,19 @@ done <<< "$PHASE_SPLIT_CANDIDATES"
 
 PHASE_SPLIT_FILES=""
 if [ -n "$PHASE_ANCHOR_FILE" ]; then
-  PHASE_SPLIT_TOTAL=$(jq -r '.metadata.splitGroup.total' "$PHASE_ANCHOR_FILE")
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  # split-detect already resolves this exact anchor-plus-declared-siblings
+  # group over $PHASE_DIR_PATH -- one call replaces the two raw jq reads of
+  # $PHASE_ANCHOR_FILE that used to run here (`.metadata.splitGroup.total`
+  # and `.siblings[]?`), never a per-sibling read. The candidate loop above
+  # and the basename-resolution loop below are UNCHANGED: they still decide
+  # which file is the anchor and still validate every declared sibling
+  # against the anchor's own directory (the traversal-defeating property
+  # execute.md:312/:1223 both describe) -- only the SOURCE of the anchor's
+  # declared total and siblings moves from a raw file read to this call.
+  PHASE_SPLIT_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH")
+  PHASE_SPLIT_TOTAL=$(printf '%s' "$PHASE_SPLIT_JSON" | jq -r '.total')
   PHASE_SPLIT_FILES="$PHASE_ANCHOR_FILE"
   PHASE_SPLIT_OK=true
   while IFS= read -r sibling; do
@@ -1248,7 +1262,7 @@ if [ -n "$PHASE_ANCHOR_FILE" ]; then
       break
     fi
     PHASE_SPLIT_FILES="${PHASE_SPLIT_FILES}"$'\n'"${SIBLING_PATH}"
-  done < <(jq -r '.metadata.splitGroup.siblings[]?' "$PHASE_ANCHOR_FILE")
+  done < <(printf '%s' "$PHASE_SPLIT_JSON" | jq -r --arg anchor "$PHASE_ANCHOR_FILE" '.members[] | select(.path != $anchor) | .path')
   PHASE_SPLIT_COUNT=$(printf '%s\n' "$PHASE_SPLIT_FILES" | grep -c .)
   if [ "$PHASE_SPLIT_OK" != true ] || [ "$PHASE_SPLIT_COUNT" -ne "$PHASE_SPLIT_TOTAL" ] || [ "$PHASE_SPLIT_COUNT" -lt 2 ]; then
     echo "Warning: phase split group is incomplete (declared total ${PHASE_SPLIT_TOTAL}, resolved ${PHASE_SPLIT_COUNT}) — falling back to single-file phase execution" >&2
@@ -1301,9 +1315,17 @@ A member with nothing left to do takes no part in execution. Before any branch, 
 ```bash
 PHASE_ACTIVE_SPLIT_FILES=""
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # One split-detect call, hoisted above the loop, in place of a per-member
+  # jq pending-count read -- it already computes pendingCount per member
+  # from the same `(.status // "pending") != "completed"` predicate this
+  # loop used to apply itself.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    SPLIT_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+    SPLIT_PENDING=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .pendingCount')
     if [ "${SPLIT_PENDING:-0}" -gt 0 ]; then
       if [ -n "$PHASE_ACTIVE_SPLIT_FILES" ]; then
         PHASE_ACTIVE_SPLIT_FILES="${PHASE_ACTIVE_SPLIT_FILES}"$'\n'"${split_file}"
@@ -1357,10 +1379,15 @@ This phase's participating project groups cannot be known until **Detect a Full-
 PHASE_MAIN_TASKS="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
 
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_ACTIVE_SPLIT_FILES"
 else
@@ -1552,12 +1579,18 @@ while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dir
 [ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
 
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+# Hoisted once, above the loop -- never re-called per split_file.
+PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
+
 SPLIT_BRANCHES=""
 SPLIT_PLAN=""
 SPLIT_KEYS=""
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
-  SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
+  SPLIT_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // ""')
   case "$SPLIT_PROJECT" in
     ""|null)
       SPLIT_SLUG=$(basename "$split_file" -tasks.json)
@@ -2031,7 +2064,9 @@ Get the branch name from the init-session output (already validated by CLI).
 Read and validate `branchName` — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1, before this subsection ever runs):
 
 ```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -2107,7 +2142,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
-   BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+   BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
    if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
      echo "Invalid branchName: $BRANCH_NAME" >&2
      exit 1
@@ -2347,7 +2382,9 @@ VISUAL_GROUP_KEYS=$(jq -r '[.userStories[] | select(.verification | type == "obj
 For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):
 
 ```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -2423,9 +2460,11 @@ command -v agent-browser
   **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): apply the same reference section with `EXEC_BRANCH` = this run's `branchName`, scoped to the FIRST visual story's OWN project group. This resolves the port of that group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). `EXEC_ROOT` is the same project root Container Dev Server Bootstrap (Step 3.3) already used for `VISUAL_GROUP_KEY` — `$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[VISUAL_GROUP_KEY]`:
 
   ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-  BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+  BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
   if [ "[VISUAL_GROUP_KEY]" = "DEFAULT" ]; then
     cd "$AIMI_ROOT"
   else
@@ -3189,10 +3228,17 @@ $AIMI_CLI count-pending
 
 **When `PHASE_SPLIT_MODE=true`:** `count-pending`'s session-state read does not apply — Step 1.7's Detect a Full-Stack Split Inside This Phase step never pointed this session's state at a single governing file, because a split phase has none. Sum pending stories across **every** member of the split directly, by path, instead — a loop over `$PHASE_SPLIT_FILES` (the full member list resolved in Step 1.7, not just the active subset), never a fixed pair of named variables:
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+# Hoisted once, above the loop -- never re-called per split_file. Reads the
+# same pendingCount split-detect already computes from the identical
+# `(.status // "pending") != "completed"` predicate the paragraph below names.
+PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
 PHASE_PENDING=0
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
-  SPLIT_FILE_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+  SPLIT_FILE_PENDING=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .pendingCount')
   PHASE_PENDING=$((PHASE_PENDING + ${SPLIT_FILE_PENDING:-0}))
 done <<< "$PHASE_SPLIT_FILES"
 ```
@@ -3245,10 +3291,13 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 # member list, $PHASE_SPLIT_FILES, exactly like the adjacent Multi-File
 # Pending Count block, not just this run's active subset.
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   CV_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    CV_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    CV_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     CV_GROUP_RAW="${CV_GROUP_RAW}${CV_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
 else
@@ -3528,10 +3577,15 @@ Stop every participating repository's own phase dev server before the report bel
 
 ```bash
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
 else
@@ -3589,10 +3643,15 @@ Best-effort only — never reverts or changes the already-`completed` status on 
 
 ```bash
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
 else
@@ -3885,7 +3944,7 @@ git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1

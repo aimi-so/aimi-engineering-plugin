@@ -16,11 +16,13 @@ blocks in this file there is no port to check here yet -- this suite is not a
   2. the corpus is not a vacuum -- every question-group's answer actually
      differs somewhere across it;
   3. the capture is deterministic;
-  4. the recorded site count and file distribution still match what the SAME
-     extractor finds in the CURRENT commands/ tree. This story changes no
-     command file, so today that must hold exactly; stories 02-04 are
-     expected to shrink it, one baselined row at a time, same as
-     command-blocks-baseline.txt.
+  4. the recorded ACTIVE site count and file distribution -- SITES minus the
+     ones a retiring story has marked `retiredIn`, never SITES itself -- still
+     match what the SAME extractor finds in the CURRENT commands/ tree. A site
+     a story replaces with a CLI verb call gets `retiredIn: "<story id>"` in
+     the same commit that rewrites the command file, same as
+     command-blocks-baseline.txt shrinks its own rows in the commit that
+     retires them; the site itself, and its cases, are never deleted.
 """
 
 import json
@@ -128,10 +130,22 @@ def test_two_consecutive_captures_are_byte_identical():
 
 # ---------------------------------------------------------------------------
 # 4. The recorded count and file distribution match a live re-extraction of
-#    the CURRENT commands/ tree. This story touches no command file, so this
-#    must hold exactly today; a later story that replaces a site is expected
-#    to make the live count drop below the recorded one.
+#    the CURRENT commands/ tree, over ACTIVE sites only (SITES minus the ones
+#    carrying a `retiredIn` key). A site whose read a story replaces with a
+#    CLI verb call is never deleted here -- its case in command_block_jq_cases
+#    is the evidence the replacement preserves behaviour, and deleting the
+#    site would strand it (see test_every_case_references_a_known_site).
+#    Instead the retiring story adds `retiredIn: "<story id>"` to that site
+#    object, in the SAME commit that rewrites the command file -- never left
+#    for a later story to mark, the same rule command-blocks-baseline.txt
+#    already follows for its own rows. Comparing only against active sites is
+#    what keeps this suite green at every story's own commit rather than red
+#    from story 02 through story 05: a site removed from commands/ without
+#    being marked `retiredIn` fails one of the two tests below, and marking a
+#    site `retiredIn` while it is still live in commands/ fails the other.
 # ---------------------------------------------------------------------------
+
+ACTIVE_SITES = [s for s in SITES if "retiredIn" not in s]
 
 
 def _live_sites():
@@ -143,18 +157,25 @@ def _live_sites():
 
 def test_recorded_site_count_matches_the_live_extractor():
     live = _live_sites()
-    assert len(live) == len(SITES), (
-        f"recorded {len(SITES)} sites, live extractor now finds {len(live)} -- if commands/ changed, "
-        "this is expected and this story's own AC requires recording the extractor's number, not "
-        "tuning it to match a stale count"
+    assert len(live) == len(ACTIVE_SITES), (
+        f"{len(ACTIVE_SITES)} sites recorded as still active (retiredIn absent), live extractor now "
+        f"finds {len(live)}. A site the live extractor no longer finds must be marked `retiredIn` in "
+        "the same commit that rewrote the command file (see _comment_command_block_jq's retirement "
+        "convention) -- it is not deleted from command_block_jq_sites and never regenerated from the "
+        "replacement verb. A site the live extractor still finds must NOT carry `retiredIn`."
     )
 
 
 def test_recorded_file_distribution_matches_the_live_extractor():
     live = _live_sites()
     live_dist = Counter(s["file"] for s in live)
-    recorded_dist = Counter(s["file"] for s in SITES)
-    assert live_dist == recorded_dist
+    recorded_dist = Counter(s["file"] for s in ACTIVE_SITES)
+    assert live_dist == recorded_dist, (
+        "the live extractor's per-file counts, over the CURRENT commands/ tree, no longer match the "
+        "counts of sites recorded as still active (retiredIn absent). Retiring a site updates its "
+        "`retiredIn` field in the same commit as the command-file rewrite that retires it; it is never "
+        "deleted from command_block_jq_sites."
+    )
 
 
 def test_recorded_files_are_exactly_the_ones_the_story_names():
