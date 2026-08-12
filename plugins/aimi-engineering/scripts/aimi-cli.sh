@@ -9294,14 +9294,23 @@ anthropic/claude-opus-4-7"
     # design/workflow/executor → balanced (sonnet)
     local _fast_model _balanced_model _powerful_model
 
-    _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
+    # `|| _x=""` is what makes the three fallbacks below REACHABLE. A grep that
+    # matches nothing exits 1; `pipefail` hands that status to the whole
+    # pipeline, and a BARE assignment to an already-declared local hands it to
+    # `set -e`, which killed the verb here — exit 1, empty stdout, empty
+    # stderr, nothing written — the moment the host's model list contained no
+    # "haiku". Every `[ -z ... ] &&` line after it was dead code documenting a
+    # behaviour that could not happen. The `||` makes "no match" an empty
+    # string instead of a fatal status, which is what the next line already
+    # assumed it was.
+    _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1) || _fast_model=""
     [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
 
-    _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
+    _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1) || _balanced_model=""
     [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
     [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
 
-    _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
+    _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1) || _powerful_model=""
     [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
     # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced

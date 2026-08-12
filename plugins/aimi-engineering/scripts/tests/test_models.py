@@ -607,6 +607,56 @@ def test_the_writer_refuses_rather_than_degrading(tmp_path):
     assert actual["tree"] == case["tree"]
 
 
+def test_a_model_list_with_no_haiku_still_writes_a_table(tmp_path):
+    """D6's repair, asserted at the rule the three moved records describe.
+
+    The capture found this aborting at exit 1 with both streams empty and
+    nothing written: `pipefail` handed grep's exit 1 to a bare assignment and
+    `set -e` took the verb down, so the three documented fallbacks after it --
+    first line, second line, last line -- were dead code. They are reachable
+    now, and this reads them off a real run rather than off the comment.
+    """
+    actual = _replay_write(WRITE_CASES["dm-lista-sem-haiku-oc-stub"], tmp_path)
+    assert actual["exit"] == 0
+    assert json.loads(actual["file"])["categories"]["opencode"] == {
+        # no haiku -> the FIRST entry; no opus -> the LAST; no sonnet -> the SECOND
+        "research": "openai/gpt-5",
+        "review": "meta/llama-4-405b",
+        "design": "google/gemini-3-pro",
+        "workflow": "google/gemini-3-pro",
+        "executor": "google/gemini-3-pro",
+    }
+
+
+def test_the_repaired_path_still_merges(tmp_path):
+    """The repair does not get to cost the thing this story is about.
+
+    An OpenCode host with no haiku in its list and a config carrying both hosts
+    used to write nothing at all; it now writes its own table AND leaves
+    claudeCode's byte-for-byte alone.
+    """
+    case = WRITE_CASES["dm-lista-sem-haiku-config-existente-oc-stub"]
+    actual = _replay_write(case, tmp_path)
+    assert actual["exit"] == 0
+    before = json.loads(case["input"]["config"])["categories"]["claudeCode"]
+    assert json.loads(actual["file"])["categories"]["claudeCode"] == before
+
+
+def test_no_case_fails_silently_except_the_one_the_parser_owns():
+    """A verb that exits non-zero with both streams empty has said nothing.
+
+    Four cases in the capture did that: three were D6 and are repaired. The
+    survivor is `detect-models --research` with no value, where the parser
+    shifts twice and the second `shift` fails under set -e -- an argument bug,
+    not a document one, and deliberately left for the slice that owns flag
+    parsing rather than smuggled into a commit about the merge. Naming it here
+    is what stops the list growing back.
+    """
+    silent = sorted(label for label, case in WRITE_CASES.items()
+                    if case["exit"] != 0 and case["stdout"] == "" and case["stderr"] == "")
+    assert silent == ["dm-flags-valor-ausente-cc"]
+
+
 def test_the_merge_takes_the_existing_document_as_a_parameter():
     """The signature is the enforcement, so it is asserted like one.
 
