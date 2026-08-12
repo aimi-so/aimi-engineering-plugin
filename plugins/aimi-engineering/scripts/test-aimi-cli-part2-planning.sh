@@ -3094,6 +3094,30 @@ test_list_models_claudecode_returns_three_aliases() {
   assert_eq "true" "$has_haiku"  "list-models claudecode: array contains 'haiku'"
 }
 
+# The Claude Code branch of list-models answers with a literal JSON array and
+# crosses into nothing -- its answer is a constant, so there is no document to
+# read and no interpreter to need, which is what keeps `list-models` working on
+# a host with no python3. The price is that the three aliases are spelled
+# twice: once as data in _host_valid_models, once as JSON here. This runs both
+# and compares them, so the second spelling cannot drift from the first without
+# a test saying so.
+test_list_models_claudecode_matches_the_host_valid_set() {
+  echo ""
+  echo "=== Testing list-models' Claude Code literal against _host_valid_models ==="
+
+  local from_helper from_verb
+  from_helper=$(
+    eval "$(sed -n '/^_is_claude_code_host() {$/,/^}$/p' "$CLI")"
+    eval "$(sed -n '/^_normalize_model_id() {$/,/^}$/p' "$CLI")"
+    eval "$(sed -n '/^_host_valid_models() {$/,/^}$/p' "$CLI")"
+    CLAUDECODE=1 _host_valid_models | jq -R . | jq -cs .
+  )
+  from_verb=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 "$CLI" list-models 2>/dev/null | jq -c .)
+
+  assert_eq "$from_helper" "$from_verb" \
+    "list-models claudecode: the literal array is _host_valid_models' set, in its order"
+}
+
 test_list_models_opencode_absent_fallback() {
   echo ""
   echo "=== Testing list-models on OpenCode host with opencode binary absent — fallback with warning ==="
@@ -3820,20 +3844,35 @@ OC_RESEARCH
 }
 
 # ----------------------------------------------------------------------------
-# The INVALID<TAB> tagging, driven with hostile model ids.
+# resolve-models' warnings, driven with hostile model ids.
 #
-# cmd_resolve_models marks an invalid entry by prefixing the literal string
-# "INVALID\t" onto the model id inside jq, then splits that tagged value back
-# apart in a `while IFS=$'\t' read -r _cat _val` loop. The tab was chosen so a
-# model id containing "=" could not truncate the message -- but a tab is only
-# one of the characters that survives into the value, and NEWLINE is the one
-# that breaks the frame: the read loop is line-oriented, so a two-line model id
-# produces TWO iterations, and the second one reports a category that does not
-# exist while claiming an empty model id.
+# WHAT THIS USED TO BE MEASURING. cmd_resolve_models marked an invalid entry by
+# prefixing the literal string "INVALID\t" onto the model id inside jq, then
+# split that tagged value back apart in a `while IFS=$'\t' read -r _cat _val`
+# loop. The tab was chosen so a model id containing "=" could not truncate the
+# message -- the comment beside it recorded that the delimiter had ALREADY been
+# changed once for exactly that reason. But a tab is only one of the characters
+# that survives into a value, and NEWLINE was the one that broke the frame: the
+# read loop is line-oriented, so a two-line model id produced TWO iterations,
+# and the second reported a category that does not exist while claiming an
+# empty model id.
 #
-# STORY 05 DELETES THE INVALID-TAB SCAFFOLDING, and this test is what shows
-# what that removal actually removed. The expectations below are today's
-# behaviour, fabricated warning included.
+# ---- STORY 05 LANDED, AND THE SCAFFOLDING IS WHERE IT IS READ OFF -----------
+# There is no delimiter now. models.py parses the config once and answers the
+# three questions the tag used to carry between processes -- which entries are
+# invalid, what the clean result is, what to warn about -- as three expressions
+# over one list of (category, model, valid) tuples. The tab, backslash and
+# space rows below did NOT move: the first two are values a delimiter never
+# had to survive in the first place, and the third is the normalizer's, not the
+# delimiter's. THREE ASSERTIONS ON THE NEWLINE ROW INVERTED, and each is
+# annotated where it stands:
+#   warning count   2 -> 1  (one invalid id is one warning)
+#   the message     first line only -> the WHOLE id, newline included
+#   the second line fabricated 'category: opus' -> gone, and asserted absent
+# Reproducing the fabricated line would have meant re-implementing the
+# tab-split loop, which is the thing this story exists to delete. It is a
+# named divergence, not an accident: KNOWN_DIVERGENCES in tests/test_models.py
+# carries it by corpus label with what it costs.
 # ----------------------------------------------------------------------------
 
 # Run resolve-models on a Claude Code host with `model` in the research slot and
@@ -3881,22 +3920,22 @@ test_resolve_models_invalid_tag_hostile_ids() {
     "$(_invalid_tag_stderr 'son\net')" \
     "INVALID<TAB> edge: a backslash in the id survives uninterpreted"
 
-  # THE NEWLINE CASE. One invalid id, two warnings, and the second one is
-  # fabricated: the read loop consumed 'sonnet' from line 1 and then read line 2
-  # -- 'opus', the tail of the model id -- as a CATEGORY NAME, with an empty
-  # model id. There is no 'opus' category; resolve-models has exactly five, all
-  # of them still present on stdout.
+  # THE NEWLINE CASE, all three assertions INVERTED BY STORY 05. The read loop
+  # used to consume 'sonnet' from line 1 and then read line 2 -- 'opus', the
+  # tail of the model id -- as a CATEGORY NAME with an empty model id, so one
+  # invalid id produced two warnings and the second named a category that has
+  # never existed. Nothing splits on lines now: one invalid category is one
+  # warning, and it carries the id it was given.
   local nl_stderr nl_stdout nl_count nl_ec
   nl_stderr=$(_invalid_tag_stderr "$(printf 'sonnet\nopus')")
   nl_count=$(printf '%s\n' "$nl_stderr" | grep -c 'Warning: resolve-models')
-  assert_eq "2" "$nl_count" \
-    "INVALID<TAB> newline edge: ONE invalid id produces TWO warnings"
-  assert_stderr_contains "Warning: resolve-models: model 'sonnet' $suffix" \
+  assert_eq "1" "$nl_count" \
+    "hostile-id newline edge: ONE invalid id produces ONE warning"
+  assert_stderr_contains "$(printf "Warning: resolve-models: model 'sonnet\nopus' %s" "$suffix")" \
     "$nl_stderr" \
-    "INVALID<TAB> newline edge: the first warning reports only the id's first line"
-  assert_stderr_contains "Warning: resolve-models: model '' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: opus), falling back to inherit" \
-    "$nl_stderr" \
-    "INVALID<TAB> newline edge: the second warning is FABRICATED and names 'opus' as the category"
+    "hostile-id newline edge: the warning carries the WHOLE id, newline included"
+  assert_eq "" "$(printf '%s\n' "$nl_stderr" | grep 'category: opus' || true)" \
+    "hostile-id newline edge: no fabricated warning names a category that does not exist"
 
   local nl_dir
   nl_dir=$(mktemp -d)
@@ -7370,6 +7409,7 @@ main() {
   echo ""
   echo "--- list-models Tests ---"
   test_list_models_claudecode_returns_three_aliases
+  test_list_models_claudecode_matches_the_host_valid_set
   test_list_models_opencode_absent_fallback
 
   # detect-models tests

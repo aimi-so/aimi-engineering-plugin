@@ -190,6 +190,35 @@ _aimi_tasks_py() {
   _aimi_script_py tasks.py
 }
 
+# Same, for the four models.json READER verbs.
+_aimi_models_py() {
+  _aimi_script_py models.py
+}
+
+# python3 for a models READER, or the verb's own documented fallback.
+# Usage: if ! _models_python3_or_degrade <verb> <what-it-falls-back-to>; then ...
+#
+# NOT check_python3, and the difference is the whole point. check_python3 exits
+# 1, which is right for a verb that cannot answer without the interpreter and
+# whose caller is a command that has already committed to running. resolve-
+# models is neither: it runs once per invocation of eight commands and skills,
+# and its contract is that it NEVER fails -- stdout is always valid JSON, every
+# failure path prints the fallback and returns 0. Under Claude Code python3 is
+# already a hard per-Bash-call dependency (hooks/hooks.json wires a .py on
+# PreToolUse), but install.sh wires no hooks at all, so on OpenCode nothing
+# else guarantees an interpreter. A bare check_python3 here would turn a
+# python3-less OpenCode host from "works" into "every command dies at its first
+# CLI call" -- a regression against the pure-jq behaviour this port replaces.
+#
+# So each reader degrades to what it already promises when it cannot read the
+# config: all-inherit, all-null, `prompt`, the built-in Anthropic list. One
+# line to stderr, and exit 0.
+_models_python3_or_degrade() {
+  command -v python3 >/dev/null 2>&1 && return 0
+  echo "Warning: $1: python3 is required to read models.json and was not found; falling back to $2." >&2
+  return 1
+}
+
 # Ensure state directory exists
 ensure_state_dir() {
   mkdir -p "$AIMI_DIR"
@@ -8939,13 +8968,17 @@ cmd_detect_interactivity() {
 # and returns the all-inherit fallback. Re-run `aimi-cli detect-models` to
 # upgrade the config to v2.0.
 #
-# Performance notes:
-#   - The standalone jq-empty validation pass is omitted; the resolution jq
-#     error handler already catches malformed JSON.
-#   - Multi-pass INVALID tagging is merged into a single jq invocation per host.
-#   - OpenCode: `opencode models` output is cached by models.json mtime so
-#     repeated calls within the same models.json state skip the shell-out.
+# The document half — the schema verdict, the per-category lookup, the validity
+# question and every warning — is models.py's, at one crossing. What stays here
+# is what bash owns anyway: where the file lives, whether it exists, whether it
+# is empty, which host this is, the host's valid set (which is where the
+# `opencode` shell-out and its mtime-keyed cache live), and the fallback
+# literal, which is needed on three paths that never reach python3 at all.
 cmd_resolve_models() {
+  # check_jq stays, in all three verbs that had it, although none of them runs
+  # jq any more. Dropping it would let a jq-less host THROUGH where it is
+  # refused today — a behaviour change, and one with no bearing on this port.
+  # Retiring the three calls is its own decision and its own commit.
   check_jq
 
   local config_file
@@ -8969,18 +9002,6 @@ cmd_resolve_models() {
     return 0
   fi
 
-  # v1.0 rejection guard: reject any config that has a top-level .models key OR
-  # whose .schemaVersion is not exactly "2.0". Both are signs of the old schema.
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
   # Determine host key
   local host
   if _is_claude_code_host; then
@@ -8989,45 +9010,16 @@ cmd_resolve_models() {
     host="opencode"
   fi
 
-  # Resolve each category via single-step lookup: .categories[$host][$cat] → model_id
-  # Missing category or null value → inherit
-  # The error handler catches malformed JSON (no separate jq empty pass needed).
-  local _result
-  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    def resolve_cat($cat):
-      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end) as $model |
-      if $model == null then "inherit" else $model end;
-    {
-      research: resolve_cat("research"),
-      review:   resolve_cat("review"),
-      design:   resolve_cat("design"),
-      workflow: resolve_cat("workflow"),
-      executor: resolve_cat("executor")
-    } | @json
-  ' 2>/dev/null) || {
-    echo "Warning: resolve-models: models config file is malformed JSON or failed to parse: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  }
-
-  if [ -z "$_result" ]; then
-    echo "Warning: resolve-models: empty result from models config: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
-  # Validate the resolved model IDs against the host's valid set.
+  # The host's valid set — Claude Code's three aliases, or OpenCode's
+  # `opencode models` output — plus the two host-shaped literals its warnings
+  # read. An EMPTY set means "no valid set available" (no opencode binary, or
+  # one that printed nothing); models.py then skips validation entirely, which
+  # is the fail-safe that keeps a configured value usable rather than refusing
+  # it against a set nobody could produce.
   #
-  # ONE tagging program serves both hosts; only the DATA differs — see
-  # _host_valid_models, which yields Claude Code's three short aliases or
-  # OpenCode's normalized `opencode models` output. Both sides of the question
-  # are normalized (candidate and every list entry) by the one normalizer, and
-  # that normalization happens BEFORE the membership test, never inside it.
-  #
-  # The INVALID\t tagging pipeline itself is unchanged:
-  #   - invalid entries get value "INVALID\t<normalized>" (tab-delimited to handle = in model names)
-  #   - warnings emitted via tab-delimited IFS read loop
-  #   - validated result has INVALID entries replaced with "inherit"
+  # This runs BEFORE the python3 check on purpose: it is what writes the
+  # OpenCode cache file, so a host without an interpreter leaves the same
+  # files behind as one with it.
   local _valid_models _host_name _host_qualifier
   _valid_models=$(_host_valid_models)
   if _is_claude_code_host; then
@@ -9038,44 +9030,23 @@ cmd_resolve_models() {
     _host_qualifier=""
   fi
 
-  # An empty valid set means "no valid set available" (the opencode binary is
-  # absent, or returned nothing). Skipping validation entirely there is the
-  # deliberate fail-safe: the configured value is used as-is.
-  if [ -n "$_valid_models" ]; then
-    local _tagged
-    _tagged=$(printf '%s' "$_result" | jq -r --arg valid "$_valid_models" '
-      def norm: sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "");
-      ($valid | split("\n") | map(norm) | map(select(. != ""))) as $valid_list |
-      to_entries | map(
-        .key as $cat |
-        (.value | norm) as $model |
-        if $model == "" or $model == "inherit" then {key: $cat, value: "inherit"}
-        elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
-        else {key: $cat, value: ("INVALID\t" + $model)}
-        end
-      ) | from_entries | @json
-    ' 2>/dev/null)
-
-    # Emit warnings and build clean result in one pass
-    local _validated
-    _validated=$(printf '%s' "$_tagged" | jq -r '
-      to_entries | map(
-        if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
-        else .
-        end
-      ) | from_entries | @json
-    ' 2>/dev/null)
-
-    # Print warnings for invalid entries (tab delimiter avoids = truncation)
-    while IFS=$'\t' read -r _cat _val; do
-      [ -n "$_cat" ] || continue
-      echo "Warning: resolve-models: model '$_val' is not valid for $_host_name host (${_host_qualifier}category: $_cat), falling back to inherit" >&2
-    done < <(printf '%s' "$_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
-
-    _result="$_validated"
+  if ! _models_python3_or_degrade resolve-models all-inherit; then
+    printf '%s\n' "$_fallback"
+    return 0
   fi
 
-  printf '%s\n' "$_result"
+  # One crossing. models.py prints the resolved object, or the fallback it was
+  # handed plus the branch's own warning; it exits non-zero for exactly one
+  # input, and `set -euo pipefail` hands that status straight to the caller
+  # with both streams empty, which is what the jq before it did. See D1 in
+  # tests/golden_from_jq.json's _comment_models_read.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" resolve \
+    --host "$host" \
+    --config-file "$config_file" \
+    --fallback "$_fallback" \
+    --valid "$_valid_models" \
+    --host-name "$_host_name" \
+    --host-qualifier "$_host_qualifier"
 }
 
 # Emit the current per-category model assignments for the active host.
@@ -9107,16 +9078,6 @@ cmd_get_current_models() {
     return 0
   fi
 
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
   local host
   if _is_claude_code_host; then
     host="claudeCode"
@@ -9124,29 +9085,21 @@ cmd_get_current_models() {
     host="opencode"
   fi
 
-  local _result
-  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    def get_cat($cat):
-      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end);
-    {
-      research: get_cat("research"),
-      review:   get_cat("review"),
-      design:   get_cat("design"),
-      workflow: get_cat("workflow"),
-      executor: get_cat("executor")
-    } | @json
-  ' 2>/dev/null) || {
-    echo "Warning: get-current-models: models config file is malformed JSON or failed to parse: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  }
-
-  if [ -z "$_result" ]; then
+  if ! _models_python3_or_degrade get-current-models all-null; then
     printf '%s\n' "$_fallback"
     return 0
   fi
 
-  printf '%s\n' "$_result"
+  # One crossing, into the same reader resolve-models uses, differing by the
+  # flag it is NOT given: no valid set, so no validation and no warning — this
+  # verb hands back what is stored, including a value resolve-models would
+  # refuse. The unset value is JSON null here and the string "inherit" there,
+  # deliberately: /aimi:setup-models has to tell "not configured" apart from a
+  # literal `inherit` override, and only null says the first.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" current \
+    --host "$host" \
+    --config-file "$config_file" \
+    --fallback "$_fallback"
 }
 
 # List available models for the current host as a JSON array on stdout.
@@ -9164,6 +9117,17 @@ cmd_get_current_models() {
 cmd_list_models() {
   check_jq
 
+  # THE CLAUDE CODE BRANCH CROSSES NOTHING. Its answer is a constant — the
+  # three short aliases the Task tool accepts — so there is no document to
+  # read and no interpreter to need. The same three ids are DATA that
+  # _host_valid_models already spells once; this is that data in JSON, and
+  # test_list_models_claudecode_matches_the_host_valid_set in part2 runs both
+  # and compares them, so the second spelling cannot drift from the first.
+  if _is_claude_code_host; then
+    printf '[\n  "opus",\n  "sonnet",\n  "haiku"\n]\n'
+    return 0
+  fi
+
   local _models_list
   _models_list=$(_host_valid_models)
 
@@ -9174,8 +9138,14 @@ anthropic/claude-sonnet-4-6
 anthropic/claude-opus-4-7"
   fi
 
-  # Convert newline-delimited list to a JSON array
-  printf '%s\n' "$_models_list" | jq -R . | jq -s .
+  if ! _models_python3_or_degrade list-models "the built-in Anthropic model list"; then
+    printf '[\n  "anthropic/claude-haiku-4-5",\n  "anthropic/claude-sonnet-4-6",\n  "anthropic/claude-opus-4-7"\n]\n'
+    return 0
+  fi
+
+  # One crossing, on this branch only: the newline-delimited list to a JSON
+  # array, which is all `jq -R . | jq -s .` ever did here.
+  printf '%s\n' "$_models_list" | python3 "$(_aimi_models_py)" list
 }
 
 # Detect available models on the current host and write ~/.config/aimi/models.json.
@@ -9257,7 +9227,7 @@ cmd_detect_models() {
     # Route every flag value through the one normalizer and the one predicate
     # before writing. Two deliberate boundaries here:
     #
-    #   - A merely-INVALID id WARNS and is still written. Flag mode does not
+    #   - A merely-invalid id WARNS and is still written. Flag mode does not
     #     gain a new non-zero exit for it: /aimi:setup-models writes through
     #     this path (its picker offers a free-form "Other"), and this CLI's
     #     discipline is that validation happens at READ time — cmd_resolve_models
@@ -9493,7 +9463,8 @@ anthropic/claude-opus-4-7"
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
 #   prompt — neither file exists (first run, not yet configured)
-# No jq needed — pure file-existence checks.
+# The file questions are answered here; the document's own half — the v1.0
+# verdict and "is this host configured at all" — is one crossing into models.py.
 cmd_models_prompt_check() {
   local config_file
   config_file=$(_aimi_models_config_path)
@@ -9512,20 +9483,6 @@ cmd_models_prompt_check() {
     return 0
   fi
 
-  # v1.0 schema (has top-level .models OR schemaVersion != "2.0") → prompt
-  # The picker re-writes the file in v2.0 shape on next configure.
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "prompt"
-    return 0
-  fi
-
-  # v2.0 with current host configured (at least one category non-null) → skip.
-  # Aligns with get-current-models: if the picker would pre-fill nothing for
-  # this host, ask the user instead of silently falling back to all-inherit.
   local host
   if _is_claude_code_host; then
     host="claudeCode"
@@ -9533,31 +9490,26 @@ cmd_models_prompt_check() {
     host="opencode"
   fi
 
-  local _has_config
-  _has_config=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    (.categories[$host] // {}) as $h |
-    [($h.research // null), ($h.review // null), ($h.design // null),
-     ($h.workflow // null), ($h.executor // null)]
-    | map(select(. != null and . != ""))
-    | (length > 0)
-  ' 2>/dev/null) || _has_config="false"
-
-  if [ "$_has_config" = "true" ]; then
-    echo "skip"
+  if ! _models_python3_or_degrade models-prompt-check prompt; then
+    echo "prompt"
     return 0
   fi
 
-  # Host not configured but config file is present — honor the per-host
-  # dismissal marker if it exists. File-missing always re-prompts (above);
-  # this branch only matters when the user kept some config but explicitly
-  # opted out for this host.
-  local marker_file
+  # The per-host dismissal marker is a FILE question, so it is answered here
+  # and handed across as a flag rather than read twice. It only matters when
+  # the config file is present but says nothing about this host: a missing
+  # file always re-prompts (above), whatever the marker says.
+  local marker_file marker=0
   marker_file=$(_aimi_models_prompt_marker_path)
   if [ -f "$marker_file" ]; then
-    echo "skip"
-  else
-    echo "prompt"
+    marker=1
   fi
+
+  # One crossing: the v1.0 verdict and the "is this host configured at all"
+  # question, both over the same parse.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" prompt-check \
+    --host "$host" \
+    --marker "$marker"
 }
 
 # Atomically create the models first-run prompt marker file.

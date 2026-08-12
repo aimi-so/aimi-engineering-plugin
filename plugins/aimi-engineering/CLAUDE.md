@@ -114,6 +114,8 @@ Two exemptions exist, both in the roadmap family, both named here so the list ca
 
 Readers are exempt from the lock half and not from the counting half. `cmd_list_ready` names the module in each of two mutually exclusive branches, which is one crossing per invocation; that branch exemption is asserted by name too.
 
+The same counting rule covers the four **`models.json` readers** — `cmd_resolve_models`, `cmd_get_current_models`, `cmd_models_prompt_check` and `cmd_list_models`, each one crossing into `scripts/models.py`, none of them taking a lock (`test_each_reader_crosses_at_most_once_per_invocation` in `scripts/tests/test_models.py` counts them). `cmd_list_models` is the second **branch** exemption after `cmd_list_ready`, and the opposite shape: its Claude Code branch crosses ZERO times, because that host's answer is a constant. Zero crossings is the defect in a tasks verb — there it means a read-decide-write done in bash — and is not one here, where nothing is read and nothing is decided. The three aliases it prints are consequently spelled twice, once as data in `_host_valid_models` and once as JSON in the branch; the two are run against each other by `test_list_models_claudecode_matches_the_host_valid_set` so the second cannot drift. **None of the four calls `check_python3`** — see the top-level `CLAUDE.md` § Testing for why that would be a regression, and what each degrades to instead.
+
 ### `story-merge`
 
 One CLI subcommand manages the story-merge lifecycle. It is consumed by the `/aimi:plan` two-pass pipeline, not invoked by users directly.
