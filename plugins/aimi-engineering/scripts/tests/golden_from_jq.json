@@ -34302,5 +34302,2406 @@
       "outside_after": {}
     }
   ],
-  "_comment_archive": "archive-task -- cmd_archive_task, captured the way the six tasks.json blocks before it were, by running the bash and jq that used to live in aimi-cli.sh BEFORE any of it was deleted: 38 cases at commit 30053d7. THIS IS THE ONLY VERB IN THE FILE THAT DELETES A USER'S FILES, so the record is of the FILESYSTEM and not only of stdout: `tree` is the whole project root listed relative to itself (directories with a trailing slash, symlinks shown as `path -> target`), `file` is the tasks document still sitting at its ORIGINAL path (null once it has been moved), and `outside_after` is every fixture written one directory ABOVE the project root, with its contents, so \"the escape target survived untouched\" is a comparison rather than a claim. A golden that recorded stdout alone would pass while the file was being deleted instead of moved. args/input make every case replayable; each ran in its own throwaway base holding proj/ (the project root, so PROJECT_ROOT resolves to it) beside fora/ (outside it), and two normalizations fire -- the project root to /TMP and its parent to /OUTSIDE, in that order -- applied to the inputs on the way in and to every recorded string on the way out. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Archived: a plain success (archive-sucesso), an absolute CLI argument (archive-caminho- absoluto), a document whose only other story is skipped (archive-skipped- tambem-e-terminal), and one where .aimi/archive does not exist at all so mkdir -p has to make it (archive-sem-diretorio-archive). Refused with nothing touched: a non-terminal story (archive-nao-terminal, and -com-lock), a missing file (archive-arquivo-inexistente), no argument at all (archive-sem- argumento), and a CLI argument that leaves the project root (archive- argumento-fora-do-projeto). Destination already occupied: archive-colisao, archive-colisao-multipla (two slots taken, lands on -3), archive-colisao-com- lock, archive-ja-no-archive (a file already IN the archive, archived again) and archive-brainstorm-colide. Deleting: archive-research-e-prototype, archive-research-ausente (a named path that does not exist is skipped silently and counts for nothing), archive-research-lista-vazia, archive- research-nao-lista, archive-research-absoluto-dentro and archive-sem-metadata. Escaping: an absolute path outside the root (archive-research-absoluto-fora), a ../ traversal (archive-research-traversal), a symlink inside the project whose target resolves outside it (archive-research-symlink-fora), the same through prototypePaths after the research delete has already run (archive- prototype-fora-depois-do-research), and the brainstorm equivalent (archive- brainstorm-fora-existente). Every deleting and escaping case carries the same three decoys -- an unlisted sibling research file, a file already in .aimi/archive/, and a file outside .aimi/ entirely -- so a survivor set can be compared rather than spot-checked. NINE THINGS THE CAPTURE ITSELF EXPOSED, recorded here so no one has to rediscover them from 38 recordings by eye. (1) THE LOCK IS MOVED INTO THE ARCHIVE. archive-lock-acompanha's tree shows .aimi/archive/<name>.json.lock where .aimi/tasks/<name>.json.lock used to be, and cmd_archive_task takes no lock of its own at any point: a writer holding flock on the moved inode has no mutual exclusion against a writer that arrives afterwards and creates a fresh lock at the original path. (2) A .lock THAT IS A DIRECTORY IS LEFT BEHIND instead, because the move is guarded by `[ -f ]` -- archive-lock-e-diretorio ends with the task in the archive and the lock directory still in .aimi/tasks/. (3) THE -N COLLISION SUFFIX SPLITS THE BASENAME ON THE FIRST DOT, not the last: archive-colisao-ponto-precoce sends corpus.v2-tasks.json to corpus-2.v2-tasks.json. The lock's own suffix is computed independently of the task's, so the two only stay paired by coincidence. (4) userStories: [] ARCHIVES HERE AND IS NOT LISTED BY list-archivable. archive-userstories-vazio records the success; _archivable_file_is_terminal, which list-archivable uses, additionally requires the array to be non-empty, and cmd_archive_task's inline copy of that check does not. One rule, two implementations, already disagreeing before any port -- ranked, not fixed here. (5) THE `[ -z \"$non_terminal\" ]` BRANCH IS REACHED BY EXACTLY ONE INPUT, and it is not the one it reads as if it guards. Under `set -euo pipefail` a jq that FAILS takes the assignment down with it before the test is ever reached, so a document with no userStories (archive-sem-userstories), one whose userStories is a string (archive-userstories-nao-lista) and a malformed one (archive-json-malformado) exit 5, 5 and 4 with EMPTY stderr -- jq's own status, its message swallowed by the 2>/dev/null on the assignment that ran it, and no diagnostic anywhere. The arm fires only for an EMPTY tasks file, where jq exits 0 having printed nothing: archive-arquivo-vazio is refused with the non-terminal message, which is the wrong sentence for the input but is the behaviour. (10) A TWO-DOCUMENT TASKS FILE IS ARCHIVED WHATEVER ITS SECOND DOCUMENT SAYS. jq reads a stream and printed one count per document, so `[ \"$non_terminal\" -ne 0 ]` was handed \"0 1\"; `[` reported \"integer expression expected\" and returned 2, which an `if` reads as FALSE. archive-dois-documentos-um-aberto has an in_progress story in its second document and is archived anyway, with bash's complaint the only trace. (6) validate_path_in_project LETS A NON-EXISTENT TRAVERSAL THROUGH when the parent directory does not exist either: it falls back to the unresolved string, which still starts with PROJECT_ROOT. archive-research-traversal (refused) and archive-research-fora-inexistente (allowed, then skipped as missing) are the same ../fora/... path and differ only in whether fora/ exists. (7) THE TWO CALL-SITE ORDERINGS DIFFER AND BOTH MATTER: researchPaths and prototypePaths are confined BEFORE their existence check, brainstormPath only INSIDE it -- so archive-brainstorm-fora-inexistente is silently skipped where archive-research-fora-inexistente would have been refused had its parent existed. (8) EVERY ESCAPE REFUSAL LANDS AFTER THE TASK FILE AND ITS LOCK HAVE ALREADY MOVED, and after any earlier delete has already happened -- archive-prototype-fora-depois-do-research exits 1 with the task in the archive and .aimi/research/r1.md already gone. A refusal with a side effect is visible in these records because `tree` is compared, and that is the field's whole reason for being here. (9) A DIRECTORY NAMED IN researchPaths ENDS THE RUN MID-ARCHIVE: `rm -f` refuses it, `set -e` does the rest, and archive-research-diretorio exits 1 with the task already archived and the directory and both files under it untouched. Nothing recurses, and nothing in the port may start. AFTER THE PORT: 238 of the 246 field comparisons are identical. Every `file`, every `tree` and every `outside_after` matched in all 41 cases -- which is the half that matters here, because those three ARE the verb: nothing moved that did not move before, nothing was deleted that was not deleted before, and no refusal gained or lost a side effect. The 8 that differ fall in 5 cases and in two classes, neither of them a rule anyone wrote. (A) THE ENGINE'S OWN STATUS WITH NO MESSAGE AT ALL, exit and stderr in archive-sem-userstories, archive-userstories-nao-lista and archive-json-malformado: jq aborted and `set -euo pipefail` took the script down at jq's exit 5, 5 and 4, with jq's message swallowed by the 2>/dev/null on the assignment that ran it, so the recording is of a silent death. tasks.py refuses at 1 with a line naming the verb and the file. Recorded rather than reproduced, exactly as the six blocks before this one did with their engine aborts -- synthesizing an engine error on purpose is not a thing to write -- and all three still refuse, still print nothing to stdout, and still leave the tree exactly as bash left it. (B) BASH'S COMPLAINT ABOUT ITS OWN COMPARISON, stderr only, in archive-dois-documentos and archive-dois-documentos-um-aberto: `[` was handed one count per document, reported \"integer expression expected\" and returned 2, which the `if` read as false. The port branches on the count instead, so it archives the same file with nothing on stderr. The archive it produces is identical, which is what the tree comparison says; what is gone is a diagnostic that named no rule. The `archive_cases` array itself is untouched by the port commit -- only this paragraph was appended -- so a reviewer can diff the two commits and see that the record predates the replacement."
+  "_comment_archive": "archive-task -- cmd_archive_task, captured the way the six tasks.json blocks before it were, by running the bash and jq that used to live in aimi-cli.sh BEFORE any of it was deleted: 38 cases at commit 30053d7. THIS IS THE ONLY VERB IN THE FILE THAT DELETES A USER'S FILES, so the record is of the FILESYSTEM and not only of stdout: `tree` is the whole project root listed relative to itself (directories with a trailing slash, symlinks shown as `path -> target`), `file` is the tasks document still sitting at its ORIGINAL path (null once it has been moved), and `outside_after` is every fixture written one directory ABOVE the project root, with its contents, so \"the escape target survived untouched\" is a comparison rather than a claim. A golden that recorded stdout alone would pass while the file was being deleted instead of moved. args/input make every case replayable; each ran in its own throwaway base holding proj/ (the project root, so PROJECT_ROOT resolves to it) beside fora/ (outside it), and two normalizations fire -- the project root to /TMP and its parent to /OUTSIDE, in that order -- applied to the inputs on the way in and to every recorded string on the way out. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Archived: a plain success (archive-sucesso), an absolute CLI argument (archive-caminho- absoluto), a document whose only other story is skipped (archive-skipped- tambem-e-terminal), and one where .aimi/archive does not exist at all so mkdir -p has to make it (archive-sem-diretorio-archive). Refused with nothing touched: a non-terminal story (archive-nao-terminal, and -com-lock), a missing file (archive-arquivo-inexistente), no argument at all (archive-sem- argumento), and a CLI argument that leaves the project root (archive- argumento-fora-do-projeto). Destination already occupied: archive-colisao, archive-colisao-multipla (two slots taken, lands on -3), archive-colisao-com- lock, archive-ja-no-archive (a file already IN the archive, archived again) and archive-brainstorm-colide. Deleting: archive-research-e-prototype, archive-research-ausente (a named path that does not exist is skipped silently and counts for nothing), archive-research-lista-vazia, archive- research-nao-lista, archive-research-absoluto-dentro and archive-sem-metadata. Escaping: an absolute path outside the root (archive-research-absoluto-fora), a ../ traversal (archive-research-traversal), a symlink inside the project whose target resolves outside it (archive-research-symlink-fora), the same through prototypePaths after the research delete has already run (archive- prototype-fora-depois-do-research), and the brainstorm equivalent (archive- brainstorm-fora-existente). Every deleting and escaping case carries the same three decoys -- an unlisted sibling research file, a file already in .aimi/archive/, and a file outside .aimi/ entirely -- so a survivor set can be compared rather than spot-checked. NINE THINGS THE CAPTURE ITSELF EXPOSED, recorded here so no one has to rediscover them from 38 recordings by eye. (1) THE LOCK IS MOVED INTO THE ARCHIVE. archive-lock-acompanha's tree shows .aimi/archive/<name>.json.lock where .aimi/tasks/<name>.json.lock used to be, and cmd_archive_task takes no lock of its own at any point: a writer holding flock on the moved inode has no mutual exclusion against a writer that arrives afterwards and creates a fresh lock at the original path. (2) A .lock THAT IS A DIRECTORY IS LEFT BEHIND instead, because the move is guarded by `[ -f ]` -- archive-lock-e-diretorio ends with the task in the archive and the lock directory still in .aimi/tasks/. (3) THE -N COLLISION SUFFIX SPLITS THE BASENAME ON THE FIRST DOT, not the last: archive-colisao-ponto-precoce sends corpus.v2-tasks.json to corpus-2.v2-tasks.json. The lock's own suffix is computed independently of the task's, so the two only stay paired by coincidence. (4) userStories: [] ARCHIVES HERE AND IS NOT LISTED BY list-archivable. archive-userstories-vazio records the success; _archivable_file_is_terminal, which list-archivable uses, additionally requires the array to be non-empty, and cmd_archive_task's inline copy of that check does not. One rule, two implementations, already disagreeing before any port -- ranked, not fixed here. (5) THE `[ -z \"$non_terminal\" ]` BRANCH IS REACHED BY EXACTLY ONE INPUT, and it is not the one it reads as if it guards. Under `set -euo pipefail` a jq that FAILS takes the assignment down with it before the test is ever reached, so a document with no userStories (archive-sem-userstories), one whose userStories is a string (archive-userstories-nao-lista) and a malformed one (archive-json-malformado) exit 5, 5 and 4 with EMPTY stderr -- jq's own status, its message swallowed by the 2>/dev/null on the assignment that ran it, and no diagnostic anywhere. The arm fires only for an EMPTY tasks file, where jq exits 0 having printed nothing: archive-arquivo-vazio is refused with the non-terminal message, which is the wrong sentence for the input but is the behaviour. (10) A TWO-DOCUMENT TASKS FILE IS ARCHIVED WHATEVER ITS SECOND DOCUMENT SAYS. jq reads a stream and printed one count per document, so `[ \"$non_terminal\" -ne 0 ]` was handed \"0 1\"; `[` reported \"integer expression expected\" and returned 2, which an `if` reads as FALSE. archive-dois-documentos-um-aberto has an in_progress story in its second document and is archived anyway, with bash's complaint the only trace. (6) validate_path_in_project LETS A NON-EXISTENT TRAVERSAL THROUGH when the parent directory does not exist either: it falls back to the unresolved string, which still starts with PROJECT_ROOT. archive-research-traversal (refused) and archive-research-fora-inexistente (allowed, then skipped as missing) are the same ../fora/... path and differ only in whether fora/ exists. (7) THE TWO CALL-SITE ORDERINGS DIFFER AND BOTH MATTER: researchPaths and prototypePaths are confined BEFORE their existence check, brainstormPath only INSIDE it -- so archive-brainstorm-fora-inexistente is silently skipped where archive-research-fora-inexistente would have been refused had its parent existed. (8) EVERY ESCAPE REFUSAL LANDS AFTER THE TASK FILE AND ITS LOCK HAVE ALREADY MOVED, and after any earlier delete has already happened -- archive-prototype-fora-depois-do-research exits 1 with the task in the archive and .aimi/research/r1.md already gone. A refusal with a side effect is visible in these records because `tree` is compared, and that is the field's whole reason for being here. (9) A DIRECTORY NAMED IN researchPaths ENDS THE RUN MID-ARCHIVE: `rm -f` refuses it, `set -e` does the rest, and archive-research-diretorio exits 1 with the task already archived and the directory and both files under it untouched. Nothing recurses, and nothing in the port may start. AFTER THE PORT: 238 of the 246 field comparisons are identical. Every `file`, every `tree` and every `outside_after` matched in all 41 cases -- which is the half that matters here, because those three ARE the verb: nothing moved that did not move before, nothing was deleted that was not deleted before, and no refusal gained or lost a side effect. The 8 that differ fall in 5 cases and in two classes, neither of them a rule anyone wrote. (A) THE ENGINE'S OWN STATUS WITH NO MESSAGE AT ALL, exit and stderr in archive-sem-userstories, archive-userstories-nao-lista and archive-json-malformado: jq aborted and `set -euo pipefail` took the script down at jq's exit 5, 5 and 4, with jq's message swallowed by the 2>/dev/null on the assignment that ran it, so the recording is of a silent death. tasks.py refuses at 1 with a line naming the verb and the file. Recorded rather than reproduced, exactly as the six blocks before this one did with their engine aborts -- synthesizing an engine error on purpose is not a thing to write -- and all three still refuse, still print nothing to stdout, and still leave the tree exactly as bash left it. (B) BASH'S COMPLAINT ABOUT ITS OWN COMPARISON, stderr only, in archive-dois-documentos and archive-dois-documentos-um-aberto: `[` was handed one count per document, reported \"integer expression expected\" and returned 2, which the `if` read as false. The port branches on the count instead, so it archives the same file with nothing on stderr. The archive it produces is identical, which is what the tree comparison says; what is gone is a diagnostic that named no rule. The `archive_cases` array itself is untouched by the port commit -- only this paragraph was appended -- so a reviewer can diff the two commits and see that the record predates the replacement.",
+  "models_read_cases": [
+    {
+      "label": "rm-valido-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valido-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-opus-4-7\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valido-oc-sem-binario",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-opus-4-7\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-v1-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"opus\"}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"opus\"}}\n"
+      }
+    },
+    {
+      "label": "rm-v1-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"x\"}}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"x\"}}\n"
+      }
+    },
+    {
+      "label": "rm-chave-models-em-v2-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"models\": {}, \"categories\": {\"claudeCode\": {\"research\": \"opus\", \"review\": \"sonnet\", \"design\": \"haiku\", \"workflow\": \"sonnet\", \"executor\": \"opus\"}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"2.0\", \"models\": {}, \"categories\": {\"claudeCode\": {\"research\": \"opus\", \"review\": \"sonnet\", \"design\": \"haiku\", \"workflow\": \"sonnet\", \"executor\": \"opus\"}}}\n"
+      }
+    },
+    {
+      "label": "rm-sem-schema-version-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"categories\": {\"claudeCode\": {\"research\": \"opus\", \"review\": \"sonnet\", \"design\": \"haiku\", \"workflow\": \"sonnet\", \"executor\": \"opus\"}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"categories\": {\"claudeCode\": {\"research\": \"opus\", \"review\": \"sonnet\", \"design\": \"haiku\", \"workflow\": \"sonnet\", \"executor\": \"opus\"}}}\n"
+      }
+    },
+    {
+      "label": "rm-arquivo-ausente-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "rm-arquivo-ausente-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "rm-arquivo-vazio-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is empty: /TMP/models.json\n",
+      "files": {
+        "models.json": ""
+      }
+    },
+    {
+      "label": "rm-arquivo-vazio-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is empty: /TMP/models.json\n",
+      "files": {
+        "models.json": ""
+      }
+    },
+    {
+      "label": "rm-so-espacos-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "   \n  \n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: empty result from models config: /TMP/models.json\n",
+      "files": {
+        "models.json": "   \n  \n"
+      }
+    },
+    {
+      "label": "rm-json-malformado-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"2.0\", \"categories\": {\n"
+      }
+    },
+    {
+      "label": "rm-json-malformado-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"2.0\", \"categories\": {\n"
+      }
+    },
+    {
+      "label": "rm-valor-true-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": true,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": true,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-numero-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 5,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 5,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-objeto-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": {},\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": {},\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-array-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": [\n        \"opus\"\n      ],\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": [\n        \"opus\"\n      ],\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-false-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-null-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": null,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": null,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-true-oc-sem-binario",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": true,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":true,\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": true,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-numero-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 5,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 5,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-valor-true-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": true,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": true,\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-com-tab-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\tnet\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'son\tnet' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\tnet\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-com-tab-duplo-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\t\\tnet\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'son\t\tnet' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\t\\tnet\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-com-tab-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude\\topus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "Warning: resolve-models: model 'anthropic/claude\topus-4-7' is not valid for OpenCode host (category: research), falling back to inherit\n",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude\\topus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-com-newline-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\\nopus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'sonnet' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\nWarning: resolve-models: model '' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: opus), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\\nopus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-com-newline-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\\nanthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "Warning: resolve-models: model 'anthropic/claude-opus-4-7' is not valid for OpenCode host (category: research), falling back to inherit\nWarning: resolve-models: model '' is not valid for OpenCode host (category: anthropic/claude-haiku-4-5), falling back to inherit\n",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\\nanthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-espaco-nas-pontas-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"  sonnet  \",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"sonnet\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"  sonnet  \",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-espaco-nas-pontas-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"  anthropic/claude-sonnet-4-6  \",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-sonnet-4-6\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"  anthropic/claude-sonnet-4-6  \",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-espaco-interno-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son net\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'son net' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son net\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-barra-invertida-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\\\net\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'son\\net' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"son\\\\net\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-barra-invertida-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic\\\\claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "Warning: resolve-models: model 'anthropic\\claude-opus-4-7' is not valid for OpenCode host (category: research), falling back to inherit\n",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic\\\\claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-desconhecido-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "Warning: resolve-models: model 'gpt-4' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-desconhecido-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "Warning: resolve-models: model 'gpt-4' is not valid for OpenCode host (category: research), falling back to inherit\n",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-id-desconhecido-oc-sem-binario",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"gpt-4\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-inherit-literal-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"inherit\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"inherit\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-inherit-literal-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"inherit\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"inherit\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-string-vazia-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-string-vazia-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-categories-ausente-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\"\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\"\n}\n"
+      }
+    },
+    {
+      "label": "rm-categories-ausente-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\"\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\"\n}\n"
+      }
+    },
+    {
+      "label": "rm-categories-string-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is malformed JSON or failed to parse: /TMP/models.json\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n"
+      }
+    },
+    {
+      "label": "rm-categories-host-string-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": \"nope\"\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is malformed JSON or failed to parse: /TMP/models.json\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": \"nope\"\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-categories-host-array-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": []\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is malformed JSON or failed to parse: /TMP/models.json\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": []\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-so-outro-host-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-so-outro-host-oc-stub",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-dois-documentos-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n{\"research\":\"haiku\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-documento-escalar-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "\"apenas uma string\"\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "\"apenas uma string\"\n"
+      }
+    },
+    {
+      "label": "rm-cache-preexistente-vence-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"cached/only-in-cache\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'zed/other-model\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": "cached/only-in-cache\n"
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"cached/only-in-cache\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for OpenCode host (category: review), falling back to inherit\nWarning: resolve-models: model 'anthropic/claude-haiku-4-5' is not valid for OpenCode host (category: design), falling back to inherit\nWarning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for OpenCode host (category: workflow), falling back to inherit\nWarning: resolve-models: model 'anthropic/claude-opus-4-7' is not valid for OpenCode host (category: executor), falling back to inherit\n",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "cached/only-in-cache\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"cached/only-in-cache\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-cache-preexistente-ignorado-sem-binario-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"cached/only-in-cache\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": "cached/only-in-cache\n"
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"cached/only-in-cache\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "cached/only-in-cache\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"cached/only-in-cache\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-stub-vazio-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf ''\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"gpt-4\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-python3-ausente-arquivo-ausente-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "rm-python3-ausente-arquivo-vazio-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}\n",
+      "stderr": "Warning: resolve-models: models config file is empty: /TMP/models.json\n",
+      "files": {
+        "models.json": ""
+      }
+    },
+    {
+      "label": "rm-python3-ausente-config-valida-cc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "rm-python3-ausente-config-valida-oc",
+      "verb": "resolve-models",
+      "args": [
+        "resolve-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-opus-4-7\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-valido-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-valido-oc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-opus-4-7\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-v1-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"opus\"}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"opus\"}}\n"
+      }
+    },
+    {
+      "label": "gcm-v1-oc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"x\"}}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"1.0\", \"models\": {\"research\": \"x\"}}\n"
+      }
+    },
+    {
+      "label": "gcm-arquivo-ausente-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "gcm-arquivo-vazio-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "Warning: get-current-models: models config file is empty: /TMP/models.json\n",
+      "files": {
+        "models.json": ""
+      }
+    },
+    {
+      "label": "gcm-so-espacos-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "   \n  \n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "   \n  \n"
+      }
+    },
+    {
+      "label": "gcm-json-malformado-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models\n",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"2.0\", \"categories\": {\n"
+      }
+    },
+    {
+      "label": "gcm-valor-true-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": true,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":true,\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": true,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-valor-numero-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 5,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":5,\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 5,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-valor-exponencial-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"research\":1e3}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":1000,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"research\":1e3}}}\n"
+      }
+    },
+    {
+      "label": "gcm-valor-objeto-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": {\n        \"a\": 1\n      },\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":{\"a\":1},\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": {\n        \"a\": 1\n      },\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-valor-false-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false,\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-string-vazia-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-parcial-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"design\": \"haiku\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":null,\"design\":\"haiku\",\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"design\": \"haiku\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-categories-string-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "Warning: get-current-models: models config file is malformed JSON or failed to parse: /TMP/models.json\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n"
+      }
+    },
+    {
+      "label": "gcm-categories-ausente-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\"\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\"\n}\n"
+      }
+    },
+    {
+      "label": "gcm-so-outro-host-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-so-outro-host-oc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-id-com-newline-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\\nopus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"sonnet\\nopus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\\nopus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-id-espaco-nas-pontas-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"  sonnet  \",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"  sonnet  \",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"  sonnet  \",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-id-desconhecido-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"gpt-4\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"gpt-4\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-dois-documentos-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n{\"research\":\"haiku\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-python3-ausente-arquivo-ausente-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":null,\"review\":null,\"design\":null,\"workflow\":null,\"executor\":null}\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "gcm-python3-ausente-config-valida-cc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"opus\",\"review\":\"sonnet\",\"design\":\"haiku\",\"workflow\":\"sonnet\",\"executor\":\"opus\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "gcm-python3-ausente-config-valida-oc",
+      "verb": "get-current-models",
+      "args": [
+        "get-current-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "{\"research\":\"anthropic/claude-opus-4-7\",\"review\":\"anthropic/claude-sonnet-4-6\",\"design\":\"anthropic/claude-haiku-4-5\",\"workflow\":\"anthropic/claude-sonnet-4-6\",\"executor\":\"anthropic/claude-opus-4-7\"}\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-arquivo-ausente-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "mpc-arquivo-vazio-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": ""
+      }
+    },
+    {
+      "label": "mpc-so-espacos-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "   \n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "   \n"
+      }
+    },
+    {
+      "label": "mpc-v1-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"1.0\", \"models\": {}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"1.0\", \"models\": {}}\n"
+      }
+    },
+    {
+      "label": "mpc-json-malformado-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\",\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\"schemaVersion\": \"2.0\",\n"
+      }
+    },
+    {
+      "label": "mpc-configurado-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-configurado-oc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-so-outro-host-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-so-outro-host-com-marker-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": "claudeCode",
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models-prompt-seen-claudeCode": "seen\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-so-outro-host-marker-do-outro-host-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": "opencode",
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models-prompt-seen-opencode": "seen\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-arquivo-ausente-com-marker-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": "claudeCode",
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models-prompt-seen-claudeCode": "seen\n"
+      }
+    },
+    {
+      "label": "mpc-todos-null-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": null,\n      \"review\": null,\n      \"design\": null,\n      \"workflow\": null,\n      \"executor\": null\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": null,\n      \"review\": null,\n      \"design\": null,\n      \"workflow\": null,\n      \"executor\": null\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-todos-string-vazia-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"\",\n      \"design\": \"\",\n      \"workflow\": \"\",\n      \"executor\": \"\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"\",\n      \"review\": \"\",\n      \"design\": \"\",\n      \"workflow\": \"\",\n      \"executor\": \"\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-valor-zero-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 0\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": 0\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-valor-false-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": false\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-categories-string-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": \"nope\"\n}\n"
+      }
+    },
+    {
+      "label": "mpc-categories-host-string-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": \"nope\"\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": \"nope\"\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-categories-vazio-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {}\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {}\n}\n"
+      }
+    },
+    {
+      "label": "mpc-dois-documentos-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-python3-ausente-arquivo-ausente-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "prompt\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "mpc-python3-ausente-configurado-cc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "mpc-python3-ausente-configurado-oc",
+      "verb": "models-prompt-check",
+      "args": [
+        "models-prompt-check"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "skip\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-cc",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"opus\",\n  \"sonnet\",\n  \"haiku\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-cc-sem-config",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"opus\",\n  \"sonnet\",\n  \"haiku\"\n]\n",
+      "stderr": "",
+      "files": {}
+    },
+    {
+      "label": "lm-oc-stub",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-opus-4-7\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-haiku-4-5\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-oc-sem-binario",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-haiku-4-5\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-opus-4-7\"\n]\n",
+      "stderr": "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list.\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-oc-stub-vazio",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf ''\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-haiku-4-5\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-opus-4-7\"\n]\n",
+      "stderr": "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list.\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-oc-cache-preexistente",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'zed/other-model\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": "cached/only-in-cache\n  cached/padded  \n\n"
+      },
+      "exit": 0,
+      "stdout": "[\n  \"cached/only-in-cache\",\n  \"cached/padded\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "cached/only-in-cache\n  cached/padded  \n\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-oc-sem-config",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": true,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-opus-4-7\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-haiku-4-5\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n"
+      }
+    },
+    {
+      "label": "lm-python3-ausente-cc",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"opus\",\n  \"sonnet\",\n  \"haiku\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"sonnet\",\n      \"design\": \"haiku\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-python3-ausente-oc-stub",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf 'anthropic/claude-opus-4-7\\n  anthropic/claude-sonnet-4-6  \\n\\nanthropic/claude-haiku-4-5\\n'\n",
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-opus-4-7\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-haiku-4-5\"\n]\n",
+      "stderr": "",
+      "files": {
+        "models-oc-cache-<MTIME>.txt": "anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n",
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    },
+    {
+      "label": "lm-python3-ausente-oc-sem-binario",
+      "verb": "list-models",
+      "args": [
+        "list-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": false,
+        "marker": null,
+        "seed_cache": null
+      },
+      "exit": 0,
+      "stdout": "[\n  \"anthropic/claude-haiku-4-5\",\n  \"anthropic/claude-sonnet-4-6\",\n  \"anthropic/claude-opus-4-7\"\n]\n",
+      "stderr": "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list.\n",
+      "files": {
+        "models.json": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\",\n      \"review\": \"anthropic/claude-sonnet-4-6\",\n      \"design\": \"anthropic/claude-haiku-4-5\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n"
+      }
+    }
+  ],
+  "_comment_models_read": "models.json READERS -- cmd_resolve_models, cmd_get_current_models, cmd_models_prompt_check and cmd_list_models -- captured the way every block before them was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 114 cases at commit 9d45ddf. cmd_detect_models is the WRITER of this same file and is NOT here; it is captured with its own block by its own slice. models.json is a GLOBAL file, so every case builds a throwaway config root and points AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR at it, and PATH is a shim directory of symlinks rather than the developer's -- nothing here can reach the real ~/.config/aimi/ or ~/.claude/plugins/cache/. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT, which is a different case again from one that prints nothing), `python3` says whether a python3 symlink was placed in that shim directory, `marker` names the per-host models-prompt-seen-<host> file to pre-create, and `seed_cache` writes models-oc-cache-<mtime>.txt keyed on the CONFIG FILE's own mtime before the run. `files` is every file left in the root afterwards WITH ITS CONTENTS, because _oc_models_cache_path writes a sibling next to models.json and nothing ever collects it -- the same reason archive_cases records a tree. Two normalizations fire, on the way in and on the way out: the root becomes /TMP and the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt. Without them two captures could not be byte-identical; with them, two consecutive full captures are. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Accepted: a valid v2.0 config on both hosts, the literal string `inherit`, an id padded with spaces, a config holding only the OTHER host's table. Rejected with the pt-BR string \"schema 1.0 obsoleto -- re-rode aimi-cli detect-models\", which resolve-models and get-current-models each own a copy of: a real v1.0 document, a v2.0 one carrying a top-level .models key, one with no schemaVersion at all, a bare JSON string, and -- see (3) -- malformed JSON. Warned and degraded to inherit: an unknown id per host, an id with an internal space, an internal tab, a double tab, a backslash, a newline. Silently absent: an empty string, a null, a false, an absent `categories` key. Refused with nothing on either stream: the four non-string values of (1). TWELVE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D1. A non-string category value makes resolve-models exit 5 with EMPTY stdout and EMPTY stderr -- rm-valor-true-cc, rm-valor-numero-cc, rm-valor-objeto-cc, rm-valor-array-cc -- violating its own documented contract that stdout is always valid JSON and every failure path returns the fallback at exit 0. Three things compound: jq's `//` fires only on null and false, so a non-string survives into the \"INVALID\\t\" + value concatenation, which is a type error; that jq call's stderr is discarded with no || fallback, unlike the two before it; and it is a BARE assignment to an already-declared local, so under `set -euo pipefail` jq's status takes the whole shell down. It is host-conditional, which is the tell: with an EMPTY valid set the validation pass never runs and the same config prints {\"research\":true,...} at exit 0 -- rm-valor-true-oc-sem-binario. Captured as-is and ported to as-is; the repair is its own commit. (2) `false` and `null` both resolve to inherit while `0` does not -- rm-valor-false-cc and rm-valor-null-cc against rm-valor-numero-cc -- because `//` reads false as absent and 0 as present. models-prompt-check inherits the same asymmetry from its own `//`: mpc-valor-zero-cc answers skip and mpc-valor-false-cc answers prompt. (3) Malformed JSON is reported as \"schema 1.0 obsoleto\" -- rm-json-malformado-cc, gcm-json-malformado-cc -- because jq's parse failure lands in the `|| _schema_ok=\"reject\"` handler on the schema pass. The documented \"malformed JSON or failed to parse\" message is reachable only when the file PARSES and `.categories`, or its host sub-table, is not an object: rm-categories-string-cc, rm-categories-host-string-cc, rm-categories-host-array-oc-stub. Both messages name the config path. (4) D4. One invalid id containing a newline produces TWO warnings, and the second names a category that does not exist while claiming an empty model id -- rm-id-com-newline-cc on Claude Code, rm-id-com-newline-oc-stub on OpenCode, where the fabricated category is a model id. The `while IFS=$'\\t' read -r _cat _val` loop is line-oriented and the value it reads is not. (5) An INTERNAL tab survives the same loop intact, single or doubled -- rm-id-com-tab-cc, rm-id-com-tab-duplo-cc, rm-id-com-tab-oc-stub -- because `read` hands the whole remainder after the FIRST delimiter to the last variable, verbatim. The delimiter's only real casualty is the newline, so changing the delimiter a third time would have fixed nothing. (6) resolve-models emits the NORMALIZED id, not the stored one: a config holding \"  sonnet  \" resolves to \"sonnet\" -- rm-id-espaco-nas-pontas-cc, rm-id-espaco-nas-pontas-oc-stub -- while get-current-models, which does not validate, hands the padded string straight back (gcm-id-espaco-nas-pontas-cc). (7) jq reads a STREAM, not one value. A two-document models.json runs the verb twice and prints two lines of JSON -- rm-dois-documentos-cc, gcm-dois-documentos-cc -- and the same shape makes models-prompt-check answer prompt for a file whose single document would have answered skip (mpc-dois-documentos-cc), because the bash compares jq's whole multi-line output against the literal \"true\". (8) A whitespace-only file lands in resolve-models' \"empty result\" branch WITH a warning (rm-so-espacos-cc) and in get-current-models' equivalent branch with NO warning at all (gcm-so-espacos-cc). The two verbs' last-resort branches differ by exactly one line to stderr, and both are contract. (9) D10, recorded and deliberately carried across unchanged. The OpenCode cache is keyed on the mtime of models.json but its VALUE is the output of `opencode models`: a seeded cache beats the live binary (rm-cache-preexistente-vence-oc, lm-oc-cache-preexistente) and is not consulted at all when the binary is absent, because the `command -v opencode` probe returns first (rm-cache-preexistente-ignorado-sem-binario-oc). No case anywhere deletes one. Fixing the key would change WHEN a shell-out happens, which is a behaviour change and cannot ride inside a delta-zero commit. (10) list-models normalizes what it OFFERS -- padded entries trimmed, empty entries dropped (lm-oc-cache-preexistente) -- and falls back to the built-in Anthropic list whenever the set is empty for either of its two reasons: no binary (lm-oc-sem-binario) or a binary that printed nothing (lm-oc-stub-vazio). Its Claude Code branch reads no config at all and answers the same three aliases with or without one (lm-cc, lm-cc-sem-config). (11) The two JSON output spellings coexist and are both contract: resolve-models and get-current-models print COMPACT single-line objects, list-models prints a PRETTY two-space-indented array. (12) The `python3` cases record what a python3-less host sees TODAY, which is everything -- these four verbs are pure bash and jq at this commit, so hiding the interpreter changes nothing. They are here so the port's degrade path is measured against a real before-state instead of an assumption. The ones the port deliberately changes are named, with what each costs, in test_models.py's KNOWN_DIVERGENCES; the recording itself is never edited to match the port."
 }
