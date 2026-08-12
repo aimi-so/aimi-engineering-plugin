@@ -38300,5 +38300,2444 @@
       ]
     }
   ],
-  "_comment_models_write": "models.json's WRITER -- cmd_detect_models, the one verb that creates the file the four readers in `models_read_cases` only read -- captured the way every block before it was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 60 cases at commit ecdb463. THE FIELD SHAPE IS `tasks_write_cases`' AND NOT `models_read_cases`', because this is a writer: `input` is the state BEFORE and `file` is the whole document AFTER, so a recording that went green while the config was being clobbered is not expressible here. `file` is the file's exact BYTES rather than a parsed object -- null when no file was left on disk at all -- because jq's two-space pretty-print with its trailing newline is what /aimi:setup-models reads back, and only bytes pin that. `tree` names every file left in the throwaway root, which is how the OpenCode cache sibling and the absence of a stray mktemp temp file stay visible. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT), `python3` and `jq` say whether that symlink was placed in the shim directory, and `readonly` chmods the config root to 0500 for the run. EVERY CASE BUILDS A THROWAWAY ROOT with AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR pointed at it and a shim PATH of symlinks rather than the developer's -- non-negotiable for this verb in a way it was not for the readers, because this one WRITES ~/.config/aimi/models.json and a case that leaked would destroy the developer's own model configuration. Three normalizations fire so two captures can be byte-identical, and they are: the root becomes /TMP, the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt, and mktemp's six random characters become models.json.<RANDOM>. With them, two consecutive full captures are byte-identical. THIRTEEN THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) THE MERGE IS ITSELF A REBUILD THAT HAPPENS TO PRESERVE ONE KEY, which is counter-intuitive and is the reason this block exists. The jq is `{schemaVersion: \"2.0\", categories: ((.categories // {}) + {($host_key): {...}})}`, so exactly three things are true at once: `categories.<other host>` SURVIVES (dm-outro-host-cc, dm-ambos-hosts-cc, dm-flags-outro-host-cc -- this is the 1.97.2 regression and the whole point); `schemaVersion` is force-written to \"2.0\" even over a document that said \"1.0\" (dm-schema-v1-cc, dm-flags-schema-v1-cc); and EVERY OTHER TOP-LEVEL KEY IS DISCARDED (dm-chave-desconhecida-cc, dm-flags-chave-desconhecida-cc -- `updatedAt` and `notes` do not come back). The current host's own sub-table is REPLACED wholesale rather than merged, so an extra key inside it does not survive either (dm-subtabela-com-chave-extra-cc). Widening any of this to a deep merge would be an unrequested behaviour change; narrowing it is 1.97.2 again. (2) D6, VERIFIED, PINNED -- AND THEN REPAIRED, so THREE OF THESE RECORDS MOVED. What the capture found: `set -euo pipefail` at aimi-cli.sh:2, `pipefail` propagating grep's exit 1, and a bare assignment to an already-declared local together aborted the verb the moment the host's model list contained no \"haiku\" -- exit 1, EMPTY stdout, EMPTY stderr, nothing written, and in one case a perfectly good config left untouched with no explanation. The three documented fallbacks that follow (first line, second line, last line) were unreachable dead code. Reachable only on an OpenCode host whose provider set omits haiku; Claude Code's list is the literal opus/sonnet/haiku. The commit after the port made `|| _x=\"\"` out of each bare assignment, which is the smallest change that turns \"no match\" back into the empty string the next line already assumed, and dm-lista-sem-haiku-oc-stub, dm-lista-so-sonnet-oc-stub and dm-lista-sem-haiku-config-existente-oc-stub each now hold exit 0, the table the fallbacks describe, and the ordinary two-line epilogue. Those three entries were written out BY HAND from the rule -- fast = first line matching haiku else the FIRST line, balanced = first matching sonnet else the SECOND else the first, powerful = first matching opus else the LAST -- and the replay then had to agree with them. The other 57 are untouched; what the bash did is in this file's history and in that commit's diff. ONE SILENT FAILURE SURVIVES and is deliberately not repaired here: dm-flags-valor-ausente-cc, see (8), which belongs to the argument parser rather than to this rule. test_no_case_fails_silently_except_the_one_the_parser_owns is what keeps that list from growing again. (3) D7 HAS NO CASE HERE, AND THAT IS STATED RATHER THAN FAKED -- and then it was driven anyway, and REFUTED. No case in this block can reach it: every one runs non-interactively with stdin on /dev/null, so `[ -t 0 ]` is false and the prompt block never executes at all. The claim was that Ctrl-D at `read -r answer </dev/tty` returns 1 and takes the verb down through the same set -e chain as (2). test_models.py drives the real prompt through a pty instead, and what happens is the documented behaviour: five prompts, five defaults, exit 0, the config written. The reason is the difference between (2) and this one -- bash CLEARS -e inside a command substitution when not in POSIX mode, so the failing `read` inside `_prompt_category` never aborts anything, and the substitution's status is its last command's, which is the printf. (2) aborts because ITS bare assignment is at the function's own level, where -e is live. Nothing is repaired for D7 because nothing is broken; the pty test is what says so, and it stays. (4) D9 IS REFUTED FOR THIS VERB, and the corpus proves it rather than asserting it. Every value reaches the document through `jq --arg`, which escapes; the only printf here re-emits jq's already-valid output. So a double quote, a backslash, a newline, a tab, all four at once, non-ASCII and three control characters all round-trip correctly through the bash (dm-flags-aspas-cc, dm-flags-barra-invertida-cc, dm-flags-newline-cc, dm-flags-tab-cc, dm-flags-todos-os-quatro-cc, dm-flags-nao-ascii-cc, dm-flags-controle-cc, dm-flags-outro-host-com-aspas-cc). They are here for the port's sake: they are what proves Python's json.dumps matches jq byte for byte, and they found the ONE character where it does not -- U+007F, which jq escapes as \\u007f and json.dumps emits raw. The two genuinely unescaped printf-built JSON sites in this file are aimi-cli.sh:9892 and :9929, BOTH inside cmd_check_version (the story that named them predates a shift in line numbers and attributed one to cmd_prime_cache, which builds all of its output with `jq -n --arg`). They are the next slice's, not this one's, and no escaping repair was made here. (5) FOUR INPUTS ABORT AT jq's OWN EXIT 5 with jq's own message on stderr and the config untouched: a document that is an array (dm-documento-array-cc) or a string (dm-documento-string-cc), where `.categories` cannot be indexed, and a `.categories` that is a string, in both modes (dm-categories-string-cc, dm-flags-categories-string-cc), where a string and an object cannot be added. The status is reproduced; the message was the engine's and is named in test_models.py's KNOWN_DIVERGENCES_WRITE. (6) A WHITESPACE-ONLY CONFIG IS CLOBBERED TO A LONE NEWLINE (dm-so-espacos-cc). It is non-empty, so the merge branch is taken; `jq empty` accepts it; and jq's stream over it holds ZERO values, so the merge emits nothing and the file that gets written is \"\\n\". Data loss that predates this port and is carried across it unchanged. (7) jq READS A STREAM, NOT ONE VALUE, here as everywhere else: a two-document config is merged TWICE and both results are written into models.json, leaving a file that is still two documents (dm-dois-documentos-cc). (8) TWO ARGUMENT SHAPES ANSWER NOTHING AT ALL. `--research` with no value exits 1 with BOTH STREAMS EMPTY (dm-flags-valor-ausente-cc), because the parser shifts twice on a flag whose value is missing and the second `shift` fails under set -e. A bare positional argument is silently ignored and the verb runs in default mode (dm-argumento-posicional-cc). Neither is repaired by this story. (9) THE WRITE FAILING LEAVES THE OLD CONFIG INTACT, which is what the mktemp-then-mv discipline is for: a read-only config directory exits 1 with mktemp's message and the pre-existing document byte-for-byte unchanged, in both modes (dm-diretorio-somente-leitura-cc, dm-flags-diretorio-somente-leitura-cc). No stray temp file is left behind -- `tree` says so. (10) check_jq STAYS. A host without jq gets \"Error: jq is required but not installed.\" and exit 1 before anything is read (dm-jq-ausente-cc). Deleting the check as part of a port to Python would silently admit a jq-less host to a verb the rest of the file still refuses to serve. (11) THE python3 CASES RECORD WHAT A python3-LESS HOST SAW AT CAPTURE TIME, which is everything: this verb was pure bash and jq here, so hiding the interpreter changed nothing (dm-python3-ausente-cc, dm-flags-python3-ausente-cc). They are here so the port's crossing is measured against a real before-state instead of an assumption. Unlike the four readers, the writer does NOT degrade -- see KNOWN_DIVERGENCES_WRITE for what it does instead and why silence is the one answer a writer must not give. (12) NUMBERS CARRIED ACROSS FROM THE OTHER HOST'S TABLE ARE RENDERED BY jq, not echoed: 1e3 comes back as 1000 and 1.0 as 1 (dm-outro-host-com-numeros-cc). Two extremes are split into their own case because jq's double cannot hold them the way Python's int can (dm-outro-host-com-numeros-extremos-cc: 1e+22 and -0). (13) jq PARSES `NaN` AND PRINTS IT AS null (dm-nan-cc). Python's json parses it too and would write the bare token NaN, which is not JSON and which jq itself would then refuse to read -- so the port renders a non-finite double as null the way jq does, and this case is what says so."
+  "_comment_models_write": "models.json's WRITER -- cmd_detect_models, the one verb that creates the file the four readers in `models_read_cases` only read -- captured the way every block before it was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 60 cases at commit ecdb463. THE FIELD SHAPE IS `tasks_write_cases`' AND NOT `models_read_cases`', because this is a writer: `input` is the state BEFORE and `file` is the whole document AFTER, so a recording that went green while the config was being clobbered is not expressible here. `file` is the file's exact BYTES rather than a parsed object -- null when no file was left on disk at all -- because jq's two-space pretty-print with its trailing newline is what /aimi:setup-models reads back, and only bytes pin that. `tree` names every file left in the throwaway root, which is how the OpenCode cache sibling and the absence of a stray mktemp temp file stay visible. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT), `python3` and `jq` say whether that symlink was placed in the shim directory, and `readonly` chmods the config root to 0500 for the run. EVERY CASE BUILDS A THROWAWAY ROOT with AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR pointed at it and a shim PATH of symlinks rather than the developer's -- non-negotiable for this verb in a way it was not for the readers, because this one WRITES ~/.config/aimi/models.json and a case that leaked would destroy the developer's own model configuration. Three normalizations fire so two captures can be byte-identical, and they are: the root becomes /TMP, the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt, and mktemp's six random characters become models.json.<RANDOM>. With them, two consecutive full captures are byte-identical. THIRTEEN THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) THE MERGE IS ITSELF A REBUILD THAT HAPPENS TO PRESERVE ONE KEY, which is counter-intuitive and is the reason this block exists. The jq is `{schemaVersion: \"2.0\", categories: ((.categories // {}) + {($host_key): {...}})}`, so exactly three things are true at once: `categories.<other host>` SURVIVES (dm-outro-host-cc, dm-ambos-hosts-cc, dm-flags-outro-host-cc -- this is the 1.97.2 regression and the whole point); `schemaVersion` is force-written to \"2.0\" even over a document that said \"1.0\" (dm-schema-v1-cc, dm-flags-schema-v1-cc); and EVERY OTHER TOP-LEVEL KEY IS DISCARDED (dm-chave-desconhecida-cc, dm-flags-chave-desconhecida-cc -- `updatedAt` and `notes` do not come back). The current host's own sub-table is REPLACED wholesale rather than merged, so an extra key inside it does not survive either (dm-subtabela-com-chave-extra-cc). Widening any of this to a deep merge would be an unrequested behaviour change; narrowing it is 1.97.2 again. (2) D6, VERIFIED, PINNED -- AND THEN REPAIRED, so THREE OF THESE RECORDS MOVED. What the capture found: `set -euo pipefail` at aimi-cli.sh:2, `pipefail` propagating grep's exit 1, and a bare assignment to an already-declared local together aborted the verb the moment the host's model list contained no \"haiku\" -- exit 1, EMPTY stdout, EMPTY stderr, nothing written, and in one case a perfectly good config left untouched with no explanation. The three documented fallbacks that follow (first line, second line, last line) were unreachable dead code. Reachable only on an OpenCode host whose provider set omits haiku; Claude Code's list is the literal opus/sonnet/haiku. The commit after the port made `|| _x=\"\"` out of each bare assignment, which is the smallest change that turns \"no match\" back into the empty string the next line already assumed, and dm-lista-sem-haiku-oc-stub, dm-lista-so-sonnet-oc-stub and dm-lista-sem-haiku-config-existente-oc-stub each now hold exit 0, the table the fallbacks describe, and the ordinary two-line epilogue. Those three entries were written out BY HAND from the rule -- fast = first line matching haiku else the FIRST line, balanced = first matching sonnet else the SECOND else the first, powerful = first matching opus else the LAST -- and the replay then had to agree with them. The other 57 are untouched; what the bash did is in this file's history and in that commit's diff. ONE SILENT FAILURE SURVIVES and is deliberately not repaired here: dm-flags-valor-ausente-cc, see (8), which belongs to the argument parser rather than to this rule. test_no_case_fails_silently_except_the_one_the_parser_owns is what keeps that list from growing again. (3) D7 HAS NO CASE HERE, AND THAT IS STATED RATHER THAN FAKED -- and then it was driven anyway, and REFUTED. No case in this block can reach it: every one runs non-interactively with stdin on /dev/null, so `[ -t 0 ]` is false and the prompt block never executes at all. The claim was that Ctrl-D at `read -r answer </dev/tty` returns 1 and takes the verb down through the same set -e chain as (2). test_models.py drives the real prompt through a pty instead, and what happens is the documented behaviour: five prompts, five defaults, exit 0, the config written. The reason is the difference between (2) and this one -- bash CLEARS -e inside a command substitution when not in POSIX mode, so the failing `read` inside `_prompt_category` never aborts anything, and the substitution's status is its last command's, which is the printf. (2) aborts because ITS bare assignment is at the function's own level, where -e is live. Nothing is repaired for D7 because nothing is broken; the pty test is what says so, and it stays. (4) D9 IS REFUTED FOR THIS VERB, and the corpus proves it rather than asserting it. Every value reaches the document through `jq --arg`, which escapes; the only printf here re-emits jq's already-valid output. So a double quote, a backslash, a newline, a tab, all four at once, non-ASCII and three control characters all round-trip correctly through the bash (dm-flags-aspas-cc, dm-flags-barra-invertida-cc, dm-flags-newline-cc, dm-flags-tab-cc, dm-flags-todos-os-quatro-cc, dm-flags-nao-ascii-cc, dm-flags-controle-cc, dm-flags-outro-host-com-aspas-cc). They are here for the port's sake: they are what proves Python's json.dumps matches jq byte for byte, and they found the ONE character where it does not -- U+007F, which jq escapes as \\u007f and json.dumps emits raw. The two genuinely unescaped printf-built JSON sites in this file are aimi-cli.sh:9892 and :9929, BOTH inside cmd_check_version (the story that named them predates a shift in line numbers and attributed one to cmd_prime_cache, which builds all of its output with `jq -n --arg`). They are the next slice's, not this one's, and no escaping repair was made here. (5) FOUR INPUTS ABORT AT jq's OWN EXIT 5 with jq's own message on stderr and the config untouched: a document that is an array (dm-documento-array-cc) or a string (dm-documento-string-cc), where `.categories` cannot be indexed, and a `.categories` that is a string, in both modes (dm-categories-string-cc, dm-flags-categories-string-cc), where a string and an object cannot be added. The status is reproduced; the message was the engine's and is named in test_models.py's KNOWN_DIVERGENCES_WRITE. (6) A WHITESPACE-ONLY CONFIG IS CLOBBERED TO A LONE NEWLINE (dm-so-espacos-cc). It is non-empty, so the merge branch is taken; `jq empty` accepts it; and jq's stream over it holds ZERO values, so the merge emits nothing and the file that gets written is \"\\n\". Data loss that predates this port and is carried across it unchanged. (7) jq READS A STREAM, NOT ONE VALUE, here as everywhere else: a two-document config is merged TWICE and both results are written into models.json, leaving a file that is still two documents (dm-dois-documentos-cc). (8) TWO ARGUMENT SHAPES ANSWER NOTHING AT ALL. `--research` with no value exits 1 with BOTH STREAMS EMPTY (dm-flags-valor-ausente-cc), because the parser shifts twice on a flag whose value is missing and the second `shift` fails under set -e. A bare positional argument is silently ignored and the verb runs in default mode (dm-argumento-posicional-cc). Neither is repaired by this story. (9) THE WRITE FAILING LEAVES THE OLD CONFIG INTACT, which is what the mktemp-then-mv discipline is for: a read-only config directory exits 1 with mktemp's message and the pre-existing document byte-for-byte unchanged, in both modes (dm-diretorio-somente-leitura-cc, dm-flags-diretorio-somente-leitura-cc). No stray temp file is left behind -- `tree` says so. (10) check_jq STAYS. A host without jq gets \"Error: jq is required but not installed.\" and exit 1 before anything is read (dm-jq-ausente-cc). Deleting the check as part of a port to Python would silently admit a jq-less host to a verb the rest of the file still refuses to serve. (11) THE python3 CASES RECORD WHAT A python3-LESS HOST SAW AT CAPTURE TIME, which is everything: this verb was pure bash and jq here, so hiding the interpreter changed nothing (dm-python3-ausente-cc, dm-flags-python3-ausente-cc). They are here so the port's crossing is measured against a real before-state instead of an assumption. Unlike the four readers, the writer does NOT degrade -- see KNOWN_DIVERGENCES_WRITE for what it does instead and why silence is the one answer a writer must not give. (12) NUMBERS CARRIED ACROSS FROM THE OTHER HOST'S TABLE ARE RENDERED BY jq, not echoed: 1e3 comes back as 1000 and 1.0 as 1 (dm-outro-host-com-numeros-cc). Two extremes are split into their own case because jq's double cannot hold them the way Python's int can (dm-outro-host-com-numeros-extremos-cc: 1e+22 and -0). (13) jq PARSES `NaN` AND PRINTS IT AS null (dm-nan-cc). Python's json parses it too and would write the bare token NaN, which is not JSON and which jq itself would then refuse to read -- so the port renders a non-finite double as null the way jq does, and this case is what says so.",
+  "version_cache_cases": [
+    {
+      "label": "cv-cache-vazio-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": []
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-sem-diretorio-cache-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [],
+        "make_cache_dir": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-cache-ilegivel-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [],
+        "readonly": [
+          {
+            "path": "claude-config/plugins/cache",
+            "mode": "0000"
+          }
+        ]
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-quiet-cache-vazio-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version",
+          "--quiet"
+        ],
+        "cache": []
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-uma-versao-atual-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "state_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
+      },
+      "exit": 0,
+      "stdout": "{\"status\":\"current\",\"version\":\"1.2.3\"}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "cv-uma-versao-sem-state-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"1.2.3\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-uma-versao-obsoleta-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "state_cli_path": "/fake/velha/1.0.0/scripts/aimi-cli.sh"
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"stale\",\n  \"storedVersion\": \"1.0.0\",\n  \"latestVersion\": \"1.2.3\",\n  \"storedPath\": \"/fake/velha/1.0.0/scripts/aimi-cli.sh\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: CLI version is stale. Stored: 1.0.0, Latest: 1.2.3\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": "/fake/velha/1.0.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "cv-fix-obsoleta-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version",
+          "--fix"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "state_cli_path": "/fake/velha/1.0.0/scripts/aimi-cli.sh"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"fixed\",\n  \"storedVersion\": \"1.0.0\",\n  \"latestVersion\": \"1.2.3\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "cv-quiet-fix-obsoleta-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version",
+          "--quiet",
+          "--fix"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "state_cli_path": "/fake/velha/1.0.0/scripts/aimi-cli.sh"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"fixed\",\n  \"storedVersion\": \"1.0.0\",\n  \"latestVersion\": \"1.2.3\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "cv-tres-versoes-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.10.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"1.123.0\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-duas-entradas-marketplace-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "zzz-antiga",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "aaa-nova",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"1.123.0\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-versao-malformada-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          },
+          {
+            "entry": "mk1",
+            "version": "nao-e-uma-versao"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"nao-e-uma-versao\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-opencode-gerenciado",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [],
+        "host": "opencode",
+        "plugin_dir": {}
+      },
+      "exit": 0,
+      "stdout": "{\"status\":\"ok\",\"path\":\"/TMP/opencode-plugin/scripts/aimi-cli.sh\",\"message\":\"managed by compound-plugin converter\"}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-opencode-dentro-do-claude-code",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "host": "both",
+        "plugin_dir": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"1.2.3\",\n  \"latestPath\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-config-dir-com-espaco-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "config_dir": "claude config dir"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"missing\",\n  \"latestVersion\": \"1.2.3\",\n  \"latestPath\": \"/TMP/claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "Warning: No stored cli-path found. Run init-session to persist.\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-config-dir-metacaracteres-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version"
+        ],
+        "cache": [],
+        "config_dir": "cfg\";touch MARKER;ls \""
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "cv-fix-simlink-worktrees-cc",
+      "verb": "check-version",
+      "input": {
+        "args": [
+          "check-version",
+          "--fix"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3",
+            "worktree_symlink": true
+          }
+        ],
+        "state_cli_path": "/fake/velha/1.0.0/scripts/aimi-cli.sh"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"fixed\",\n  \"storedVersion\": \"1.0.0\",\n  \"latestVersion\": \"1.2.3\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        ".worktrees/",
+        ".worktrees/wt-1.2.3/",
+        ".worktrees/wt-1.2.3/install/",
+        ".worktrees/wt-1.2.3/install/scripts/",
+        ".worktrees/wt-1.2.3/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3 -> /TMP/.worktrees/wt-1.2.3/install",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "tree": [
+        ".worktrees/",
+        ".worktrees/wt-1.2.3/",
+        ".worktrees/wt-1.2.3/install/",
+        ".worktrees/wt-1.2.3/install/scripts/",
+        ".worktrees/wt-1.2.3/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3 -> /TMP/.worktrees/wt-1.2.3/install",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-cache-vazio-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": []
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "clv-sem-diretorio-cache-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [],
+        "make_cache_dir": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "clv-cache-ilegivel-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [],
+        "readonly": [
+          {
+            "path": "claude-config/plugins/cache",
+            "mode": "0000"
+          }
+        ]
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "clv-uma-versao-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 0,\n  \"kept\": \"1.2.3\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-tres-versoes-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.10.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 2,\n  \"kept\": \"1.123.0\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-duas-entradas-marketplace-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "zzz-antiga",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "aaa-nova",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 1,\n  \"kept\": \"1.123.0\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-versao-malformada-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          },
+          {
+            "entry": "mk1",
+            "version": "nao-e-uma-versao"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 1,\n  \"kept\": \"nao-e-uma-versao\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/nao-e-uma-versao/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-nao-removivel-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk-velha",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk-nova",
+            "version": "1.123.0"
+          }
+        ],
+        "readonly": [
+          {
+            "path": "claude-config/plugins/cache/mk-velha/aimi-engineering",
+            "mode": "0500"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 0,\n  \"kept\": \"1.123.0\"\n}\n",
+      "stderr": "Warning: Failed to remove /TMP/claude-config/plugins/cache/mk-velha/aimi-engineering/1.9.0\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk-nova/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk-velha/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk-nova/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk-velha/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/",
+        "claude-config/plugins/cache/mk-velha/aimi-engineering/1.9.0/",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-opencode-gerenciado",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [],
+        "host": "opencode",
+        "plugin_dir": {}
+      },
+      "exit": 0,
+      "stdout": "{\"removed\":0,\"skipped\":true,\"message\":\"converter manages lifecycle\"}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "clv-config-dir-com-espaco-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.10.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.123.0"
+          }
+        ],
+        "config_dir": "claude config dir"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 2,\n  \"kept\": \"1.123.0\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude config dir/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "clv-config-dir-metacaracteres-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [],
+        "config_dir": "cfg\";touch MARKER;ls \""
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "clv-simlink-worktrees-cc",
+      "verb": "cleanup-versions",
+      "input": {
+        "args": [
+          "cleanup-versions"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.123.0",
+            "worktree_symlink": true
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"removed\": 1,\n  \"kept\": \"1.123.0\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        ".worktrees/",
+        ".worktrees/wt-1.123.0/",
+        ".worktrees/wt-1.123.0/install/",
+        ".worktrees/wt-1.123.0/install/scripts/",
+        ".worktrees/wt-1.123.0/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0 -> /TMP/.worktrees/wt-1.123.0/install",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        ".worktrees/",
+        ".worktrees/wt-1.123.0/",
+        ".worktrees/wt-1.123.0/install/",
+        ".worktrees/wt-1.123.0/install/scripts/",
+        ".worktrees/wt-1.123.0/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0 -> /TMP/.worktrees/wt-1.123.0/install",
+        "project/",
+        "project/.aimi/",
+        "project/.aimi/.state.lock",
+        "project/.aimi/cli-path",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n"
+    },
+    {
+      "label": "pc-cache-vazio-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": []
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"not_found\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Plugin not installed. Run /plugin install aimi-engineering first.\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-sem-diretorio-cache-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "make_cache_dir": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"not_found\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Plugin not installed. Run /plugin install aimi-engineering first.\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-uma-versao-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.2.3\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-ja-atual-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "global_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"already_current\",\n  \"path\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.2.3\",\n  \"message\": \"Cache already points to this path\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-tres-versoes-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.10.0"
+          },
+          {
+            "entry": "mk1",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.123.0\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.10.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-duas-entradas-marketplace-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "zzz-antiga",
+            "version": "1.9.0"
+          },
+          {
+            "entry": "aaa-nova",
+            "version": "1.123.0"
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.123.0\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/aaa-nova/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/",
+        "claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh",
+        "claude-config/plugins/cache/zzz-antiga/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/",
+        "claude-config/plugins/cache/zzz-antiga/aimi-engineering/1.9.0/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/aaa-nova/aimi-engineering/1.123.0/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-nao-executavel-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3",
+            "exec": false
+          }
+        ]
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"error\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Resolved path is not executable\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-opencode-ok",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "host": "opencode",
+        "plugin_dir": {}
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/opencode-plugin/scripts/aimi-cli.sh\",\n  \"host\": \"opencode\",\n  \"version\": \"opencode-plugin\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/opencode-plugin/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-opencode-nao-executavel",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "host": "opencode",
+        "plugin_dir": {
+          "exec": false
+        }
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"error\",\n  \"path\": null,\n  \"host\": \"opencode\",\n  \"version\": null,\n  \"message\": \"AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: /TMP/opencode-plugin/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-opencode-sem-script",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "host": "opencode",
+        "plugin_dir": {
+          "script": false
+        }
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"error\",\n  \"path\": null,\n  \"host\": \"opencode\",\n  \"version\": null,\n  \"message\": \"AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: /TMP/opencode-plugin/scripts/aimi-cli.sh\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-cache-vazio-com-plugin-dir-both",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "host": "both",
+        "plugin_dir": {}
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"error\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Resolved path rejected: does not match expected cache pattern\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "opencode-plugin/",
+        "opencode-plugin/scripts/",
+        "opencode-plugin/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-config-dir-com-espaco-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "config_dir": "claude config dir"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.2.3\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude config dir/",
+        "claude config dir/plugins/",
+        "claude config dir/plugins/cache/",
+        "claude config dir/plugins/cache/mk1/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude config dir/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-config-dir-metacaracteres-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "config_dir": "cfg\";touch MARKER;ls \""
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"not_found\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Plugin not installed. Run /plugin install aimi-engineering first.\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "cfg\";touch MARKER;ls \"/",
+        "cfg\";touch MARKER;ls \"/plugins/",
+        "cfg\";touch MARKER;ls \"/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-simlink-worktrees-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3",
+            "worktree_symlink": true
+          }
+        ]
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.2.3\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        ".worktrees/",
+        ".worktrees/wt-1.2.3/",
+        ".worktrees/wt-1.2.3/install/",
+        ".worktrees/wt-1.2.3/install/scripts/",
+        ".worktrees/wt-1.2.3/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3 -> /TMP/.worktrees/wt-1.2.3/install",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        ".worktrees/",
+        ".worktrees/wt-1.2.3/",
+        ".worktrees/wt-1.2.3/install/",
+        ".worktrees/wt-1.2.3/install/scripts/",
+        ".worktrees/wt-1.2.3/install/scripts/aimi-cli.sh",
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3 -> /TMP/.worktrees/wt-1.2.3/install",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-aimi-config-somente-leitura-cc",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "readonly": [
+          {
+            "path": "aimi-config",
+            "mode": "0500"
+          }
+        ]
+      },
+      "exit": 1,
+      "stdout": "{\n  \"status\": \"error\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"write_global_cli_cache failed: mktemp: failed to create file via template '/TMP/aimi-config/cli-path.XXXXXX': Permission <CLI>: line <N>: : No such file or directory\\nchmod: cannot access '': No such file or directory\\nmv: cannot stat '': No such file or directory\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-bare-cache-vazio",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [],
+        "host": "bare"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"not_found\",\n  \"path\": null,\n  \"host\": \"claude_code\",\n  \"version\": null,\n  \"message\": \"Plugin not installed. Run /plugin install aimi-engineering first.\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "pc-bare-uma-versao",
+      "verb": "prime-cache",
+      "input": {
+        "args": [
+          "prime-cache"
+        ],
+        "cache": [
+          {
+            "entry": "mk1",
+            "version": "1.2.3"
+          }
+        ],
+        "host": "bare"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"status\": \"ok\",\n  \"path\": \"/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\",\n  \"host\": \"claude_code\",\n  \"version\": \"1.2.3\",\n  \"message\": \"Cache primed successfully\"\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "aimi-config/cli-path",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "claude-config/plugins/cache/mk1/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/",
+        "claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": "/TMP/claude-config/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh\n",
+      "state_cli_path": null
+    },
+    {
+      "label": "ver-normal",
+      "verb": "version",
+      "input": {
+        "args": [
+          "version"
+        ],
+        "cache": [],
+        "plugin_json": "{\"version\": \"1.2.3\"}\n"
+      },
+      "exit": 0,
+      "stdout": "1.2.3\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "ver-chave-ausente",
+      "verb": "version",
+      "input": {
+        "args": [
+          "version"
+        ],
+        "cache": [],
+        "plugin_json": "{\"name\": \"aimi\"}\n"
+      },
+      "exit": 0,
+      "stdout": "null\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "ver-nao-string",
+      "verb": "version",
+      "input": {
+        "args": [
+          "version"
+        ],
+        "cache": [],
+        "plugin_json": "{\"version\": {\"maior\": 1, \"menor\": 2}}\n"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"maior\": 1,\n  \"menor\": 2\n}\n",
+      "stderr": "",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "ver-json-malformado",
+      "verb": "version",
+      "input": {
+        "args": [
+          "version"
+        ],
+        "cache": [],
+        "plugin_json": "{ nao e json\n"
+      },
+      "exit": 4,
+      "stdout": "",
+      "stderr": "parse error: Invalid literal at line 1, column 6\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/.claude-plugin/",
+        "fake-install/.claude-plugin/plugin.json",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    },
+    {
+      "label": "ver-sem-plugin-json",
+      "verb": "version",
+      "input": {
+        "args": [
+          "version"
+        ],
+        "cache": [],
+        "plugin_json": "<absent>"
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: plugin.json not found\n",
+      "tree_before": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "tree": [
+        "aimi-config/",
+        "claude-config/",
+        "claude-config/plugins/",
+        "claude-config/plugins/cache/",
+        "fake-install/",
+        "fake-install/scripts/",
+        "fake-install/scripts/aimi-cli.sh",
+        "project/",
+        "project/.aimi/",
+        "xdg/"
+      ],
+      "global_cli_path": null,
+      "state_cli_path": null
+    }
+  ],
+  "_comment_version_cache": "THE FOUR VERSION/CACHE VERBS -- version, check-version, cleanup-versions, prime-cache -- captured at 112d72f before a line of aimi-cli.sh moved. THIS BLOCK IS NOT A PORT'S BEFORE-PICTURE, AND IT IS THE ONLY ONE HERE THAT IS NOT. All four verbs STAY Bash + jq; the decision and its reasons are written out in cmd_prime_cache's header comment, which is their normative home. What the corpus records is the before-picture of a FIX: the empty-glob abort (D2) and the `ls`-pipeline glob that carried it. THE FIELD SHAPE RECORDS A FILESYSTEM, not a stream, because cleanup-versions runs `rm -rf`: `tree_before` and `tree` are the whole throwaway root either side of the run, so no case can go green while a directory it never mentioned was deleted. `global_cli_path` and `state_cli_path` are the two files these verbs write, recorded as content rather than as presence -- null when absent, which is a different fact from empty. `input` is the whole rebuild recipe and test_version_cache.py's _build_root is the only thing that reads it, so capture and replay cannot drift apart. EVERY CASE BUILDS A THROWAWAY ROOT with CLAUDE_CONFIG_DIR, AIMI_CONFIG_DIR, HOME and XDG_CONFIG_HOME pointed at it -- non-negotiable here in the way it was for models_write_cases and more so: a case that leaked the developer's real CLAUDE_CONFIG_DIR would have cleanup-versions delete the plugin install running the suite. The capture host exports CLAUDECODE=1 and AIMI_PLUGIN_DIR for real, so the recipe sets both explicitly per case instead of inheriting either. Two consecutive full captures are byte-identical. NINE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D2, VERIFIED AND THEN FIXED -- the reason this block exists. cmd_check_version documents a {status: \"unknown\", message: \"No installed version found\"} branch and cmd_cleanup_versions a {removed: 0, kept: null} branch, and NEITHER HAD EVER BEEN EMITTED. `set -euo pipefail` at aimi-cli.sh:2, plus a helper that returned 1 on an empty glob, plus a bare `var=$(helper)` assignment that carries that status, aborted both verbs above their own handlers. Observable behaviour was exit 1, EMPTY stdout, EMPTY stderr and no cli-path written. Recorded that way in nine cases -- an empty plugins/cache (cv-cache-vazio-cc, clv-cache-vazio-cc), an absent one (cv-sem-diretorio-cache-cc, clv-sem-diretorio-cache-cc), an unreadable one (cv-cache-ilegivel-cc, clv-cache-ilegivel-cc), the same under --quiet (cv-quiet-cache-vazio-cc) and the two metacharacter cases whose caches are also empty -- and every one of them now answers its documented JSON at exit 0. They are named in test_version_cache.py's KNOWN_DIVERGENCES and nowhere else, which is what makes 'the fix touched only these' checkable rather than claimed. The exit status was 1 and not 2: an earlier note said 2, from before the glob moved behind a helper that swallows ls's own exit 2 and returns 1 instead. (2) D2 AND D12 WERE ONE DEFECT WHEN THIS STORY WAS PLANNED AND ARE NOT ONE ANY MORE, which is worth recording because the planning note says otherwise. prime-cache was said to survive the same empty glob ONLY because its nested `bash -c` inherited neither -e nor pipefail. That stopped being true at 7133927: it survives because of an explicit `|| resolved_path=\"\"`, and the nested shell was already reduced to a fork. So the two verbs' aborts and prime-cache's survival were independent by capture time, and pc-cache-vazio-cc records prime-cache answering not_found at exit 0 on the very root where its two siblings died. (3) D12'S INJECTION WAS ALREADY CLOSED, measured rather than assumed. A CLAUDE_CONFIG_DIR of `cfg\";touch MARKER;ls \"` was expanded by the outer shell into the inner `bash -c`'s program text and DID run the touch on the parent of 7133927 -- reproduced here, marker created, prime-cache still reporting not_found at exit 0. On the captured code it does not: that commit passed the directory as a POSITIONAL ARGUMENT to a single-quoted program. The three metacharacter cases stay as the permanent regression, and the array glob removed the nested shell entirely, so there is no longer a program text for a config dir to be interpolated into. (4) D11, VERIFIED. write_global_cli_cache refuses to persist a path under a `.worktrees/` segment because such a path vanishes on worktree cleanup and every later session then exits 127. The refusal is a match on the path STRING. A cache entry that is a SYMLINK into a worktree has no such segment in its own name, so it passes: cv-fix-simlink-worktrees-cc, clv-simlink-worktrees-cc and pc-simlink-worktrees-cc each record a global cli-path written to a path whose target is under .worktrees/ -- exactly the outcome the guard exists to prevent. (5) D8, VERIFIED. cmd_prime_cache's OpenCode branch compares `candidate` against the expression it was assigned from seven lines earlier, so the comparison is tautologically false and its error branch cannot execute. No case here reaches it and none can; pc-opencode-ok, pc-opencode-nao-executavel and pc-opencode-sem-script are the whole reachable surface of that branch. (6) D13, VERIFIED, and it is three behaviours rather than one. cmd_version's only guard is that plugin.json EXISTS, so `jq -r '.version'` then prints the literal string `null` at exit 0 for a document with no version key (ver-chave-ausente), pretty-prints a JSON object across four lines at exit 0 when the key is not a string (ver-nao-string), and exits 4 with jq's own parse error for malformed JSON (ver-json-malformado). Only the absent-file case answers in the CLI's own voice (ver-sem-plugin-json). (7) cleanup-versions KEEPS A MALFORMED VERSION DIRECTORY OVER A REAL ONE, and this is a finding the corpus produced rather than one it was asked to confirm. `sort -V` orders `nao-e-uma-versao` ABOVE `1.2.3`, so clv-versao-malformada-cc rm -rf's the genuine 1.2.3 install, keeps the junk directory and writes ITS path into the global cli-path -- the same class of data loss 7133927 fixed, reached by a different route. It is recorded and deliberately NOT repaired here: deciding what counts as a version directory is a policy with its own blast radius (a prerelease like 1.2.3-beta.1 is legitimately not N.N.N), and this slice's scope is the abort. The recording is what a later slice should act on. (8) THE TWO JSON SPELLINGS COEXIST AND MUST. `current` is printf-built and compact ({\"status\":\"current\"}), every other check-version answer is jq-built and pretty ({\\n  \"status\": \"missing\"}), and test-aimi-cli-part1-core.sh asserts both spellings LITERALLY. Uniform JSON would be a test-breaking change, so cv-uma-versao-atual-cc and cv-uma-versao-sem-state-cc pin one spelling each. The same care applies to cv-uma-versao-obsoleta-cc, which exits 1 while emitting valid JSON: non-zero-with-valid-output is load-bearing and callers read the body anyway. (9) TWO FAILURES THAT LOOK LIKE SUCCESS, both pre-existing and both preserved. A version directory that cannot be removed produces a stderr warning and a `removed` count that does not include it, while the verb still exits 0 (clv-nao-removivel-cc). And write_global_cli_cache returns 0 when it REFUSES to write, which is why prime-cache reports an error only when the write genuinely fails (pc-aimi-config-somente-leitura-cc, carrying mktemp's message inside the JSON)."
 }

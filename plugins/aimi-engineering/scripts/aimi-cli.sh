@@ -293,24 +293,49 @@ _extract_version_from_path() {
 #   suffix is the path fragment after the version directory:
 #   "scripts/aimi-cli.sh" for the CLI, "skills" for the skills base directory.
 #
-# Prints the newest path and returns 0; prints nothing and returns 1 when the
-# glob matches nothing. That return value is how each caller keeps the
-# empty-glob behaviour it already had: a bare call aborts under
-# `set -euo pipefail` exactly as the old bare pipeline did, while a caller that
-# must survive (cmd_prime_cache, _resolve_skills_base_dir -- both of them wrap
-# the glob in a nested `bash -c` today for precisely that reason) appends an
-# explicit `|| var=""`.
+# ALWAYS RETURNS 0. It prints the newest path, or nothing at all when no version
+# is installed, and every caller decides what "nothing" means with a plain
+# `[ -z "$var" ]` test it already had.
+#
+# That is a deliberate contract change, and the reason is that the previous one
+# -- return 1 on an empty glob -- was a rule callers had to remember rather than
+# a property they could rely on. Under `set -euo pipefail` a bare
+# `var=$(_resolve_latest_cache_path ...)` carries the non-zero status and kills
+# the script, so cmd_check_version's documented `{status: "unknown"}` branch and
+# cmd_cleanup_versions' `{removed: 0, kept: null}` branch sat below an
+# unreachable line and had NEVER ONCE been emitted. Two callers remembered to
+# append `|| var=""` and survived; two did not and aborted. A helper whose
+# safety depends on the caller appending three characters is the defect, so it
+# no longer has a failure mode to forget.
+#
+# The GLOB is a plain Bash array assignment: no `ls`, so there is no exit status
+# for `pipefail` to propagate, and no nested `bash -c`, so `$config_dir` is never
+# expanded into another shell's program text. Bash leaves an unmatched pattern
+# as its own literal text rather than as an empty list, which is what the
+# existence test on the first element is for -- `-e` for an ordinary path, `-L`
+# so a dangling symlink still counts as the match `ls -d` would have printed.
+#
+# The ORDERING is untouched: the same sed/sort -V/tail/cut comparator as before,
+# still keyed on each candidate's own version segment rather than on the whole
+# path. Every out-of-file copy of that idiom (the --help EXAMPLES block,
+# cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
+# _resolve-cli.sh, and the two literal patterns in hooks/auto-approve-cli.sh
+# that must match them) therefore still agrees with this function.
 _resolve_latest_cache_path() {
   local config_dir="$1" suffix="$2"
+  local -a candidates=()
+  candidates=("$config_dir"/plugins/cache/*/aimi-engineering/*/"$suffix")
+  if [ ! -e "${candidates[0]:-}" ] && [ ! -L "${candidates[0]:-}" ]; then
+    return 0
+  fi
   local newest=""
   newest=$(
-    bash -c 'ls -d "$1"/plugins/cache/*/aimi-engineering/*/"$2" 2>/dev/null' _ "$config_dir" "$suffix" \
+    printf '%s\n' "${candidates[@]}" \
       | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
       | sort -V \
       | tail -1 \
       | cut -d' ' -f2-
   ) || newest=""
-  [ -n "$newest" ] || return 1
   printf '%s\n' "$newest"
 }
 
@@ -1048,14 +1073,15 @@ cmd_get_story() {
 # SKILL.md belonging to the same install whose CLI is orchestrating it, so both
 # sides now ask _resolve_latest_cache_path the same question.
 #
-# The `|| skills_dir=""` preserves what the nested `bash -c` bought: an empty
-# glob leaves this function alive and answering "", never aborting the caller.
+# An empty glob leaves this function alive and answering "", never aborting the
+# caller -- that is now _resolve_latest_cache_path's own contract rather than
+# something this call site has to arrange.
 _resolve_skills_base_dir() {
   if _is_claude_code_host; then
     local config_dir
     config_dir=$(_claude_config_dir)
     local skills_dir
-    skills_dir=$(_resolve_latest_cache_path "$config_dir" "skills") || skills_dir=""
+    skills_dir=$(_resolve_latest_cache_path "$config_dir" "skills")
     printf '%s\n' "${skills_dir:-}"
     return 0
   fi
@@ -9838,11 +9864,15 @@ cmd_check_version() {
   fi
 
   # Resolve the latest installed path (newest VERSION -- see
-  # _resolve_latest_cache_path). Called bare: an empty glob still aborts under
-  # `set -euo pipefail`, as it always has.
+  # _resolve_latest_cache_path). An empty glob now answers with the empty string
+  # instead of aborting the script, which is what makes the branch below
+  # reachable for the first time.
   latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
-  # Case: glob returns empty — no installed version found
+  # Case: glob returns empty — no installed version found.
+  # CALLER-VISIBLE: this branch is documented but was dead code until the helper
+  # above stopped returning non-zero. A caller that read "check-version aborts"
+  # as its no-plugin signal now gets this JSON at exit 0 instead.
   if [ -z "$latest_path" ]; then
     if [ "$quiet" = false ]; then
       echo "Warning: No installed aimi-cli.sh found via glob." >&2
@@ -9911,11 +9941,12 @@ cmd_cleanup_versions() {
 
   # Resolve the latest installed path. This verb rm -rf's every version
   # directory it does NOT pick, so "latest" has to mean newest version rather
-  # than lexicographically last -- see _resolve_latest_cache_path. Called bare:
-  # an empty glob still aborts under `set -euo pipefail`, as it always has.
+  # than lexicographically last -- see _resolve_latest_cache_path.
   latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
-  # No installed versions found
+  # No installed versions found. CALLER-VISIBLE: dead code until the helper
+  # stopped returning non-zero on an empty glob. Note it returns BEFORE
+  # write_global_cli_cache, so an empty cache still writes no cli-path.
   if [ -z "$latest_path" ]; then
     jq -n '{removed: 0, kept: null}'
     return 0
@@ -9961,6 +9992,36 @@ cmd_cleanup_versions() {
 # Used by install hooks and slash commands to populate the cache without relying
 # on the lazy-resolution layers.
 #
+# ---------------------------------------------------------------------------
+# WHY THIS VERB, AND THE THREE AROUND IT, STAY BASH + jq
+#
+# The normative statement for the version/cache family lives here because this
+# is the verb with the hardest constraint. `version`, `check-version`,
+# `cleanup-versions` and `prime-cache` DO NOT CROSS INTO PYTHON, and that is a
+# decision rather than an omission.
+#
+# These verbs, with the helper family beside them (read_global_cli_cache,
+# write_global_cli_cache, read_global_worktree_cache, _claude_config_dir,
+# _extract_version_from_path, _validate_plugin_dir), are what LOCATE
+# aimi-cli.sh. tasks.py, roadmap.py, models.py and story_merge.py live in the
+# same directory as the CLI being located, so a check_python3 gate here would
+# make finding the CLI depend on having found it. Concretely: install.sh calls
+# `prime-cache` DURING the OpenCode install, and commands/references/
+# cli-path-resolution.md calls `check-version --quiet --fix` immediately after
+# every path resolution -- both would start requiring an interpreter on hosts
+# that today need only Bash and jq. `version` is the CLI identity probe and has
+# the same problem for the same reason.
+#
+# `cleanup-versions` is the one verb off that hot path, and it stays Bash on
+# different grounds: the pure-Bash comparator that decides which install it
+# keeps landed six commits earlier in this same branch, and porting the verb
+# here would delete that comparator inside the branch that added it.
+#
+# The jq calls stay too. Rewriting four `jq -n` constructors as printf would
+# reproduce, not remove, the unescaped printf-built JSON already standing in
+# cmd_check_version.
+# ---------------------------------------------------------------------------
+#
 # JSON output: {status, path, host, version, message}
 #   status: 'ok' | 'already_current' | 'not_found' | 'error'
 #   path:   absolute path written (or null)
@@ -10003,12 +10064,13 @@ cmd_prime_cache() {
     resolved_path="$candidate"
   else
     # Claude Code branch: newest installed version (see
-    # _resolve_latest_cache_path). The `|| resolved_path=""` is what the nested
-    # `bash -c` used to buy: an empty glob must leave this verb alive so it can
-    # reach its own not_found branch below, not abort under `set -euo pipefail`.
+    # _resolve_latest_cache_path). This verb needed a `|| resolved_path=""` here
+    # to survive an empty glob and reach its own not_found branch; the helper no
+    # longer has a failure mode, so the guard is gone rather than left standing
+    # as a hint that one exists.
     local config_dir
     config_dir=$(_claude_config_dir)
-    resolved_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh") || resolved_path=""
+    resolved_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
     if [ -z "$resolved_path" ]; then
       if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then

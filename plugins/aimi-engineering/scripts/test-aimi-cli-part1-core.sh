@@ -1890,32 +1890,35 @@ test_check_version_backward_compat() {
 }
 
 # ----------------------------------------------------------------------------
-# The empty plugin-cache glob, ASSERTED instead of skipped.
+# The empty plugin-cache glob, now asserting the DOCUMENTED answers.
 #
-# THIS TEST PINS A DEFECT. Every expectation below is "what the CLI does
-# today", never "what it should do".
+# THIS TEST USED TO PIN A DEFECT, AND THE INVERSION IS THE POINT OF THE DIFF.
 #
 # cmd_check_version documents a `{status: "unknown", message: "No installed
 # version found"}` branch for the no-installed-version case, and
 # cmd_cleanup_versions documents `{removed: 0, kept: null}` for the same case.
-# NEITHER HAS EVER BEEN EMITTED. aimi-cli.sh:2 sets `set -euo pipefail`; both
-# verbs call _resolve_latest_cache_path BARE, that helper returns 1 when the
-# glob matches nothing, and a `var=$(helper)` assignment carries the helper's
-# status -- so the shell aborts the whole script before either handler branch
-# is reached. Both documented branches are dead code. What is actually
-# observable is an abort: exit 1, empty stdout, empty stderr, and no write to
-# the global cli-path cache.
+# NEITHER HAD EVER BEEN EMITTED. aimi-cli.sh:2 sets `set -euo pipefail`; both
+# verbs called _resolve_latest_cache_path BARE, that helper returned 1 when the
+# glob matched nothing, and a `var=$(helper)` assignment carries the helper's
+# status -- so the shell aborted the whole script before either handler branch
+# was reached. What was observable was exit 1, empty stdout, empty stderr and no
+# write to the global cli-path cache, and that is what the previous revision of
+# this function asserted, verbatim.
 #
 # It went unnoticed because the one test that could have caught it printed
 # "(skipping current-version test: no installed version in cache)" and asserted
 # nothing exactly when the case became reachable. A skipped test is why nobody
-# noticed.
+# noticed, which is why the abort was written down as an assertion first and
+# inverted here rather than quietly replaced.
 #
-# STORY 07 INVERTS THIS. When the version verbs move to Python they reach their
-# own handler branches, and these assertions get rewritten to the documented
-# outputs in that story's diff -- which is the entire reason for writing today's
-# behaviour down first. Until story 07 has landed, a failure here means the
-# BEHAVIOUR moved; do not repair the assertion to match it.
+# _resolve_latest_cache_path now always returns 0 and answers with the empty
+# string, so both handlers run. THIS IS CALLER-VISIBLE: a command that read "the
+# verb aborts" as its no-plugin signal now gets JSON and exit 0. The same nine
+# runs are recorded on both sides in golden_from_jq.json's version_cache_cases,
+# named in test_version_cache.py's KNOWN_DIVERGENCES.
+#
+# A failure here still means the BEHAVIOUR moved; do not repair the assertion to
+# match it.
 # ----------------------------------------------------------------------------
 test_version_verbs_empty_plugin_cache_glob() {
   echo ""
@@ -1935,32 +1938,83 @@ test_version_verbs_empty_plugin_cache_glob() {
     CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
     bash "$CLI" check-version 2>"$err") && ec=0 || ec=$?
 
-  assert_exit_code "1" "$ec" \
-    "check-version (empty glob): aborts with exit 1, never reaching the documented status:unknown branch"
-  assert_eq "" "$out" \
-    "check-version (empty glob): stdout is empty -- the {status:unknown} JSON is unreachable"
-  assert_eq "" "$(cat "$err")" \
-    "check-version (empty glob): stderr is empty too, not even the 'No installed aimi-cli.sh found' warning"
+  assert_exit_code "0" "$ec" \
+    "check-version (empty glob): reaches the documented status:unknown branch and exits 0"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version (empty glob): emits the documented unknown status"
+  assert_contains '"message": "No installed version found"' "$out" \
+    "check-version (empty glob): emits the documented message"
+  assert_eq "Warning: No installed aimi-cli.sh found via glob." "$(cat "$err")" \
+    "check-version (empty glob): warns on stderr, which the abort never let it do"
 
   out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
     CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
     bash "$CLI" check-version --quiet 2>"$err") && ec=0 || ec=$?
 
-  assert_exit_code "1" "$ec" \
-    "check-version --quiet (empty glob): the abort lands before --quiet could change anything"
+  assert_exit_code "0" "$ec" \
+    "check-version --quiet (empty glob): exits 0 as well"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version --quiet (empty glob): --quiet changes stderr, not the answer"
+  assert_eq "" "$(cat "$err")" \
+    "check-version --quiet (empty glob): --quiet suppresses the warning it can now reach"
 
   out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
     CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
     bash "$CLI" cleanup-versions 2>"$err") && ec=0 || ec=$?
 
-  assert_exit_code "1" "$ec" \
-    "cleanup-versions (empty glob): aborts with exit 1, never reaching the documented {removed:0,kept:null} branch"
-  assert_eq "" "$out" \
-    "cleanup-versions (empty glob): stdout is empty -- the {removed:0,kept:null} JSON is unreachable"
+  assert_exit_code "0" "$ec" \
+    "cleanup-versions (empty glob): reaches the documented {removed:0,kept:null} branch and exits 0"
+  assert_contains '"removed": 0' "$out" \
+    "cleanup-versions (empty glob): removed is 0 -- there was nothing to remove"
+  assert_contains '"kept": null' "$out" \
+    "cleanup-versions (empty glob): kept is null, not a version it invented"
   assert_eq "" "$(cat "$err")" \
     "cleanup-versions (empty glob): stderr is empty"
   assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
-    "cleanup-versions (empty glob): the abort precedes write_global_cli_cache, so no cli-path is written"
+    "cleanup-versions (empty glob): the branch returns before write_global_cli_cache, so still no cli-path"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# A CLAUDE_CONFIG_DIR carrying shell metacharacters must have NO side effect.
+#
+# This lives in the suite that is mandatory after any aimi-cli.sh change,
+# deliberately, because it guards a property that a refactor can undo by
+# accident. All three cache-globbing verbs used to reach a nested `bash -c`
+# whose PROGRAM TEXT was built by interpolating $config_dir, so a config dir
+# containing a double quote closed the escaped quote and ran the rest. Measured,
+# not inferred: on the parent of the commit that moved the glob behind
+# _resolve_latest_cache_path, this exact payload created the marker file while
+# prime-cache still reported not_found at exit 0.
+#
+# Two things closed it, and this asserts the outcome rather than either
+# mechanism: the directory became a positional ARGUMENT to a single-quoted
+# program, and then the array glob removed the nested shell altogether. If a
+# later change reintroduces a nested shell here, the marker comes back.
+# ----------------------------------------------------------------------------
+test_version_verbs_config_dir_metacharacters() {
+  echo ""
+  echo "=== Testing the cache-globbing verbs against a metacharacter-bearing CLAUDE_CONFIG_DIR ==="
+
+  local root evil aimi_cfg proj marker
+  root=$(mktemp -d)
+  aimi_cfg="$root/aimi-config"
+  proj="$root/project"
+  # The payload's `touch` target is RELATIVE, so it lands in the run's own cwd.
+  evil="$root/cfg\";touch MARKER;ls \""
+  marker="$proj/MARKER"
+  mkdir -p "$evil/plugins/cache" "$aimi_cfg" "$proj/.aimi"
+
+  local verb
+  for verb in check-version cleanup-versions prime-cache; do
+    rm -f "$marker"
+    (cd "$proj" && env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+      CLAUDE_CONFIG_DIR="$evil" AIMI_CONFIG_DIR="$aimi_cfg" \
+      bash "$CLI" "$verb" >/dev/null 2>&1) || true
+    assert_eq "no" "$([ -e "$marker" ] && echo yes || echo no)" \
+      "$verb: a CLAUDE_CONFIG_DIR carrying \";touch ...\" executes nothing"
+  done
 
   rm -rf "$root"
 }
@@ -7717,6 +7771,7 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_version_verbs_empty_plugin_cache_glob
+  test_version_verbs_config_dir_metacharacters
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
   test_cleanup_versions_sorts_on_version_segment
