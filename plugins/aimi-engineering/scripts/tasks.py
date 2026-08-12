@@ -101,8 +101,11 @@ WHAT THIS FILE MUST NOT BECOME
     this file `$0` is tasks.py, so porting it would put a Python module's path
     into ~/.config/aimi/cli-path and every later $AIMI_CLI resolution would
     load a .py as a shell script -- on the NEXT session, long after the test
-    run that passed. init-session stays in bash permanently, and the string
-    "cli-path" appears nowhere in this file.
+    run that passed. THOSE THREE LINES stay in bash permanently, and the string
+    "cli-path" appears nowhere in this file. Its three DOCUMENT reads did cross
+    -- op_init_session below -- and the seam between the two halves is marked in
+    aimi-cli.sh: everything above it is about where this script is, everything
+    below it about what the document says.
 
 WHERE jq AND PYTHON PART COMPANY
 --------------------------------
@@ -569,6 +572,31 @@ def _emit_compact(value):
     sys.stdout.write("\n")
 
 
+def streamed_docs(path):
+    """The file's JSON values ONE AT A TIME, raising where jq stopped.
+
+    jq is a streaming filter: it had already printed document 1's answer when
+    document 2 failed to parse. Every verb but one wants the whole file or
+    nothing, and load_docs below gives them that by draining this. research-gc
+    is the exception -- it reads the stream for its side effects and keeps what
+    arrived before the abort, because a port that parsed each file whole would
+    lose document 1's researchPaths and then DELETE the research file they
+    name (rgc-dois-documentos-segundo-malformado).
+    """
+    with open(path, "r", encoding="utf-8") as handle:
+        text = handle.read()
+
+    decoder = json.JSONDecoder()
+    index = 0
+    while True:
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        if index >= len(text):
+            return
+        value, index = decoder.raw_decode(text, index)
+        yield value
+
+
 def load_docs(path):
     """Every JSON value in the file, in order, RAISING on a file it cannot read.
 
@@ -583,20 +611,12 @@ def load_docs(path):
     VALUE rather than as an exit: the bash gate it twins runs jq with stderr
     redirected to /dev/null and answers "not found" for every failure it could
     have had, and a twin that died with a different message would not be one.
-    """
-    with open(path, "r", encoding="utf-8") as handle:
-        text = handle.read()
 
-    decoder = json.JSONDecoder()
-    docs = []
-    index = 0
-    while True:
-        while index < len(text) and text[index] in " \t\r\n":
-            index += 1
-        if index >= len(text):
-            return docs
-        value, index = decoder.raw_decode(text, index)
-        docs.append(value)
+    The list() is eager on purpose: every caller here is inside a `try` that
+    expects the parse failure to surface from THIS call, not from whatever
+    iterates the result later.
+    """
+    return list(streamed_docs(path))
 
 
 def read_docs(path, verb):
@@ -3386,6 +3406,241 @@ def op_archive_task(argv):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# The four readers the 1.123.0 port left standing
+#
+# init-session's three metadata reads, get-branch's fallback, research-gc's
+# walk over every tasks file, and the predicate behind list-archivable. The
+# last two were named in no prior decision at all; the first two were left
+# because init-session's neighbourhood also holds the ONE thing that must never
+# cross -- see cmd_init_session in aimi-cli.sh, and the module docstring above.
+# ---------------------------------------------------------------------------
+
+
+def document_line(docs, *segments):
+    """`jq -r '.a.b'` over the whole STREAM -- one line per document, joined,
+    which is the single string bash's `$(...)` captured.
+
+    NOT document_scalar, which archive-task uses and which carries `// empty`.
+    Neither read below was written with it, and the difference is visible: `jq
+    -r` prints the four-letter word `null` for an absent branchName, bash
+    stored the word, and the charset gate then ACCEPTED it as a legal branch
+    name. Borrowing a helper that maps null to "" would repair that on the way
+    past -- see _comment_session_doc (1), where it is recorded rather than
+    fixed, from four different documents that reach it.
+    """
+    lines = []
+    for doc in docs:
+        value, owner = doc, ""
+        for segment in segments:
+            value = jq_index(value, segment, owner)
+            owner = owner + "." + segment
+        lines.append(jq_raw(value))
+    return "\n".join(lines)
+
+
+def op_init_session(argv):
+    """The THREE DOCUMENT READS of cmd_init_session, and the gate between them.
+
+    WHAT IS NOT HERE IS THE POINT. cmd_init_session also resolves its OWN
+    script path and persists it, as session state and in the global cache
+    every later $AIMI_CLI resolution reads. Inside this file `$0` is tasks.py,
+    so porting that would persist a Python module's path and the next session
+    would load a .py as a shell script -- long after the test run that passed.
+    It stays in bash permanently. The seam is marked there, and the module
+    docstring above names the key and the function in the one place a scan for
+    them is allowed to find them: test_tasks_py_never_names_the_cli_path_cache
+    reads every line below it.
+
+    THE CHARSET GATE CROSSED WITH THE READS, and it had to. bash tested the
+    value it got back from jq, and for a non-string branchName that value is
+    whatever `jq -r` PRINTED -- an array comes out over four lines and the
+    refusal quotes all four, indentation included. One crossing cannot hand a
+    multi-line value back to a shell variable and still emit its own JSON in
+    the same stream, so the gate went where the raw value already is. Regex,
+    message and exit status are bash's to the byte, and it fires exactly where
+    bash fired it: after the branchName read, before the other two reads, and
+    before bash writes .aimi/current-branch. That ordering is not a claim --
+    session_doc_cases records the whole of .aimi/ after every run, and every
+    refused case has the two writes above the seam already done and no
+    current-branch file at all.
+
+    What the gate guarantees on the way out is what lets bash have the value at
+    all: a branch that passes matches ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$, so it holds
+    no newline, no quote and no brace. It is emitted as the first line and the
+    session object follows; bash splits on that first newline and cannot be
+    fooled, because a value that could hide a newline never gets here.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py init-session --tasks-file <path>")
+    docs = read_docs(path, "init-session")
+
+    branch = document_line(docs, "metadata", "branchName")
+    if not BRANCH_NAME.fullmatch(branch):
+        # bash's own line, to the byte, on stderr at exit 1.
+        sys.stderr.write("Error: Invalid branch name: " + branch + "\n")
+        return 1
+
+    # EXACTLY ONE DOCUMENT IS LEFT HERE, and the gate is what proves it: zero
+    # documents join to "" and one alphanumeric is required, two or more join
+    # with a newline the charset cannot hold. So the counts below need no
+    # stream arm -- unlike archive-task's, which has no gate in front of it and
+    # records what `[` did when handed two numbers.
+    pending = count_with_status(_stories(docs[0]), "pending")
+    version = document_line(docs, "schemaVersion")
+
+    sys.stdout.write(branch + "\n")
+    _emit({"tasks": path, "branch": branch, "pending": pending, "schemaVersion": version})
+    return 0
+
+
+def op_get_branch(argv):
+    """cmd_get_branch's FALLBACK, which is all that ever read the document.
+
+    The `read_state "current-branch"` fast path stays in bash and still returns
+    without opening anything: gb-estado-presente-sem-documento answers from
+    state with no tasks file on disk at all.
+
+    No gate here, deliberately -- cmd_get_branch never had one, and
+    gb-branch-hostil records it echoing a name init-session refuses.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py get-branch --tasks-file <path>")
+    docs = read_docs(path, "get-branch")
+    sys.stdout.write(document_line(docs, "metadata", "branchName") + "\n")
+    return 0
+
+
+def op_archivable_file_is_terminal(argv):
+    """`_archivable_file_is_terminal`, the predicate behind list-archivable.
+
+    NOT a verb -- the second op here named after the bash FUNCTION it replaces,
+    for validate-story-exists' reason: `grep _archivable_file_is_terminal` has
+    to find both ends of it.
+
+    THE NON-EMPTY CLAUSE IS ITS OWN, AND MUST STAY ITS OWN. This rule and
+    op_archive_task's disagree: a document whose userStories is [] is REFUSED
+    here and ARCHIVED there, because archive-task's inline copy never had the
+    total-count test. That disagreement predates every port -- archive_cases
+    pins the archiving side with archive-userstories-vazio and
+    _comment_archive (4) names it, session_doc_cases pins the refusing side
+    with la-zero-historias -- and it is preserved, not reconciled. The two
+    predicates therefore share no helper: factoring the common half out is the
+    one edit that would quietly make them agree. Reconciling them, in either
+    direction, is a separate commit with its own tests and its own changelog
+    line.
+
+    RETURN-CODE-ONLY, and the answer is a word rather than an exit status
+    because die() already owns 1. `true` or `false` on stdout, exit 0; bash
+    compares the word and treats anything else -- including this file refusing
+    a document it cannot read -- as false.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py archivable-file-is-terminal --tasks-file <path>")
+    docs = read_docs(path, "archivable-file-is-terminal")
+
+    # `[.userStories[] | select(.status != "completed" and .status != "skipped")] | length`,
+    # once per document, exactly as jq printed it.
+    counts = [
+        len(
+            [
+                story
+                for story in _stories(doc)
+                if jq_index(story, "status", ".userStories[]") not in ("completed", "skipped")
+            ]
+        )
+        for doc in docs
+    ]
+    # bash tested ONE string holding jq's whole output, so both arms are string
+    # arms. No output at all -- an empty tasks file -- is `[ -z ]` and refuses.
+    # Two or more documents produce a value `[ ... -ne 0 ]` cannot compare: it
+    # said "integer expression expected", returned 2, and the `&&` never fired,
+    # so the test was simply SKIPPED. la-dois-documentos records a file
+    # reported archivable although its second document holds a pending story.
+    if not counts:
+        return _archivable_verdict(False)
+    if len(counts) == 1 and counts[0] != 0:
+        return _archivable_verdict(False)
+
+    # `.userStories | length`, the clause op_archive_task does not have.
+    totals = [jq_length(jq_index(doc, "userStories"), ".userStories") for doc in docs]
+    if not totals:
+        return _archivable_verdict(False)
+    if len(totals) == 1 and totals[0] == 0:
+        return _archivable_verdict(False)
+    return _archivable_verdict(True)
+
+
+def _archivable_verdict(value):
+    sys.stdout.write("true\n" if value else "false\n")
+    return 0
+
+
+def research_path_lines(paths):
+    """`for f in .aimi/tasks/*.json; do jq -r '.metadata.researchPaths[]? // empty' "$f"; done`,
+    as the `while read` loop that consumed it saw the bytes.
+
+    THE PATHS ARRIVE ALREADY GLOBBED, by the shell, in the shell's own order.
+    That is not laziness: which file is read FIRST decides what survives an
+    abort, and a glob re-run here would sort by code point where bash sorted by
+    the caller's collation.
+
+    IT STOPS, IT DOES NOT SKIP, and that is the whole reason this reads a
+    stream. The loop ran under `set -euo pipefail` inside a process
+    substitution, so the FIRST jq that aborted ended the entire loop -- every
+    later tasks file contributed nothing, and the research those files name was
+    then collected as orphaned. rgc-malformado-antes-de-um-bom deletes a live
+    research file for the syntax error in an unrelated document;
+    rgc-malformado-depois-de-um-bom is the same two files in the other order
+    and keeps it. Recorded and reproduced, not repaired: this commit is the one
+    that has to prove it changed nothing, and a fix here would be invisible
+    inside it.
+
+    Three properties come from the pipeline rather than from the values. `[]?`
+    swallows a researchPaths that cannot be iterated, so a string or a null
+    yields nothing instead of aborting -- but the `.metadata` index in front of
+    it is NOT guarded, so a metadata that is a string aborts the whole walk.
+    `// empty` drops null and false and nothing else. And `jq -r` pretty-prints
+    every non-string, so an object or an array becomes several lines, each one
+    read as a path; rgc-entrada-objeto names a live file inside an object and
+    deletes it anyway.
+    """
+    lines = []
+    for path in paths:
+        if not os.path.isfile(path):
+            continue  # `[ -f "$f" ] || continue`, and the unmatched glob itself
+        try:
+            for doc in streamed_docs(path):
+                values = jq_index(jq_index(doc, "metadata"), "researchPaths", ".metadata")
+                try:
+                    items = jq_iterate(values, ".metadata.researchPaths")
+                except MalformedTasks:
+                    continue  # `[]?`
+                for value in items:
+                    if value is None or value is False:
+                        continue  # `// empty`
+                    lines.extend(jq_raw(value).split("\n"))
+        except (OSError, UnicodeDecodeError, ValueError, MalformedTasks):
+            return lines
+    return lines
+
+
+def op_research_paths(argv):
+    """One crossing for the whole `.aimi/tasks` directory, where there was one
+    jq per file. Every path bash's glob produced is an argument.
+
+    Prints one line per path, empty lines included: the read loop skipped them
+    with its own `[ -z ]` and an entry carrying a newline arrived as two paths,
+    so the byte stream is the contract rather than the list.
+    """
+    for line in research_path_lines(argv):
+        sys.stdout.write(line + "\n")
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -3415,14 +3670,22 @@ _OPS = {
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),
     "archive-task": op_archive_task,
+    "init-session": op_init_session,
+    "get-branch": op_get_branch,
+    "research-paths": op_research_paths,
+    "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }
 
 # No _VERB_FOR_OP table, unlike roadmap.py: every op here is named after the
 # aimi-cli.sh verb that calls it, so a diagnostic already names a command the
 # reader can run. Keep it that way -- a rename on one side needs the other.
-# The single exception is validate-story-exists, which names the bash FUNCTION
-# it twins for the same reason: `grep validate_story_exists` has to find both
-# copies while both exist.
+# Three entries are not verbs and each names the bash thing it replaces instead,
+# for the same reason: a grep has to find both ends. validate-story-exists and
+# archivable-file-is-terminal name FUNCTIONS, one of which still has a bash copy
+# beside it. research-paths names the referenced-set half of research-gc, which
+# is the only half that crossed -- the mtime sweep and the brainstorm frontmatter
+# parser are still bash's, and calling this op `research-gc` would promise a verb
+# it does not implement.
 
 
 def main(argv):

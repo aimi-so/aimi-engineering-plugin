@@ -56,6 +56,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -2566,21 +2567,23 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "os.unlink(handle.name)",
         "os.unlink(path)",
     ]
-    # Twenty-eight os.path calls, and the module still names no path of its own
+    # Twenty-nine os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
     # are confined_spec_path resolving and comparing, three arrived with
     # get-story-context (two isfile() probes for a skill -- the bare directory,
-    # then OpenCode's aimi- prefixed one -- and one for the brainstorm), and the
-    # last thirteen with archive-task: five in require_in_project, which is
+    # then OpenCode's aimi- prefixed one -- and one for the brainstorm), and
+    # thirteen with archive-task: five in require_in_project, which is
     # validate_path_in_project's three arms ported whole, four in archive_move
     # probing for a free destination, three in the op itself and one in the
-    # basename(1) twin. Every path any of them touches arrived as an argument or
-    # was concatenated onto one that did -- the skills base directory,
-    # PROJECT_ROOT and the archive directory are all bash's answers, handed in
-    # as flags.
-    assert code.count("os.path.") == 28
-    assert code.count("os.path.isfile(") == 6
+    # basename(1) twin. The twenty-ninth is research_path_lines' isfile(), which
+    # is `[ -f "$f" ] || continue` and does double duty as the guard against an
+    # unmatched glob arriving as its own literal. Every path any of them touches
+    # arrived as an argument or was concatenated onto one that did -- the skills
+    # base directory, PROJECT_ROOT, the archive directory and the tasks-file
+    # list are all bash's answers, handed in as flags or as arguments.
+    assert code.count("os.path.") == 29
+    assert code.count("os.path.isfile(") == 7
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
@@ -2797,9 +2800,13 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
     its verb names, and a diagnostic then quoted a command nobody could run.
     Keeping the names equal is what makes that table unnecessary here.
 
-    validate-story-exists is the one entry that is not a verb: it names the
-    bash FUNCTION it twins, so `grep validate_story_exists` finds both copies
-    while both exist."""
+    THREE entries are not verbs and each names the bash thing it replaces
+    instead. validate-story-exists and archivable-file-is-terminal name
+    FUNCTIONS, so a grep finds both ends -- validate_story_exists still has a
+    bash copy beside it. research-paths names the referenced-set half of
+    research-gc, which is the only half that crossed: the mtime sweep and the
+    brainstorm frontmatter parser are still bash's, and calling the op
+    `research-gc` would promise a verb it does not implement."""
     assert set(T._OPS) == {
         "status",
         "metadata",
@@ -2829,6 +2836,10 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "archive-task",
         "gate-pass",
         "gate-fail",
+        "init-session",
+        "get-branch",
+        "research-paths",
+        "archivable-file-is-terminal",
     }
     # The four mark-* ops are one implementation built four times rather than
     # four near-copies of one jq program, which is what they were.
@@ -2981,3 +2992,412 @@ def test_get_state_maps_empty_to_null_and_never_opens_a_path():
         "story": None,
         "last": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# init-session, get-branch, research-gc and the archivable predicate:
+# the four readers the 1.123.0 port left standing
+# ---------------------------------------------------------------------------
+
+SESSION = {c["label"]: c for c in GOLDEN["session_doc_cases"]}
+RESEARCH = {c["label"]: c for c in GOLDEN["research_gc_cases"]}
+
+
+def _executable(text):
+    """ONE function with its PROSE removed -- its docstring for Python, its `#`
+    lines for bash.
+
+    _code() above does the same for the whole of tasks.py and takes no
+    argument; this is the per-function form, and the shell wrappers need it
+    too. Same reason either way: these wrappers EXPLAIN what they replaced, so
+    "one jq startup per file" is a sentence about a deletion, and a grep that
+    could not tell it from a surviving call would force every explanation out
+    of the files to keep the suite green.
+    """
+    text = re.sub(r'^ *"""(?:.|\n)*?"""\n', "", text, flags=re.M)
+    return "\n".join(
+        line for line in text.split("\n") if not line.lstrip().startswith("#")
+    )
+
+SESSION_FIELDS = ("exit", "stdout", "stderr", "state_after")
+# `tree` is the load-bearing one here for the same reason it is in the archive
+# block: research-gc deletes files, and its stdout is a COUNT. A comparison of
+# stdout alone would pass while the wrong file was being removed.
+RESEARCH_FIELDS = ("exit", "stdout", "stderr", "tree", "outside_after")
+
+
+def _isolated_env(base):
+    """Every path the CLI could reach outside the fixture, pointed back into it.
+
+    init-session calls write_global_cli_cache, so a case that leaked
+    AIMI_CONFIG_DIR would rewrite the developer's own ~/.config/aimi/cli-path
+    while the suite ran. HOME is the fixture too, because find_aimi_root stops
+    walking up there.
+    """
+    env = dict(os.environ)
+    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
+        env.pop(name, None)
+    env["HOME"] = base
+    env["AIMI_CONFIG_DIR"] = os.path.join(base, "cfg")
+    env["XDG_CONFIG_HOME"] = os.path.join(base, ".config")
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(base, ".claude")
+    env["LC_ALL"] = "C"
+    return env
+
+
+def _replay_session(case, tmp_path):
+    """Rebuild the project root, run the CLI, read .aimi/ back."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    given = case["input"]
+
+    def sub(text):
+        return text.replace("/TMP", root).replace("/OUTSIDE", base)
+
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    for rel, text in sorted(given["files"].items()):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(sub(text))
+    for key, value in sorted(given["state"].items()):
+        with open(os.path.join(root, ".aimi", key), "w", encoding="utf-8") as handle:
+            handle.write(sub(value) + "\n")
+
+    proc = subprocess.run(
+        ["bash", CLI] + [sub(a) for a in case["args"]],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_isolated_env(base),
+    )
+
+    state_after = {}
+    aimi = os.path.join(root, ".aimi")
+    for name in sorted(os.listdir(aimi)):
+        full = os.path.join(aimi, name)
+        if os.path.isfile(full):
+            with open(full, encoding="utf-8", errors="replace") as handle:
+                state_after[name] = _archive_norm(handle.read(), root, base)
+
+    return {
+        "exit": proc.returncode,
+        "stdout": _archive_norm(proc.stdout, root, base),
+        "stderr": _archive_norm(proc.stderr, root, base),
+        "state_after": state_after,
+    }
+
+
+def _replay_gc(case, tmp_path):
+    """Same rebuild as the archive block's, plus the one thing research-gc
+    needs and no other verb does: an mtime per fixture, in days, so the 30-day
+    threshold is decided by the case and not by the clock."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    given = case["input"]
+
+    def sub(text):
+        return text.replace("/TMP", root).replace("/OUTSIDE", base)
+
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    for rel, text in sorted(given["outside"].items()):
+        full = os.path.join(base, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(sub(text))
+    for rel in given["dirs"]:
+        os.makedirs(os.path.join(root, rel), exist_ok=True)
+    for rel, text in sorted(given["files"].items()):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(sub(text))
+    now = int(time.time())
+    for rel, days in sorted(given["ages"].items()):
+        stamp = now - days * 86400
+        os.utime(os.path.join(root, rel), (stamp, stamp))
+
+    proc = subprocess.run(
+        ["bash", CLI] + [sub(a) for a in case["args"]],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_isolated_env(base),
+    )
+
+    outside_after = {}
+    for rel in _archive_listing(base, root, base, skip="proj"):
+        full = os.path.join(base, rel)
+        if os.path.isfile(full) and not os.path.islink(full):
+            with open(full, encoding="utf-8", errors="replace") as handle:
+                outside_after[rel] = _archive_norm(handle.read(), root, base)
+        else:
+            outside_after[rel] = None
+
+    return {
+        "exit": proc.returncode,
+        "stdout": _archive_norm(proc.stdout, root, base),
+        "stderr": _archive_norm(proc.stderr, root, base),
+        "tree": _archive_listing(root, root, base),
+        "outside_after": outside_after,
+    }
+
+
+# The 8 cases that could not survive the crossing, per field, in three classes
+# -- and RESEARCH has none at all, which is the headline: all 37 recordings of
+# a verb that deletes files match byte for byte, `tree` and `outside_after`
+# included.
+#
+# (A) THE ENGINE'S OWN STATUS AND MESSAGE. jq aborted and `set -euo pipefail`
+#     took the script down at jq's exit 4 or 5; tasks.py refuses at 1 with a
+#     line naming the verb and the file. Recorded rather than reproduced, as
+#     every block before this one did with its engine aborts.
+# (B) THE STATE ONE READ AHEAD. The three is-userstories cases aborted at the
+#     SECOND jq, after the first had already gated and bash had already written
+#     .aimi/current-branch. Three reads at one crossing cannot fail one at a
+#     time, so the refusal now lands before that write: a failed init-session
+#     leaves no current-branch behind instead of a stale one. Strictly less
+#     state after a failure, on a document jq itself refused to read, and it is
+#     the only field in either block that moved.
+# (C) BASH'S COMPLAINT ABOUT ITS OWN COMPARISON. `[` was handed one count per
+#     document, said "integer expression expected" twice and returned 2 twice,
+#     which the `&&`s read as false twice. The port branches on the counts
+#     instead, so la-dois-documentos is still reported ARCHIVABLE -- stdout
+#     matches -- with nothing on stderr.
+SESSION_DIVERGENCES = {
+    "is-malformado": ("exit", "stderr"),
+    "is-metadata-string": ("exit", "stderr"),
+    "gb-malformado": ("exit", "stderr"),
+    "gb-metadata-string": ("exit", "stderr"),
+    "is-userstories-ausente": ("exit", "stderr", "state_after"),
+    "is-userstories-nao-lista": ("exit", "stderr", "state_after"),
+    "is-userstories-null": ("exit", "stderr", "state_after"),
+    "la-dois-documentos": ("stderr",),
+}
+
+
+@pytest.mark.parametrize("label", sorted(SESSION), ids=sorted(SESSION))
+def test_the_session_port_reproduces_the_jq(label, tmp_path):
+    case = SESSION[label]
+    actual = _replay_session(case, tmp_path)
+    excused = SESSION_DIVERGENCES.get(label, ())
+    for field in SESSION_FIELDS:
+        if field in excused:
+            continue
+        assert actual[field] == case[field], label + " . " + field
+
+
+@pytest.mark.parametrize("label", sorted(RESEARCH), ids=sorted(RESEARCH))
+def test_the_research_gc_port_reproduces_the_bash(label, tmp_path):
+    """No divergence table, and that is the claim: a verb that deletes a user's
+    files reproduces all five fields in all 37 recordings."""
+    case = RESEARCH[label]
+    actual = _replay_gc(case, tmp_path)
+    for field in RESEARCH_FIELDS:
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_the_session_divergence_table_names_only_cases_that_exist():
+    assert set(SESSION_DIVERGENCES) <= set(SESSION)
+    assert len(SESSION_DIVERGENCES) == 8, "the comment above names 8; keep the two in step"
+
+
+@pytest.mark.parametrize(
+    "label", sorted(SESSION_DIVERGENCES), ids=sorted(SESSION_DIVERGENCES)
+)
+def test_each_excused_session_case_keeps_its_answer(label, tmp_path):
+    """An excused case may lose the engine's wording and its exit status. It may
+    not change its mind.
+
+    The seven aborts still refuse and still write nothing to stdout. The one
+    `[` complaint still ARCHIVES -- the verdict la-dois-documentos records is
+    the defect being preserved, not the message that accompanied it.
+    """
+    recorded = SESSION[label]
+    actual = _replay_session(recorded, tmp_path)
+    if label == "la-dois-documentos":
+        assert recorded["stderr"].count("integer expression expected") == 2
+        assert actual["stdout"] == recorded["stdout"], "still archivable"
+        assert actual["stderr"] == "", "the complaint had no rule behind it"
+        assert actual["state_after"] == recorded["state_after"]
+        return
+    assert recorded["stderr"].startswith(("jq:", "parse error:")), label
+    assert recorded["exit"] in (4, 5), label
+    assert actual["exit"] == 1, label
+    assert actual["stdout"] == "", label + ": a refusal writes nothing to stdout"
+    assert actual["stderr"].startswith("Error: "), label
+    # (B): the only state that may differ is current-branch, and only by being
+    # ABSENT. Nothing else in .aimi/ moved, and no case gained a file.
+    lost = set(recorded["state_after"]) - set(actual["state_after"])
+    assert lost <= {"current-branch"}, label
+    assert not set(actual["state_after"]) - set(recorded["state_after"]), label
+    for key in actual["state_after"]:
+        assert actual["state_after"][key] == recorded["state_after"][key], label + " . " + key
+
+
+def test_the_two_archivable_predicates_still_disagree_and_share_no_helper():
+    """THE DISAGREEMENT THIS PORT HAD TO PRESERVE.
+
+    _archivable_file_is_terminal requires userStories to be NON-EMPTY;
+    cmd_archive_task's inline copy of the same rule never did, and now neither
+    does op_archive_task. So `userStories: []` is REFUSED by list-archivable
+    and ARCHIVED by archive-task -- one rule, two implementations, already
+    disagreeing before any port. Both sides are recorded, from two different
+    blocks captured a commit apart, and both still hold.
+
+    A shared helper is the single most likely way this reconciles by accident,
+    so the two ops are asserted to have none: the total-count clause appears in
+    exactly one of them, and neither calls the other. Story 09 moves
+    cmd_list_archivable, the predicate's only caller -- it must CONSUME the
+    predicate rather than re-derive the non-empty clause, or the disagreement
+    dies there instead.
+    """
+    assert SESSION["la-zero-historias"]["stdout"] == "[]\n"
+    assert ARCHIVE["archive-userstories-vazio"]["exit"] == 0
+    assert ARCHIVE["archive-userstories-vazio"]["file"] is None
+
+    source = _source()
+
+    def body(name):
+        """One top-level def, up to whatever comes next at column 0."""
+        return re.search(
+            r"^def " + name + r"\(.*?(?=^(?:def |_OPS|# -))", source, re.M | re.S
+        ).group(0)
+
+    predicate = _executable(body("op_archivable_file_is_terminal"))
+    archive = _executable(body("op_archive_task"))
+    # The clause that separates them, in one of the two and not the other.
+    assert 'jq_length(jq_index(doc, "userStories")' in predicate
+    assert "jq_length" not in archive
+    # And neither reaches into the other for the half they DO share.
+    assert "op_archive_task" not in predicate
+    assert "archivable" not in archive
+    assert len(re.findall(r"^def _archivable_verdict\(", source, re.M)) == 1
+
+
+def test_init_session_keeps_its_gate_and_never_ports_the_self_resolution():
+    """The gate crossed WITH the reads it sits between, and nothing else did.
+
+    tasks.py holds one branchName charset pattern, and op_init_session tests
+    the raw value against it before it reads pending or schemaVersion -- so a
+    refusal happens before bash is handed anything. What did NOT cross is the
+    line above it: `resolve_path "$0"` and the two cli-path writes are still
+    executed in bash, because inside tasks.py `$0` is the .py file.
+    """
+    source = _source()
+    assert len(re.findall(r"^BRANCH_NAME = ", source, re.M)) == 1
+    session = _executable(re.search(
+        r"^def op_init_session\(.*?(?=^(?:def |_OPS|# -))", source, re.M | re.S
+    ).group(0))
+    assert "BRANCH_NAME.fullmatch(branch)" in session
+    assert 'sys.stderr.write("Error: Invalid branch name: " + branch' in session
+    # ordering, read off the source: the gate is above both later reads
+    assert session.index("BRANCH_NAME.fullmatch") < session.index("count_with_status")
+    assert session.index("BRANCH_NAME.fullmatch") < session.index('"schemaVersion"')
+
+    with open(CLI, encoding="utf-8") as handle:
+        shell = handle.read()
+    assert shell.count('write_state "cli-path" "$self_path"') == 1
+    assert shell.count('write_global_cli_cache "$self_path"') == 1
+    body = _executable(dict(_wrappers())["cmd_init_session"])
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "jq " not in body
+    # and the gate's refusal still precedes the state write, from bash's side:
+    # a refused run never reaches write_state at all, because the crossing above
+    # it exits non-zero.
+    assert body.index(_TASKS_CROSSING) < body.index('write_state "current-branch"')
+
+
+def test_research_gc_crosses_once_and_the_glob_stays_in_the_shell():
+    """Which file is read FIRST decides what survives an abort, so the glob is
+    not re-run in Python: bash expands it and hands the paths over as arguments,
+    in the shell's own collation order.
+
+    The stop-rather-than-skip rule is the one this pins hardest. `set -euo
+    pipefail` ended the whole for-loop at the first jq that aborted, so a
+    malformed tasks file silently emptied the referenced set for every file
+    after it -- and the research those files name was then collected.
+    """
+    body = _executable(dict(_wrappers())["cmd_research_gc"])
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "jq " not in body
+    assert '"$tasks_dir"/*.json' in body
+    # check_python3 OUTSIDE the process substitution: an interpreter that could
+    # not start inside it would leave the referenced set empty and the sweep
+    # would then delete every live research file.
+    assert body.index("check_python3") < body.index(_TASKS_CROSSING)
+    assert "check_python3" not in body.split("< <(")[1]
+
+    same = RESEARCH["rgc-malformado-antes-de-um-bom"]
+    other = RESEARCH["rgc-malformado-depois-de-um-bom"]
+    assert ".aimi/research/vivo.md" not in same["tree"], "the truncation, preserved"
+    assert ".aimi/research/vivo.md" in other["tree"], "same two files, other order"
+    # and a stream that fails halfway still yields what jq had already printed
+    assert ".aimi/research/vivo.md" in RESEARCH[
+        "rgc-dois-documentos-segundo-malformado"]["tree"]
+
+
+def test_the_research_corpus_exercises_every_case_it_claims_to():
+    """Ten buckets, every verdict read off the RECORDING. A corpus where
+    nothing was ever deleted would let the 37-case replay pass on nothing."""
+    def survivors(label):
+        return {t.split("/")[-1] for t in RESEARCH[label]["tree"]
+                if t.startswith(".aimi/research/") and not t.endswith("/")}
+
+    # 1. the ordinary run: the referenced file stays, the old orphan goes, the
+    #    young orphan stays
+    assert survivors("rgc-referencia-simples") == {"vivo.md", "orfao-novo.md"}
+    assert RESEARCH["rgc-referencia-simples"]["stdout"] == (
+        "Cleaned 1 orphaned research files (>30 days)\n"
+    )
+    # 2. silence when nothing goes
+    assert RESEARCH["rgc-tudo-recente"]["stdout"] == ""
+    assert survivors("rgc-tudo-recente") == {"vivo.md", "orfao-velho.md", "orfao-novo.md"}
+    # 3. the threshold, from both sides
+    assert survivors("rgc-limite-29-e-31-dias") == {"vinte-e-nove.md"}
+    # 4. an absolute researchPath protects nothing
+    assert "vivo.md" not in survivors("rgc-caminho-absoluto")
+    # 5. a non-string entry protects nothing either
+    assert "vivo.md" not in survivors("rgc-entrada-objeto")
+    assert "vivo.md" not in survivors("rgc-entrada-array")
+    # 6. ./ is stripped, an embedded newline yields a second usable path
+    assert "vivo.md" in survivors("rgc-prefixo-ponto-barra")
+    assert "vivo.md" in survivors("rgc-entrada-com-newline")
+    # 7. both brainstorm sources still protect
+    assert "vivo.md" in survivors("rgc-brainstorm-researchpaths")
+    assert "vivo.md" in survivors("rgc-brainstorm-foundation")
+    # 8. nested research is never globbed and so is never collected
+    assert "aninhado.md" in survivors("rgc-research-em-subdiretorio")
+    # 9. nothing outside .aimi/research is ever touched, even when named
+    assert RESEARCH["rgc-caminho-fora-do-projeto"]["outside_after"] == {
+        "fora/": None, "fora/segredo.md": "one directory above the project root\n"
+    }
+    # 10. the shapes that abort the walk, and the shapes that merely say nothing
+    for label in ("rgc-tasks-malformado", "rgc-metadata-string", "rgc-doc-array"):
+        assert "vivo.md" not in survivors(label), label
+    for label in ("rgc-metadata-null", "rgc-doc-null", "rgc-researchpaths-null"):
+        assert RESEARCH[label]["exit"] == 0, label
+
+
+def test_get_branch_reads_the_document_only_when_the_state_is_empty():
+    """The fast path is the common one -- /aimi:execute calls this per story --
+    and it must not gain a python3 startup."""
+    body = _executable(dict(_wrappers())["cmd_get_branch"])
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "jq " not in body
+    assert body.index('read_state "current-branch"') < body.index(_TASKS_CROSSING)
+    assert body.index('if [ -z "$branch" ]') < body.index("get_tasks_file")
+    # recorded from the other side: answered from state with NO tasks file at all
+    assert SESSION["gb-estado-presente-sem-documento"]["stdout"] == "do-estado\n"
+    assert SESSION["gb-estado-presente-sem-documento"]["input"]["files"] == {}
+    # and get-branch has no gate: it echoes a name init-session refuses
+    assert SESSION["gb-branch-hostil"]["stdout"] == "main; rm -rf /\n"
+    assert SESSION["is-branch-hostil"]["exit"] == 1
+
+
+def test_a_missing_branchname_is_still_the_word_null():
+    """`jq -r` printed `null` for an absent branchName and the charset gate
+    accepted it, so init-session reports and stores a branch literally called
+    null. document_line reproduces it rather than mapping null to "" -- which
+    is exactly why it is not document_scalar, the archive helper that carries
+    `// empty`."""
+    for label in ("is-branch-ausente", "is-branch-null-explicito",
+                  "is-metadata-ausente", "is-metadata-null"):
+        assert json.loads(SESSION[label]["stdout"])["branch"] == "null", label
+        assert SESSION[label]["state_after"]["current-branch"] == "null\n", label
+    assert T.document_line([{"metadata": {}}], "metadata", "branchName") == "null"
+    assert T.document_scalar([{"metadata": {}}], "branchName") == ""

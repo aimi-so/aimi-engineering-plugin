@@ -856,7 +856,7 @@ cmd_find_tasks_all() {
 # Initialize execution session
 # Usage: aimi-cli.sh init-session [--file <path>]
 cmd_init_session() {
-  local tasks_file branch pending
+  local tasks_file branch
   local file_flag=""
 
   # Parse optional --file flag
@@ -905,23 +905,27 @@ cmd_init_session() {
   write_state "cli-path" "$self_path"
   write_global_cli_cache "$self_path"
 
-  branch=$(jq -r '.metadata.branchName' "$tasks_file")
+  # ---- the seam. Above: WHERE THIS SCRIPT IS. Below: WHAT THE DOCUMENT SAYS.
+  # The three lines above never cross into tasks.py and never will: inside it
+  # `$0` is the .py file, so persisting that would write a Python module's path
+  # into ~/.config/aimi/cli-path and break every later $AIMI_CLI resolution --
+  # on the NEXT session, long after the test run that passed.
 
-  # Validate branch name (security)
-  if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-    echo "Error: Invalid branch name: $branch" >&2
-    exit 1
-  fi
+  # ONE crossing for the three document reads that used to be three jq
+  # startups. The charset gate below moved with them and is now tasks.py's,
+  # because it tests the value jq PRINTED and a non-string branchName prints
+  # over several lines -- see op_init_session, which explains the split and
+  # what it guarantees about the first line here. Everything the gate lets
+  # through matches ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$, so it carries no newline and
+  # the split cannot be fooled.
+  check_python3
+  local payload
+  payload=$(python3 "$(_aimi_tasks_py)" init-session --tasks-file "$tasks_file") || exit $?
+  branch=${payload%%$'\n'*}
 
   write_state "current-branch" "$branch"
 
-  pending=$(jq '[.userStories[] | select(.status == "pending")] | length' "$tasks_file")
-
-  local version
-  version=$(jq -r '.schemaVersion' "$tasks_file")
-
-  jq -n --arg tasks "$tasks_file" --arg branch "$branch" --argjson pending "$pending" --arg version "$version" \
-    '{tasks: $tasks, branch: $branch, pending: $pending, schemaVersion: $version}'
+  printf '%s\n' "${payload#*$'\n'}"
 }
 
 # Get comprehensive status summary
@@ -1520,6 +1524,13 @@ cmd_reset_orphaned() {
 }
 
 # Get branch name
+#
+# The FAST PATH still opens nothing. read_state answers from .aimi/, and only
+# an empty answer reaches the document at all -- a populated session state
+# never starts python3, never resolves a tasks file, and is unaffected by what
+# the document holds (gb-estado-presente-sem-documento answers with no tasks
+# file on disk; gb-estado-presente-documento-hostil answers while the document
+# holds a name init-session would refuse).
 cmd_get_branch() {
   local branch
   branch=$(read_state "current-branch")
@@ -1527,7 +1538,8 @@ cmd_get_branch() {
   if [ -z "$branch" ]; then
     local tasks_file
     tasks_file=$(get_tasks_file)
-    branch=$(jq -r '.metadata.branchName' "$tasks_file")
+    check_python3
+    branch=$(python3 "$(_aimi_tasks_py)" get-branch --tasks-file "$tasks_file") || exit $?
   fi
 
   echo "$branch"
@@ -10361,17 +10373,25 @@ cmd_validate_tasks() {
 
 # Check whether a tasks file's stories are ALL terminal (completed or skipped)
 # and non-empty. Echoes nothing; return code only (0 = archivable-as-a-file).
+#
+# ONE crossing where there were two jq programs over the same file, and the
+# contract is unchanged: it says nothing, it returns 1 for a missing, malformed,
+# non-list or empty document, and it NEVER takes the command down. Both of those
+# properties still come from the same two places -- `2>/dev/null` swallows the
+# diagnostic, and every caller invokes this in a condition context where `set -e`
+# is suspended -- so a document tasks.py refuses is simply not archivable.
+#
+# ITS NON-EMPTY CLAUSE IS DELIBERATELY NOT op_archive_task's. The two rules
+# disagree about `userStories: []` -- refused here, archived there -- and the
+# disagreement predates any port; both sides are pinned in golden_from_jq.json
+# (la-zero-historias and archive-userstories-vazio). op_archivable_file_is_terminal
+# says at length why they share no helper.
 _archivable_file_is_terminal() {
   local tasks_file="$1"
-  local non_terminal
-  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
-  [ -z "$non_terminal" ] && return 1
-  [ "$non_terminal" -ne 0 ] && return 1
-
-  local total
-  total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
-  [ -z "$total" ] && return 1
-  [ "$total" -eq 0 ] && return 1
+  local verdict
+  verdict=$( { check_python3 && python3 "$(_aimi_tasks_py)" \
+    archivable-file-is-terminal --tasks-file "$tasks_file"; } 2>/dev/null ) || return 1
+  [ "$verdict" = "true" ] || return 1
   return 0
 }
 
@@ -10818,20 +10838,24 @@ cmd_research_gc() {
   local referenced_set=""
 
   # --- Source 1: .aimi/tasks/*.json metadata.researchPaths ---
+  #
+  # ONE crossing for the whole directory, where there was one jq startup per
+  # file. The GLOB STAYS HERE and its expansion is handed over as arguments,
+  # because which file is read first decides what survives an abort and the
+  # shell's collation is the order that was recorded. check_python3 is called
+  # OUTSIDE the process substitution on purpose: an interpreter that failed to
+  # start inside it would end the subshell, leave the referenced-set empty, and
+  # the sweep below would then collect every live research file as an orphan.
   local tasks_dir="$AIMI_DIR/tasks"
   if [ -d "$tasks_dir" ]; then
+    check_python3
     while IFS= read -r rpath; do
       [ -z "$rpath" ] && continue
       # Normalize: strip leading ./ and collapse to a canonical relative path
       rpath="${rpath#./}"
       referenced_set="$referenced_set
 $rpath"
-    done < <(
-      for f in "$tasks_dir"/*.json; do
-        [ -f "$f" ] || continue
-        jq -r '.metadata.researchPaths[]? // empty' "$f" 2>/dev/null
-      done
-    )
+    done < <(python3 "$(_aimi_tasks_py)" research-paths "$tasks_dir"/*.json 2>/dev/null)
   fi
 
   # --- Source 2: .aimi/brainstorms/*.md frontmatter researchPaths ---

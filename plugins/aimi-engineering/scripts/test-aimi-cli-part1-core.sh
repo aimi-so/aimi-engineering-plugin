@@ -328,6 +328,82 @@ test_init_session_self_resolution_stays_in_bash() {
     "boundary: tasks.py names the cli-path cache nowhere outside the docstring forbidding it"
 }
 
+# init-session's THREE DOCUMENT READS -- the other half of the seam the test
+# above guards -- and the security gate that sits between them.
+#
+# The three static assertions are the retargeted form of a grep that would have
+# found the deleted jq: they scan aimi-cli.sh for each program that left and
+# tasks.py for the symbol that replaced it, following the maxConcurrency
+# precedent above. -F throughout, because the deleted text is jq source.
+#
+# The behavioural half is here rather than in the golden corpus because the
+# branchName charset gate is SECURITY-relevant: that field is interpolated into
+# git and gh commands downstream, and a prior slice fixed an injection that
+# bypassed exactly this gate. It is asserted on its exact text, its exact exit
+# status AND on the state it must not have written -- a gate that fired after
+# write_state would leave the hostile name in .aimi/current-branch for the next
+# command to read.
+test_init_session_document_reads_crossed_and_the_gate_still_bites() {
+  echo ""
+  echo "=== Testing tasks.py boundary: init-session's three document reads ==="
+
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: none of the three jq programs may come back.
+  assert_eq "0" "$(grep -cF '.metadata.branchName' "$CLI" || true)" \
+    "init-session: no jq read of metadata.branchName survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'select(.status == "pending")' "$CLI" || true)" \
+    "init-session: no jq copy of the pending count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF "jq -r '.schemaVersion'" "$CLI" || true)" \
+    "init-session: no jq read of schemaVersion survives in aimi-cli.sh"
+  # Scans tasks.py: one op for the three reads, one shared reader behind them,
+  # and get-branch's fallback beside it.
+  assert_eq "1" "$(grep -c '^def op_init_session(' "$tasks_py" || true)" \
+    "init-session: exactly one op_init_session definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def document_line(' "$tasks_py" || true)" \
+    "init-session: exactly one document_line definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def op_get_branch(' "$tasks_py" || true)" \
+    "get-branch: exactly one op_get_branch definition in tasks.py"
+
+  # A hostile branchName, refused with the same sentence and the same status.
+  local hostile_dir hostile_file
+  hostile_dir=$(mktemp -d)
+  mkdir -p "$hostile_dir/.aimi/tasks"
+  hostile_file="$hostile_dir/.aimi/tasks/2020-01-01-hostile-tasks.json"
+  cat > "$hostile_file" << 'HOSTILEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: hostile",
+    "type": "feat",
+    "branchName": "main; rm -rf /",
+    "createdAt": "2020-01-01"
+  },
+  "userStories": []
+}
+HOSTILEEOF
+
+  local stdout stderr_file exit_code=0
+  stderr_file=$(mktemp)
+  stdout=$(cd "$hostile_dir" && "$CLI" init-session 2>"$stderr_file") || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" \
+    "init-session: a branchName outside the charset is refused at exit 1"
+  assert_eq "Error: Invalid branch name: main; rm -rf /" "$(cat "$stderr_file")" \
+    "init-session: the refusal names the branch, verbatim"
+  assert_eq "" "$stdout" \
+    "init-session: a refused run writes nothing to stdout"
+  # The gate fires BEFORE the branch is persisted and AFTER the tasks path is:
+  # everything above the seam has already run, the branch write has not.
+  assert_eq "0" "$([ -f "$hostile_dir/.aimi/current-branch" ] && echo 1 || echo 0)" \
+    "init-session: a refused branch is never written to .aimi/current-branch"
+  assert_eq "1" "$([ -f "$hostile_dir/.aimi/current-tasks" ] && echo 1 || echo 0)" \
+    "init-session: the tasks path is written before the gate runs"
+
+  rm -rf "$hostile_dir" "$stderr_file"
+}
+
 # The body of one cmd_* function, comments stripped.
 #
 # Comments are stripped because these wrappers EXPLAIN what they replaced --
@@ -7699,6 +7775,7 @@ main() {
   test_metadata
   test_metadata_max_concurrency_default
   test_init_session_self_resolution_stays_in_bash
+  test_init_session_document_reads_crossed_and_the_gate_still_bites
   test_locked_writers_cross_once_and_keep_the_lock_in_bash
   test_current_story
   test_get_branch

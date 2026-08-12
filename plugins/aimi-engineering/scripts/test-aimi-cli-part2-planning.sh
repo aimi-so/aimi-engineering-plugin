@@ -1493,6 +1493,80 @@ RESEOF
   rm -rf "$es_dir"
 }
 
+# The archivable predicate and research-gc's referenced-set walk, whose jq left
+# aimi-cli.sh in the same commit.
+#
+# Static half: retargeted greps, aimi-cli.sh for the deleted programs and
+# tasks.py for what replaced them, -F because the deleted text is jq source.
+# The bash FUNCTION _archivable_file_is_terminal survives -- only its two jq
+# calls went -- so it is asserted present rather than absent.
+#
+# Behavioural half covers the predicate's two properties a corpus replay would
+# not make obvious to a reader: it NEVER speaks and never aborts, and it still
+# disagrees with archive-task about an empty document. That disagreement is
+# deliberate and pinned from both sides in golden_from_jq.json; story 09 moves
+# list-archivable and must consume this predicate rather than re-derive its
+# non-empty clause, or the disagreement reconciles by accident.
+test_archivable_predicate_and_research_walk_crossed() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the archivable predicate and research-gc ==="
+
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  assert_eq "0" \
+    "$(grep -cF 'select(.status != "completed" and .status != "skipped")' "$CLI" || true)" \
+    "archivable: no jq copy of the non-terminal count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF "jq '.userStories | length'" "$CLI" || true)" \
+    "archivable: no jq copy of the total count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF '.metadata.researchPaths[]?' "$CLI" || true)" \
+    "research-gc: no jq read of researchPaths survives in aimi-cli.sh"
+  assert_eq "1" "$(grep -c '^def op_archivable_file_is_terminal(' "$tasks_py" || true)" \
+    "archivable: exactly one op_archivable_file_is_terminal definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def research_path_lines(' "$tasks_py" || true)" \
+    "research-gc: exactly one research_path_lines definition in tasks.py"
+  assert_eq "1" "$(grep -c '^_archivable_file_is_terminal()' "$CLI" || true)" \
+    "archivable: the bash predicate stays -- only the two jq programs inside it went"
+
+  local pred_dir
+  pred_dir=$(mktemp -d)
+  mkdir -p "$pred_dir/.aimi/tasks"
+
+  # (a) every story terminal, and non-empty: listed
+  cat > "$pred_dir/.aimi/tasks/2020-01-01-terminal-tasks.json" << 'TERMEOF'
+{"schemaVersion":"3.3","metadata":{"branchName":"feat/t"},
+ "userStories":[{"id":"US-001","status":"completed"},{"id":"US-002","status":"skipped"}]}
+TERMEOF
+  local output
+  output=$(cd "$pred_dir" && "$CLI" list-archivable)
+  assert_eq "1" "$(printf '%s' "$output" | jq 'length')" \
+    "list-archivable: an all-terminal file is listed"
+  rm -f "$pred_dir/.aimi/tasks/2020-01-01-terminal-tasks.json"
+
+  # (b) userStories: [] -- REFUSED here, while archive-task archives the same
+  # document. One rule, two implementations, disagreeing on purpose.
+  printf '%s\n' '{"schemaVersion":"3.3","metadata":{"branchName":"feat/t"},"userStories":[]}' \
+    > "$pred_dir/.aimi/tasks/2020-01-02-vazio-tasks.json"
+  output=$(cd "$pred_dir" && "$CLI" list-archivable)
+  assert_eq "[]" "$output" \
+    "list-archivable: an empty userStories is NOT archivable (archive-task disagrees, on purpose)"
+  rm -f "$pred_dir/.aimi/tasks/2020-01-02-vazio-tasks.json"
+
+  # (c) a document the predicate cannot read: not archivable, and SILENT. Its
+  # whole contract is that it echoes nothing and never takes the command down.
+  printf 'NOT JSON AT ALL\n' > "$pred_dir/.aimi/tasks/2020-01-03-mal-tasks.json"
+  local stderr_file exit_code=0
+  stderr_file=$(mktemp)
+  output=$(cd "$pred_dir" && "$CLI" list-archivable 2>"$stderr_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" \
+    "list-archivable: a malformed tasks file does not take the command down"
+  assert_eq "[]" "$output" "list-archivable: a malformed tasks file is not archivable"
+  assert_eq "" "$(cat "$stderr_file")" \
+    "list-archivable: the predicate says nothing about a document it cannot read"
+
+  rm -rf "$pred_dir" "$stderr_file"
+}
+
 test_research_gc() {
   echo ""
   echo "=== Testing research-gc subcommand ==="
@@ -7371,6 +7445,7 @@ main() {
   # Research-gc tests — each creates its own isolated temp dir
   echo ""
   echo "--- Research GC Tests ---"
+  test_archivable_predicate_and_research_walk_crossed
   test_research_gc
 
   # Interactivity mode detection tests
