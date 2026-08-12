@@ -145,16 +145,24 @@ check_jq() {
 }
 
 # Ensure python3 is available. Mirrors check_jq. Its scope is this SCRIPT, not
-# one family of verbs: the roadmap verbs, story-merge and every tasks.json verb
-# answer from a module beside this file, and that last group includes the
-# per-story hot path /aimi:execute runs -- mark-*, list-ready, next-story,
-# count-pending and get-story-context, the verb every spawned executor runs as
-# its first action. What still runs without python3 is the environment and
-# forge half (version, check-version, prime-cache, init-session, detect-*,
-# forge-*, setup-branch) plus estimate-payload and list-archivable, and that
+# one family of verbs: the roadmap verbs, story-merge, every tasks.json verb and
+# the whole models.json surface answer from a module beside this file, and the
+# tasks group includes the per-story hot path /aimi:execute runs -- mark-*,
+# list-ready, next-story, count-pending and get-story-context, the verb every
+# spawned executor runs as its first action. init-session joined that group when
+# its three document reads crossed, and detect-models joined it when the
+# models.json merge did -- it is the one detect-* verb that needs the
+# interpreter. What still runs without python3 is the environment and forge
+# half: the four version/cache verbs (version, check-version, cleanup-versions,
+# prime-cache), which are what LOCATE this script and therefore must not depend
+# on a module that lives beside it; the rest of detect-* (detect-forge,
+# detect-default-branch, detect-parent-branch, detect-interactivity,
+# detect-design-bundle); forge-*; setup-branch; and estimate-payload. That
 # residue is too small to be worth naming as the rule: assume aimi-cli.sh needs
-# python3. The whole-repo statement, including which host the requirement is
-# new on, is in the top-level CLAUDE.md § Testing.
+# python3. Three places DEGRADE rather than refuse and so belong to neither
+# list -- the four models.json readers (see _models_python3_or_degrade below),
+# next-story, and list-archivable. The whole-repo statement, including which
+# host the requirement is new on, is in the top-level CLAUDE.md § Testing.
 check_python3() {
   if ! command -v python3 &> /dev/null; then
     echo "Error: python3 is required by aimi-cli.sh but is not installed." >&2
@@ -165,7 +173,7 @@ check_python3() {
 
 # Absolute path to a Python module that sits beside this script -- roadmap.py
 # for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
-# tasks.json verbs.
+# tasks.json verbs, models.py for the models.json readers and their writer.
 #
 # Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
 # one directory up. It has to be resolved rather than assumed because this file
