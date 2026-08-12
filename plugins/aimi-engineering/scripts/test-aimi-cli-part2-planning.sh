@@ -25,6 +25,7 @@ set -uo pipefail
 #   - get-current-models Tests
 #   - list-models Tests
 #   - detect-models Tests
+#   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
 #   - split-detect Tests (TC36-TC46, TC50-TC52)
@@ -3384,6 +3385,438 @@ test_detect_models_default_mode_preserves_other_host() {
 }
 
 # ============================================================================
+# Model-validity predicate comparison
+# ============================================================================
+#
+# aimi-cli.sh answers "is this model id valid?" in FOUR places, and they do not
+# agree with each other:
+#
+#   P1  cmd_resolve_models, Claude Code branch -- exact match against the set
+#       {opus, sonnet, haiku}.
+#   P2  cmd_resolve_models, OpenCode branch -- membership in the `opencode
+#       models` list. The LIST entries are trimmed with jq's ltrimstr(" ") /
+#       rtrimstr(" "), which strip ONE space each rather than all of them, and
+#       the candidate id is never trimmed at all.
+#   P3  cmd_detect_models flag mode -- no validation whatsoever; whatever the
+#       flag carries is written into models.json verbatim.
+#   P4  cmd_detect_models' nested _prompt_category -- `tr -d '[:space:]'` over
+#       the answer (which deletes INTERNAL whitespace too, not just the ends),
+#       then `grep -qxF` against the host's available-model list.
+#
+# The matrix below drives ONE table of ids through all four and asserts every
+# cell, so story 04's collapse into a single predicate has a recorded
+# before-state to be judged against. Where two sites disagree about one id,
+# both answers are asserted rather than one averaged claim.
+#
+# Every predicate here gets at least one id it ACCEPTS and one it REJECTS. P3's
+# rejections are not in the matrix because P3 accepts every id there is -- its
+# only rejections are argument-shaped, and they are asserted with their exact
+# stderr and exit status in test_detect_models_flag_mode_rejections below.
+# ----------------------------------------------------------------------------
+
+# The `opencode` stub the OpenCode-branch predicate is measured against. Two
+# ids, neither padded: the padding in the table is on the CANDIDATE side, which
+# is where P2's asymmetry lives.
+_make_opencode_stub() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/opencode" << 'OC_STUB'
+#!/usr/bin/env bash
+printf 'anthropic/claude-sonnet-4-6\nanthropic/claude-haiku-4-5\n'
+OC_STUB
+  chmod +x "$dir/opencode"
+  printf '%s\n' "$dir"
+}
+
+# Lift _prompt_category out of cmd_detect_models. It is a nested function, so
+# the extraction keys on its four-space indentation rather than column 0, and
+# the `</dev/tty` redirect is rewritten away so the predicate can be driven
+# without a pty. The two lines the predicate actually IS -- the
+# `tr -d '[:space:]'` normalisation and the `grep -qxF` membership test -- are
+# lifted from aimi-cli.sh untouched.
+source_prompt_category() {
+  eval "$(sed -n '/^    _prompt_category() {$/,/^    }$/p' "$CLI" | sed 's#</dev/tty##')"
+}
+
+# P1: resolve-models on a Claude Code host. "accept" means the id survived
+# validation and reached stdout unchanged.
+_predicate_p1_resolve_models_claude_code() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+  rm -rf "$tmpdir"
+  if [ "$out" = "$model" ]; then printf 'accept\n'; else printf 'reject\n'; fi
+}
+
+# P2: resolve-models on an OpenCode host, against the stub in _OC_STUB_DIR.
+_predicate_p2_resolve_models_opencode() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{opencode:{
+    research:$m,review:"anthropic/claude-haiku-4-5",design:"anthropic/claude-haiku-4-5",
+    workflow:"anthropic/claude-haiku-4-5",executor:"anthropic/claude-haiku-4-5"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$_OC_STUB_DIR:$PATH" \
+    AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+  rm -rf "$tmpdir"
+  if [ "$out" = "$model" ]; then printf 'accept\n'; else printf 'reject\n'; fi
+}
+
+# P3: detect-models flag mode. "accept" means the id reached models.json verbatim.
+_predicate_p3_detect_models_flag() {
+  local model="$1" tmpdir written
+  tmpdir=$(mktemp -d)
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research "$model" --review opus --design sonnet \
+      --workflow sonnet --executor sonnet > /dev/null 2>&1 < /dev/null
+  written=$(jq -r '.categories.claudeCode.research // "<absent>"' "$tmpdir/models.json" 2>/dev/null)
+  rm -rf "$tmpdir"
+  if [ "$written" = "$model" ]; then printf 'accept\n'; else printf 'reject\n'; fi
+}
+
+# P4: _prompt_category. The default is "opus" and no id in the table normalises
+# to it, so "came back as the default" is an unambiguous reading of "rejected".
+_predicate_p4_prompt_category() {
+  local model="$1" out
+  out=$(printf '%s\n' "$model" | _prompt_category research opus 2>/dev/null)
+  if [ "$out" = "opus" ]; then printf 'reject\n'; else printf 'accept\n'; fi
+}
+
+# One table row through all four sites. Spaces in the id are rendered as U+2423
+# in the assertion label so a padded id and its trimmed twin stay tellable apart
+# in the transcript.
+_assert_predicate_row() {
+  local id="$1" want_p1="$2" want_p2="$3" want_p3="$4" want_p4="$5"
+  local label
+  label=$(printf '%s' "$id" | sed 's/ /␣/g')
+
+  assert_eq "$want_p1" "$(_predicate_p1_resolve_models_claude_code "$id")" \
+    "predicate P1 (resolve-models, Claude Code exact-match) on [$label]"
+  assert_eq "$want_p2" "$(_predicate_p2_resolve_models_opencode "$id")" \
+    "predicate P2 (resolve-models, OpenCode list-membership) on [$label]"
+  assert_eq "$want_p3" "$(_predicate_p3_detect_models_flag "$id")" \
+    "predicate P3 (detect-models flag mode, unvalidated) on [$label]"
+  assert_eq "$want_p4" "$(_predicate_p4_prompt_category "$id")" \
+    "predicate P4 (_prompt_category, whitespace-deleted grep -qxF) on [$label]"
+}
+
+test_model_validity_predicate_matrix() {
+  echo ""
+  echo "=== Testing the four model-validity predicates against one shared id table ==="
+
+  _OC_STUB_DIR=$(_make_opencode_stub)
+  source_prompt_category
+  # Claude Code's available-model list, exactly as cmd_detect_models builds it.
+  _available_models=$'haiku\nsonnet\nopus'
+  _prompt_models="haiku|sonnet|opus"
+
+  #                    id                                  P1     P2     P3     P4
+  _assert_predicate_row "sonnet"                          accept reject accept accept
+  _assert_predicate_row "anthropic/claude-sonnet-4-6"     reject accept accept reject
+  _assert_predicate_row "  anthropic/claude-sonnet-4-6  " reject reject accept reject
+  _assert_predicate_row "son net"                         reject reject accept accept
+
+  # The P3/P1 disagreement end to end, in one config file: detect-models writes
+  # an id that resolve-models -- same host, same file, one command later --
+  # refuses. Story 04 owns the fix; until then this is the recorded before-state.
+  local rt rt_err rt_out
+  rt=$(mktemp -d)
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" bash "$CLI" detect-models \
+    --research anthropic/claude-sonnet-4-6 --review opus --design sonnet \
+    --workflow sonnet --executor sonnet > /dev/null 2>&1 < /dev/null
+
+  assert_eq "anthropic/claude-sonnet-4-6" \
+    "$(jq -r '.categories.claudeCode.research' "$rt/models.json" 2>/dev/null)" \
+    "predicate round-trip: detect-models writes the id into models.json unvalidated"
+
+  rt_err=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  rt_out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" \
+    bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+
+  assert_eq "inherit" "$rt_out" \
+    "predicate round-trip: resolve-models drops that same id to inherit one command later"
+  assert_stderr_contains "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit" \
+    "$rt_err" "predicate round-trip: with the exact rejection warning"
+
+  rm -rf "$rt" "$_OC_STUB_DIR"
+}
+
+test_prompt_category_predicate_edges() {
+  echo ""
+  echo "=== Testing _prompt_category: whitespace deletion, then exact membership ==="
+
+  source_prompt_category
+  _available_models=$'haiku\nsonnet\nopus'
+  _prompt_models="haiku|sonnet|opus"
+
+  local err out ec
+  err=$(mktemp)
+
+  # ACCEPT: the exact alias.
+  out=$(printf 'sonnet\n' | _prompt_category research opus 2>"$err") && ec=0 || ec=$?
+  assert_eq "sonnet" "$out" "_prompt_category: accepts the exact alias 'sonnet'"
+  assert_exit_code "0" "$ec" "_prompt_category: an accepted answer exits 0"
+  assert_stderr_contains "Category research — model [haiku|sonnet|opus] (default: opus): " \
+    "$(cat "$err")" "_prompt_category: prompts on stderr with the available list and the default"
+
+  # ACCEPT, and this is the disagreement: `tr -d '[:space:]'` deletes ALL
+  # whitespace, so ids resolve-models rejects verbatim get through here, and
+  # 'son net' is silently repaired into 'sonnet' rather than refused.
+  assert_eq "sonnet" "$(printf '  sonnet  \n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: accepts a padded 'sonnet' that resolve-models rejects verbatim"
+  assert_eq "sonnet" "$(printf 'son net\n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: rewrites 'son net' into 'sonnet' -- internal whitespace is deleted, not refused"
+
+  # REJECT: a fully-qualified id, which is exactly what list-models offers on
+  # the other host.
+  out=$(printf 'anthropic/claude-sonnet-4-6\n' | _prompt_category research opus 2>"$err") && ec=0 || ec=$?
+  assert_eq "opus" "$out" "_prompt_category: rejects a fully-qualified id and returns the default"
+  assert_exit_code "0" "$ec" "_prompt_category: a rejected answer still exits 0 -- there is no error channel"
+  assert_stderr_contains "Category research — model [haiku|sonnet|opus] (default: opus): " \
+    "$(cat "$err")" "_prompt_category: the rejection is silent; the prompt is the only stderr"
+
+  # REJECT: an empty answer.
+  assert_eq "opus" "$(printf '\n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: an empty answer falls back to the default"
+
+  rm -f "$err"
+}
+
+# ----------------------------------------------------------------------------
+# list-models offers ids that resolve-models then rejects.
+#
+# THIS IS A REAL USER-FACING BUG, pinned rather than fixed: /aimi:setup-models
+# lists the choices with list-models and stores them for resolve-models to read
+# back, so a user can pick an offered id and silently get "inherit". STORY 04
+# OWNS THE FIX -- it collapses the four predicates into one, and this test is
+# what proves the fix reached the user-visible symptom.
+# ----------------------------------------------------------------------------
+test_list_models_offers_ids_resolve_models_rejects() {
+  echo ""
+  echo "=== Testing the user-visible disagreement: list-models offers, resolve-models rejects ==="
+
+  # --- Direction 1: the OpenCode fallback list, driven into a Claude Code host.
+  local offered
+  offered=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="/usr/bin:/bin" \
+    bash "$CLI" list-models 2>/dev/null | jq -r '.[1]')
+  assert_eq "anthropic/claude-sonnet-4-6" "$offered" \
+    "list-models: the OpenCode fallback offers anthropic/claude-sonnet-4-6"
+
+  local tmpdir stderr stdout ec
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$offered" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+
+  stderr=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>/dev/null) && ec=0 || ec=$?
+
+  assert_stderr_contains "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit" \
+    "$stderr" "cross-host: resolve-models rejects the id list-models offered, with the exact warning"
+  assert_exit_code "0" "$ec" \
+    "cross-host: the rejection is not an error -- resolve-models still exits 0"
+  assert_eq "inherit" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "cross-host: the offered id silently becomes inherit"
+  rm -rf "$tmpdir"
+
+  # --- Direction 2: a padded id from a real `opencode models`.
+  # cmd_list_models pipes the list through `jq -R .` with no trimming, so it
+  # offers the padding verbatim. cmd_resolve_models trims the LIST with jq's
+  # ltrimstr(" ")/rtrimstr(" ") -- one space each, not all -- and never trims
+  # the candidate. The result is that BOTH the id list-models offered and its
+  # fully-trimmed form are rejected: nothing the user can copy out of the list
+  # is acceptable.
+  local stub padded
+  stub=$(mktemp -d)
+  cat > "$stub/opencode" << 'OC_PAD'
+#!/usr/bin/env bash
+printf '  anthropic/claude-sonnet-4-6  \nanthropic/claude-haiku-4-5\n'
+OC_PAD
+  chmod +x "$stub/opencode"
+
+  padded=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$stub" bash "$CLI" list-models 2>/dev/null | jq -r '.[0]')
+  assert_eq "  anthropic/claude-sonnet-4-6  " "$padded" \
+    "list-models: offers the opencode id with its padding intact"
+
+  local pad_dir trim_dir
+  pad_dir=$(mktemp -d)
+  jq -n --arg m "$padded" '{schemaVersion:"2.0",categories:{opencode:{
+    research:$m,review:"anthropic/claude-haiku-4-5",design:"anthropic/claude-haiku-4-5",
+    workflow:"anthropic/claude-haiku-4-5",executor:"anthropic/claude-haiku-4-5"}}}' \
+    > "$pad_dir/models.json"
+  stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad_dir" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad_dir" bash "$CLI" resolve-models 2>/dev/null)
+  assert_stderr_contains "Warning: resolve-models: model '  anthropic/claude-sonnet-4-6  ' is not valid for OpenCode host (category: research), falling back to inherit" \
+    "$stderr" "padded id: resolve-models rejects the exact string list-models offered"
+  assert_eq "inherit" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "padded id: the offered id becomes inherit"
+
+  trim_dir=$(mktemp -d)
+  jq -n '{schemaVersion:"2.0",categories:{opencode:{
+    research:"anthropic/claude-sonnet-4-6",review:"anthropic/claude-haiku-4-5",
+    design:"anthropic/claude-haiku-4-5",workflow:"anthropic/claude-haiku-4-5",
+    executor:"anthropic/claude-haiku-4-5"}}}' > "$trim_dir/models.json"
+  stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$trim_dir" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$trim_dir" bash "$CLI" resolve-models 2>/dev/null)
+  assert_stderr_contains "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for OpenCode host (category: research), falling back to inherit" \
+    "$stderr" "trimmed id: rejected too, because ltrimstr/rtrimstr strip ONE space and leave the rest"
+  assert_eq "inherit" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "trimmed id: nothing the user can copy out of the offered list is acceptable"
+
+  rm -rf "$stub" "$pad_dir" "$trim_dir"
+}
+
+# ----------------------------------------------------------------------------
+# The INVALID<TAB> tagging, driven with hostile model ids.
+#
+# cmd_resolve_models marks an invalid entry by prefixing the literal string
+# "INVALID\t" onto the model id inside jq, then splits that tagged value back
+# apart in a `while IFS=$'\t' read -r _cat _val` loop. The tab was chosen so a
+# model id containing "=" could not truncate the message -- but a tab is only
+# one of the characters that survives into the value, and NEWLINE is the one
+# that breaks the frame: the read loop is line-oriented, so a two-line model id
+# produces TWO iterations, and the second one reports a category that does not
+# exist while claiming an empty model id.
+#
+# STORY 05 DELETES THE INVALID-TAB SCAFFOLDING, and this test is what shows
+# what that removal actually removed. The expectations below are today's
+# behaviour, fabricated warning included.
+# ----------------------------------------------------------------------------
+
+# Run resolve-models on a Claude Code host with `model` in the research slot and
+# return only its stderr.
+_invalid_tag_stderr() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  rm -rf "$tmpdir"
+  printf '%s' "$out"
+}
+
+test_resolve_models_invalid_tag_hostile_ids() {
+  echo ""
+  echo "=== Testing the INVALID<TAB> tagging against hostile model ids ==="
+
+  local suffix="is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit"
+
+  # A literal TAB inside the id. `read -r _cat _val` gives the remainder of the
+  # line to the last variable, so the embedded tab survives into the message.
+  assert_stderr_contains "$(printf "Warning: resolve-models: model 'son\tnet' %s" "$suffix")" \
+    "$(_invalid_tag_stderr "$(printf 'son\tnet')")" \
+    "INVALID<TAB> edge: an id containing a tab keeps the tab in its warning"
+
+  # Leading and trailing spaces are preserved verbatim -- nothing trims the id
+  # on this branch, which is why the padded ids in the matrix above are rejected.
+  assert_stderr_contains "Warning: resolve-models: model '  sonnet' $suffix" \
+    "$(_invalid_tag_stderr "  sonnet")" \
+    "INVALID<TAB> edge: a leading space is preserved and makes 'sonnet' invalid"
+  assert_stderr_contains "Warning: resolve-models: model 'sonnet  ' $suffix" \
+    "$(_invalid_tag_stderr "sonnet  ")" \
+    "INVALID<TAB> edge: a trailing space is preserved and makes 'sonnet' invalid"
+
+  # A backslash reaches the message uninterpreted -- neither jq's "INVALID\t"
+  # construction nor the read loop re-escapes it.
+  assert_stderr_contains 'Warning: resolve-models: model '"'"'son\net'"'"' '"$suffix" \
+    "$(_invalid_tag_stderr 'son\net')" \
+    "INVALID<TAB> edge: a backslash in the id survives uninterpreted"
+
+  # THE NEWLINE CASE. One invalid id, two warnings, and the second one is
+  # fabricated: the read loop consumed 'sonnet' from line 1 and then read line 2
+  # -- 'opus', the tail of the model id -- as a CATEGORY NAME, with an empty
+  # model id. There is no 'opus' category; resolve-models has exactly five, all
+  # of them still present on stdout.
+  local nl_stderr nl_stdout nl_count nl_ec
+  nl_stderr=$(_invalid_tag_stderr "$(printf 'sonnet\nopus')")
+  nl_count=$(printf '%s\n' "$nl_stderr" | grep -c 'Warning: resolve-models')
+  assert_eq "2" "$nl_count" \
+    "INVALID<TAB> newline edge: ONE invalid id produces TWO warnings"
+  assert_stderr_contains "Warning: resolve-models: model 'sonnet' $suffix" \
+    "$nl_stderr" \
+    "INVALID<TAB> newline edge: the first warning reports only the id's first line"
+  assert_stderr_contains "Warning: resolve-models: model '' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: opus), falling back to inherit" \
+    "$nl_stderr" \
+    "INVALID<TAB> newline edge: the second warning is FABRICATED and names 'opus' as the category"
+
+  local nl_dir
+  nl_dir=$(mktemp -d)
+  jq -n --arg m "$(printf 'sonnet\nopus')" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$nl_dir/models.json"
+  nl_stdout=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$nl_dir" \
+    bash "$CLI" resolve-models 2>/dev/null) && nl_ec=0 || nl_ec=$?
+
+  assert_eq "design executor research review workflow" \
+    "$(printf '%s' "$nl_stdout" | jq -r 'keys | join(" ")')" \
+    "INVALID<TAB> newline edge: stdout still carries the five real categories -- 'opus' is not one"
+  assert_eq "inherit" "$(printf '%s' "$nl_stdout" | jq -r '.research')" \
+    "INVALID<TAB> newline edge: the multi-line id falls back to inherit"
+  assert_exit_code "0" "$nl_ec" \
+    "INVALID<TAB> newline edge: the fabricated warning does not change the exit status"
+
+  rm -rf "$nl_dir"
+}
+
+# ----------------------------------------------------------------------------
+# detect-models' argument rejections.
+#
+# The writer path itself is covered by test_detect_models_tier_flags_claudecode
+# (schema-v2.0 write of all five categories) and
+# test_detect_models_tier_flags_preserve_other_host (the other host's sub-table
+# survives a re-run). What neither reaches is the refusal: this verb WRITES the
+# file every later command reads, so what it declines to write matters.
+# ----------------------------------------------------------------------------
+test_detect_models_flag_mode_rejections() {
+  echo ""
+  echo "=== Testing detect-models: partial flag set and unknown flag are both refused ==="
+
+  local tmpdir err out ec
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+
+  # Partial flag set: two of the five.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research haiku --review opus 2>"$err" < /dev/null) \
+    && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "detect-models (partial flags): exits 1"
+  assert_stderr_contains "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" \
+    "$(cat "$err")" "detect-models (partial flags): exact error on stderr"
+  assert_eq "" "$out" "detect-models (partial flags): stdout stays empty"
+  assert_eq "no" "$([ -e "$tmpdir/models.json" ] && echo yes || echo no)" \
+    "detect-models (partial flags): models.json is not written"
+
+  # Unknown flag.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --bogus x 2>"$err" < /dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "detect-models (unknown flag): exits 1"
+  assert_stderr_contains "Error: detect-models: unknown flag: --bogus" \
+    "$(cat "$err")" "detect-models (unknown flag): exact error on stderr"
+  assert_stderr_contains "Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]" \
+    "$(cat "$err")" "detect-models (unknown flag): exact usage line on stderr"
+  assert_eq "no" "$([ -e "$tmpdir/models.json" ] && echo yes || echo no)" \
+    "detect-models (unknown flag): models.json is not written"
+
+  rm -rf "$tmpdir"
+}
+
+# ============================================================================
 # story-merge Tests
 # ============================================================================
 
@@ -6737,6 +7170,15 @@ main() {
   test_detect_models_tier_flags_preserve_other_host
   test_detect_models_preserves_other_host
   test_detect_models_default_mode_preserves_other_host
+  test_detect_models_flag_mode_rejections
+
+  # model-validity predicate comparison
+  echo ""
+  echo "--- Model-Validity Predicate Tests ---"
+  test_model_validity_predicate_matrix
+  test_prompt_category_predicate_edges
+  test_list_models_offers_ids_resolve_models_rejects
+  test_resolve_models_invalid_tag_hostile_ids
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""

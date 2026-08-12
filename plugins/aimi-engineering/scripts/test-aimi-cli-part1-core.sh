@@ -1708,26 +1708,36 @@ test_check_version() {
   "$CLI" clear-state > /dev/null
 
   # --- Test 1: Current version (stored cli-path matches glob-resolved latest) ---
-  # Write cli-path to exactly match what the glob resolves, so check-version sees "current"
-  local latest_glob_path config_dir
-  config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
+  # The cache is BUILT, not borrowed. This test used to read the AMBIENT plugin
+  # cache and, when it found nothing installed, print
+  # "(skipping current-version test: no installed version in cache)" and assert
+  # nothing -- so its contribution to the suite total depended on the host, and
+  # the one case it declined to cover (an empty glob) was the case where both
+  # version verbs abort. That case is now asserted on every host by
+  # test_version_verbs_empty_plugin_cache_glob below. A throwaway cache holding
+  # exactly one version answers the "current" question identically everywhere.
+  local cv_root cv_cfg cv_aimi_cfg cv_latest
+  cv_root=$(mktemp -d)
+  cv_cfg="$cv_root/claude-config"
+  cv_aimi_cfg="$cv_root/aimi-config"
+  mkdir -p "$cv_aimi_cfg"
+  _make_cached_version "$cv_cfg" "abc123" "1.2.3"
+  cv_latest="$cv_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
 
   local output exit_code
 
-  if [ -n "$latest_glob_path" ]; then
-    # Force cli-path to the glob-resolved latest so stored == latest
-    "$CLI" init-session > /dev/null
-    echo "$latest_glob_path" > "$AIMI_DIR/cli-path"
+  # Force cli-path to the glob-resolved latest so stored == latest
+  "$CLI" init-session > /dev/null
+  echo "$cv_latest" > "$AIMI_DIR/cli-path"
 
-    output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+  output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cv_cfg" AIMI_CONFIG_DIR="$cv_aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
 
-    assert_contains '"status":"current"' "$output" "check-version: current version returns status current"
-    assert_exit_code "0" "$exit_code" "check-version: current version exits 0"
-  else
-    # No installed version found — check-version returns "unknown", skip "current" test
-    echo "  (skipping current-version test: no installed version in cache)"
-  fi
+  assert_contains '"status":"current"' "$output" "check-version: current version returns status current"
+  assert_exit_code "0" "$exit_code" "check-version: current version exits 0"
+
+  rm -rf "$cv_root"
 
   # --- Test 2: Missing cli-path (no .aimi/cli-path file) ---
   "$CLI" clear-state > /dev/null
@@ -1877,6 +1887,82 @@ test_check_version_backward_compat() {
     assert_exit_code "1" "$exit_code" "check-version (no flags): stale exits 1"
     assert_contains "CLI version is stale" "$stderr_content" "check-version (no flags): stale emits warning"
   fi
+}
+
+# ----------------------------------------------------------------------------
+# The empty plugin-cache glob, ASSERTED instead of skipped.
+#
+# THIS TEST PINS A DEFECT. Every expectation below is "what the CLI does
+# today", never "what it should do".
+#
+# cmd_check_version documents a `{status: "unknown", message: "No installed
+# version found"}` branch for the no-installed-version case, and
+# cmd_cleanup_versions documents `{removed: 0, kept: null}` for the same case.
+# NEITHER HAS EVER BEEN EMITTED. aimi-cli.sh:2 sets `set -euo pipefail`; both
+# verbs call _resolve_latest_cache_path BARE, that helper returns 1 when the
+# glob matches nothing, and a `var=$(helper)` assignment carries the helper's
+# status -- so the shell aborts the whole script before either handler branch
+# is reached. Both documented branches are dead code. What is actually
+# observable is an abort: exit 1, empty stdout, empty stderr, and no write to
+# the global cli-path cache.
+#
+# It went unnoticed because the one test that could have caught it printed
+# "(skipping current-version test: no installed version in cache)" and asserted
+# nothing exactly when the case became reachable. A skipped test is why nobody
+# noticed.
+#
+# STORY 07 INVERTS THIS. When the version verbs move to Python they reach their
+# own handler branches, and these assertions get rewritten to the documented
+# outputs in that story's diff -- which is the entire reason for writing today's
+# behaviour down first. Until story 07 has landed, a failure here means the
+# BEHAVIOUR moved; do not repair the assertion to match it.
+# ----------------------------------------------------------------------------
+test_version_verbs_empty_plugin_cache_glob() {
+  echo ""
+  echo "=== Testing check-version / cleanup-versions against an EMPTY plugin cache ==="
+
+  local root cfg aimi_cfg err
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  err="$root/stderr"
+  # plugins/cache exists but holds nothing, so the cache glob matches zero paths.
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg"
+
+  local out ec
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" \
+    "check-version (empty glob): aborts with exit 1, never reaching the documented status:unknown branch"
+  assert_eq "" "$out" \
+    "check-version (empty glob): stdout is empty -- the {status:unknown} JSON is unreachable"
+  assert_eq "" "$(cat "$err")" \
+    "check-version (empty glob): stderr is empty too, not even the 'No installed aimi-cli.sh found' warning"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" \
+    "check-version --quiet (empty glob): the abort lands before --quiet could change anything"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" cleanup-versions 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" \
+    "cleanup-versions (empty glob): aborts with exit 1, never reaching the documented {removed:0,kept:null} branch"
+  assert_eq "" "$out" \
+    "cleanup-versions (empty glob): stdout is empty -- the {removed:0,kept:null} JSON is unreachable"
+  assert_eq "" "$(cat "$err")" \
+    "cleanup-versions (empty glob): stderr is empty"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "cleanup-versions (empty glob): the abort precedes write_global_cli_cache, so no cli-path is written"
+
+  rm -rf "$root"
 }
 
 test_cleanup_versions() {
@@ -4715,6 +4801,127 @@ test_prime_cache_unwritable_cache_dir() {
   teardown_global_cache_env
 }
 
+# ----------------------------------------------------------------------------
+# prime-cache: the two validation gates, and what they refuse.
+#
+# This verb writes ~/.config/aimi/cli-path, and every later command execs
+# whatever that file names -- so the paths prime-cache REFUSES are the
+# highest-consequence thing about it. The six tests above assert acceptance and
+# one environment failure (an unwritable config dir); not one of them reaches
+# either validation gate in cmd_prime_cache, and the test that reads as though
+# it did -- test_prime_cache_rejects_bad_path -- ends up asserting `ok` on a
+# path that is in fact valid.
+#
+# The rejection channel here is stdout JSON (`.status` and `.message`) plus the
+# exit status. These verbs never write to stderr, which is why the assertions
+# below pair assert_eq on the exact `.message` with assert_exit_code rather
+# than using assert_stderr_contains.
+#
+# All three run the CLI as its own process rather than calling the sed-eval'd
+# cmd_prime_cache in this shell: the gates sit downstream of a glob whose
+# empty-match behaviour depends on `set -euo pipefail`, which this test script
+# does not set.
+# ----------------------------------------------------------------------------
+
+test_prime_cache_rejects_path_outside_cache_pattern() {
+  echo ""
+  echo "=== Testing prime-cache: rejects a resolved path failing the cache case-pattern ==="
+
+  local root cfg aimi_cfg plug
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  plug="$root/plugin"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" "$plug/scripts"
+  printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
+  chmod +x "$plug/scripts/aimi-cli.sh"
+
+  # CLAUDECODE=1 pins the Claude Code branch even though AIMI_PLUGIN_DIR is set,
+  # and AIMI_PLUGIN_DIR being set is precisely what keeps an empty glob out of
+  # the not_found early return -- so an empty resolved_path falls into the
+  # case-pattern gate, which is the only way to reach it.
+  local out ec
+  out=$(env AIMI_PLUGIN_DIR="$plug" CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (pattern reject): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (pattern reject): status=error"
+  assert_eq "Resolved path rejected: does not match expected cache pattern" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (pattern reject): exact message field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (pattern reject): path is null, so nothing is handed to a later exec"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (pattern reject): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_rejects_non_executable_path() {
+  echo ""
+  echo "=== Testing prime-cache (Claude Code): rejects a non-executable resolved path ==="
+
+  local root cfg aimi_cfg scripts
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  # A well-shaped cache entry whose CLI is not executable. The glob matches on
+  # name, so resolution succeeds and the executable gate is what stops it.
+  scripts="$cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts"
+  mkdir -p "$scripts"
+  printf '#!/usr/bin/env bash\n' > "$scripts/aimi-cli.sh"
+  chmod 0644 "$scripts/aimi-cli.sh"
+
+  local out ec
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (non-executable): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (non-executable): status=error"
+  assert_eq "Resolved path is not executable" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (non-executable): exact message field"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (non-executable): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_rejects_non_executable_opencode_path() {
+  echo ""
+  echo "=== Testing prime-cache (OpenCode): rejects a non-executable AIMI_PLUGIN_DIR CLI ==="
+
+  local root aimi_cfg plug
+  root=$(mktemp -d)
+  aimi_cfg="$root/aimi-config"
+  plug="$root/plugin"
+  mkdir -p "$aimi_cfg" "$plug/scripts"
+  printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
+  chmod 0644 "$plug/scripts/aimi-cli.sh"
+
+  local out ec
+  out=$(env -u CLAUDECODE AIMI_PLUGIN_DIR="$plug" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (OpenCode non-executable): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (OpenCode non-executable): status=error"
+  assert_eq "opencode" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (OpenCode non-executable): host=opencode"
+  assert_eq "AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: $plug/scripts/aimi-cli.sh" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (OpenCode non-executable): exact message field, naming the rejected path"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (OpenCode non-executable): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
 # ============================================================================
 # V3.2 Schema Tests — Gates, Waves & Field Preservation
 # ============================================================================
@@ -7509,6 +7716,7 @@ main() {
   test_check_version_fix
   test_check_version_quiet_fix
   test_check_version_backward_compat
+  test_version_verbs_empty_plugin_cache_glob
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
   test_cleanup_versions_sorts_on_version_segment
@@ -7592,6 +7800,9 @@ main() {
   test_prime_cache_not_found
   test_prime_cache_rejects_bad_path
   test_prime_cache_unwritable_cache_dir
+  test_prime_cache_rejects_path_outside_cache_pattern
+  test_prime_cache_rejects_non_executable_path
+  test_prime_cache_rejects_non_executable_opencode_path
 
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
