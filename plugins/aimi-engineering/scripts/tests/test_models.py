@@ -437,6 +437,43 @@ def test_an_all_whitespace_id_degrades_silently():
     assert warnings == []
 
 
+def test_a_non_string_value_is_refused_like_every_other_invalid_one():
+    """D1's repair, at the rule rather than through the CLI.
+
+    `true`, `5`, `{}` and `["opus"]` used to reach jq's "INVALID\\t" + value
+    concatenation, which is a type error: the call's stderr was discarded, its
+    assignment was bare, and `set -euo pipefail` took the shell down at exit 5
+    with EMPTY stdout and EMPTY stderr -- the one input that contradicted
+    resolve-models' never-fail contract. Each is an invalid id now, warned
+    about in the one refusal line and degraded to inherit, and rendered the way
+    jq rendered a non-string inside a message: its compact JSON form.
+    """
+    qualifier = "must be exactly opus, sonnet, or haiku; "
+    resolved, warnings = M.validate(
+        {"research": True, "review": 5, "design": {}, "workflow": ["opus"],
+         "executor": "opus"},
+        ["opus"], "resolve-models", "Claude Code", qualifier,
+    )
+    assert resolved == {"research": "inherit", "review": "inherit", "design": "inherit",
+                        "workflow": "inherit", "executor": "opus"}
+    assert [w.split("model ")[1].split(" is not")[0] for w in warnings] == [
+        "'true'", "'5'", "'{}'", '\'["opus"]\'']
+    for warning in warnings:
+        assert warning.endswith("), falling back to inherit")
+        assert qualifier in warning
+
+
+def test_the_corpus_has_no_failing_case_left():
+    """resolve-models' contract, read off the whole recording at once.
+
+    Every one of the 114 cases exits 0 -- including the four the capture found
+    at exit 5, whose entries were rewritten by the repair commit that changed
+    the rule. A new non-zero here means a verb that promises never to fail has
+    learned how.
+    """
+    assert sorted({case["exit"] for case in CASES.values()}) == [0]
+
+
 def test_the_valid_set_is_normalized_on_both_sides_of_the_question():
     assert M.valid_set("opus\n  sonnet  \n\nhaiku") == ["opus", "sonnet", "haiku"]
     assert M.valid_set("") == []

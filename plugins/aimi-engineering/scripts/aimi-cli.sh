@@ -9036,10 +9036,10 @@ cmd_resolve_models() {
   fi
 
   # One crossing. models.py prints the resolved object, or the fallback it was
-  # handed plus the branch's own warning; it exits non-zero for exactly one
-  # input, and `set -euo pipefail` hands that status straight to the caller
-  # with both streams empty, which is what the jq before it did. See D1 in
-  # tests/golden_from_jq.json's _comment_models_read.
+  # handed plus the branch's own warning, and returns 0 either way — there is
+  # no input left that makes this verb fail. The jq before it had exactly one:
+  # a non-string category value aborted it at exit 5 with both streams empty,
+  # which is D1 in tests/golden_from_jq.json's _comment_models_read.
   printf '%s' "$config_json" | python3 "$(_aimi_models_py)" resolve \
     --host "$host" \
     --config-file "$config_file" \

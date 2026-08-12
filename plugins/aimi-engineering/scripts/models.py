@@ -66,7 +66,14 @@ import sys
 # jq_numbers is jq's number rendering, which prints 1e3 as 1000; _emit_compact
 # is one JSON value with no spaces at all, which is what these two verbs print.
 from roadmap import jq_numbers
-from tasks import MalformedTasks, _emit_compact, jq_equal, jq_index, jq_index_in
+from tasks import (
+    MalformedTasks,
+    _emit_compact,
+    jq_equal,
+    jq_index,
+    jq_index_in,
+    jq_tostring,
+)
 
 # The five categories, in the order the resolution jq built them, which is the
 # order their warnings come out in.
@@ -90,13 +97,18 @@ _SPACE = " \t\n\r\f\v"
 class JqAbort(Exception):
     """Where jq stopped evaluating and took its exit status with it.
 
-    Two shapes reach it. `has("models")` on a document that is not an object,
-    which aimi-cli.sh caught in `|| _schema_ok="reject"` and turned into the
-    v1.0 rejection -- so a malformed file is reported as an obsolete schema.
-    And "INVALID\\t" + a non-string, which nothing caught at all: that jq call's
-    stderr went to /dev/null and its assignment was bare, so `set -euo pipefail`
-    killed the shell with jq's own status. The second is D1 and is reproduced
-    rather than repaired here; the repair is its own commit.
+    ONE shape reaches it now: `has("models")` on a document that is not an
+    object, which aimi-cli.sh caught in `|| _schema_ok="reject"` and turned
+    into the v1.0 rejection -- so a bare string, a number or a null document is
+    reported as an obsolete schema. schema_rejected catches it there.
+
+    The second shape was "INVALID\\t" + a non-string, which nothing caught at
+    all: that jq call's stderr went to /dev/null and its assignment was bare,
+    so `set -euo pipefail` killed the shell with jq's own status and both
+    streams empty. That was D1. The port reproduced it and the commit after
+    repaired it -- validate refuses a non-string the way it refuses every other
+    unusable value -- so normalize's raise is now a contract about ITS input
+    rather than a path any config can reach.
     """
 
 
@@ -129,8 +141,10 @@ def normalize(value):
     """One model id, trimmed at the ENDS only -- never internally.
 
     'son net' must stay 'son net' and be refused, not repaired into the valid
-    alias 'sonnet'. Raises JqAbort for anything that is not a string, because
-    that is where jq's sub() aborted, which is D1.
+    alias 'sonnet'. Raises JqAbort for anything that is not a string, which is
+    where jq's sub() aborted -- kept as a contract about this function's input
+    rather than as a live path, since validate now refuses a non-string before
+    reaching here.
     """
     if not isinstance(value, str):
         raise JqAbort("cannot trim " + type(value).__name__)
@@ -214,6 +228,18 @@ def validate(values, valid, verb, host_name, host_qualifier):
     resolved = {}
     warnings = []
     for category, value in values.items():
+        # A NON-STRING IS AN INVALID ID, NOT AN EMERGENCY. This is the D1
+        # repair: `true`, `5`, `{}` and `["opus"]` used to reach the tag
+        # concatenation, which is a type error on a non-string, and take the
+        # whole shell down with jq's exit 5 and both streams empty --
+        # contradicting the one thing this verb promises. It is refused the
+        # way every other unusable value is refused, and rendered the way jq
+        # rendered a non-string in a message: its compact JSON form.
+        if not isinstance(value, str):
+            resolved[category] = "inherit"
+            warnings.append(_not_valid(jq_tostring(value), verb, host_name,
+                                       host_qualifier, category))
+            continue
         model = normalize(value)
         if model == "" or model == "inherit":
             resolved[category] = "inherit"
@@ -221,12 +247,20 @@ def validate(values, valid, verb, host_name, host_qualifier):
             resolved[category] = model
         else:
             resolved[category] = "inherit"
-            warnings.append(
-                "Warning: " + verb + ": model '" + model + "' is not valid for "
-                + host_name + " host (" + host_qualifier + "category: " + category
-                + "), falling back to inherit"
-            )
+            warnings.append(_not_valid(model, verb, host_name, host_qualifier, category))
     return resolved, warnings
+
+
+def _not_valid(model, verb, host_name, host_qualifier, category):
+    """The refusal line, in ONE place, whatever made the value unusable.
+
+    Its wording and its stream are contract -- part2 matches it literally and
+    /aimi:setup-models' operator reads it -- so the repair that added a second
+    caller made it a function rather than a second copy.
+    """
+    return ("Warning: " + verb + ": model '" + model + "' is not valid for "
+            + host_name + " host (" + host_qualifier + "category: " + category
+            + "), falling back to inherit")
 
 
 def warn(line):
@@ -264,9 +298,12 @@ def read_or_fall_back(verb, host, config_file, fallback):
         emit_fallback(fallback)
         return None
 
+    # MalformedTasks alone, because jq_index is the only thing that can stop
+    # this read and that is what it raises. The verdict above is where a
+    # JqAbort comes from, and schema_rejected has already caught it.
     try:
         return [read_categories(doc, host) for doc in docs]
-    except (JqAbort, MalformedTasks):
+    except MalformedTasks:
         warn("Warning: " + verb + ": models config file is malformed JSON or "
              "failed to parse: " + config_file)
         emit_fallback(fallback)
@@ -281,9 +318,10 @@ def read_or_fall_back(verb, host, config_file, fallback):
 def op_resolve(argv):
     """resolve-models: five categories to concrete ids, or to `inherit`.
 
-    Never fails: every branch below prints the all-inherit fallback and returns
-    0. The ONE exception is D1 -- a non-string category value, which exits 5
-    with nothing on either stream, exactly as the jq it replaces did.
+    Never fails, with nothing left to qualify that: every branch below prints
+    valid JSON and returns 0. The one input that used to contradict it -- a
+    non-string category value, D1 -- is refused in validate now rather than
+    aborting the shell at exit 5 with both streams empty.
     """
     verb = "resolve-models"
     config_file = _flag(argv, "--config-file") or ""
@@ -331,9 +369,9 @@ def op_current(argv):
 
     The asymmetry is deliberate and must not be unified: /aimi:setup-models has
     to tell "not configured" apart from a literal `inherit` override, and only
-    null says the first. This verb does not validate at all, so a value resolve
-    would refuse comes straight back -- including a non-string, which is why D1
-    cannot happen here.
+    null says the first. This verb does not validate at all, so a value
+    resolve-models would refuse comes straight back -- a non-string included,
+    which is why D1 never reached this side of the file.
     """
     verb = "get-current-models"
     config_file = _flag(argv, "--config-file") or ""
@@ -379,7 +417,9 @@ def op_prompt_check(argv):
     try:
         answers = ["true" if _host_configured(doc, host) else "false" for doc in docs]
         configured = "\n".join(answers) == "true"
-    except (JqAbort, MalformedTasks):
+    except MalformedTasks:
+        # aimi-cli.sh's `|| _has_config="false"`, which then falls through to
+        # the marker rather than to `skip` -- mpc-categories-string-cc.
         configured = False
 
     if configured or marker:
@@ -450,17 +490,19 @@ def _flag(argv, name):
 
 
 def main(argv):
+    """No arm here catches JqAbort, and that is the D1 repair's other half.
+
+    The port kept one, mapping it to jq's exit 5 with both streams empty. There
+    is no longer anything to map: the only value that reached it is refused in
+    validate now, and every other JqAbort is caught where it is raised --
+    schema_rejected's, which is the v1.0 rejection. An arm that cannot fire is
+    a place a later regression could hide quietly at exit 5, which is the exact
+    failure this pair of commits is about.
+    """
     if len(argv) < 2 or argv[1] not in _OPS:
         sys.stderr.write("Usage: models.py <" + "|".join(sorted(_OPS)) + "> [flags]\n")
         return 2
-    try:
-        return _OPS[argv[1]](argv[2:])
-    except JqAbort:
-        # D1, and the only path in this file that produces no output at all.
-        # jq's runtime-error status was 5 and `set -euo pipefail` handed it
-        # straight to the caller with both streams empty; the wrapper still
-        # does, because it does not catch this one either.
-        return 5
+    return _OPS[argv[1]](argv[2:])
 
 
 if __name__ == "__main__":
