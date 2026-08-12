@@ -70,15 +70,11 @@ unassigned	next.md	PROJECT_PATH
 unassigned	open-pr.md	INCLUDE_BACKEND_SPEC
 unassigned	open-pr.md	s
 unassigned	plan.md	BUNDLE_OVERRIDE
-unassigned	plan.md	d
 unassigned	plan.md	entry
 unassigned	plan.md	overflow
-unassigned	plan.md	p
 unassigned	plan.md	ROOT
-unassigned	plan.md	status_by_id
 unassigned	plan.md	token
 unassigned	plan.md	topicSlug
-unassigned	plan.md	unmet
 unassigned	references/container-execution.md	AIMI_ROOT
 unassigned	references/container-execution.md	CONTAINER_BASE
 unassigned	references/container-execution.md	EXEC_BRANCH

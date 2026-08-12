@@ -17,6 +17,7 @@ set -uo pipefail
 # Sections, in the order the single-file suite ran them:
 #   - General Tests
 #   - Lifecycle Tests
+#   - validate-ids Tests
 #   - New Feature Tests (v1.13.0)
 #   - Version Command Test
 #   - Version Staleness Tests
@@ -218,11 +219,287 @@ test_metadata() {
   echo ""
   echo "=== Testing metadata command ==="
 
-  local output
-  output=$("$CLI" metadata)
+  # Pin all three halves of the contract, not just two substrings: the exit
+  # code, the exact object printed, and the fact that a read verb writes
+  # nothing. A port that returned the right keys with a stray addition, or
+  # that rewrote the file on the way past, would satisfy assert_contains and
+  # still be a behaviour change.
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
 
+  local output exit_code=0
+  output=$("$CLI" metadata) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "metadata exits 0"
   assert_contains '"title": "feat: Test feature"' "$output" "metadata returns title"
   assert_contains '"branchName": "feat/test-feature"' "$output" "metadata returns branch"
+
+  local compact
+  compact=$(printf '%s' "$output" | jq -Sc '.')
+  assert_eq \
+    '{"brainstormPath":null,"branchName":"feat/test-feature","createdAt":"2026-02-27","maxConcurrency":4,"planPath":null,"title":"feat: Test feature","type":"feat"}' \
+    "$compact" \
+    "metadata prints the whole metadata object and nothing else"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "metadata leaves tasks.json untouched"
+}
+
+test_metadata_max_concurrency_default() {
+  echo ""
+  echo "=== Testing metadata: maxConcurrency defaulting ==="
+
+  # cmd_metadata carries exactly one rule beyond "print .metadata": the
+  # maxConcurrency default. Both of its branches are pinned here, because a
+  # port that dropped the clamp would still pass every other metadata
+  # assertion in this file.
+  #
+  # The rule used to be a jq expression written out THREE times in aimi-cli.sh
+  # -- once here and once in each branch of cmd_status. All three call sites
+  # are verbs tasks.py now serves, so the rule left this file entirely instead
+  # of being reduced to one bash copy, and the two static assertions below say
+  # so from both ends. They are the retargeted form of a grep that used to
+  # count the jq copies, following the roadmap precedent in part3
+  # ("exactly one cv_identity definition in roadmap.py"): scan the Python file
+  # ALONE, because unlike the shell class there is no explanatory bash copy
+  # that legitimately survives here. Two assertions rather than one, so a
+  # re-introduced copy in either file fails on its own line.
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: no jq copy of the default may come back.
+  assert_eq "0" "$(grep -c 'maxConcurrency // 20' "$CLI" || true)" \
+    "metadata: no jq copy of the maxConcurrency default survives in aimi-cli.sh"
+  # Scans tasks.py: exactly one definition, which is where it went.
+  assert_eq "1" "$(grep -c '^def clamp_max_concurrency(' "$tasks_py" || true)" \
+    "metadata: exactly one clamp_max_concurrency definition in tasks.py"
+
+  local mc_fixture="$TASKS_DIR/9999-99-93-metadata-mc.json"
+
+  # (a) absent -> 20
+  jq 'del(.metadata.maxConcurrency)' "$TASKS_FILE" > "$mc_fixture"
+  echo "$mc_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code=0
+  output=$("$CLI" metadata) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "metadata: exits 0 with maxConcurrency absent"
+  assert_eq "20" "$(printf '%s' "$output" | jq '.maxConcurrency')" \
+    "metadata: absent maxConcurrency defaults to 20"
+
+  # (b) zero -> 20
+  jq '.metadata.maxConcurrency = 0' "$TASKS_FILE" > "$mc_fixture"
+  output=$("$CLI" metadata)
+  assert_eq "20" "$(printf '%s' "$output" | jq '.maxConcurrency')" \
+    "metadata: non-positive maxConcurrency is clamped to 20"
+
+  rm -f "$mc_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_init_session_self_resolution_stays_in_bash() {
+  echo ""
+  echo "=== Testing tasks.py boundary: init-session's cli-path writes stay in bash ==="
+
+  # THE ONE THING THIS PORT MUST NEVER DO. cmd_init_session runs
+  # `resolve_path "$0"` and feeds the result to BOTH write_state "cli-path" and
+  # write_global_cli_cache. Inside tasks.py `$0` is the .py file, so porting it
+  # would put a Python module's path into ~/.config/aimi/cli-path -- and every
+  # later $AIMI_CLI resolution would then load a .py as a shell script. The
+  # plugin dies on the NEXT session, long after the test run that passed, which
+  # is exactly why this is pinned statically rather than left to a behavioural
+  # test that would still be green.
+  local tasks_py tasks_body
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: both writes still execute in bash, off the self-resolved
+  # path, and neither moved behind a python3 crossing.
+  assert_eq "1" "$(grep -c 'write_state "cli-path" "\$self_path"' "$CLI" || true)" \
+    "boundary: init-session still writes cli-path state from bash"
+  assert_eq "1" "$(grep -c 'write_global_cli_cache "\$self_path"' "$CLI" || true)" \
+    "boundary: init-session still writes the global cli-path cache from bash"
+
+  # Scans tasks.py, minus its module docstring -- the docstring NAMES the cache
+  # in order to forbid it, so scanning the whole file would make the
+  # explanation trip its own guard. Function docstrings are indented and so are
+  # never in the deleted range.
+  tasks_body=$(sed '/^"""/,/^"""/d' "$tasks_py")
+  assert_eq "0" "$(printf '%s\n' "$tasks_body" | grep -c 'cli-path' || true)" \
+    "boundary: tasks.py names the cli-path cache nowhere outside the docstring forbidding it"
+}
+
+# init-session's THREE DOCUMENT READS -- the other half of the seam the test
+# above guards -- and the security gate that sits between them.
+#
+# The three static assertions are the retargeted form of a grep that would have
+# found the deleted jq: they scan aimi-cli.sh for each program that left and
+# tasks.py for the symbol that replaced it, following the maxConcurrency
+# precedent above. -F throughout, because the deleted text is jq source.
+#
+# The behavioural half is here rather than in the golden corpus because the
+# branchName charset gate is SECURITY-relevant: that field is interpolated into
+# git and gh commands downstream, and a prior slice fixed an injection that
+# bypassed exactly this gate. It is asserted on its exact text, its exact exit
+# status AND on the state it must not have written -- a gate that fired after
+# write_state would leave the hostile name in .aimi/current-branch for the next
+# command to read.
+test_init_session_document_reads_crossed_and_the_gate_still_bites() {
+  echo ""
+  echo "=== Testing tasks.py boundary: init-session's three document reads ==="
+
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: none of the three jq programs may come back.
+  assert_eq "0" "$(grep -cF '.metadata.branchName' "$CLI" || true)" \
+    "init-session: no jq read of metadata.branchName survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'select(.status == "pending")' "$CLI" || true)" \
+    "init-session: no jq copy of the pending count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF "jq -r '.schemaVersion'" "$CLI" || true)" \
+    "init-session: no jq read of schemaVersion survives in aimi-cli.sh"
+  # Scans tasks.py: one op for the three reads, one shared reader behind them,
+  # and get-branch's fallback beside it.
+  assert_eq "1" "$(grep -c '^def op_init_session(' "$tasks_py" || true)" \
+    "init-session: exactly one op_init_session definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def document_line(' "$tasks_py" || true)" \
+    "init-session: exactly one document_line definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def op_get_branch(' "$tasks_py" || true)" \
+    "get-branch: exactly one op_get_branch definition in tasks.py"
+
+  # A hostile branchName, refused with the same sentence and the same status.
+  local hostile_dir hostile_file
+  hostile_dir=$(mktemp -d)
+  mkdir -p "$hostile_dir/.aimi/tasks"
+  hostile_file="$hostile_dir/.aimi/tasks/2020-01-01-hostile-tasks.json"
+  cat > "$hostile_file" << 'HOSTILEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: hostile",
+    "type": "feat",
+    "branchName": "main; rm -rf /",
+    "createdAt": "2020-01-01"
+  },
+  "userStories": []
+}
+HOSTILEEOF
+
+  local stdout stderr_file exit_code=0
+  stderr_file=$(mktemp)
+  stdout=$(cd "$hostile_dir" && "$CLI" init-session 2>"$stderr_file") || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" \
+    "init-session: a branchName outside the charset is refused at exit 1"
+  assert_eq "Error: Invalid branch name: main; rm -rf /" "$(cat "$stderr_file")" \
+    "init-session: the refusal names the branch, verbatim"
+  assert_eq "" "$stdout" \
+    "init-session: a refused run writes nothing to stdout"
+  # The gate fires BEFORE the branch is persisted and AFTER the tasks path is:
+  # everything above the seam has already run, the branch write has not.
+  assert_eq "0" "$([ -f "$hostile_dir/.aimi/current-branch" ] && echo 1 || echo 0)" \
+    "init-session: a refused branch is never written to .aimi/current-branch"
+  assert_eq "1" "$([ -f "$hostile_dir/.aimi/current-tasks" ] && echo 1 || echo 0)" \
+    "init-session: the tasks path is written before the gate runs"
+
+  rm -rf "$hostile_dir" "$stderr_file"
+}
+
+# The body of one cmd_* function, comments stripped.
+#
+# Comments are stripped because these wrappers EXPLAIN what they replaced --
+# "two jq programs over the same file" is prose about a deletion, not a
+# surviving call, and a grep that could not tell them apart would force the
+# explanation out of the file.
+_cmd_body() {
+  awk -v fn="^$1\\\\(\\\\) \\\\{" '
+    $0 ~ fn { inside = 1 }
+    inside   { print }
+    inside && /^\}$/ { exit }
+  ' "$CLI" | grep -v '^[[:space:]]*#'
+}
+
+test_locked_writers_cross_once_and_keep_the_lock_in_bash() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the seven locked writers cross once, inside bash's lock ==="
+
+  # THE SHAPE, asserted per verb rather than described. Each of the seven
+  # wrappers must make EXACTLY ONE python3 call, hold ZERO jq, and place that
+  # call between `_lock` and the FD-200 redirect that closes the subshell --
+  # which is what "one crossing, inside the lock" means operationally. A second
+  # call would re-read a document the first already held; a call outside the
+  # subshell would read it with no lock at all.
+  local fn body jq_count py_count lock_line py_line fd_line ordered
+  local mktemp_total=0 gate_before_lock=""
+
+  for fn in cmd_mark_complete cmd_mark_failed cmd_mark_in_progress cmd_mark_skipped \
+            cmd_update_field cmd_normalize_status cmd_normalize_verification; do
+    body=$(_cmd_body "$fn")
+
+    py_count=$(printf '%s\n' "$body" | grep -c 'python3 ' || true)
+    assert_eq "1" "$py_count" "writers: $fn makes exactly one python3 call"
+
+    # ONE jq legitimately survives, in the two normalizers only: the `jq empty`
+    # preflight that refuses a malformed tasks file BEFORE the lock, with its
+    # own message. It is not part of the read-decide-write -- it is the same
+    # class of pre-lock gate as validate_story_exists, and moving it inside the
+    # crossing would change both the message and the moment of the refusal. It
+    # is excluded here by name and asserted present below, so dropping it
+    # cannot pass as tidying.
+    jq_count=$(printf '%s\n' "$body" | grep -v 'jq empty "\$tasks_file"' | grep -c '\bjq\b' || true)
+    assert_eq "0" "$jq_count" "writers: $fn has no jq left in its read-decide-write"
+
+    lock_line=$(printf '%s\n' "$body" | grep -n '_lock "\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    py_line=$(printf '%s\n' "$body" | grep -n 'python3 ' | head -1 | cut -d: -f1)
+    fd_line=$(printf '%s\n' "$body" | grep -n ') 200>"\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    ordered=no
+    if [ -n "$lock_line" ] && [ -n "$py_line" ] && [ -n "$fd_line" ] &&
+       [ "$lock_line" -lt "$py_line" ] && [ "$py_line" -lt "$fd_line" ]; then
+      ordered=yes
+    fi
+    assert_eq "yes" "$ordered" "writers: $fn's crossing sits inside the lock subshell"
+
+    mktemp_total=$((mktemp_total + $(printf '%s\n' "$body" | grep -c 'mktemp' || true)))
+  done
+
+  # The temp file is tasks.py's now -- same directory, then os.replace, and
+  # unlinked on the way out of any failure. The bash mktemp that used to
+  # bracket each of these leaked its file whenever `set -e` ended the script
+  # before the matching `rm -f`; three golden cases record that it did.
+  assert_eq "0" "$mktemp_total" "writers: no wrapper mktemps a temp file of its own any more"
+
+  # THE GATE THAT MUST NOT MOVE. validate_story_exists stays in bash and stays
+  # BEFORE the lock in all five story-scoped writers. Moving it inside would
+  # close a TOCTOU window that is ranked and owned by its own change -- and
+  # would do it silently, which is the opposite of how that window should
+  # close. Reported as a list so a failure names the verb.
+  for fn in cmd_mark_complete cmd_mark_failed cmd_mark_in_progress cmd_mark_skipped \
+            cmd_update_field; do
+    body=$(_cmd_body "$fn")
+    lock_line=$(printf '%s\n' "$body" | grep -n '_lock "\${tasks_file}\.lock"' | head -1 | cut -d: -f1)
+    py_line=$(printf '%s\n' "$body" | grep -n 'validate_story_exists ' | head -1 | cut -d: -f1)
+    if [ -z "$py_line" ] || [ -z "$lock_line" ] || [ "$py_line" -ge "$lock_line" ]; then
+      gate_before_lock="$gate_before_lock $fn"
+    fi
+  done
+  assert_eq "" "$gate_before_lock" "writers: validate_story_exists still runs in bash before the lock"
+
+  # The preflight the loop above excluded by name, asserted present. Both
+  # normalizers take a path from the caller rather than from get_tasks_file, so
+  # they are the two verbs that can be handed a file that is not JSON at all,
+  # and both refuse it before taking the lock.
+  for fn in cmd_normalize_status cmd_normalize_verification; do
+    assert_eq "1" "$(_cmd_body "$fn" | grep -c 'jq empty "\$tasks_file"' || true)" \
+      "writers: $fn still refuses a malformed tasks file before the lock"
+  done
+
+  # And the lock itself is untouched, both strategies intact: flock where it
+  # exists, the mkdir spinlock where it does not. Reimplementing either in
+  # Python would be the duplication this port removes, and a Python flock on a
+  # host that falls back to the spinlock would not even be the same lock.
+  assert_eq "1" "$(grep -c '^    flock -x 200$' "$CLI" || true)" \
+    "writers: _lock still takes flock on FD 200 in bash"
+  assert_eq "1" "$(grep -c '^    while ! mkdir "\$lockdir" 2>/dev/null; do$' "$CLI" || true)" \
+    "writers: _lock still carries its mkdir spinlock fallback in bash"
 }
 
 test_current_story() {
@@ -232,10 +509,32 @@ test_current_story() {
   # First set a current story
   "$CLI" next-story > /dev/null
 
-  local output
-  output=$("$CLI" current-story)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
 
+  local output exit_code=0
+  output=$("$CLI" current-story) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "current-story exits 0"
   assert_contains '"id": "US-001"' "$output" "current-story returns correct story"
+  assert_eq "Schema story (root)" "$(printf '%s' "$output" | jq -r '.title')" \
+    "current-story prints the whole story object, not just its id"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "current-story leaves tasks.json untouched"
+
+  # The no-current-story branch prints the bare string `null` and still exits
+  # 0. Removing just that one state file keeps current-tasks/current-branch in
+  # place for the tests that run after this one; clear-state would not.
+  rm -f "$AIMI_DIR/current-story"
+  exit_code=0
+  output=$("$CLI" current-story) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "current-story: exits 0 with no story in state"
+  assert_eq "null" "$output" "current-story: prints null with no story in state"
+
+  # Restore the state the following tests read.
+  "$CLI" next-story > /dev/null
 }
 
 test_get_branch() {
@@ -252,10 +551,30 @@ test_get_state() {
   echo ""
   echo "=== Testing get-state command ==="
 
-  local output
-  output=$("$CLI" get-state)
+  local output exit_code=0
+  output=$("$CLI" get-state) || exit_code=$?
 
+  assert_exit_code "0" "$exit_code" "get-state exits 0"
   assert_contains '"branch": "feat/test-feature"' "$output" "get-state returns branch"
+
+  # get-state is a fixed four-key assembly over four state files. Pin the key
+  # set, not just one value — the shape is the contract, and an assembly that
+  # gained or lost a key would still satisfy the assertion above.
+  assert_eq '["branch","last","story","tasks"]' \
+    "$(printf '%s' "$output" | jq -c 'keys')" \
+    "get-state prints exactly the four state keys"
+
+  assert_eq "US-001" "$(printf '%s' "$output" | jq -r '.story')" \
+    "get-state reports the story current-story holds"
+
+  # The empty-string-to-null mapping is the one rule in the jq: nothing has
+  # written last-result yet at this point in the run, so `.last` must be JSON
+  # null rather than "".
+  assert_eq "true" "$(printf '%s' "$output" | jq -c '.last == null')" \
+    "get-state maps an unwritten state file to null, not to an empty string"
+
+  assert_eq "false" "$(printf '%s' "$output" | jq -c '.tasks == null')" \
+    "get-state reports the resolved tasks path"
 }
 
 test_clear_state() {
@@ -310,9 +629,17 @@ test_count_pending() {
   echo ""
   echo "=== Testing count-pending ==="
 
-  local output
-  output=$("$CLI" count-pending)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" count-pending) || exit_code=$?
+  assert_exit_code "0" "$exit_code" "count-pending exits 0"
   assert_eq "4" "$output" "count-pending counts stories with status pending"
+
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "count-pending leaves tasks.json untouched"
 }
 
 test_list_ready() {
@@ -346,6 +673,38 @@ test_next_story() {
 
   # Should return US-001 (ready, lowest priority)
   assert_contains '"id": "US-001"' "$output" "next-story returns first ready by priority"
+}
+
+test_readiness_predicate_has_one_implementation() {
+  echo ""
+  echo "=== Testing list-ready/next-story: one readiness predicate, one ordering ==="
+
+  # The rule these two verbs share was written out twice in aimi-cli.sh, and the
+  # second copy was invisible: cmd_next_story called cmd_list_ready as a shell
+  # FUNCTION and re-sorted its output through a jq of its own, so "one
+  # implementation" held only while nobody touched either. Both crossed into
+  # tasks.py in one commit, and these assertions say so from both ends --
+  # retargeted at the surviving Python symbol the way the maxConcurrency clamp
+  # above was, rather than deleted with the jq they used to scan.
+  #
+  # -F throughout: the deleted text is jq source, full of ( . $ [ ].
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: neither half of the rule may come back.
+  assert_eq "0" "$(grep -cF 'all(. as $dep_id' "$CLI" || true)" \
+    "list-ready: no jq copy of the dependency walk survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'sort_by(.priority)' "$CLI" || true)" \
+    "next-story: no jq copy of the priority ordering survives in aimi-cli.sh"
+  # Scans tasks.py: exactly one predicate, which is where it went.
+  assert_eq "1" "$(grep -c '^def is_ready(' "$tasks_py" || true)" \
+    "list-ready: exactly one is_ready definition in tasks.py"
+
+  # And the one rule this port deliberately keeps in BOTH languages. Ten verbs
+  # outside this slice still call the bash function, so it stays until the last
+  # of them crosses; test_tasks.py asserts the two copies print the same bytes.
+  assert_eq "1" "$(grep -c '^validate_story_exists()' "$CLI" || true)" \
+    "validate_story_exists: the bash gate stays for the ten verbs still calling it"
 }
 
 test_mark_in_progress() {
@@ -419,16 +778,34 @@ test_cascade_skip() {
   echo ""
   echo "=== Testing cascade-skip ==="
 
-  local output
-  output=$("$CLI" cascade-skip US-002)
+  local output exit_code=0
+  output=$("$CLI" cascade-skip US-002) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "cascade-skip exits 0"
 
   # US-004 depends on US-002 (failed), should be skipped
   assert_contains '"US-004"' "$output" "cascade-skip includes US-004 (depends on failed US-002)"
+
+  # Pin the report shape as well as its content: {skipped, count}, the failed
+  # story itself excluded from its own skip set.
+  assert_eq '["count","skipped"]' "$(printf '%s' "$output" | jq -c 'keys')" \
+    "cascade-skip prints exactly {skipped, count}"
+  assert_eq '["US-004"]' "$(printf '%s' "$output" | jq -c '.skipped')" \
+    "cascade-skip skip list is exactly US-004 (the failed story is not in its own set)"
+  assert_eq "1" "$(printf '%s' "$output" | jq '.count')" \
+    "cascade-skip count matches the skip list length"
 
   # Verify US-004 is now skipped in the file
   local us004_status
   us004_status=$(jq -r '.userStories[] | select(.id == "US-004") | .status' "$TASKS_FILE")
   assert_eq "skipped" "$us004_status" "US-004 status is skipped in file"
+
+  # The note the apply writes is part of the on-disk contract — it is the
+  # string a reader sees when asking why a story never ran.
+  local us004_notes
+  us004_notes=$(jq -r '.userStories[] | select(.id == "US-004") | .notes' "$TASKS_FILE")
+  assert_eq "Skipped: depends on failed story US-002" "$us004_notes" \
+    "cascade-skip writes the depends-on-failed-story note on disk"
 
   # US-003 does NOT depend on US-002, should not be skipped
   local us003_status
@@ -536,11 +913,167 @@ test_count_pending_final() {
   echo ""
   echo "=== Testing count-pending (final state) ==="
 
-  local output
-  output=$("$CLI" count-pending)
+  local output exit_code=0
+  output=$("$CLI" count-pending) || exit_code=$?
 
   # US-001 completed, US-002 failed, US-003 skipped, US-004 skipped = 0 pending
   assert_eq "0" "$output" "count-pending returns 0 after all stories resolved"
+  # Zero pending is not an error condition — the exit code is what a caller
+  # branches on, so it is pinned separately from the number.
+  assert_exit_code "0" "$exit_code" "count-pending exits 0 when nothing is pending"
+}
+
+# ============================================================================
+# validate-ids Tests
+# ============================================================================
+#
+# This verb had no assertions at all before this suite grew them, which is why
+# its two traps are pinned explicitly rather than described.
+
+test_validate_ids_valid() {
+  echo ""
+  echo "=== Testing validate-ids: well-formed ids ==="
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "validate-ids: exits 0 when every id is well formed"
+  assert_eq '{"count":4,"valid":true}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "validate-ids: the pass branch prints {valid: true, count: N}"
+
+  # TRAP: the output shape is ASYMMETRIC. The pass branch has no `errors` key
+  # at all — it is not an empty array — and the failure branch below has no
+  # `count`. A port that normalised the two into one object would be a
+  # behaviour change, so both halves are pinned.
+  assert_eq "false" "$(printf '%s' "$output" | jq -c 'has("errors")')" \
+    "validate-ids: the pass branch carries no errors key"
+}
+
+test_validate_ids_lowercase_suffix() {
+  echo ""
+  echo "=== Testing validate-ids: US-NNNa is accepted ==="
+
+  # TRAP: the regex is ^US-[0-9]{3}[a-z]?$ — the optional lowercase suffix is
+  # part of the contract, and task-format-v3.md documents it with US-012a as
+  # the example. The error wording says "(expected US-NNN)", which describes
+  # the common case and not the regex; a test written from that message alone
+  # would assert the opposite of the code.
+  local suffix_fixture="$TASKS_DIR/9999-99-92-validate-ids-suffix.json"
+  jq '.userStories = [
+        (.userStories[0] | .id = "US-001" | .dependsOn = []),
+        (.userStories[1] | .id = "US-001a" | .dependsOn = [])
+      ]' "$TASKS_FILE" > "$suffix_fixture"
+  echo "$suffix_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "validate-ids: a lowercase-suffixed id exits 0"
+  assert_eq '{"count":2,"valid":true}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "validate-ids: US-001a is counted as valid, not reported as an error"
+
+  rm -f "$suffix_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_ids_malformed() {
+  echo ""
+  echo "=== Testing validate-ids: malformed ids ==="
+
+  local bad_fixture="$TASKS_DIR/9999-99-91-validate-ids-bad.json"
+  jq '.userStories = [
+        (.userStories[0] | .id = "US-001" | .dependsOn = []),
+        (.userStories[1] | .id = "us-002" | .dependsOn = []),
+        (.userStories[2] | .id = "US-3" | .dependsOn = [])
+      ]' "$TASKS_FILE" > "$bad_fixture"
+  echo "$bad_fixture" > "$AIMI_DIR/current-tasks"
+
+  local pre_file
+  pre_file=$(jq -S '.' "$bad_fixture")
+
+  local output exit_code=0
+  output=$("$CLI" validate-ids) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "validate-ids: a malformed id exits 1"
+  assert_eq "false" "$(printf '%s' "$output" | jq -c '.valid')" \
+    "validate-ids: the failure branch reports valid false"
+  assert_eq '["Invalid story ID: us-002 (expected US-NNN)","Invalid story ID: US-3 (expected US-NNN)"]' \
+    "$(printf '%s' "$output" | jq -c '.errors')" \
+    "validate-ids: one error per malformed id, in file order, with the documented wording"
+  assert_eq "false" "$(printf '%s' "$output" | jq -c 'has("count")')" \
+    "validate-ids: the failure branch carries no count key"
+
+  # A validator writes nothing.
+  local post_file
+  post_file=$(jq -S '.' "$bad_fixture")
+  assert_eq "$pre_file" "$post_file" "validate-ids: leaves tasks.json untouched"
+
+  rm -f "$bad_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validators_moved_to_tasks_py() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the four validators left aimi-cli.sh ==="
+
+  # The retargeted form of a grep that used to find these rules in bash,
+  # following the same precedent test_metadata_max_concurrency_default set (and
+  # part3's "exactly one cv_identity definition in roadmap.py" before it): scan
+  # aimi-cli.sh for the deleted text AND tasks.py for the surviving symbol, two
+  # assertions per rule, so a re-introduced copy in either file fails on its own
+  # line rather than being masked by the other.
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  # Scans aimi-cli.sh: no jq copy of any of the four may come back. Each string
+  # is one the deleted program built, and each is one /aimi:plan matches on.
+  assert_eq "0" "$(grep -cF 'Circular dependency' "$CLI" || true)" \
+    "validators: no jq copy of validate-deps' cycle message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'Wave mismatch' "$CLI" || true)" \
+    "validators: no jq copy of validate-waves' mismatch message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'Invalid story ID: ' "$CLI" || true)" \
+    "validators: no bash copy of validate-ids' rejection message survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'ignore previous|(^|' "$CLI" || true)" \
+    "validators: no jq copy of the suspicious-content screen survives in aimi-cli.sh"
+
+  # Scans tasks.py: exactly one of each, which is where they went.
+  assert_eq "1" "$(grep -c '^def validate_deps(' "$tasks_py" || true)" \
+    "validators: exactly one validate_deps definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_stories(' "$tasks_py" || true)" \
+    "validators: exactly one validate_stories definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_ids(' "$tasks_py" || true)" \
+    "validators: exactly one validate_ids definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def validate_waves(' "$tasks_py" || true)" \
+    "validators: exactly one validate_waves definition in tasks.py"
+
+  # The screen the jq wrote out THREE times -- title, description, tasks[] --
+  # is one constant now. Three copies of a prompt-injection rule are three
+  # chances to fix two of them.
+  assert_eq "1" "$(grep -c '^SUSPICIOUS = ($' "$tasks_py" || true)" \
+    "validators: exactly one SUSPICIOUS definition in tasks.py"
+
+  # The story-id regex is the one thing here that did NOT fully move, and the
+  # count says so rather than leaving a reader to wonder. validate_story_id
+  # still gates a CLI ARGUMENT in bash — a different call site with the same
+  # pattern — while the DOCUMENT rule is tasks.py's.
+  assert_eq "1" "$(grep -cF '^US-[0-9]{3}[a-z]?$' "$CLI" || true)" \
+    "validators: aimi-cli.sh keeps exactly one story-id regex, validate_story_id's argument gate"
+  assert_eq "1" "$(grep -c '^STORY_ID_PATTERN = ' "$tasks_py" || true)" \
+    "validators: exactly one STORY_ID_PATTERN definition in tasks.py"
+
+  # And the wrapper shape, per verb. These four are READERS: one crossing each,
+  # no jq left, and — unlike the eleven writers — no lock, because there is
+  # nothing to serialize against a verb that only reads.
+  local fn body
+  for fn in cmd_validate_deps cmd_validate_stories cmd_validate_ids cmd_validate_waves; do
+    body=$(_cmd_body "$fn")
+    assert_eq "1" "$(printf '%s\n' "$body" | grep -c 'python3 ' || true)" \
+      "validators: $fn makes exactly one python3 call"
+    assert_eq "0" "$(printf '%s\n' "$body" | grep -c '\bjq\b' || true)" \
+      "validators: $fn has no jq left"
+    assert_eq "0" "$(printf '%s\n' "$body" | grep -c '_lock ' || true)" \
+      "validators: $fn takes no lock, because a reader has nothing to serialize"
+  done
 }
 
 # ============================================================================
@@ -940,6 +1473,84 @@ TASKSEOF
   rm -rf "$tmp_dir"
 }
 
+test_get_story_context_skills_dropped() {
+  echo ""
+  echo "=== Testing get-story-context skillsDropped: always present, and what it names ==="
+
+  # The eviction warnings go to stderr and always did, because stdout is piped
+  # straight into a JSON parse by every consumer there is. A caller running this
+  # verb with 2>/dev/null could not tell a hydrated skill set from a halved one,
+  # so the payload now carries the drop report itself.
+
+  # (1) Nothing dropped: the key is [], never absent. The standard fixture's
+  # stories declare no skills at all, which is the emptiest path there is.
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+  local output
+  output=$("$CLI" get-story-context US-001 2>/dev/null)
+  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
+    "skills_dropped: the key is an empty array when nothing was dropped"
+
+  # (2) An individually oversized skill is dropped BEFORE the aggregate loop, so
+  # the two small siblings declared after it survive. The pre-port loop popped
+  # from the end until the total fit, which took both of them down first and then
+  # aborted the verb outright — the agent received no payload at all.
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  mkdir -p "$tmp_dir/.aimi/tasks"
+  mkdir -p "$tmp_dir/skills/gigante" "$tmp_dir/skills/alpha" "$tmp_dir/skills/beta"
+  python3 -c "import sys; sys.stdout.write('x' * 102401)" > "$tmp_dir/skills/gigante/SKILL.md"
+  printf 'Alpha skill content.\n' > "$tmp_dir/skills/alpha/SKILL.md"
+  printf 'Beta skill content.\n' > "$tmp_dir/skills/beta/SKILL.md"
+
+  cat > "$tmp_dir/.aimi/tasks/9999-99-99-oversized-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: oversized skill",
+    "type": "feat",
+    "branchName": "feat/oversized",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story declaring an oversized skill first",
+      "description": "Test story",
+      "acceptanceCriteria": ["Small siblings survive"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["gigante", "alpha", "beta"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  local stderr_file exit_code
+  stderr_file=$(mktemp)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>"$stderr_file")
+  exit_code=$?
+  local stderr_output
+  stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "skills_dropped: an oversized skill does not sink the payload"
+  assert_eq '["alpha","beta"]' "$(printf '%s' "$output" | jq -c '[.skills[].name]')" \
+    "skills_dropped: both small siblings survive an oversized skill declared first"
+  assert_eq '[{"name":"gigante","bytes":102401,"reason":"oversized"}]' \
+    "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
+    "skills_dropped: the oversized skill is reported with its own size and reason"
+  assert_stderr_contains "exceeds the 100KB skills cap on its own" "$stderr_output" \
+    "skills_dropped: the oversized drop has its own warning, distinct from the aggregate one"
+
+  rm -rf "$tmp_dir"
+}
+
 test_get_story_context_design_context() {
   echo ""
   echo "=== Testing get-story-context populates designContext from brainstormPath + designBundle ==="
@@ -1033,8 +1644,13 @@ test_reset_orphaned_empty() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local output
-  output=$("$CLI" reset-orphaned)
+  local pre_file
+  pre_file=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" reset-orphaned) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "reset-orphaned exits 0 when there is nothing to reset"
 
   local count
   count=$(echo "$output" | jq '.count')
@@ -1043,6 +1659,15 @@ test_reset_orphaned_empty() {
   local reset_len
   reset_len=$(echo "$output" | jq '.reset | length')
   assert_eq "0" "$reset_len" "reset-orphaned returns empty reset array"
+
+  assert_eq '{"count":0,"reset":[]}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "reset-orphaned: the empty case prints exactly {count: 0, reset: []}"
+
+  # The zero case returns before the locked write is even set up, so the file
+  # must be byte-for-byte what it was.
+  local post_file
+  post_file=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_file" "$post_file" "reset-orphaned: the empty case writes nothing"
 }
 
 test_reset_orphaned_with_orphans() {
@@ -1056,8 +1681,10 @@ test_reset_orphaned_with_orphans() {
   "$CLI" mark-in-progress US-001 > /dev/null
   "$CLI" mark-in-progress US-002 > /dev/null
 
-  local output
-  output=$("$CLI" reset-orphaned)
+  local output exit_code=0
+  output=$("$CLI" reset-orphaned) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "reset-orphaned exits 0 when it reset something"
 
   local count
   count=$(echo "$output" | jq '.count')
@@ -1067,11 +1694,28 @@ test_reset_orphaned_with_orphans() {
   assert_contains "US-001" "$output" "reset-orphaned includes US-001"
   assert_contains "US-002" "$output" "reset-orphaned includes US-002"
 
+  assert_eq '["count","reset"]' "$(printf '%s' "$output" | jq -c 'keys')" \
+    "reset-orphaned prints exactly {count, reset}"
+  assert_eq '["US-001","US-002"]' "$(printf '%s' "$output" | jq -c '.reset')" \
+    "reset-orphaned reset list is exactly the two in_progress ids, in file order"
+
   # Verify the stories are now failed in the file
   local status_output us1_status
   status_output=$("$CLI" status)
   us1_status=$(echo "$status_output" | jq -r '.userStories[] | select(.id == "US-001") | .status')
   assert_eq "failed" "$us1_status" "US-001 status is failed after reset-orphaned"
+
+  # On-disk state, read from the file rather than through another verb: both
+  # stories failed, both carrying the fixed note, and nothing left in_progress.
+  assert_eq "failed" \
+    "$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$TASKS_FILE")" \
+    "US-002 status is failed on disk after reset-orphaned"
+  assert_eq "Reset: orphaned from previous session" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$TASKS_FILE")" \
+    "reset-orphaned writes its fixed note on disk"
+  assert_eq "0" \
+    "$(jq '[.userStories[] | select(.status == "in_progress")] | length' "$TASKS_FILE")" \
+    "reset-orphaned leaves no story in_progress on disk"
 }
 
 test_stale_state_warning() {
@@ -1119,6 +1763,20 @@ test_version() {
 # Version Staleness Tests
 # ============================================================================
 
+# The test-side twin of aimi-cli.sh's _resolve_latest_cache_path: what the CLI
+# should answer for "newest installed version". Tests below compare the CLI's
+# answer against this, so it must key on the VERSION SEGMENT for the same
+# reason the CLI does -- `ls | tail -1` collates 1.121.3 before 1.9.0, and a
+# whole-path `sort -V` orders by marketplace-entry directory first.
+_test_latest_installed_cli_path() {
+  local config_dir="$1"
+  ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null \
+    | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+    | sort -V \
+    | tail -1 \
+    | cut -d' ' -f2-
+}
+
 test_check_version() {
   echo ""
   echo "=== Testing check-version ==="
@@ -1126,26 +1784,36 @@ test_check_version() {
   "$CLI" clear-state > /dev/null
 
   # --- Test 1: Current version (stored cli-path matches glob-resolved latest) ---
-  # Write cli-path to exactly match what the glob resolves, so check-version sees "current"
-  local latest_glob_path config_dir
-  config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  # The cache is BUILT, not borrowed. This test used to read the AMBIENT plugin
+  # cache and, when it found nothing installed, print
+  # "(skipping current-version test: no installed version in cache)" and assert
+  # nothing -- so its contribution to the suite total depended on the host, and
+  # the one case it declined to cover (an empty glob) was the case where both
+  # version verbs abort. That case is now asserted on every host by
+  # test_version_verbs_empty_plugin_cache_glob below. A throwaway cache holding
+  # exactly one version answers the "current" question identically everywhere.
+  local cv_root cv_cfg cv_aimi_cfg cv_latest
+  cv_root=$(mktemp -d)
+  cv_cfg="$cv_root/claude-config"
+  cv_aimi_cfg="$cv_root/aimi-config"
+  mkdir -p "$cv_aimi_cfg"
+  _make_cached_version "$cv_cfg" "abc123" "1.2.3"
+  cv_latest="$cv_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
 
   local output exit_code
 
-  if [ -n "$latest_glob_path" ]; then
-    # Force cli-path to the glob-resolved latest so stored == latest
-    "$CLI" init-session > /dev/null
-    echo "$latest_glob_path" > "$AIMI_DIR/cli-path"
+  # Force cli-path to the glob-resolved latest so stored == latest
+  "$CLI" init-session > /dev/null
+  echo "$cv_latest" > "$AIMI_DIR/cli-path"
 
-    output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+  output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cv_cfg" AIMI_CONFIG_DIR="$cv_aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
 
-    assert_contains '"status":"current"' "$output" "check-version: current version returns status current"
-    assert_exit_code "0" "$exit_code" "check-version: current version exits 0"
-  else
-    # No installed version found — check-version returns "unknown", skip "current" test
-    echo "  (skipping current-version test: no installed version in cache)"
-  fi
+  assert_contains '"status":"current"' "$output" "check-version: current version returns status current"
+  assert_exit_code "0" "$exit_code" "check-version: current version exits 0"
+
+  rm -rf "$cv_root"
 
   # --- Test 2: Missing cli-path (no .aimi/cli-path file) ---
   "$CLI" clear-state > /dev/null
@@ -1186,7 +1854,7 @@ test_check_version_fix() {
 
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --fix test: no installed version in cache)"
@@ -1222,7 +1890,7 @@ test_check_version_quiet_fix() {
 
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --quiet --fix test: no installed version in cache)"
@@ -1271,7 +1939,7 @@ test_check_version_backward_compat() {
   # Test 2: No flags, current version => "current" status
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -n "$latest_glob_path" ]; then
     "$CLI" init-session > /dev/null
@@ -1297,6 +1965,136 @@ test_check_version_backward_compat() {
   fi
 }
 
+# ----------------------------------------------------------------------------
+# The empty plugin-cache glob, now asserting the DOCUMENTED answers.
+#
+# THIS TEST USED TO PIN A DEFECT, AND THE INVERSION IS THE POINT OF THE DIFF.
+#
+# cmd_check_version documents a `{status: "unknown", message: "No installed
+# version found"}` branch for the no-installed-version case, and
+# cmd_cleanup_versions documents `{removed: 0, kept: null}` for the same case.
+# NEITHER HAD EVER BEEN EMITTED. aimi-cli.sh:2 sets `set -euo pipefail`; both
+# verbs called _resolve_latest_cache_path BARE, that helper returned 1 when the
+# glob matched nothing, and a `var=$(helper)` assignment carries the helper's
+# status -- so the shell aborted the whole script before either handler branch
+# was reached. What was observable was exit 1, empty stdout, empty stderr and no
+# write to the global cli-path cache, and that is what the previous revision of
+# this function asserted, verbatim.
+#
+# It went unnoticed because the one test that could have caught it printed
+# "(skipping current-version test: no installed version in cache)" and asserted
+# nothing exactly when the case became reachable. A skipped test is why nobody
+# noticed, which is why the abort was written down as an assertion first and
+# inverted here rather than quietly replaced.
+#
+# _resolve_latest_cache_path now always returns 0 and answers with the empty
+# string, so both handlers run. THIS IS CALLER-VISIBLE: a command that read "the
+# verb aborts" as its no-plugin signal now gets JSON and exit 0. The same nine
+# runs are recorded on both sides in golden_from_jq.json's version_cache_cases,
+# named in test_version_cache.py's KNOWN_DIVERGENCES.
+#
+# A failure here still means the BEHAVIOUR moved; do not repair the assertion to
+# match it.
+# ----------------------------------------------------------------------------
+test_version_verbs_empty_plugin_cache_glob() {
+  echo ""
+  echo "=== Testing check-version / cleanup-versions against an EMPTY plugin cache ==="
+
+  local root cfg aimi_cfg err
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  err="$root/stderr"
+  # plugins/cache exists but holds nothing, so the cache glob matches zero paths.
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg"
+
+  local out ec
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version (empty glob): reaches the documented status:unknown branch and exits 0"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version (empty glob): emits the documented unknown status"
+  assert_contains '"message": "No installed version found"' "$out" \
+    "check-version (empty glob): emits the documented message"
+  assert_eq "Warning: No installed aimi-cli.sh found via glob." "$(cat "$err")" \
+    "check-version (empty glob): warns on stderr, which the abort never let it do"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version --quiet (empty glob): exits 0 as well"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version --quiet (empty glob): --quiet changes stderr, not the answer"
+  assert_eq "" "$(cat "$err")" \
+    "check-version --quiet (empty glob): --quiet suppresses the warning it can now reach"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" cleanup-versions 2>"$err") && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "cleanup-versions (empty glob): reaches the documented {removed:0,kept:null} branch and exits 0"
+  assert_contains '"removed": 0' "$out" \
+    "cleanup-versions (empty glob): removed is 0 -- there was nothing to remove"
+  assert_contains '"kept": null' "$out" \
+    "cleanup-versions (empty glob): kept is null, not a version it invented"
+  assert_eq "" "$(cat "$err")" \
+    "cleanup-versions (empty glob): stderr is empty"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "cleanup-versions (empty glob): the branch returns before write_global_cli_cache, so still no cli-path"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# A CLAUDE_CONFIG_DIR carrying shell metacharacters must have NO side effect.
+#
+# This lives in the suite that is mandatory after any aimi-cli.sh change,
+# deliberately, because it guards a property that a refactor can undo by
+# accident. All three cache-globbing verbs used to reach a nested `bash -c`
+# whose PROGRAM TEXT was built by interpolating $config_dir, so a config dir
+# containing a double quote closed the escaped quote and ran the rest. Measured,
+# not inferred: on the parent of the commit that moved the glob behind
+# _resolve_latest_cache_path, this exact payload created the marker file while
+# prime-cache still reported not_found at exit 0.
+#
+# Two things closed it, and this asserts the outcome rather than either
+# mechanism: the directory became a positional ARGUMENT to a single-quoted
+# program, and then the array glob removed the nested shell altogether. If a
+# later change reintroduces a nested shell here, the marker comes back.
+# ----------------------------------------------------------------------------
+test_version_verbs_config_dir_metacharacters() {
+  echo ""
+  echo "=== Testing the cache-globbing verbs against a metacharacter-bearing CLAUDE_CONFIG_DIR ==="
+
+  local root evil aimi_cfg proj marker
+  root=$(mktemp -d)
+  aimi_cfg="$root/aimi-config"
+  proj="$root/project"
+  # The payload's `touch` target is RELATIVE, so it lands in the run's own cwd.
+  evil="$root/cfg\";touch MARKER;ls \""
+  marker="$proj/MARKER"
+  mkdir -p "$evil/plugins/cache" "$aimi_cfg" "$proj/.aimi"
+
+  local verb
+  for verb in check-version cleanup-versions prime-cache; do
+    rm -f "$marker"
+    (cd "$proj" && env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+      CLAUDE_CONFIG_DIR="$evil" AIMI_CONFIG_DIR="$aimi_cfg" \
+      bash "$CLI" "$verb" >/dev/null 2>&1) || true
+    assert_eq "no" "$([ -e "$marker" ] && echo yes || echo no)" \
+      "$verb: a CLAUDE_CONFIG_DIR carrying \";touch ...\" executes nothing"
+  done
+
+  rm -rf "$root"
+}
+
 test_cleanup_versions() {
   echo ""
   echo "=== Testing cleanup-versions ==="
@@ -1319,6 +2117,158 @@ test_cleanup_versions() {
   # Validate JSON output format has both keys
   assert_contains '"removed"' "$output" "cleanup-versions: output contains removed key"
   assert_contains '"kept"' "$output" "cleanup-versions: output contains kept key"
+}
+
+# ----------------------------------------------------------------------------
+# cleanup-versions: which version survives
+#
+# test_cleanup_versions above cannot see this class of bug and never could. It
+# runs the verb twice against the AMBIENT cache and asserts only that the
+# second run removes nothing -- true whichever directory the first run chose.
+# The two tests below build a cache instead, and assert both what is left on
+# disk and what the JSON claims.
+#
+# The fixture versions are chosen so lexicographic and version order DISAGREE.
+# `ls` collates 1.10.0 and 1.123.0 BEFORE 1.9.0, because '1' < '9' at the third
+# character, so the old `ls ... | tail -1` answered 1.9.0 and this verb -- the
+# one site that runs rm -rf -- deleted the newer installs and wrote the older
+# one into the global cli-path cache. A 1.122.0/1.123.0 fixture would pass
+# against that bug, because those two happen to agree.
+#
+# Everything runs under a throwaway CLAUDE_CONFIG_DIR and AIMI_CONFIG_DIR: this
+# verb rm -rf's whatever it does not keep, so pointed at the ambient
+# environment it would delete the plugin install running the suite.
+# ----------------------------------------------------------------------------
+
+# Create one installed-version directory holding an executable stub CLI.
+_make_cached_version() {
+  local cache_root="$1" entry="$2" version="$3"
+  local dir="$cache_root/plugins/cache/$entry/aimi-engineering/$version/scripts"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\n' > "$dir/aimi-cli.sh"
+  chmod +x "$dir/aimi-cli.sh"
+}
+
+# Run cleanup-versions against a throwaway cache. CLAUDECODE=1 and an unset
+# AIMI_PLUGIN_DIR are explicit rather than inherited: a real session exports
+# both, and inheriting AIMI_PLUGIN_DIR would take the converter short-circuit
+# and assert nothing at all.
+_run_cleanup_versions_isolated() {
+  local cfg="$1" aimi_cfg="$2"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" cleanup-versions 2>/dev/null
+}
+
+test_cleanup_versions_keeps_newest_version() {
+  echo ""
+  echo "=== Testing cleanup-versions keeps the newest VERSION, not the lexicographic last ==="
+
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$cfg" "$aimi_cfg"
+
+  _make_cached_version "$cfg" "abc123" "1.9.0"
+  _make_cached_version "$cfg" "abc123" "1.10.0"
+  _make_cached_version "$cfg" "abc123" "1.123.0"
+
+  local output base
+  output=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg")
+  base="$cfg/plugins/cache/abc123/aimi-engineering"
+
+  assert_eq "1.123.0" "$(echo "$output" | jq -r '.kept')" \
+    "cleanup-versions: reports 1.123.0 as kept, not the lexicographically last 1.9.0"
+  assert_eq "2" "$(echo "$output" | jq -r '.removed')" \
+    "cleanup-versions: removes both older version directories"
+
+  assert_eq "yes" "$([ -d "$base/1.123.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.123.0 directory is still on disk"
+  assert_eq "no" "$([ -d "$base/1.9.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.9.0 directory is gone from disk"
+  assert_eq "no" "$([ -d "$base/1.10.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.10.0 directory is gone from disk"
+
+  assert_eq "$base/1.123.0/scripts/aimi-cli.sh" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "cleanup-versions: writes the 1.123.0 path into the global cli-path cache"
+
+  rm -rf "$root"
+}
+
+test_cleanup_versions_sorts_on_version_segment() {
+  echo ""
+  echo "=== Testing cleanup-versions sorts on the version segment, not the whole path ==="
+
+  # Two marketplace entries, with the NEWER version under the lexicographically
+  # EARLIER one. A `sort -V` over whole path strings orders by marketplace-entry
+  # directory first and version only second, so it would pick zzz-entry/1.9.0 --
+  # the same bug moved one wildcard to the left. Only a sort keyed on the
+  # version segment answers 1.123.0 here.
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$cfg" "$aimi_cfg"
+
+  _make_cached_version "$cfg" "aaa-entry" "1.123.0"
+  _make_cached_version "$cfg" "zzz-entry" "1.9.0"
+
+  local output
+  output=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg")
+
+  assert_eq "1.123.0" "$(echo "$output" | jq -r '.kept')" \
+    "cleanup-versions: keeps 1.123.0 when it lives under the lexicographically earlier marketplace entry"
+  assert_eq "$cfg/plugins/cache/aaa-entry/aimi-engineering/1.123.0/scripts/aimi-cli.sh" \
+    "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "cleanup-versions: the global cli-path cache gets the newer version's path across entries"
+  assert_eq "no" \
+    "$([ -d "$cfg/plugins/cache/zzz-entry/aimi-engineering/1.9.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the older version under the later entry is removed"
+
+  rm -rf "$root"
+}
+
+test_resolve_skills_base_dir_picks_newest_version() {
+  echo ""
+  echo "=== Testing _resolve_skills_base_dir resolves the newest installed version ==="
+
+  # A deliberate behaviour change, not a head/tail typo fix. This function took
+  # the FIRST glob hit while CLI-path resolution took the LAST, so a host with
+  # two versions co-resident fed every spawned agent the SKILL.md of one install
+  # while the CLI orchestrating it came from the other (measured live: skills at
+  # 1.122.0 against a CLI at 1.123.0 in one session). Both sides now answer
+  # "newest version".
+  #
+  # Three versions, because the two discarded idioms fail in OPPOSITE
+  # directions and a two-version fixture lets one of them pass by luck. `ls`
+  # collates these as 1.122.0, 1.123.0, 1.9.0 -- so the old `head -1` here
+  # answers 1.122.0, the `tail -1` the CLI used answers 1.9.0, and only a
+  # version-aware comparison answers 1.123.0.
+  local root cfg empty_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  empty_cfg="$root/empty-config"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.9.0/skills"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.122.0/skills"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.123.0/skills"
+  mkdir -p "$empty_cfg"
+
+  source_cache_functions
+  eval "$(sed -n '/^_resolve_skills_base_dir()/,/^}/p' "$CLI")"
+
+  local resolved
+  resolved=$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$cfg" _resolve_skills_base_dir)
+  assert_eq "$cfg/plugins/cache/abc123/aimi-engineering/1.123.0/skills" "$resolved" \
+    "_resolve_skills_base_dir: resolves the newest version, agreeing with CLI-path resolution"
+
+  # Unresolvable still returns an empty string silently rather than aborting --
+  # the caller emits skills: [] and the story executor gets its context anyway.
+  resolved=$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$empty_cfg" _resolve_skills_base_dir)
+  assert_eq "" "$resolved" \
+    "_resolve_skills_base_dir: an empty glob still yields empty rather than aborting"
+
+  rm -rf "$root"
 }
 
 # ============================================================================
@@ -2165,7 +3115,7 @@ test_check_version_fix_updates_global_cache() {
 
   # Resolve the latest path in our mock env
   local latest_glob_path
-  latest_glob_path=$(ls "$CLAUDE_CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$CLAUDE_CONFIG_DIR")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping: no mock CLI in plugin cache)"
@@ -3981,6 +4931,127 @@ test_prime_cache_unwritable_cache_dir() {
   teardown_global_cache_env
 }
 
+# ----------------------------------------------------------------------------
+# prime-cache: the two validation gates, and what they refuse.
+#
+# This verb writes ~/.config/aimi/cli-path, and every later command execs
+# whatever that file names -- so the paths prime-cache REFUSES are the
+# highest-consequence thing about it. The six tests above assert acceptance and
+# one environment failure (an unwritable config dir); not one of them reaches
+# either validation gate in cmd_prime_cache, and the test that reads as though
+# it did -- test_prime_cache_rejects_bad_path -- ends up asserting `ok` on a
+# path that is in fact valid.
+#
+# The rejection channel here is stdout JSON (`.status` and `.message`) plus the
+# exit status. These verbs never write to stderr, which is why the assertions
+# below pair assert_eq on the exact `.message` with assert_exit_code rather
+# than using assert_stderr_contains.
+#
+# All three run the CLI as its own process rather than calling the sed-eval'd
+# cmd_prime_cache in this shell: the gates sit downstream of a glob whose
+# empty-match behaviour depends on `set -euo pipefail`, which this test script
+# does not set.
+# ----------------------------------------------------------------------------
+
+test_prime_cache_rejects_path_outside_cache_pattern() {
+  echo ""
+  echo "=== Testing prime-cache: rejects a resolved path failing the cache case-pattern ==="
+
+  local root cfg aimi_cfg plug
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  plug="$root/plugin"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" "$plug/scripts"
+  printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
+  chmod +x "$plug/scripts/aimi-cli.sh"
+
+  # CLAUDECODE=1 pins the Claude Code branch even though AIMI_PLUGIN_DIR is set,
+  # and AIMI_PLUGIN_DIR being set is precisely what keeps an empty glob out of
+  # the not_found early return -- so an empty resolved_path falls into the
+  # case-pattern gate, which is the only way to reach it.
+  local out ec
+  out=$(env AIMI_PLUGIN_DIR="$plug" CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (pattern reject): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (pattern reject): status=error"
+  assert_eq "Resolved path rejected: does not match expected cache pattern" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (pattern reject): exact message field"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (pattern reject): path is null, so nothing is handed to a later exec"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (pattern reject): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_rejects_non_executable_path() {
+  echo ""
+  echo "=== Testing prime-cache (Claude Code): rejects a non-executable resolved path ==="
+
+  local root cfg aimi_cfg scripts
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  # A well-shaped cache entry whose CLI is not executable. The glob matches on
+  # name, so resolution succeeds and the executable gate is what stops it.
+  scripts="$cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts"
+  mkdir -p "$scripts"
+  printf '#!/usr/bin/env bash\n' > "$scripts/aimi-cli.sh"
+  chmod 0644 "$scripts/aimi-cli.sh"
+
+  local out ec
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (non-executable): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (non-executable): status=error"
+  assert_eq "Resolved path is not executable" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (non-executable): exact message field"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (non-executable): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_rejects_non_executable_opencode_path() {
+  echo ""
+  echo "=== Testing prime-cache (OpenCode): rejects a non-executable AIMI_PLUGIN_DIR CLI ==="
+
+  local root aimi_cfg plug
+  root=$(mktemp -d)
+  aimi_cfg="$root/aimi-config"
+  plug="$root/plugin"
+  mkdir -p "$aimi_cfg" "$plug/scripts"
+  printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
+  chmod 0644 "$plug/scripts/aimi-cli.sh"
+
+  local out ec
+  out=$(env -u CLAUDECODE AIMI_PLUGIN_DIR="$plug" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (OpenCode non-executable): exits 1"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (OpenCode non-executable): status=error"
+  assert_eq "opencode" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (OpenCode non-executable): host=opencode"
+  assert_eq "AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: $plug/scripts/aimi-cli.sh" \
+    "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (OpenCode non-executable): exact message field, naming the rejected path"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (OpenCode non-executable): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
 # ============================================================================
 # V3.2 Schema Tests — Gates, Waves & Field Preservation
 # ============================================================================
@@ -4091,12 +5162,28 @@ test_gate_pass() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-pass US-001)
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-001) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-pass: exits 0"
 
   local gate_status
   gate_status=$(echo "$output" | jq -r '.gate.status')
   assert_eq "passed" "$gate_status" "gate-pass: gate.status set to passed"
+
+  assert_eq '["gate","id"]' "$(printf '%s' "$output" | jq -Sc 'keys')" \
+    "gate-pass: echoes back exactly {id, gate}"
+  assert_eq "US-001" "$(printf '%s' "$output" | jq -r '.id')" \
+    "gate-pass: echoes back the story it was given"
+
+  # On disk: the gate is merged into, not replaced — the fixture's type,
+  # prompt and options survive, and the bare variant adds nothing but status.
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","status":"passed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: on disk the gate keeps every sibling field and gains only status"
+  assert_eq "false" \
+    "$(jq -c '.userStories[] | select(.id == "US-001") | .gate | has("selectedOption")' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: the bare variant writes no selectedOption"
 
   _teardown_gate_fixture
 }
@@ -4107,12 +5194,21 @@ test_gate_fail() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-fail US-001)
+  local output exit_code=0
+  output=$("$CLI" gate-fail US-001) || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-fail: exits 0"
 
   local gate_status
   gate_status=$(echo "$output" | jq -r '.gate.status')
   assert_eq "failed" "$gate_status" "gate-fail: gate.status set to failed"
+
+  assert_eq '["gate","id"]' "$(printf '%s' "$output" | jq -Sc 'keys')" \
+    "gate-fail: echoes back exactly {id, gate}"
+
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","status":"failed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-fail: on disk the gate keeps every sibling field and gains only status"
 
   _teardown_gate_fixture
 }
@@ -4123,14 +5219,70 @@ test_gate_pass_with_option() {
 
   _setup_gate_fixture
 
-  local output
-  output=$("$CLI" gate-pass US-001 --option "A")
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-001 --option "A") || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "gate-pass --option: exits 0"
 
   local gate_status selected_option
   gate_status=$(echo "$output" | jq -r '.gate.status')
   selected_option=$(echo "$output" | jq -r '.gate.selectedOption')
   assert_eq "passed" "$gate_status" "gate-pass --option: gate.status set to passed"
   assert_eq "A" "$selected_option" "gate-pass --option: selectedOption is 'A'"
+
+  assert_eq '{"options":["A","B"],"prompt":"Pick approach","selectedOption":"A","status":"passed","type":"decision"}' \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .gate' "$GATE_FIXTURE_FILE")" \
+    "gate-pass --option: on disk the gate gains both status and selectedOption"
+
+  _teardown_gate_fixture
+}
+
+test_gate_pass_no_gate_defined() {
+  echo ""
+  echo "=== Testing gate-pass on a story with no gate ==="
+
+  _setup_gate_fixture
+
+  # US-005 in the gate fixture carries no gate field at all.
+  local pre_file
+  pre_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-005 2>&1) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "gate-pass: a story with no gate exits 1"
+  assert_eq '{"valid":false,"errors":["Story US-005 has no gate defined"]}' "$output" \
+    "gate-pass: the no-gate path prints the valid/errors object naming the story"
+
+  local post_file
+  post_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+  assert_eq "$pre_file" "$post_file" "gate-pass: the no-gate path writes nothing"
+  assert_eq "false" \
+    "$(jq -c '.userStories[] | select(.id == "US-005") | has("gate")' "$GATE_FIXTURE_FILE")" \
+    "gate-pass: the no-gate path does not invent a gate"
+
+  _teardown_gate_fixture
+}
+
+test_gate_fail_no_gate_defined() {
+  echo ""
+  echo "=== Testing gate-fail on a story with no gate ==="
+
+  _setup_gate_fixture
+
+  local pre_file
+  pre_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-fail US-005 2>&1) || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "gate-fail: a story with no gate exits 1"
+  assert_eq '{"valid":false,"errors":["Story US-005 has no gate defined"]}' "$output" \
+    "gate-fail: the no-gate path prints the same object gate-pass does"
+
+  local post_file
+  post_file=$(jq -S '.' "$GATE_FIXTURE_FILE")
+  assert_eq "$pre_file" "$post_file" "gate-fail: the no-gate path writes nothing"
 
   _teardown_gate_fixture
 }
@@ -4261,6 +5413,14 @@ WAVEOF
   assert_contains '"valid": false' "$output" "validate-waves: mismatched waves fail validation"
   assert_contains "Wave mismatch" "$output" "validate-waves: reports wave mismatch error"
   assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"
+
+  # TRAP, pinned deliberately: cmd_validate_waves' body ENDS at its jq call —
+  # there is no `return 1` on the invalid branch, so an invalid verdict still
+  # exits 0. A caller that branches on `$?` rather than on `.valid` sees a
+  # pass. This is current behaviour, and pinning it stops a later port
+  # "correcting" it into a silent regression for anyone doing exactly that.
+  assert_exit_code "0" "$exit_code" \
+    "validate-waves: exits 0 even for an invalid verdict (the verdict is in .valid, not in \$?)"
 
   rm -f "$wave_fixture"
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
@@ -5511,6 +6671,148 @@ TASKEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+# A designSpec/businessSpec value is a PATH read out of the tasks file, and a
+# tasks file is edited by hand and arrives in branches. Before confinement,
+# "../<something>" was resolved, opened and reported on -- a read primitive
+# pointed anywhere the CLI's own user could read. Both halves are asserted
+# against a spec that really exists one directory above the project root, so a
+# guard that merely failed to find the file would not pass these.
+test_validate_tasks_designspec_outside_project_root_refused() {
+  echo ""
+  echo "=== Testing validate-tasks: a designSpec above the project root is refused, not read ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-73-validate-tasks-ds-escape.json"
+  local outside_dir="$TEST_DIR/../vt-escape-$$"
+  mkdir -p "$outside_dir"
+  cat > "$outside_dir/Fora.md" << 'SPECEOF'
+# Fora
+
+## 3.1 Secao fora
+
+O texto Segredo de fora do projeto mora aqui.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: escape",
+    "type": "feat",
+    "branchName": "feat/escape",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "prototypePaths": ["proto/index.html"],
+    "designBundle": {
+      "designSpec": "OUTSIDE_PLACEHOLDER/Fora.md"
+    }
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Visual story",
+      "description": "Cites the outside spec",
+      "acceptanceCriteria": [
+        "\"Segredo de fora do projeto\" (DesignSpec § 3.1 L5) MUST appear."
+      ],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 1,
+      "verification": { "strategy": "visual", "status": "pending" }
+    }
+  ]
+}
+TASKEOF
+
+  sed -i "s|OUTSIDE_PLACEHOLDER|../vt-escape-$$|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks ds escape: returns valid=false"
+  assert_contains 'DesignSpec path escapes the project root' "$output" \
+    "validate-tasks ds escape: names the rule"
+  assert_contains '../vt-escape' "$output" "validate-tasks ds escape: names the offending path"
+  local leaked
+  leaked=$(printf '%s' "$output" | grep -c 'missing DesignSpec citation' || true)
+  assert_eq "0" "$leaked" "validate-tasks ds escape: the outside file was never read"
+  assert_exit_code "1" "$exit_code" "validate-tasks ds escape: exits non-zero"
+
+  rm -rf "$outside_dir"
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
+test_validate_tasks_businessspec_outside_project_root_refused() {
+  echo ""
+  echo "=== Testing validate-tasks: a businessSpec above the project root is refused, not read ==="
+
+  local tasks_fixture="$TASKS_DIR/9999-99-72-validate-tasks-bs-escape.json"
+  local outside_dir="$TEST_DIR/../vt-escape-bs-$$"
+  mkdir -p "$outside_dir"
+  cat > "$outside_dir/Fora.md" << 'SPECEOF'
+# Fora
+
+## 5.3 Portfolio
+
+Aqui mora campoDeFora.
+SPECEOF
+
+  cat > "$tasks_fixture" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: escape bs",
+    "type": "feat",
+    "branchName": "feat/escape-bs",
+    "createdAt": "2026-08-11",
+    "planPath": null,
+    "maxConcurrency": 2,
+    "frontendOnly": true,
+    "designBundle": {
+      "businessSpec": "OUTSIDE_PLACEHOLDER/Fora.md"
+    },
+    "backendSpec": {
+      "endpoints": [
+        {
+          "path": "/api/x",
+          "method": "GET",
+          "source": "BusinessSpec § 5.3 L5",
+          "responseShape": { "campoDeFora": { "type": "number" } }
+        }
+      ]
+    }
+  },
+  "userStories": []
+}
+TASKEOF
+
+  sed -i "s|OUTSIDE_PLACEHOLDER|../vt-escape-bs-$$|g" "$tasks_fixture"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+  echo "$tasks_fixture" > "$AIMI_DIR/current-tasks"
+
+  local output exit_code
+  output=$("$CLI" validate-tasks) && exit_code=0 || exit_code=$?
+
+  assert_contains '"valid": false' "$output" "validate-tasks bs escape: returns valid=false"
+  assert_contains 'BusinessSpec path escapes the project root' "$output" \
+    "validate-tasks bs escape: names the rule"
+  local leaked
+  leaked=$(printf '%s' "$output" | grep -c 'field name not found' || true)
+  assert_eq "0" "$leaked" "validate-tasks bs escape: the outside file was never read"
+  assert_exit_code "1" "$exit_code" "validate-tasks bs escape: exits non-zero"
+
+  rm -rf "$outside_dir"
+  rm -f "$tasks_fixture"
+  echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
+}
+
 test_mark_complete_preserves_new_fields() {
   echo ""
   echo "=== Testing mark-complete preserves gate, verification, implementation, and wave fields ==="
@@ -6342,8 +7644,18 @@ test_update_field_nested_path() {
   pre_url=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.url' "$TASKS_FILE")
   pre_expect=$(jq -r '.userStories[] | select(.id == "US-001") | .verification.expect' "$TASKS_FILE")
 
-  # Run the update against the dotted path
-  "$CLI" update-field US-001 verification.status passed > /dev/null
+  # Run the update against the dotted path, keeping the trailing echo-back:
+  # it is a second jq program built from the same argument, so it is part of
+  # what "the legitimate path is unchanged" has to mean.
+  local echo_back raw exit_code=0
+  raw=$("$CLI" update-field US-001 verification.status passed) || exit_code=$?
+  echo_back=$(printf '%s' "$raw" | jq -c '.')
+
+  assert_exit_code "0" "$exit_code" "update-field nested: exits 0 on the legitimate path"
+  assert_eq \
+    '{"id":"US-001","verification":{"strategy":"test","status":"passed","url":"http://example.com","expect":"all green"}}' \
+    "$echo_back" \
+    "update-field nested: echo-back prints the whole {id, verification} object"
 
   # Assert the leaf changed
   local post_status
@@ -6359,6 +7671,79 @@ test_update_field_nested_path() {
   assert_eq "$pre_strategy" "$post_strategy" "update-field nested: verification.strategy sibling preserved"
   assert_eq "$pre_url" "$post_url" "update-field nested: verification.url sibling preserved"
   assert_eq "$pre_expect" "$post_expect" "update-field nested: verification.expect sibling preserved"
+}
+
+test_update_field_single_segment() {
+  echo ""
+  echo "=== Testing update-field: a one-segment path patches the story's own key ==="
+
+  reset_fixture
+
+  # The echo-back filter interpolates "${field_path%%.*}" — the FIRST segment
+  # — so on a one-segment path the echoed key and the written key are the same
+  # one. Both interpolation sites are behind the validate_field_path gate the
+  # preceding story added; this test is the legitimate half of that contract.
+  local pre_other_stories
+  pre_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" update-field US-001 notes "hand written") || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "update-field single segment: exits 0"
+  assert_eq '{"id":"US-001","notes":"hand written"}' "$(printf '%s' "$output" | jq -c '.')" \
+    "update-field single segment: echo-back is {id, <first segment>}"
+  assert_eq "hand written" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$TASKS_FILE")" \
+    "update-field single segment: the value lands on disk"
+
+  # The write is scoped to the named story and to nothing else.
+  local post_other_stories
+  post_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+  assert_eq "$pre_other_stories" "$post_other_stories" \
+    "update-field single segment: every other story is untouched on disk"
+}
+
+test_update_field_refuses_non_identifier_path() {
+  echo ""
+  echo "=== Testing update-field: a field path that is not dotted identifiers is refused ==="
+
+  reset_fixture
+
+  # The field path is concatenated into update-field's jq program, so it is
+  # program text. A path carrying a closing paren used to close the filter's
+  # own parenthesis and open a second one, landing the write somewhere nobody
+  # named on the command line. Snapshot the two things that must survive a
+  # refusal: metadata.branchName (charset-gated everywhere else because git
+  # and gh consume it) and every story except the one named.
+  local pre_branch pre_other_stories
+  pre_branch=$(jq -r '.metadata.branchName' "$TASKS_FILE")
+  pre_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+
+  local stderr_output exit_code
+
+  # (a) closing paren — the shape that made this a security fix rather than
+  # an input-validation nicety
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 'x) as $u | (.metadata.branchName' INJECTED 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: path containing a closing paren exits 1"
+  assert_stderr_contains "Invalid field path" "$stderr_output" \
+    "update-field: path containing a closing paren is refused by name on stderr"
+
+  # Containment, proven on disk rather than asserted in prose
+  local post_branch post_other_stories
+  post_branch=$(jq -r '.metadata.branchName' "$TASKS_FILE")
+  post_other_stories=$(jq -Sc '[.userStories[] | select(.id != "US-001")]' "$TASKS_FILE")
+  assert_eq "$pre_branch" "$post_branch" \
+    "update-field: refused call leaves metadata.branchName unchanged on disk"
+  assert_eq "$pre_other_stories" "$post_other_stories" \
+    "update-field: refused call leaves every non-target story unchanged on disk"
+
+  # (b) a space — the same gate, reached by ordinary malformed input
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 'verification status' passed 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: path containing a space exits 1"
+  assert_stderr_contains "Invalid field path" "$stderr_output" \
+    "update-field: path containing a space is refused by name on stderr"
 }
 
 # ============================================================================
@@ -6388,6 +7773,10 @@ main() {
   test_find_tasks
   test_init_session
   test_metadata
+  test_metadata_max_concurrency_default
+  test_init_session_self_resolution_stays_in_bash
+  test_init_session_document_reads_crossed_and_the_gate_still_bites
+  test_locked_writers_cross_once_and_keep_the_lock_in_bash
   test_current_story
   test_get_branch
   test_get_state
@@ -6403,6 +7792,7 @@ main() {
   test_count_pending
   test_list_ready
   test_next_story
+  test_readiness_predicate_has_one_implementation
   test_mark_in_progress
   test_mark_complete
   test_list_ready_after_complete
@@ -6413,6 +7803,15 @@ main() {
   test_validate_deps
   test_status
   test_count_pending_final
+
+  # validate-ids — own fixtures, so they run after the progressive lifecycle
+  # sequence above rather than inside it
+  echo ""
+  echo "--- validate-ids Tests ---"
+  test_validate_ids_valid
+  test_validate_ids_lowercase_suffix
+  test_validate_ids_malformed
+  test_validators_moved_to_tasks_py
 
   # New feature tests (v1.13.0) — run with fresh state
   echo ""
@@ -6426,6 +7825,7 @@ main() {
   test_get_story_context_skills_opencode_prefix
   test_get_story_context_skills_absent
   test_get_story_context_skills_cap_drop
+  test_get_story_context_skills_dropped
   test_get_story_context_design_context
   test_reset_orphaned_empty
   test_reset_orphaned_with_orphans
@@ -6447,7 +7847,12 @@ main() {
   test_check_version_fix
   test_check_version_quiet_fix
   test_check_version_backward_compat
+  test_version_verbs_empty_plugin_cache_glob
+  test_version_verbs_config_dir_metacharacters
   test_cleanup_versions
+  test_cleanup_versions_keeps_newest_version
+  test_cleanup_versions_sorts_on_version_segment
+  test_resolve_skills_base_dir_picks_newest_version
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
   fi
@@ -6527,6 +7932,9 @@ main() {
   test_prime_cache_not_found
   test_prime_cache_rejects_bad_path
   test_prime_cache_unwritable_cache_dir
+  test_prime_cache_rejects_path_outside_cache_pattern
+  test_prime_cache_rejects_non_executable_path
+  test_prime_cache_rejects_non_executable_opencode_path
 
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
@@ -6557,6 +7965,8 @@ main() {
   test_gate_pass
   test_gate_fail
   test_gate_pass_with_option
+  test_gate_pass_no_gate_defined
+  test_gate_fail_no_gate_defined
   test_list_ready_decision_gate_pending
   test_list_ready_action_gate_pending_dependency
   test_list_ready_verify_gate_non_blocking
@@ -6583,8 +7993,12 @@ main() {
   test_validate_tasks_backendspec_missing_source
   test_validate_tasks_backendspec_invented_field
   test_validate_tasks_backendspec_derived_escape_hatch
+  test_validate_tasks_designspec_outside_project_root_refused
+  test_validate_tasks_businessspec_outside_project_root_refused
   test_mark_complete_preserves_new_fields
   test_update_field_nested_path
+  test_update_field_single_segment
+  test_update_field_refuses_non_identifier_path
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""

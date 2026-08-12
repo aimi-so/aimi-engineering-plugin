@@ -766,9 +766,10 @@ _lock() {
   fi
 }
 
-# Process-liveness probe, mirroring aimi-cli.sh's _is_pid_alive: a kill -0
-# signal-zero probe. "No such process" -> dead. "Exists, not permitted to
-# signal" -> alive (a foreign/other-user process is still a live process).
+# Process-liveness probe, mirroring roadmap.py's is_pid_alive (which aimi-cli.sh's
+# stale-claim recovery calls): a kill -0 signal-zero probe. "No such process"
+# -> dead. "Exists, not permitted to signal" -> alive (a foreign/other-user
+# process is still a live process).
 # Liveness alone is NOT identity — see dev_server_entry_is_ours below, the
 # real gate used before any kill or reuse of a registered dev-server.json pid.
 _is_pid_alive() {

@@ -144,6 +144,89 @@ check_jq() {
   fi
 }
 
+# Ensure python3 is available. Mirrors check_jq. Its scope is this SCRIPT, not
+# one family of verbs: the roadmap verbs, story-merge, every tasks.json verb and
+# the whole models.json surface answer from a module beside this file, and the
+# tasks group includes the per-story hot path /aimi:execute runs -- mark-*,
+# list-ready, next-story, count-pending and get-story-context, the verb every
+# spawned executor runs as its first action. init-session joined that group when
+# its three document reads crossed, and detect-models joined it when the
+# models.json merge did -- it is the one detect-* verb that needs the
+# interpreter. What still runs without python3 is the environment and forge
+# half: the four version/cache verbs (version, check-version, cleanup-versions,
+# prime-cache), which are what LOCATE this script and therefore must not depend
+# on a module that lives beside it; the rest of detect-* (detect-forge,
+# detect-default-branch, detect-parent-branch, detect-interactivity,
+# detect-design-bundle); forge-*; setup-branch; and estimate-payload. That
+# residue is too small to be worth naming as the rule: assume aimi-cli.sh needs
+# python3. Three places DEGRADE rather than refuse and so belong to neither
+# list -- the four models.json readers (see _models_python3_or_degrade below),
+# next-story, and list-archivable. The whole-repo statement, including which
+# host the requirement is new on, is in the top-level CLAUDE.md § Testing.
+check_python3() {
+  if ! command -v python3 &> /dev/null; then
+    echo "Error: python3 is required by aimi-cli.sh but is not installed." >&2
+    echo "Install with: brew install python (macOS) or apt install python3 (Linux)" >&2
+    exit 1
+  fi
+}
+
+# Absolute path to a Python module that sits beside this script -- roadmap.py
+# for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
+# tasks.json verbs, models.py for the models.json readers and their writer.
+#
+# Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
+# one directory up. It has to be resolved rather than assumed because this file
+# is invoked through a cached path, through $AIMI_PLUGIN_DIR, and from a
+# worktree, and only its own location is reliable in all three.
+_aimi_script_py() {
+  local script_path
+  script_path="${BASH_SOURCE[0]:-$0}"
+  printf '%s/%s\n' "$(cd "$(dirname "$script_path")" && pwd)" "$1"
+}
+
+# The fourteen roadmap call sites name their module through this, so none of
+# them had to change when a second module arrived.
+_aimi_roadmap_py() {
+  _aimi_script_py roadmap.py
+}
+
+# Same, for the tasks.json verbs. Built on the shared resolver above
+# rather than repeating the BASH_SOURCE idiom, which is the whole reason
+# _aimi_script_py was split out of _aimi_roadmap_py in the first place.
+_aimi_tasks_py() {
+  _aimi_script_py tasks.py
+}
+
+# Same, for the four models.json READER verbs.
+_aimi_models_py() {
+  _aimi_script_py models.py
+}
+
+# python3 for a models READER, or the verb's own documented fallback.
+# Usage: if ! _models_python3_or_degrade <verb> <what-it-falls-back-to>; then ...
+#
+# NOT check_python3, and the difference is the whole point. check_python3 exits
+# 1, which is right for a verb that cannot answer without the interpreter and
+# whose caller is a command that has already committed to running. resolve-
+# models is neither: it runs once per invocation of eight commands and skills,
+# and its contract is that it NEVER fails -- stdout is always valid JSON, every
+# failure path prints the fallback and returns 0. Under Claude Code python3 is
+# already a hard per-Bash-call dependency (hooks/hooks.json wires a .py on
+# PreToolUse), but install.sh wires no hooks at all, so on OpenCode nothing
+# else guarantees an interpreter. A bare check_python3 here would turn a
+# python3-less OpenCode host from "works" into "every command dies at its first
+# CLI call" -- a regression against the pure-jq behaviour this port replaces.
+#
+# So each reader degrades to what it already promises when it cannot read the
+# config: all-inherit, all-null, `prompt`, the built-in Anthropic list. One
+# line to stderr, and exit 0.
+_models_python3_or_degrade() {
+  command -v python3 >/dev/null 2>&1 && return 0
+  echo "Warning: $1: python3 is required to read models.json and was not found; falling back to $2." >&2
+  return 1
+}
+
 # Ensure state directory exists
 ensure_state_dir() {
   mkdir -p "$AIMI_DIR"
@@ -189,6 +272,79 @@ _extract_version_from_path() {
   local no_script="${path%/*}"       # strip /aimi-cli.sh -> .../scripts
   local no_scripts="${no_script%/*}" # strip /scripts -> .../1.4.0
   printf '%s\n' "${no_scripts##*/}"  # strip prefix -> 1.4.0
+}
+
+# Resolve the NEWEST installed path under the Claude Code plugin cache.
+#
+# THE ONE OWNER of "which installed version is latest". Every site in this file
+# that used to spell that question as `ls <cache glob> | tail -1` -- or, at
+# _resolve_skills_base_dir, as `ls -d <cache glob> | head -1` -- calls this
+# instead, so the rule is stated once and the sites cannot disagree.
+#
+# Lexicographic order is not a near-miss here, it is wrong in the direction
+# that destroys data: `ls` collates 1.121.3 BEFORE 1.9.0 because '1' < '9' at
+# the third character, so on a cache holding 1.9.0 next to 1.123.0 `tail -1`
+# answers 1.9.0. cmd_cleanup_versions then rm -rf's 1.123.0, keeps 1.9.0 and
+# writes 1.9.0's path into the global cli-path cache. This plugin's history
+# spans 1.9.0 to 1.123.0, so that pairing is reachable on any long-lived
+# install rather than hypothetical.
+#
+# It is deliberately NOT a plain `sort -V` over the globbed paths, and that
+# distinction is most of why this is a function. The cache glob spans TWO
+# wildcards -- <config>/plugins/cache/<marketplace-entry>/aimi-engineering/<version>/<suffix>
+# -- so sorting whole path strings orders by marketplace-entry directory first
+# and by version only within one entry, which reintroduces the same class of
+# bug the moment a host holds two marketplace entries. Each candidate is
+# therefore prefixed with its own version segment and the sort keys on that.
+#
+# Usage: _resolve_latest_cache_path <config_dir> <suffix>
+#   suffix is the path fragment after the version directory:
+#   "scripts/aimi-cli.sh" for the CLI, "skills" for the skills base directory.
+#
+# ALWAYS RETURNS 0. It prints the newest path, or nothing at all when no version
+# is installed, and every caller decides what "nothing" means with a plain
+# `[ -z "$var" ]` test it already had.
+#
+# That is a deliberate contract change, and the reason is that the previous one
+# -- return 1 on an empty glob -- was a rule callers had to remember rather than
+# a property they could rely on. Under `set -euo pipefail` a bare
+# `var=$(_resolve_latest_cache_path ...)` carries the non-zero status and kills
+# the script, so cmd_check_version's documented `{status: "unknown"}` branch and
+# cmd_cleanup_versions' `{removed: 0, kept: null}` branch sat below an
+# unreachable line and had NEVER ONCE been emitted. Two callers remembered to
+# append `|| var=""` and survived; two did not and aborted. A helper whose
+# safety depends on the caller appending three characters is the defect, so it
+# no longer has a failure mode to forget.
+#
+# The GLOB is a plain Bash array assignment: no `ls`, so there is no exit status
+# for `pipefail` to propagate, and no nested `bash -c`, so `$config_dir` is never
+# expanded into another shell's program text. Bash leaves an unmatched pattern
+# as its own literal text rather than as an empty list, which is what the
+# existence test on the first element is for -- `-e` for an ordinary path, `-L`
+# so a dangling symlink still counts as the match `ls -d` would have printed.
+#
+# The ORDERING is untouched: the same sed/sort -V/tail/cut comparator as before,
+# still keyed on each candidate's own version segment rather than on the whole
+# path. Every out-of-file copy of that idiom (the --help EXAMPLES block,
+# cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
+# _resolve-cli.sh, and the two literal patterns in hooks/auto-approve-cli.sh
+# that must match them) therefore still agrees with this function.
+_resolve_latest_cache_path() {
+  local config_dir="$1" suffix="$2"
+  local -a candidates=()
+  candidates=("$config_dir"/plugins/cache/*/aimi-engineering/*/"$suffix")
+  if [ ! -e "${candidates[0]:-}" ] && [ ! -L "${candidates[0]:-}" ]; then
+    return 0
+  fi
+  local newest=""
+  newest=$(
+    printf '%s\n' "${candidates[@]}" \
+      | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+      | sort -V \
+      | tail -1 \
+      | cut -d' ' -f2-
+  ) || newest=""
+  printf '%s\n' "$newest"
 }
 
 # Resolve the Claude config directory.
@@ -434,11 +590,33 @@ write_aimi_models_config() {
 # segment is invoked from a throwaway checkout (e.g. test-aimi-cli.sh running
 # inside a worktree, or an /aimi:execute wave). Caching it globally would point
 # every later session at a file that vanishes on worktree cleanup (exit 127).
+#
+# THE REFUSAL LOOKS AT THE RESOLVED PATH AS WELL AS THE GIVEN ONE. Matching the
+# string alone was defeated by exactly the thing the guard exists to catch: a
+# plugin-cache entry that is a SYMLINK into a worktree has no `.worktrees/`
+# segment in its own name, so it passed and was persisted -- and then produced
+# the 127 anyway when the worktree was removed. Recorded from the failing side
+# in golden_from_jq.json's cv-fix-simlink-worktrees-cc, clv-simlink-worktrees-cc
+# and pc-simlink-worktrees-cc before this line existed.
+#
+# The string check stays FIRST and answers on its own for the common case, so
+# the resolution below is reached only by a path that already looks acceptable.
+# It is best-effort by design: a path that cannot be resolved (it may not exist
+# yet) falls back to the string verdict rather than refusing, because refusing
+# is the branch that silently does nothing.
 write_global_cli_cache() {
   local path="$1"
   case "$path" in
     */.worktrees/*)
       # Refuse to cache a worktree-local copy globally; treat as no-op success.
+      return 0
+      ;;
+  esac
+  local resolved
+  resolved=$(resolve_path "$path" 2>/dev/null) || resolved=""
+  case "$resolved" in
+    */.worktrees/*)
+      # Same refusal, reached through a symlink rather than through the name.
       return 0
       ;;
   esac
@@ -567,6 +745,28 @@ validate_story_id() {
   fi
 }
 
+# Validate a dotted field path before it is concatenated into a jq program.
+#
+# update-field is the one verb that builds its jq filter out of an argument
+# rather than out of a fixed string, so the argument IS program text. Without
+# this gate a path shaped to close the filter's own parenthesis could open a
+# second one, and the assignment then landed on a field nobody named on the
+# command line -- another story, or metadata.branchName, which cmd_init_session
+# and cmd_validate_tasks both charset-gate precisely because git and gh consume
+# it downstream. Gating the argument is what keeps those two gates meaningful.
+#
+# The legitimate vocabulary is exactly a dotted chain of identifier segments;
+# every recorded call site passes the literal "verification.status". Anything
+# else is refused rather than escaped -- update-field is not a general nested
+# writer and this does not make it one.
+validate_field_path() {
+  local field_path="$1"
+  if ! [[ "$field_path" =~ ^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$ ]]; then
+    echo "Error: Invalid field path: $field_path (expected dotted identifiers, e.g. verification.status)" >&2
+    exit 1
+  fi
+}
+
 # Validate story ID exists in the tasks file
 validate_story_exists() {
   local story_id="$1"
@@ -664,7 +864,7 @@ cmd_find_tasks_all() {
 # Initialize execution session
 # Usage: aimi-cli.sh init-session [--file <path>]
 cmd_init_session() {
-  local tasks_file branch pending
+  local tasks_file branch
   local file_flag=""
 
   # Parse optional --file flag
@@ -713,23 +913,27 @@ cmd_init_session() {
   write_state "cli-path" "$self_path"
   write_global_cli_cache "$self_path"
 
-  branch=$(jq -r '.metadata.branchName' "$tasks_file")
+  # ---- the seam. Above: WHERE THIS SCRIPT IS. Below: WHAT THE DOCUMENT SAYS.
+  # The three lines above never cross into tasks.py and never will: inside it
+  # `$0` is the .py file, so persisting that would write a Python module's path
+  # into ~/.config/aimi/cli-path and break every later $AIMI_CLI resolution --
+  # on the NEXT session, long after the test run that passed.
 
-  # Validate branch name (security)
-  if ! [[ "$branch" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-    echo "Error: Invalid branch name: $branch" >&2
-    exit 1
-  fi
+  # ONE crossing for the three document reads that used to be three jq
+  # startups. The charset gate below moved with them and is now tasks.py's,
+  # because it tests the value jq PRINTED and a non-string branchName prints
+  # over several lines -- see op_init_session, which explains the split and
+  # what it guarantees about the first line here. Everything the gate lets
+  # through matches ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$, so it carries no newline and
+  # the split cannot be fooled.
+  check_python3
+  local payload
+  payload=$(python3 "$(_aimi_tasks_py)" init-session --tasks-file "$tasks_file") || exit $?
+  branch=${payload%%$'\n'*}
 
   write_state "current-branch" "$branch"
 
-  pending=$(jq '[.userStories[] | select(.status == "pending")] | length' "$tasks_file")
-
-  local version
-  version=$(jq -r '.schemaVersion' "$tasks_file")
-
-  jq -n --arg tasks "$tasks_file" --arg branch "$branch" --argjson pending "$pending" --arg version "$version" \
-    '{tasks: $tasks, branch: $branch, pending: $pending, schemaVersion: $version}'
+  printf '%s\n' "${payload#*$'\n'}"
 }
 
 # Get comprehensive status summary
@@ -746,46 +950,27 @@ cmd_status() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  if [ "$counts_only" = true ]; then
-    jq '{
-      schemaVersion: .schemaVersion,
-      title: .metadata.title,
-      branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
-      pending: [.userStories[] | select(.status == "pending")] | length,
-      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-      completed: [.userStories[] | select(.status == "completed")] | length,
-      failed: [.userStories[] | select(.status == "failed")] | length,
-      skipped: [.userStories[] | select(.status == "skipped")] | length,
-      total: .userStories | length
-    }' "$tasks_file"
-  else
-    jq '{
-      schemaVersion: .schemaVersion,
-      title: .metadata.title,
-      branch: .metadata.branchName,
-      maxConcurrency: ((.metadata.maxConcurrency // 20) | if . <= 0 then 20 else . end),
-      pending: [.userStories[] | select(.status == "pending")] | length,
-      in_progress: [.userStories[] | select(.status == "in_progress")] | length,
-      completed: [.userStories[] | select(.status == "completed")] | length,
-      failed: [.userStories[] | select(.status == "failed")] | length,
-      skipped: [.userStories[] | select(.status == "skipped")] | length,
-      total: .userStories | length,
-      userStories: [.userStories[] | {id, title, status, dependsOn: (.dependsOn // []), priority, notes}]
-    }' "$tasks_file"
-  fi
+  # The two branches used to be two 11-line jq programs whose first ten lines
+  # were identical -- including a copy each of the maxConcurrency clamp. Both
+  # are now one flag on one crossing; tasks.py's status_view omits one key.
+  local counts_args=()
+  [ "$counts_only" = true ] && counts_args=(--counts-only)
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" status --tasks-file "$tasks_file" "${counts_args[@]}"
 }
 
 # Get metadata only
 cmd_metadata() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '.metadata | .maxConcurrency = ((.maxConcurrency // 20) | if . <= 0 then 20 else . end)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
 }
 
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
-# Flags: --brief (return only {id, title, priority, dependsOn} per story)
+# Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
 cmd_list_ready() {
   local brief=false
   while [ $# -gt 0 ]; do
@@ -798,42 +983,28 @@ cmd_list_ready() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local result
-  result=$(jq '
-    . as $root |
-    [
-      .userStories[] |
-      select(.status == "pending") |
-      . as $story |
-      # Gate filtering: exclude stories with pending decision gates
-      select(
-        (.gate.type != "decision") or (.gate.status != "pending")
-      ) |
-      # Gate filtering: exclude stories where any dependency has a pending action gate
-      select(
-        (($story.dependsOn // []) | length == 0) or
-        (($story.dependsOn // []) | all(. as $dep_id |
-          $root.userStories[] | select(.id == $dep_id) |
-          ((.gate.type != "action") or (.gate.status != "pending"))
-        ))
-      ) |
-      . as $story |
-      (
-        ($story.dependsOn // []) | length == 0
-      ) or (
-        ($story.dependsOn // []) |
-        all(. as $dep_id |
-          ($root.userStories[] | select(.id == $dep_id) | .status) as $dep_status |
-          ($dep_status == "completed" or $dep_status == "skipped")
-        )
-      )
-    | if . then $story else empty end
-    ]
-  ' "$tasks_file")
+  # The readiness predicate and the --brief projection both live in tasks.py's
+  # is_ready and brief_row now, at one crossing. The gate rules and the
+  # dependency walk are subtler than they read -- jq's `all` ENDS at the first
+  # dependsOn id that matches no story, so a dangling id makes a story ready
+  # and leaves the ids after it unchecked -- and there is no longer a second
+  # copy of them for next-story to drift from.
+  check_python3
 
+  # The two branches differ by one `echo`, and only an EMPTY tasks file can
+  # tell: the verb produces no output at all for one (jq read zero values from
+  # the stream, and so does read_docs), and the pre-port code then printed a
+  # bare newline without --brief -- `result=$(...)` followed by `echo "$result"`
+  # -- while --brief piped that newline through a second jq, which read it as
+  # no input and printed nothing. Recorded as doc-vazio-ready and
+  # doc-vazio-brief, and reproduced rather than evened out: a port is not where
+  # a cosmetic difference gets settled, and a truncated tasks file printing one
+  # blank line is a hole to rank, not to tidy.
   if [ "$brief" = true ]; then
-    echo "$result" | jq '[.[] | {id, title, priority, dependsOn, project, gate}]'
+    python3 "$(_aimi_tasks_py)" list-ready --tasks-file "$tasks_file" --brief
   else
+    local result
+    result=$(python3 "$(_aimi_tasks_py)" list-ready --tasks-file "$tasks_file")
     echo "$result"
   fi
 }
@@ -842,8 +1013,17 @@ cmd_list_ready() {
 cmd_next_story() {
   local story story_id
 
-  # Use list-ready logic, then pick first by priority
-  story=$(cmd_list_ready | jq 'sort_by(.priority) | .[0]')
+  # next-story has ALWAYS answered `null` for every failure underneath it, and
+  # that is preserved rather than tidied: cmd_list_ready used to run on the left
+  # of a pipeline inside this command substitution, so neither its `exit 1` for
+  # a missing tasks file nor jq's abort on a malformed one ever reached this
+  # frame -- $story simply came back empty and the branch below cleared the
+  # pointer and printed null at exit 0. /aimi:next reads that null as "all
+  # stories complete" and stops, so turning it into a non-zero exit would turn
+  # a clean stop into a failure. `|| story=""` is that swallow, now written
+  # down instead of being an accident of pipeline structure (recorded as
+  # sem-arquivo-next, us-null-next and doc-malformado-next).
+  story=$(_next_story_selection) || story=""
 
   if [ "$story" = "null" ] || [ -z "$story" ]; then
     clear_state_file "current-story"
@@ -857,18 +1037,37 @@ cmd_next_story() {
   echo "$story"
 }
 
+# The document half of next-story: which story, if any, is next.
+#
+# Split out so the swallow above has something to swallow. The ordering rules
+# live in tasks.py's next_story -- stable on ties so tasks.json file order
+# decides, and null before every number so a story with no priority is picked
+# first -- and the state write stays here with every other .aimi/state/ write.
+_next_story_selection() {
+  local tasks_file
+  # Explicit rather than left to `set -e`: this function runs inside an `||`
+  # list, which is one of the contexts where bash IGNORES -e, so a bare
+  # assignment would carry on and hand an empty path to the crossing.
+  tasks_file=$(get_tasks_file) || return 1
+  check_python3
+  python3 "$(_aimi_tasks_py)" next-story --tasks-file "$tasks_file"
+}
+
 # Get currently active story from state
 cmd_current_story() {
   local story_id tasks_file
   story_id=$(read_state "current-story")
 
+  # No pointer at all is answered without opening the tasks file, and stays in
+  # bash for that reason: .aimi/state/ is read_state's, not tasks.py's.
   if [ -z "$story_id" ]; then
     echo "null"
     return
   fi
 
   tasks_file=$(get_tasks_file)
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" current-story --tasks-file "$tasks_file" --story-id "$story_id"
 }
 
 # Get full story object by ID (read-only)
@@ -881,25 +1080,42 @@ cmd_get_story() {
     exit 1
   fi
 
+  # Both gates stay in bash: the id's format and its existence are questions
+  # about the ARGUMENT and about which file is current, not about the document.
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id)' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" get-story --tasks-file "$tasks_file" --story-id "$story_id"
 }
 
 # Resolve the skills base directory for the current host.
 # Returns the absolute path to the skills/ directory, or empty string when unresolvable.
-# Claude Code (CLAUDECODE=1): glob ~/.claude/plugins/cache/*/aimi-engineering/*/skills, take first.
+# Claude Code (CLAUDECODE=1): the NEWEST installed version under
+#   ~/.claude/plugins/cache/*/aimi-engineering/*/skills.
 # OpenCode (AIMI_PLUGIN_DIR set, CLAUDECODE unset): $AIMI_PLUGIN_DIR/skills.
 # Otherwise: empty string — caller emits skills: [] silently.
+#
+# "Newest" here is a DECISION, not a head-to-tail typo fix, and it changes which
+# SKILL.md every spawned agent reads. This used to take the FIRST glob hit while
+# CLI-path resolution took the LAST, which on a host with two versions
+# co-resident is not a tie-break detail but two different installs answering in
+# one session — measured live: skills resolved to .../1.122.0/skills while the
+# CLI resolved to .../1.123.0/scripts/aimi-cli.sh. A spawned agent must read the
+# SKILL.md belonging to the same install whose CLI is orchestrating it, so both
+# sides now ask _resolve_latest_cache_path the same question.
+#
+# An empty glob leaves this function alive and answering "", never aborting the
+# caller -- that is now _resolve_latest_cache_path's own contract rather than
+# something this call site has to arrange.
 _resolve_skills_base_dir() {
   if _is_claude_code_host; then
     local config_dir
     config_dir=$(_claude_config_dir)
     local skills_dir
-    skills_dir=$(bash -c "ls -d \"$config_dir\"/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | head -1")
+    skills_dir=$(_resolve_latest_cache_path "$config_dir" "skills")
     printf '%s\n' "${skills_dir:-}"
     return 0
   fi
@@ -914,10 +1130,23 @@ _resolve_skills_base_dir() {
   printf ''
 }
 
-# Get story context (story slice + metadata + skills + designContext) by ID — for subagent self-brief
+# Get story context (story slice + metadata + skills + designContext + skillsDropped)
+# by ID — for subagent self-brief.
+#
+# THE HOTTEST VERB IN THE SYSTEM: every story-executor agent /aimi:execute
+# spawns runs this once, as its first action, and parses what comes back. It
+# used to be 155 lines here, 8 fixed jq calls plus one per skill, with an
+# accumulator that re-serialized every skill body already read on each new one.
+# All of it is tasks.py's now; bash keeps only what bash owns.
+#
+# Four of those five lines are the same gates every other tasks verb runs, and
+# _resolve_skills_base_dir is the fifth because it is a HOST question -- glob
+# the Claude Code plugin cache, or read $AIMI_PLUGIN_DIR -- and CLAUDECODE is a
+# discriminator this file already owns. Python is handed the answer, not the
+# question. No lock: a reader takes none, and this one writes nothing at all.
 cmd_get_story_context() {
   local story_id="$1"
-  local tasks_file
+  local tasks_file skills_base_dir
 
   if [ -z "$story_id" ]; then
     echo "Usage: aimi-cli.sh get-story-context <story-id>" >&2
@@ -929,146 +1158,12 @@ cmd_get_story_context() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # ---- Resolve skills ----
-  local skills_base_dir
   skills_base_dir=$(_resolve_skills_base_dir)
 
-  # Read skill names declared by this story
-  local skill_names_json
-  skill_names_json=$(jq -r --arg id "$story_id" \
-    '(.userStories[] | select(.id == $id) | .skills // []) | @json' "$tasks_file")
-
-  # Build skills array: name, path, content
-  # We accumulate in a bash array of jq --arg entries, then assemble with jq.
-  local skill_names_arr
-  mapfile -t skill_names_arr < <(echo "$skill_names_json" | jq -r '.[]' 2>/dev/null)
-
-  # Collect valid skill entries and track aggregate char count
-  local skill_names_collected=()
-  local skill_contents_collected=()
-  local skill_aggregate_chars=0
-
-  local skill_name
-  for skill_name in "${skill_names_arr[@]+"${skill_names_arr[@]}"}"; do
-    local skill_rel_path="skills/${skill_name}/SKILL.md"
-    if [ -z "$skills_base_dir" ]; then
-      # No resolution — skip silently (aggregate will be empty)
-      continue
-    fi
-    local skill_abs_path="${skills_base_dir}/${skill_name}/SKILL.md"
-    if [ ! -f "$skill_abs_path" ]; then
-      # OpenCode installs skills under an `aimi-` prefix (install.sh install_skills:
-      # dst="$skill_dir/aimi-$skillname"), while stories declare the bare skill
-      # name. Claude Code's cache dir is unprefixed, so the bare path already
-      # resolved above there. Fall back to the prefixed dir so OpenCode hydration
-      # is not silently skipped. Host-agnostic: on Claude Code this fallback path
-      # simply does not exist and the warning below still fires for a genuinely
-      # missing skill.
-      local skill_prefixed_path="${skills_base_dir}/aimi-${skill_name}/SKILL.md"
-      if [ -f "$skill_prefixed_path" ]; then
-        skill_abs_path="$skill_prefixed_path"
-      else
-        echo "skill ${skill_name} not found at ${skill_rel_path} — skipped" >&2
-        continue
-      fi
-    fi
-    # Read content and apply tag-breakout escapes before jq ingestion
-    local skill_content
-    skill_content=$(sed \
-      -e 's|</required_skills|\&lt;/required_skills|g' \
-      -e 's|<required_skills|\&lt;required_skills|g' \
-      "$skill_abs_path")
-    skill_names_collected+=("$skill_name")
-    skill_contents_collected+=("$skill_content")
-    (( skill_aggregate_chars += ${#skill_content} ))
-  done
-
-  # Apply 100KB aggregate cap: pop in reverse-of-insertion order until aggregate <= 102400
-  local cap=102400
-  while [ "${skill_aggregate_chars}" -gt "${cap}" ] && [ "${#skill_names_collected[@]}" -gt 0 ]; do
-    local last_idx=$(( ${#skill_names_collected[@]} - 1 ))
-    local dropped_name="${skill_names_collected[$last_idx]}"
-    local dropped_len="${#skill_contents_collected[$last_idx]}"
-    echo "skill ${dropped_name} dropped — aggregate skills context exceeded 100KB" >&2
-    unset 'skill_names_collected[$last_idx]'
-    unset 'skill_contents_collected[$last_idx]'
-    skill_names_collected=("${skill_names_collected[@]+"${skill_names_collected[@]}"}")
-    skill_contents_collected=("${skill_contents_collected[@]+"${skill_contents_collected[@]}"}")
-    (( skill_aggregate_chars -= dropped_len ))
-  done
-
-  # Build skills JSON array using jq with null input
-  local skills_json='[]'
-  local i
-  for (( i=0; i<${#skill_names_collected[@]}; i++ )); do
-    local sname="${skill_names_collected[$i]}"
-    local scontent="${skill_contents_collected[$i]}"
-    local spath="skills/${sname}/SKILL.md"
-    skills_json=$(jq -n \
-      --argjson existing "$skills_json" \
-      --arg name "$sname" \
-      --arg path "$spath" \
-      --arg content "$scontent" \
-      '$existing + [{name: $name, path: $path, content: $content}]')
-  done
-
-  # ---- Resolve designContext ----
-  local brainstorm_path_rel decisions_text=""
-  brainstorm_path_rel=$(jq -r --arg id "$story_id" '.metadata.brainstormPath // empty' "$tasks_file")
-
-  if [ -n "$brainstorm_path_rel" ]; then
-    # Resolve relative to PROJECT_ROOT (absolute if already absolute)
-    local brainstorm_abs
-    if [ "${brainstorm_path_rel#/}" = "$brainstorm_path_rel" ]; then
-      brainstorm_abs="${PROJECT_ROOT}/${brainstorm_path_rel}"
-    else
-      brainstorm_abs="$brainstorm_path_rel"
-    fi
-    if [ -f "$brainstorm_abs" ]; then
-      # Extract the ## Design Decisions section: text from that heading up to (but not
-      # including) the next ## heading (or end of file).
-      decisions_text=$(awk '
-        /^## Design Decisions/ { in_section=1; next }
-        in_section && /^## / { exit }
-        in_section { print }
-      ' "$brainstorm_abs" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | \
-        awk 'NF || (prev_nf) {print; prev_nf=NF}' | \
-        sed '/^$/d' | head -c 65536)
-    fi
-  fi
-
-  # bundleGuidance
-  local bundle_guidance=""
-  local design_bundle_json
-  design_bundle_json=$(jq -r '.metadata.designBundle // empty' "$tasks_file" 2>/dev/null)
-  if [ -n "$design_bundle_json" ]; then
-    local bundle_root design_spec business_spec
-    bundle_root=$(jq -r '.metadata.designBundle.root // "(none)"' "$tasks_file")
-    design_spec=$(jq -r '.metadata.designBundle.designSpec // "(none)"' "$tasks_file")
-    business_spec=$(jq -r '.metadata.designBundle.businessSpec // "(none)"' "$tasks_file")
-    bundle_guidance="Apply design bundle fidelity rules. Read the spec files cited below using the Read tool before authoring implementation code.
-
-Bundle root: ${bundle_root}
-DesignSpec: ${design_spec}
-BusinessSpec: ${business_spec}"
-  fi
-
-  # ---- Emit final JSON ----
-  jq -n \
-    --arg id "$story_id" \
-    --argjson skills "$skills_json" \
-    --arg decisions "$decisions_text" \
-    --arg bundleGuidance "$bundle_guidance" \
-    --slurpfile tf "$tasks_file" \
-    '{
-      story: ($tf[0].userStories[] | select(.id == $id)),
-      metadata: $tf[0].metadata,
-      skills: $skills,
-      designContext: {
-        decisions: $decisions,
-        bundleGuidance: $bundleGuidance
-      }
-    }'
+  check_python3
+  python3 "$(_aimi_tasks_py)" get-story-context \
+    --tasks-file "$tasks_file" --story-id "$story_id" \
+    --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
 }
 
 # Mark a story as in-progress
@@ -1084,19 +1179,23 @@ cmd_mark_in_progress() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  # BEFORE the lock, deliberately, and every mark-* verb keeps it there. Moving
+  # it inside would close a TOCTOU window that is ranked and owned elsewhere;
+  # closing it here by accident is exactly what test-tasks-concurrency.sh
+  # exists to catch.
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  # One crossing, inside the lock -- read, decide, write and return, all in the
+  # single call cmd_roadmap_set_status' comment describes. No stdin payload
+  # here, so the two-crossing exemption roadmap-init holds does not apply. The
+  # temp file is tasks.py's now (same directory, then os.replace), which is why
+  # the mktemp and the mv that used to bracket this block are gone.
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "in_progress"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-in-progress \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   write_state "current-story" "$story_id"
 
@@ -1116,19 +1215,15 @@ cmd_mark_complete() {
   validate_story_id "$story_id"
 
   tasks_file=$(get_tasks_file)
+  # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "completed"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-complete \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "success"
@@ -1152,17 +1247,15 @@ cmd_mark_failed() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" --arg notes "$notes" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "failed", notes: $notes}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    # --notes last: it is the one argument no pattern gates, and tasks.py reads
+    # each flag by its FIRST occurrence so a note shaped like a flag cannot
+    # answer for one.
+    python3 "$(_aimi_tasks_py)" mark-failed \
+      --tasks-file "$tasks_file" --story-id "$story_id" --notes "$notes"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "failed"
@@ -1185,17 +1278,12 @@ cmd_mark_skipped() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id)) |= . + {status: "skipped"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" mark-skipped \
+      --tasks-file "$tasks_file" --story-id "$story_id"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
 
   clear_state_file "current-story"
   write_state "last-result" "skipped"
@@ -1226,33 +1314,32 @@ cmd_set_execution_mode() {
 
   tasks_file=$(get_tasks_file)
 
-  local has_phase
-  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file")
-  if [ "$has_phase" = "true" ]; then
-    echo "Error: Cannot set metadata.execution on a phase-scoped tasks file (metadata.phase is present): $tasks_file" >&2
-    exit 1
-  fi
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  # One crossing, inside the lock. The phase guard used to be a jq read taken
+  # OUTSIDE this lock, and the assignment a second jq into a bash mktemp file:
+  # the two-crossing shape, spelled in jq rather than in python3, which is why
+  # the counting test's own filter discarded this wrapper instead of failing
+  # it. Guard, decision, write and echo-back are the single call now, and
+  # tasks.py's write_docs_atomically owns the temp file -- so the mktemp/mv/
+  # `rm -f` dance is DELETED here, not relocated.
+  #
+  # The invalid-mode refusal above stays in bash on the rule this file already
+  # follows: it is reachable without reading the document, so it happens before
+  # the lock. The phase-scoped one needs the document and moves into the
+  # crossing, where tasks.py's die() writes the same line to stderr and exits 1.
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg mode "$mode" \
-      '.metadata.execution = $mode' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" set-execution-mode \
+      --tasks-file "$tasks_file" --mode "$mode"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
-
-  printf '{"execution":"%s"}\n' "$mode"
 }
 
 # Count pending stories
 cmd_count_pending() {
   local tasks_file
   tasks_file=$(get_tasks_file)
-  jq '[.userStories[] | select(.status == "pending")] | length' "$tasks_file"
+  check_python3
+  python3 "$(_aimi_tasks_py)" count-pending --tasks-file "$tasks_file"
 }
 
 # Validate dependencies in a tasks file
@@ -1261,77 +1348,12 @@ cmd_validate_deps() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local errors
-  errors=$(jq '
-    . as $root |
-    ($root.userStories | map(.id)) as $all_ids |
-
-    # Check self-references
-    (
-      [
-        $root.userStories[] |
-        . as $story |
-        select(($story.dependsOn // []) | any(. == $story.id)) |
-        "Self-reference: \($story.id) depends on itself"
-      ]
-    ) as $self_refs |
-
-    # Check missing references
-    (
-      [
-        $root.userStories[] |
-        . as $story |
-        ($story.dependsOn // [])[] |
-        . as $dep |
-        select(($all_ids | index($dep)) == null) |
-        "Missing ID: \($story.id) depends on \($dep) which does not exist"
-      ]
-    ) as $missing_refs |
-
-    # Check circular dependencies using iterative reachability
-    # For each story, walk its dependency graph and check if it reaches itself
-    (
-      [
-        $root.userStories[] |
-        . as $start |
-        $start.id as $start_id |
-        # Build reachability: iterate N times where N = number of stories
-        (
-          [$start_id] as $initial |
-          reduce range($root.userStories | length) as $_ (
-            ($start.dependsOn // []);
-            . as $current |
-            ($current + [
-              $root.userStories[] |
-              select((.id) as $sid | $current | any(. == $sid)) |
-              (.dependsOn // [])[]
-            ]) | unique
-          )
-        ) |
-        if any(. == $start_id) then
-          "Circular dependency: \($start_id) is part of a dependency cycle"
-        else
-          empty
-        end
-      ]
-    ) as $cycles |
-
-    ($self_refs + $missing_refs + $cycles) |
-    if length == 0 then
-      {valid: true, errors: []}
-    else
-      {valid: false, errors: .}
-    end
-  ' "$tasks_file")
-
-  echo "$errors"
-
-  # Return non-zero exit code if invalid
-  local is_valid
-  is_valid=$(echo "$errors" | jq -r '.valid')
-  if [ "$is_valid" != "true" ]; then
-    return 1
-  fi
+  # A pure reader: no lock, no temp file, one crossing. The exit status is the
+  # crossing's own, which is what it was before -- the jq verdict and the
+  # `is_valid != "true"` test that used to follow it both live in tasks.py, so
+  # the two cannot answer differently.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-deps --tasks-file "$tasks_file"
 }
 
 # Validate story content (field lengths, suspicious patterns)
@@ -1339,70 +1361,12 @@ cmd_validate_stories() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local result
-  result=$(jq '
-    .userStories as $stories |
-    [
-      $stories[] |
-      . as $s |
-      (
-        (if ($s.title | length) > 200 then ["\($s.id): title exceeds 200 chars"] else [] end) +
-        (if ($s.description | length) > 500 then ["\($s.id): description exceeds 500 chars"] else [] end) +
-        ([$s.acceptanceCriteria[] | select(length > 5000)] | if length > 0 then ["\($s.id): acceptance criterion exceeds 5000 chars"] else [] end) +
-        (if ($s.title | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): title contains suspicious content"] else [] end) +
-        (if ($s.description | test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) then ["\($s.id): description contains suspicious content"] else [] end) +
-        (if ($s.project != null) then
-          (if ($s.project | test("^/")) then ["\($s.id): project must not be an absolute path"]
-           elif ($s.project | test("\\.\\.")) then ["\($s.id): project must not contain path traversal (..)"]
-           elif ($s.project | test("[\\$`;|&]")) then ["\($s.id): project contains shell metacharacters"]
-           elif ($s.project | test("^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$") | not) then ["\($s.id): project contains invalid characters"]
-           else [] end)
-         else [] end) +
-        (if ($s.skills != null) then
-          (if ($s.skills | type) != "array" then ["\($s.id): skills must be an array"]
-           else
-             (if ($s.skills | length) > 10 then ["\($s.id): skills array exceeds 10 entries"] else [] end) +
-             [$s.skills[] | select(test("^[a-zA-Z0-9][a-zA-Z0-9_-]*$") | not) | "\($s.id): skills[" + (. | tostring) + "] contains invalid characters"] +
-             [$s.skills[] | select(test("\\.\\.") or test("/") or test("[\\$`;|&]")) | "\($s.id): skills[" + (. | tostring) + "] must not contain path components"] +
-             (if ($s.skills | unique | length) != ($s.skills | length) then
-               [$s.skills | group_by(.) | .[] | select(length > 1) | .[0] | "\($s.id): skills contains duplicate entry \(.)"]
-             else [] end)
-           end)
-         else [] end) +
-        (if ($s.tasks != null) then
-          (if ($s.tasks | type) != "array" then ["\($s.id): tasks must be an array"]
-           elif ($s.tasks | length) == 0 then ["\($s.id): tasks must be omitted when empty"]
-           else
-             (if ($s.tasks | length) > 50 then ["\($s.id): tasks array exceeds 50 entries"] else [] end) +
-             [$s.tasks[] | select(type != "string") | "\($s.id): tasks[] element must be a string"] +
-             [$s.tasks[] | select(type == "string" and length > 5000) | "\($s.id): tasks[] entry exceeds 5000 chars"] +
-             [$s.tasks[] | select(type == "string" and test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i")) | "\($s.id): tasks[] entry contains suspicious content"]
-           end)
-         else [] end) +
-        (if has("gates") then ["\($s.id): gate: 'gates' field is invalid; use singular 'gate' (see plan.md L687-692)"] else [] end) +
-        (if ($s.gate != null) then
-          (["type","status","prompt"] | map(. as $k | if ($s.gate | has($k) | not) then ["\($s.id): gate: missing required field \($k)"] else [] end) | add // [])
-         else [] end) +
-        (if ($s.verification != null and ($s.verification | type) == "string") then
-          ["\($s.id): verification must be an object {strategy, status, url, expect}; found bare string — run normalize-verification to fix"]
-         else [] end) +
-        (if (has("status") | not) then
-          ["\($s.id): missing required field: status — run normalize-status to fix"]
-         else [] end)
-      ) | .[]
-    ] |
-    if length == 0 then {valid: true, errors: []}
-    else {valid: false, errors: .}
-    end
-  ' "$tasks_file")
-  local jq_exit=$?
-  echo "$result"
-  [ $jq_exit -ne 0 ] && return $jq_exit
-  # Return exit 1 when validation found errors
-  if echo "$result" | jq -e '.valid == false' > /dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+  # Same shape as cmd_validate_deps above, and the same reason. Every one of
+  # this verb's twenty-odd error strings is read by /aimi:plan's Phase 4.5 loop
+  # and Phase 3e staging check, so they moved character-for-character rather
+  # than being retyped.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-stories --tasks-file "$tasks_file"
 }
 
 # Normalize verification fields: rewrite any bare-string verification into object form
@@ -1430,28 +1394,19 @@ cmd_normalize_verification() {
     exit 1
   fi
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '
-      .userStories |= map(
-        if (.verification != null and (.verification | type) == "string") then
-          .verification = {strategy: .verification, status: "pending", url: null, expect: null}
-        else
-          .
-        end
-      )
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  local exit_code=$?
-  rm -f "$tmp_file" 2>/dev/null
-  [ $exit_code -ne 0 ] && exit $exit_code
-
-  # Report how many stories were normalized
-  local normalized_count
-  normalized_count=$(jq '[.userStories[] | select(.verification != null and (.verification | type) == "object")] | length' "$tasks_file")
-  jq -n --argjson count "$normalized_count" '{normalized: $count}'
+  # One crossing, inside the lock. The count comes back from the same call that
+  # performed the write -- it used to be a second jq run after the lock had
+  # been released, i.e. a re-read of a document another writer could already
+  # have changed. Same value in a single process; one less window.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-verification --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Normalize status fields: default any story missing the status field to "pending"
@@ -1479,22 +1434,17 @@ cmd_normalize_status() {
     exit 1
   fi
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '
-      .userStories |= map(.status //= "pending")
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  local exit_code=$?
-  rm -f "$tmp_file" 2>/dev/null
-  [ $exit_code -ne 0 ] && exit $exit_code
-
-  # Report how many stories were healed (now have status field)
-  local healed_count
-  healed_count=$(jq '[.userStories[] | select(has("status"))] | length' "$tasks_file")
-  jq -n --argjson count "$healed_count" '{normalized: $count}'
+  # One crossing, inside the lock. Same shape, and same reason, as
+  # cmd_normalize_verification above.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-status --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
@@ -1502,26 +1452,12 @@ cmd_validate_ids() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  local ids errors=() count=0
-  ids=$(jq -r '.userStories[].id' "$tasks_file")
-
-  while IFS= read -r id; do
-    [ -z "$id" ] && continue
-    count=$((count + 1))
-    if ! [[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]; then
-      errors+=("Invalid story ID: $id (expected US-NNN)")
-    fi
-  done <<< "$ids"
-
-  if [ ${#errors[@]} -eq 0 ]; then
-    jq -n --argjson count "$count" '{valid: true, count: $count}'
-    return 0
-  else
-    local errors_json
-    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
-    jq -n --argjson errors "$errors_json" '{valid: false, errors: $errors}'
-    return 1
-  fi
+  # The regex, the line-at-a-time walk over `jq -r` output and the ASYMMETRIC
+  # pass/failure shapes all moved together, because they are one rule: the
+  # count exists only on the pass branch and the errors only on the failure
+  # one, and /aimi:plan reads them apart.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-ids --tasks-file "$tasks_file"
 }
 
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
@@ -1539,53 +1475,31 @@ cmd_cascade_skip() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$failed_id" "$tasks_file"
 
-  # Find all stories that transitively depend on the failed story and mark them as skipped
-
-  # First compute which IDs to skip
-  local to_skip
-  to_skip=$(jq --arg failed_id "$failed_id" '
-    . as $root |
+  # BEHAVIOUR CHANGE, and the one this verb existed to get. This used to be
+  # two jq calls with the lock around only the second: an UNLOCKED closure
+  # computed the skip set, and the locked apply took that precomputed id list
+  # on trust -- its inner filter asked `is this id in the list?` and nothing
+  # else. The `status != "completed"` test lived only in the unlocked call, so
+  # a story that completed inside the window (measured in seconds at 400
+  # stories, because the closure was a quadratic `reduce range(length)`) was
+  # overwritten with status "skipped" and a note saying it depended on a
+  # failure. Real work, lost, 8 times out of 8.
+  #
+  # One crossing, inside the lock: the closure, both status filters, the write
+  # and the {skipped, count} report all happen against the same document. There
+  # is nowhere left to put an unlocked read, which is what closes the race.
+  # test-tasks-concurrency.sh asserts it; the golden corpus is single-threaded
+  # and cannot see it.
+  check_python3
+  local out
+  out=$(
     (
-      reduce range($root.userStories | length) as $_ (
-        [$failed_id];
-        . as $skip_ids |
-        ($skip_ids + [
-          $root.userStories[] |
-          select(
-            (.status != "completed") and
-            (.status != "skipped") and
-            ((.dependsOn // []) | any(. as $d | $skip_ids | any(. == $d)))
-          ) |
-          .id
-        ]) | unique
-      )
-    ) | map(select(. != $failed_id))
-  ' "$tasks_file")
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg failed_id "$failed_id" --argjson to_skip "$to_skip" '
-      .userStories |= [
-        .[] |
-        if (.id as $sid | $to_skip | any(. == $sid)) then
-          . + {status: "skipped", notes: ("Skipped: depends on failed story " + $failed_id)}
-        else
-          .
-        end
-      ]
-    ' "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
-
-  # Output result
-  local count
-  count=$(echo "$to_skip" | jq 'length')
-  jq -n --argjson skipped "$to_skip" --argjson count "$count" \
-    '{skipped: $skipped, count: $count}'
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" cascade-skip \
+        --tasks-file "$tasks_file" --failed-id "$failed_id"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Reset orphaned in_progress stories to failed
@@ -1593,33 +1507,38 @@ cmd_reset_orphaned() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  # Find all in_progress story IDs
-  local orphaned
-  orphaned=$(jq '[.userStories[] | select(.status == "in_progress") | .id]' "$tasks_file")
-
-  local count
-  count=$(echo "$orphaned" | jq 'length')
-
-  if [ "$count" -eq 0 ]; then
-    jq -n '{count: 0, reset: []}'
-    return
-  fi
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq '(.userStories[] | select(.status == "in_progress")) |= . + {status: "failed", notes: "Reset: orphaned from previous session"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq -n --argjson reset "$orphaned" --argjson count "$count" \
-    '{count: $count, reset: $reset}'
+  # A REPORT FIX, and only a report fix. Do not rank it with cascade-skip.
+  #
+  # The orphan list was read in an unlocked jq here too, but the locked apply
+  # re-selected `status == "in_progress"` and ignored that list entirely, so
+  # the file on disk was ALREADY correct: a story that stopped being in
+  # progress inside the window was never touched. What could be wrong was the
+  # printed {count, reset} report, built from the stale read -- a caller
+  # trusting stdout over the file believed it had reset a story it had not.
+  # No data was ever lost here and none is recovered.
+  #
+  # One crossing, inside the lock, so the ids printed are the ids written. The
+  # empty case still writes nothing; that decision moved inside the lock, the
+  # guarantee did not move at all.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" reset-orphaned --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # Get branch name
+#
+# The FAST PATH still opens nothing. read_state answers from .aimi/, and only
+# an empty answer reaches the document at all -- a populated session state
+# never starts python3, never resolves a tasks file, and is unaffected by what
+# the document holds (gb-estado-presente-sem-documento answers with no tasks
+# file on disk; gb-estado-presente-documento-hostil answers while the document
+# holds a name init-session would refuse).
 cmd_get_branch() {
   local branch
   branch=$(read_state "current-branch")
@@ -1627,13 +1546,19 @@ cmd_get_branch() {
   if [ -z "$branch" ]; then
     local tasks_file
     tasks_file=$(get_tasks_file)
-    branch=$(jq -r '.metadata.branchName' "$tasks_file")
+    check_python3
+    branch=$(python3 "$(_aimi_tasks_py)" get-branch --tasks-file "$tasks_file") || exit $?
   fi
 
   echo "$branch"
 }
 
 # Get all state as JSON
+#
+# The four reads stay here and the VALUES cross, never the paths: read_state
+# carries validate_path_in_project and .aimi/state/ has its own .state.lock,
+# neither of which tasks.py is allowed to acquire a second opinion about. All
+# the op does is the "" -> null mapping that used to be four jq conditionals.
 cmd_get_state() {
   local tasks branch story last
   tasks=$(read_state "current-tasks")
@@ -1641,17 +1566,9 @@ cmd_get_state() {
   story=$(read_state "current-story")
   last=$(read_state "last-result")
 
-  jq -n \
-    --arg tasks "$tasks" \
-    --arg branch "$branch" \
-    --arg story "$story" \
-    --arg last "$last" \
-    '{
-      tasks: (if $tasks == "" then null else $tasks end),
-      branch: (if $branch == "" then null else $branch end),
-      story: (if $story == "" then null else $story end),
-      last: (if $last == "" then null else $last end)
-    }'
+  check_python3
+  python3 "$(_aimi_tasks_py)" get-state \
+    --tasks "$tasks" --branch "$branch" --story "$story" --last "$last"
 }
 
 # Shared `--project`/git-repository entry guard. Fourteen commands each
@@ -1671,7 +1588,7 @@ cmd_get_state() {
 # cmd_resolve_base_branch share this guard by behaviour, not by domain. A forge
 # prefix would misdescribe a quarter of its own callers, so the name follows
 # this file's other domain-neutral private helpers (_local_has_branch,
-# _is_merged_into_default, _is_pid_alive).
+# _is_merged_into_default, _file_size_bytes).
 #
 # Usage: _require_git_repo "$project_dir"
 _require_git_repo() {
@@ -2494,7 +2411,7 @@ _forge_build_issue_json() {
 }
 
 # Shared three-way status envelope (forge-contract.md "Three-Way Status
-# Convention"), modeled directly on _verify_creates_emit's own
+# Convention"), modeled directly on roadmap.py's verify_creates_one verdict shape's own
 # verified/missing/error trio: found/not_found/error are three genuinely
 # distinct outcomes and must never be conflated the way `gh pr view --json
 # url` today exits non-zero for both "no PR exists" and "auth/network
@@ -3105,9 +3022,9 @@ _forge_account_override_slots() {
 # Model").
 #
 # "Not authenticated" and "could not check at all" are different facts and
-# must stay distinguishable, the same discipline _verify_creates_one already
+# must stay distinguishable, the same discipline roadmap.py's verify_creates_one already
 # applies by distinguishing a "missing" identity from a git tool failure
-# before ever calling _verify_creates_emit:
+# before ever building a verdict:
 #   - gh present, ran, reports no active session for this host -> a
 #     CONFIRMED negative. status="found", data.authenticated=false,
 #     data.account=null, message=null -- forge-contract.md's "found" covers
@@ -4927,7 +4844,7 @@ _forge_pr_view_build_found() {
 # the value out of gh's response). Captures gh's stdout and stderr on
 # separate variables (this file runs under set -euo pipefail -- rc is
 # pre-initialized and captured with `|| rc=$?`, mirroring
-# _verify_creates_one's own capture pattern) so a legitimate non-zero gh
+# roadmap.py's verify_creates_one capture pattern) so a legitimate non-zero gh
 # exit never aborts the script.
 _forge_pr_view_github() {
   local ref="$1" fields_csv="$2"
@@ -6730,7 +6647,7 @@ _forge_extract_issue_number_from_url() {
 # and verify-creates): gh conflates "no such issue" and "tool is broken"
 # into the same non-zero exit, so gh's own stderr text is pattern-matched
 # here to tell the two apart BEFORE calling _forge_emit_status -- the same
-# discipline _verify_creates_one already applies to git's ambiguous exit
+# discipline roadmap.py's verify_creates_one already applies to git's ambiguous exit
 # codes. (The AC's "found (boolean)" language maps onto this three-way
 # `status` field: status=="found" is the found:true case, status==
 # "not_found" is the found:false case -- forge-contract.md's Three-Way
@@ -8966,6 +8883,113 @@ _oc_models_cache_path() {
   printf '%s\n' "$aimi_dir/models-oc-cache-${mtime}.txt"
 }
 
+# ---------------------------------------------------------------------------
+# "Is this model id valid for this host?" — ONE implementation, three parts.
+#
+# The question used to be answered in four places that disagreed with each
+# other (resolve-models' two per-host branches, detect-models' interactive
+# prompt, detect-models' flag mode, which answered "yes" to everything), plus a
+# fifth representation of the same set in list-models. What is shared is the
+# SHAPE, not the answer: normalize the candidate, obtain the host's valid set,
+# decide membership, report the same verdict everywhere. The valid set still
+# differs per host — Claude Code's three short aliases versus OpenCode's
+# runtime `opencode models` output — because that is DATA, not a second
+# implementation.
+#
+# NORMALIZATION IS A SEPARATE STEP APPLIED BEFORE VALIDITY, NOT PART OF IT.
+# Two reasons, both load-bearing:
+#   1. cmd_list_models needs the normalized SET without any validity question
+#      being asked of it, so normalization has to be independently callable.
+#   2. Keeping the trim OUT of the predicate means the predicate can never
+#      quietly accept a value that was stored untrimmed — a caller that skips
+#      normalization gets a refusal, not a silent repair.
+# ---------------------------------------------------------------------------
+
+# Normalize one model id: trim LEADING and TRAILING whitespace only, NEVER
+# internal. Prints the normalized id; returns non-zero when the result is empty
+# ("no id"), printing nothing.
+#
+# Internal whitespace is deliberately preserved: 'son net' must stay 'son net'
+# and be REFUSED, not repaired into the valid alias 'sonnet'. The interactive
+# prompt used to do exactly that repair with `tr -d '[:space:]'`.
+#
+# It also assigns the global _MODEL_ID_NORMALIZED, so a caller normalizing a
+# whole list (_host_valid_models, below) can read the result without paying a
+# subshell fork per entry. One trim rule, one place — there is no second
+# expression of it anywhere in this file.
+_normalize_model_id() {
+  local _raw="${1-}"
+  _MODEL_ID_NORMALIZED="${_raw#"${_raw%%[![:space:]]*}"}"
+  _MODEL_ID_NORMALIZED="${_MODEL_ID_NORMALIZED%"${_MODEL_ID_NORMALIZED##*[![:space:]]}"}"
+  [ -n "$_MODEL_ID_NORMALIZED" ] || return 1
+  printf '%s' "$_MODEL_ID_NORMALIZED"
+}
+
+# Print the current host's valid model set, one NORMALIZED id per line.
+#   Claude Code — the three short aliases the Task tool accepts, and only those.
+#   OpenCode    — `opencode models` output, normalized, empty entries dropped,
+#                 cached by models.json mtime exactly as cmd_resolve_models
+#                 cached it before this helper existed.
+#
+# Prints NOTHING when there is no valid set to be had (the opencode binary is
+# absent, or it returned nothing). Callers read empty as "no valid set
+# available" and preserve the existing fail-safe: the configured value is used
+# as-is rather than refused against a set nobody could produce.
+_host_valid_models() {
+  if _is_claude_code_host; then
+    printf 'opus\nsonnet\nhaiku\n'
+    return 0
+  fi
+
+  command -v opencode >/dev/null 2>&1 || return 0
+
+  local _config_file _mtime _cache_file _raw="" _line _dir
+  _config_file=$(_aimi_models_config_path)
+  _mtime=$(stat -c '%Y' "$_config_file" 2>/dev/null || stat -f '%m' "$_config_file" 2>/dev/null || echo "0")
+  _cache_file=$(_oc_models_cache_path "$_mtime")
+
+  if [ -f "$_cache_file" ]; then
+    _raw=$(cat "$_cache_file" 2>/dev/null) || _raw=""
+  fi
+  if [ -z "$_raw" ]; then
+    _raw=$(opencode models 2>/dev/null) || _raw=""
+    if [ -n "$_raw" ]; then
+      # Write to cache (best-effort; failure is non-fatal)
+      _dir=$(_aimi_config_dir)
+      mkdir -p "$_dir" 2>/dev/null || true
+      printf '%s\n' "$_raw" > "$_cache_file" 2>/dev/null || true
+    fi
+  fi
+
+  [ -n "$_raw" ] || return 0
+
+  while IFS= read -r _line; do
+    _normalize_model_id "$_line" >/dev/null || continue
+    printf '%s\n' "$_MODEL_ID_NORMALIZED"
+  done <<< "$_raw"
+}
+
+# Membership of an ALREADY-NORMALIZED candidate in the host's valid set.
+# Usage: _model_id_valid_for_host <normalized-candidate> [<valid-set>]
+#
+# It never trims — normalization is the caller's separate, earlier step, which
+# is what stops this predicate from quietly accepting a value stored untrimmed.
+# The valid set defaults to _host_valid_models; a caller that already holds one
+# passes it explicitly (cmd_detect_models substitutes a built-in Anthropic list
+# when the opencode binary is absent) so that exactly one membership rule runs
+# everywhere. An empty valid set means "no valid set available" and yields the
+# fail-safe verdict: valid.
+_model_id_valid_for_host() {
+  local _candidate="${1-}" _valid
+  if [ $# -ge 2 ]; then
+    _valid="$2"
+  else
+    _valid=$(_host_valid_models)
+  fi
+  [ -n "$_valid" ] || return 0
+  printf '%s\n' "$_valid" | grep -qxF -- "$_candidate"
+}
+
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
 #   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
@@ -9012,13 +9036,17 @@ cmd_detect_interactivity() {
 # and returns the all-inherit fallback. Re-run `aimi-cli detect-models` to
 # upgrade the config to v2.0.
 #
-# Performance notes:
-#   - The standalone jq-empty validation pass is omitted; the resolution jq
-#     error handler already catches malformed JSON.
-#   - Multi-pass INVALID tagging is merged into a single jq invocation per host.
-#   - OpenCode: `opencode models` output is cached by models.json mtime so
-#     repeated calls within the same models.json state skip the shell-out.
+# The document half — the schema verdict, the per-category lookup, the validity
+# question and every warning — is models.py's, at one crossing. What stays here
+# is what bash owns anyway: where the file lives, whether it exists, whether it
+# is empty, which host this is, the host's valid set (which is where the
+# `opencode` shell-out and its mtime-keyed cache live), and the fallback
+# literal, which is needed on three paths that never reach python3 at all.
 cmd_resolve_models() {
+  # check_jq stays, in all three verbs that had it, although none of them runs
+  # jq any more. Dropping it would let a jq-less host THROUGH where it is
+  # refused today — a behaviour change, and one with no bearing on this port.
+  # Retiring the three calls is its own decision and its own commit.
   check_jq
 
   local config_file
@@ -9042,18 +9070,6 @@ cmd_resolve_models() {
     return 0
   fi
 
-  # v1.0 rejection guard: reject any config that has a top-level .models key OR
-  # whose .schemaVersion is not exactly "2.0". Both are signs of the old schema.
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "Warning: resolve-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
   # Determine host key
   local host
   if _is_claude_code_host; then
@@ -9062,132 +9078,43 @@ cmd_resolve_models() {
     host="opencode"
   fi
 
-  # Resolve each category via single-step lookup: .categories[$host][$cat] → model_id
-  # Missing category or null value → inherit
-  # The error handler catches malformed JSON (no separate jq empty pass needed).
-  local _result
-  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    def resolve_cat($cat):
-      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end) as $model |
-      if $model == null then "inherit" else $model end;
-    {
-      research: resolve_cat("research"),
-      review:   resolve_cat("review"),
-      design:   resolve_cat("design"),
-      workflow: resolve_cat("workflow"),
-      executor: resolve_cat("executor")
-    } | @json
-  ' 2>/dev/null) || {
-    echo "Warning: resolve-models: models config file is malformed JSON or failed to parse: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  }
-
-  if [ -z "$_result" ]; then
-    echo "Warning: resolve-models: empty result from models config: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
-  # Validate resolved model IDs per host in a single jq pass:
-  #   - invalid entries get value "INVALID\t<original>" (tab-delimited to handle = in model names)
-  #   - warnings emitted via tab-delimited IFS read loop
-  #   - validated result has INVALID entries replaced with "inherit"
+  # The host's valid set — Claude Code's three aliases, or OpenCode's
+  # `opencode models` output — plus the two host-shaped literals its warnings
+  # read. An EMPTY set means "no valid set available" (no opencode binary, or
+  # one that printed nothing); models.py then skips validation entirely, which
+  # is the fail-safe that keeps a configured value usable rather than refusing
+  # it against a set nobody could produce.
+  #
+  # This runs BEFORE the python3 check on purpose: it is what writes the
+  # OpenCode cache file, so a host without an interpreter leaves the same
+  # files behind as one with it.
+  local _valid_models _host_name _host_qualifier
+  _valid_models=$(_host_valid_models)
   if _is_claude_code_host; then
-    # Claude Code: exact-match against the set {opus, sonnet, haiku}.
-    # The Task tool only accepts these short aliases — no version suffixes.
-    local _tagged
-    _tagged=$(printf '%s' "$_result" | jq -r '
-      to_entries | map(
-        .key as $cat |
-        .value as $model |
-        if $model == "inherit" then {key: $cat, value: "inherit"}
-        elif ($model == "opus" or $model == "sonnet" or $model == "haiku") then
-          {key: $cat, value: $model}
-        else {key: $cat, value: ("INVALID\t" + $model)}
-        end
-      ) | from_entries | @json
-    ' 2>/dev/null)
-
-    # Emit warnings and build clean result in one pass
-    local _validated
-    _validated=$(printf '%s' "$_tagged" | jq -r '
-      to_entries | map(
-        if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
-        else .
-        end
-      ) | from_entries | @json
-    ' 2>/dev/null)
-
-    # Print warnings for invalid entries (tab delimiter avoids = truncation)
-    while IFS=$'\t' read -r _cat _val; do
-      [ -n "$_cat" ] || continue
-      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: $_cat), falling back to inherit" >&2
-    done < <(printf '%s' "$_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
-
-    _result="$_validated"
+    _host_name="Claude Code"
+    _host_qualifier="must be exactly opus, sonnet, or haiku; "
   else
-    # OpenCode: validate against `opencode models` output; skip validation when binary absent.
-    # Cache the models list by models.json mtime to avoid shelling out on every call.
-    if command -v opencode >/dev/null 2>&1; then
-      local _config_mtime
-      _config_mtime=$(stat -c '%Y' "$config_file" 2>/dev/null || stat -f '%m' "$config_file" 2>/dev/null || echo "0")
-      local _oc_cache_file
-      _oc_cache_file=$(_oc_models_cache_path "$_config_mtime")
-
-      local _oc_models=""
-      if [ -f "$_oc_cache_file" ]; then
-        _oc_models=$(cat "$_oc_cache_file" 2>/dev/null) || _oc_models=""
-      fi
-
-      if [ -z "$_oc_models" ]; then
-        _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
-        if [ -n "$_oc_models" ]; then
-          # Write to cache (best-effort; failure is non-fatal)
-          local _oc_aimi_dir
-          _oc_aimi_dir=$(_aimi_config_dir)
-          mkdir -p "$_oc_aimi_dir" 2>/dev/null || true
-          printf '%s\n' "$_oc_models" > "$_oc_cache_file" 2>/dev/null || true
-        fi
-      fi
-
-      if [ -n "$_oc_models" ]; then
-        # Single jq pass: tag invalid entries with INVALID\t prefix
-        local _oc_tagged
-        _oc_tagged=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
-          ($ocmodels | split("\n") | map(select(. != "")) | map(ltrimstr(" ") | rtrimstr(" "))) as $valid_list |
-          to_entries | map(
-            .key as $cat |
-            .value as $model |
-            if $model == "inherit" then {key: $cat, value: "inherit"}
-            elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
-            else {key: $cat, value: ("INVALID\t" + $model)}
-            end
-          ) | from_entries | @json
-        ' 2>/dev/null)
-
-        local _oc_validated
-        _oc_validated=$(printf '%s' "$_oc_tagged" | jq -r '
-          to_entries | map(
-            if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
-            else .
-            end
-          ) | from_entries | @json
-        ' 2>/dev/null)
-
-        while IFS=$'\t' read -r _cat _val; do
-          [ -n "$_cat" ] || continue
-          echo "Warning: resolve-models: model '$_val' is not valid for OpenCode host (category: $_cat), falling back to inherit" >&2
-        done < <(printf '%s' "$_oc_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
-
-        _result="$_oc_validated"
-      fi
-      # If opencode models output is empty, skip validation and use configured values
-    fi
-    # If opencode binary is absent, skip validation (fail-safe: use configured value as-is)
+    _host_name="OpenCode"
+    _host_qualifier=""
   fi
 
-  printf '%s\n' "$_result"
+  if ! _models_python3_or_degrade resolve-models all-inherit; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  # One crossing. models.py prints the resolved object, or the fallback it was
+  # handed plus the branch's own warning, and returns 0 either way — there is
+  # no input left that makes this verb fail. The jq before it had exactly one:
+  # a non-string category value aborted it at exit 5 with both streams empty,
+  # which is D1 in tests/golden_from_jq.json's _comment_models_read.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" resolve \
+    --host "$host" \
+    --config-file "$config_file" \
+    --fallback "$_fallback" \
+    --valid "$_valid_models" \
+    --host-name "$_host_name" \
+    --host-qualifier "$_host_qualifier"
 }
 
 # Emit the current per-category model assignments for the active host.
@@ -9219,16 +9146,6 @@ cmd_get_current_models() {
     return 0
   fi
 
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "Warning: get-current-models: schema 1.0 obsoleto — re-rode aimi-cli detect-models" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  fi
-
   local host
   if _is_claude_code_host; then
     host="claudeCode"
@@ -9236,52 +9153,51 @@ cmd_get_current_models() {
     host="opencode"
   fi
 
-  local _result
-  _result=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    def get_cat($cat):
-      ((.categories[$host][$cat] // null) | if . == null or . == "" then null else . end);
-    {
-      research: get_cat("research"),
-      review:   get_cat("review"),
-      design:   get_cat("design"),
-      workflow: get_cat("workflow"),
-      executor: get_cat("executor")
-    } | @json
-  ' 2>/dev/null) || {
-    echo "Warning: get-current-models: models config file is malformed JSON or failed to parse: $config_file" >&2
-    printf '%s\n' "$_fallback"
-    return 0
-  }
-
-  if [ -z "$_result" ]; then
+  if ! _models_python3_or_degrade get-current-models all-null; then
     printf '%s\n' "$_fallback"
     return 0
   fi
 
-  printf '%s\n' "$_result"
+  # One crossing, into the same reader resolve-models uses, differing by the
+  # flag it is NOT given: no valid set, so no validation and no warning — this
+  # verb hands back what is stored, including a value resolve-models would
+  # refuse. The unset value is JSON null here and the string "inherit" there,
+  # deliberately: /aimi:setup-models has to tell "not configured" apart from a
+  # literal `inherit` override, and only null says the first.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" current \
+    --host "$host" \
+    --config-file "$config_file" \
+    --fallback "$_fallback"
 }
 
 # List available models for the current host as a JSON array on stdout.
-# Claude Code host: fixed array ["opus","sonnet","haiku"].
-# OpenCode host: runs `opencode models` and parses its output into a JSON array.
+# Claude Code host: the three short aliases opus/sonnet/haiku.
+# OpenCode host: the `opencode models` output.
 #   Falls back to the built-in default Anthropic list when the opencode binary is absent,
 #   printing one warning to stderr.
 # stdout is always a valid JSON array; warnings go to stderr.
+#
+# The set comes from _host_valid_models, so what the picker OFFERS is byte for
+# byte the set cmd_resolve_models validates against: entries normalized, empty
+# entries dropped. This array can no longer contain "  anthropic/claude-sonnet-4-6  "
+# or "". No validity question is asked here — normalization is a separate,
+# independently callable step, and this is the caller that needs only that half.
 cmd_list_models() {
   check_jq
 
-  local _models_list
+  # THE CLAUDE CODE BRANCH CROSSES NOTHING. Its answer is a constant — the
+  # three short aliases the Task tool accepts — so there is no document to
+  # read and no interpreter to need. The same three ids are DATA that
+  # _host_valid_models already spells once; this is that data in JSON, and
+  # test_list_models_claudecode_matches_the_host_valid_set in part2 runs both
+  # and compares them, so the second spelling cannot drift from the first.
   if _is_claude_code_host; then
-    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
-    printf '["opus","sonnet","haiku"]\n'
+    printf '[\n  "opus",\n  "sonnet",\n  "haiku"\n]\n'
     return 0
   fi
 
-  # OpenCode: query `opencode models`
-  _models_list=""
-  if command -v opencode >/dev/null 2>&1; then
-    _models_list=$(opencode models 2>/dev/null) || _models_list=""
-  fi
+  local _models_list
+  _models_list=$(_host_valid_models)
 
   if [ -z "${_models_list:-}" ]; then
     echo "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
@@ -9290,8 +9206,14 @@ anthropic/claude-sonnet-4-6
 anthropic/claude-opus-4-7"
   fi
 
-  # Convert newline-delimited list to a JSON array
-  printf '%s\n' "$_models_list" | jq -R . | jq -s .
+  if ! _models_python3_or_degrade list-models "the built-in Anthropic model list"; then
+    printf '[\n  "anthropic/claude-haiku-4-5",\n  "anthropic/claude-sonnet-4-6",\n  "anthropic/claude-opus-4-7"\n]\n'
+    return 0
+  fi
+
+  # One crossing, on this branch only: the newline-delimited list to a JSON
+  # array, which is all `jq -R . | jq -s .` ever did here.
+  printf '%s\n' "$_models_list" | python3 "$(_aimi_models_py)" list
 }
 
 # Detect available models on the current host and write ~/.config/aimi/models.json.
@@ -9320,6 +9242,15 @@ anthropic/claude-opus-4-7"
 #       populate both claudeCode and opencode tables.
 cmd_detect_models() {
   check_jq
+  # python3 owns this verb's document half, and unlike the four READERS beside
+  # it there is no degrade a writer may take. Writing the current host's five
+  # values alone is the 1.97.2 regression; writing nothing and returning 0
+  # tells /aimi:setup-models the config was saved when it was not. So this
+  # refuses at exit 1 BEFORE a prompt is shown, a cache is written or a flag is
+  # judged — which is exactly what setup-models.md already promises its reader:
+  # "if detect-models exits non-zero, report the error verbatim and STOP — the
+  # config file was not written."
+  check_python3
 
   # ---- Parse category flags --------------------------------------------------
   local _flag_research="" _flag_review="" _flag_design="" _flag_workflow="" _flag_executor=""
@@ -9362,208 +9293,173 @@ cmd_detect_models() {
     _host_key="opencode"
   fi
 
-  # ---- Flag mode: category flags provided → non-interactive write -----------
+  # The five values the document gets, however they were arrived at. Both modes
+  # fill these in and then STOP: the read, the merge, the write and the two
+  # notes below are one tail serving both, where they used to be two verbatim
+  # copies of the same forty lines.
+  local _model_research _model_review _model_design _model_workflow _model_executor
+
   if [ -n "$_flag_research" ] || [ -n "$_flag_review" ] || [ -n "$_flag_design" ] || [ -n "$_flag_workflow" ] || [ -n "$_flag_executor" ]; then
+    # ---- Flag mode: category flags provided → non-interactive write ---------
     # Require all five categories when using flag mode
     if [ -z "$_flag_research" ] || [ -z "$_flag_review" ] || [ -z "$_flag_design" ] || [ -z "$_flag_workflow" ] || [ -z "$_flag_executor" ]; then
       echo "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" >&2
       exit 1
     fi
 
-    # Read existing config to preserve the other host's categories sub-table
-    local _existing_json
-    _existing_json=$(read_aimi_models_config) || _existing_json=""
+    # Route every flag value through the one normalizer and the one predicate
+    # before writing. Two deliberate boundaries here:
+    #
+    #   - A merely-invalid id WARNS and is still written. Flag mode does not
+    #     gain a new non-zero exit for it: /aimi:setup-models writes through
+    #     this path (its picker offers a free-form "Other"), and this CLI's
+    #     discipline is that validation happens at READ time — cmd_resolve_models
+    #     is where an id is refused, and it says so with the same shape of
+    #     message this warning uses.
+    #   - A value that is non-empty but normalizes to EMPTY (whitespace only) is
+    #     an argument error, not an invalid id, and takes the same hard-error
+    #     path as the "all five must be provided" check directly above.
+    local _flag_valid_set _flag_host_name
+    _flag_valid_set=$(_host_valid_models)
+    if _is_claude_code_host; then _flag_host_name="Claude Code"; else _flag_host_name="OpenCode"; fi
 
-    local _models_json
-    if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
-      # Merge: preserve other host's categories block, replace current host's block
-      _models_json=$(printf '%s' "$_existing_json" | jq \
-        --arg host_key  "$_host_key" \
-        --arg research  "$_flag_research" \
-        --arg review    "$_flag_review" \
-        --arg design    "$_flag_design" \
-        --arg workflow  "$_flag_workflow" \
-        --arg executor  "$_flag_executor" \
-        '{
-          schemaVersion: "2.0",
-          categories: ((.categories // {}) + {
-            ($host_key): {
-              research: $research,
-              review:   $review,
-              design:   $design,
-              workflow: $workflow,
-              executor: $executor
-            }
-          })
-        }')
-    else
-      # No existing config or malformed — create fresh
-      _models_json=$(jq -n \
-        --arg host_key  "$_host_key" \
-        --arg research  "$_flag_research" \
-        --arg review    "$_flag_review" \
-        --arg design    "$_flag_design" \
-        --arg workflow  "$_flag_workflow" \
-        --arg executor  "$_flag_executor" \
-        '{
-          schemaVersion: "2.0",
-          categories: {
-            ($host_key): {
-              research: $research,
-              review:   $review,
-              design:   $design,
-              workflow: $workflow,
-              executor: $executor
-            }
-          }
-        }')
-    fi
+    _check_flag_model() {
+      local _cat="$1" _raw="$2"
+      if ! _normalize_model_id "$_raw" >/dev/null; then
+        echo "Error: detect-models: --$_cat value is whitespace only, which is not a model id" >&2
+        exit 1
+      fi
+      if ! _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_flag_valid_set"; then
+        echo "Warning: detect-models: model '$_MODEL_ID_NORMALIZED' is not valid for $_flag_host_name host (category: $_cat); writing it anyway — resolve-models will fall back to inherit when it reads this file" >&2
+      fi
+    }
 
-    write_aimi_models_config "$_models_json"
-
-    local _config_path
-    _config_path=$(_aimi_models_config_path)
-    printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
-    printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
-    printf '%s\n' "$_models_json"
-    return 0
-  fi
-
-  # ---- Available model sets per host ----------------------------------------
-  local _available_models
-  local _oc_absent=0
-
-  if _is_claude_code_host; then
-    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
-    _available_models="haiku
-sonnet
-opus"
+    _check_flag_model research "$_flag_research"; _model_research="$_MODEL_ID_NORMALIZED"
+    _check_flag_model review   "$_flag_review";   _model_review="$_MODEL_ID_NORMALIZED"
+    _check_flag_model design   "$_flag_design";   _model_design="$_MODEL_ID_NORMALIZED"
+    _check_flag_model workflow "$_flag_workflow"; _model_workflow="$_MODEL_ID_NORMALIZED"
+    _check_flag_model executor "$_flag_executor"; _model_executor="$_MODEL_ID_NORMALIZED"
   else
-    # OpenCode: query `opencode models`; fall back to built-in list if absent
-    if command -v opencode >/dev/null 2>&1; then
-      _available_models=$(opencode models 2>/dev/null) || _available_models=""
-    fi
+    # ---- Available model sets per host --------------------------------------
+    local _available_models
+    local _oc_absent=0
+
+    # The host's valid set, normalized, from the one producer — the same set
+    # cmd_list_models offers and cmd_resolve_models validates against.
+    _available_models=$(_host_valid_models)
     if [ -z "${_available_models:-}" ]; then
+      # Only reachable on OpenCode: _host_valid_models prints nothing when the
+      # opencode binary is absent or returned nothing.
       _oc_absent=1
       echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
       _available_models="anthropic/claude-haiku-4-5
 anthropic/claude-sonnet-4-6
 anthropic/claude-opus-4-7"
     fi
-  fi
 
-  # ---- Build per-category model defaults ------------------------------------
-  # research → fast (haiku), review → powerful (opus),
-  # design/workflow/executor → balanced (sonnet)
-  local _fast_model _balanced_model _powerful_model
+    # ---- Build per-category model defaults ----------------------------------
+    # research → fast (haiku), review → powerful (opus),
+    # design/workflow/executor → balanced (sonnet)
+    local _fast_model _balanced_model _powerful_model
 
-  _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
-  [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
+    # `|| _x=""` is what makes the three fallbacks below REACHABLE. A grep that
+    # matches nothing exits 1; `pipefail` hands that status to the whole
+    # pipeline, and a BARE assignment to an already-declared local hands it to
+    # `set -e`, which killed the verb here — exit 1, empty stdout, empty
+    # stderr, nothing written — the moment the host's model list contained no
+    # "haiku". Every `[ -z ... ] &&` line after it was dead code documenting a
+    # behaviour that could not happen. The `||` makes "no match" an empty
+    # string instead of a fatal status, which is what the next line already
+    # assumed it was.
+    _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1) || _fast_model=""
+    [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
 
-  _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
-  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
-  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
+    _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1) || _balanced_model=""
+    [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
+    [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
 
-  _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
-  [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
+    _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1) || _powerful_model=""
+    [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
-  # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
-  local _default_research="$_fast_model"
-  local _default_review="$_powerful_model"
-  local _default_design="$_balanced_model"
-  local _default_workflow="$_balanced_model"
-  local _default_executor="$_balanced_model"
+    # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
+    local _default_research="$_fast_model"
+    local _default_review="$_powerful_model"
+    local _default_design="$_balanced_model"
+    local _default_workflow="$_balanced_model"
+    local _default_executor="$_balanced_model"
 
-  # ---- Per-category model assignment ----------------------------------------
-  local _model_research="$_default_research"
-  local _model_review="$_default_review"
-  local _model_design="$_default_design"
-  local _model_workflow="$_default_workflow"
-  local _model_executor="$_default_executor"
+    # ---- Per-category model assignment --------------------------------------
+    _model_research="$_default_research"
+    _model_review="$_default_review"
+    _model_design="$_default_design"
+    _model_workflow="$_default_workflow"
+    _model_executor="$_default_executor"
 
-  if [ -t 0 ]; then
-    # stdin is a TTY — prompt once per category for a concrete model id
-    local _prompt_models
-    _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
+    if [ -t 0 ]; then
+      # stdin is a TTY — prompt once per category for a concrete model id
+      local _prompt_models
+      _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
 
-    _prompt_category() {
-      local cat="$1"
-      local default="$2"
-      local answer
-      printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
-      read -r answer </dev/tty
-      answer=$(printf '%s' "$answer" | tr -d '[:space:]')
-      # Validate against available models; fall back to default on empty or invalid input
-      if [ -z "$answer" ]; then
-        printf '%s' "$default"
-      elif printf '%s\n' "$_available_models" | grep -qxF "$answer"; then
-        printf '%s' "$answer"
-      else
-        printf '%s' "$default"
-      fi
-    }
+      _prompt_category() {
+        local cat="$1"
+        local default="$2"
+        local answer
+        printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
+        read -r answer </dev/tty
+        # Normalize FIRST, as its own step: trim the ends only. This used to be
+        # `tr -d '[:space:]'`, which deleted INTERNAL whitespace too and so
+        # silently rewrote the typo 'son net' into the valid alias 'sonnet'.
+        # Then ask the shared predicate — no second membership test lives here.
+        # Fall back to the category default on empty or invalid input, unchanged.
+        #
+        # EOF at the prompt lands in that same fallback and always did, which is
+        # why no `|| answer=""` was ever needed: bash CLEARS `set -e` inside a
+        # command substitution when not in POSIX mode, so the failing `read`
+        # takes nothing down and this function's status is the printf's. A
+        # pty-driven test says so out loud (test_models.py), because reading it
+        # off the source is exactly how it got recorded as a defect.
+        if ! _normalize_model_id "$answer" >/dev/null; then
+          printf '%s' "$default"
+        elif _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_available_models"; then
+          printf '%s' "$_MODEL_ID_NORMALIZED"
+        else
+          printf '%s' "$default"
+        fi
+      }
 
-    _model_research=$(_prompt_category "research" "$_default_research")
-    _model_review=$(_prompt_category "review"    "$_default_review")
-    _model_design=$(_prompt_category "design"    "$_default_design")
-    _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
-    _model_executor=$(_prompt_category "executor"  "$_default_executor")
+      _model_research=$(_prompt_category "research" "$_default_research")
+      _model_review=$(_prompt_category "review"    "$_default_review")
+      _model_design=$(_prompt_category "design"    "$_default_design")
+      _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
+      _model_executor=$(_prompt_category "executor"  "$_default_executor")
+    fi
   fi
 
   # ---- Assemble the models.json document (v2.0 schema) ----------------------
-  # Read the existing config FIRST so we preserve the other host's sub-table.
-  # Without this merge, an unflagged detect-models invocation (e.g., the
+  # Read the existing config FIRST so the OTHER host's sub-table survives.
+  # Without that merge, an unflagged detect-models invocation (e.g. the
   # /aimi:plan automatic resolve at the top of every command) overwrites the
   # file with only the current host's block, silently dropping the inactive
-  # host's configured models. This is the same merge pattern the flag-mode
-  # branch above uses (lines 2477-2502).
+  # host's configured models — which is exactly what shipped as 1.97.2 and was
+  # fixed by copying the flag branch's merge over the default branch. That copy
+  # is why this assembly existed twice, verbatim; merge_models_document in
+  # models.py is the one place it lives now, and it takes the existing document
+  # as a PARAMETER so a rebuild cannot be written there by accident.
   local _existing_json
   _existing_json=$(read_aimi_models_config) || _existing_json=""
 
+  # One crossing. The document arrives on stdin and comes back merged on
+  # stdout; nothing in models.py opens or writes a file, so the mktemp + chmod
+  # 0600 + mv discipline stays in write_aimi_models_config, which already owns
+  # it and whose failure text is asserted.
   local _models_json
-  if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
-    # Merge: preserve other host's categories block, replace current host's block
-    _models_json=$(printf '%s' "$_existing_json" | jq \
-      --arg host_key  "$_host_key" \
-      --arg research  "$_model_research" \
-      --arg review    "$_model_review" \
-      --arg design    "$_model_design" \
-      --arg workflow  "$_model_workflow" \
-      --arg executor  "$_model_executor" \
-      '{
-        schemaVersion: "2.0",
-        categories: ((.categories // {}) + {
-          ($host_key): {
-            research: $research,
-            review:   $review,
-            design:   $design,
-            workflow: $workflow,
-            executor: $executor
-          }
-        })
-      }')
-  else
-    # No existing config or malformed — create fresh
-    _models_json=$(jq -n \
-      --arg host_key  "$_host_key" \
-      --arg research  "$_model_research" \
-      --arg review    "$_model_review" \
-      --arg design    "$_model_design" \
-      --arg workflow  "$_model_workflow" \
-      --arg executor  "$_model_executor" \
-      '{
-        schemaVersion: "2.0",
-        categories: {
-          ($host_key): {
-            research: $research,
-            review:   $review,
-            design:   $design,
-            workflow: $workflow,
-            executor: $executor
-          }
-        }
-      }')
-  fi
+  _models_json=$(printf '%s' "$_existing_json" | python3 "$(_aimi_models_py)" detect \
+    --host-key "$_host_key" \
+    --research "$_model_research" \
+    --review   "$_model_review" \
+    --design   "$_model_design" \
+    --workflow "$_model_workflow" \
+    --executor "$_model_executor")
 
   # ---- Atomic write ---------------------------------------------------------
   write_aimi_models_config "$_models_json"
@@ -9579,7 +9475,8 @@ anthropic/claude-opus-4-7"
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
 #   prompt — neither file exists (first run, not yet configured)
-# No jq needed — pure file-existence checks.
+# The file questions are answered here; the document's own half — the v1.0
+# verdict and "is this host configured at all" — is one crossing into models.py.
 cmd_models_prompt_check() {
   local config_file
   config_file=$(_aimi_models_config_path)
@@ -9598,20 +9495,6 @@ cmd_models_prompt_check() {
     return 0
   fi
 
-  # v1.0 schema (has top-level .models OR schemaVersion != "2.0") → prompt
-  # The picker re-writes the file in v2.0 shape on next configure.
-  local _schema_ok
-  _schema_ok=$(printf '%s' "$config_json" | jq -r '
-    if (has("models") or (.schemaVersion // "") != "2.0") then "reject" else "ok" end
-  ' 2>/dev/null) || _schema_ok="reject"
-  if [ "$_schema_ok" = "reject" ]; then
-    echo "prompt"
-    return 0
-  fi
-
-  # v2.0 with current host configured (at least one category non-null) → skip.
-  # Aligns with get-current-models: if the picker would pre-fill nothing for
-  # this host, ask the user instead of silently falling back to all-inherit.
   local host
   if _is_claude_code_host; then
     host="claudeCode"
@@ -9619,31 +9502,26 @@ cmd_models_prompt_check() {
     host="opencode"
   fi
 
-  local _has_config
-  _has_config=$(printf '%s' "$config_json" | jq -r --arg host "$host" '
-    (.categories[$host] // {}) as $h |
-    [($h.research // null), ($h.review // null), ($h.design // null),
-     ($h.workflow // null), ($h.executor // null)]
-    | map(select(. != null and . != ""))
-    | (length > 0)
-  ' 2>/dev/null) || _has_config="false"
-
-  if [ "$_has_config" = "true" ]; then
-    echo "skip"
+  if ! _models_python3_or_degrade models-prompt-check prompt; then
+    echo "prompt"
     return 0
   fi
 
-  # Host not configured but config file is present — honor the per-host
-  # dismissal marker if it exists. File-missing always re-prompts (above);
-  # this branch only matters when the user kept some config but explicitly
-  # opted out for this host.
-  local marker_file
+  # The per-host dismissal marker is a FILE question, so it is answered here
+  # and handed across as a flag rather than read twice. It only matters when
+  # the config file is present but says nothing about this host: a missing
+  # file always re-prompts (above), whatever the marker says.
+  local marker_file marker=0
   marker_file=$(_aimi_models_prompt_marker_path)
   if [ -f "$marker_file" ]; then
-    echo "skip"
-  else
-    echo "prompt"
+    marker=1
   fi
+
+  # One crossing: the v1.0 verdict and the "is this host configured at all"
+  # question, both over the same parse.
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" prompt-check \
+    --host "$host" \
+    --marker "$marker"
 }
 
 # Atomically create the models first-run prompt marker file.
@@ -9990,15 +9868,34 @@ cmd_clear_state() {
 }
 
 # Print the plugin version from plugin.json
+# Print the installed plugin version.
+#
+# The only guard used to be that plugin.json EXISTS, and `jq -r '.version'`
+# answers something for almost anything below that bar: the literal string
+# `null` at exit 0 for a document with no version key, a JSON object
+# pretty-printed across four lines at exit 0 when the key is not a string, and
+# jq's own parse error at exit 4 for malformed JSON. This is the CLI identity
+# probe -- a caller comparing its output against a version, or a human reading
+# it, is entitled to a version string or an explanation, not `null` dressed as
+# one. All three shapes are recorded in golden_from_jq.json's ver-* cases as
+# they were.
 cmd_version() {
-  local script_path plugin_json
+  local script_path plugin_json version
   script_path="${BASH_SOURCE[0]:-$0}"
   plugin_json="$(cd "$(dirname "$script_path")/.." && pwd)/.claude-plugin/plugin.json"
   if [ ! -f "$plugin_json" ]; then
     echo "Error: plugin.json not found" >&2
     exit 1
   fi
-  jq -r '.version' "$plugin_json"
+  # `jq -e` exits non-zero when the filter produces no output, which is what
+  # `empty` yields for a missing or non-string key -- so one expression covers
+  # both, and a parse failure lands in the same branch.
+  if ! version=$(jq -er 'if (.version | type) == "string" then .version else empty end' \
+      "$plugin_json" 2>/dev/null); then
+    echo "Error: plugin.json declares no string \"version\": $plugin_json" >&2
+    exit 1
+  fi
+  printf '%s\n' "$version"
 }
 
 # Check CLI version staleness
@@ -10027,10 +9924,16 @@ cmd_check_version() {
     return 0
   fi
 
-  # Resolve the latest installed path via glob
-  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  # Resolve the latest installed path (newest VERSION -- see
+  # _resolve_latest_cache_path). An empty glob now answers with the empty string
+  # instead of aborting the script, which is what makes the branch below
+  # reachable for the first time.
+  latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
-  # Case: glob returns empty — no installed version found
+  # Case: glob returns empty — no installed version found.
+  # CALLER-VISIBLE: this branch is documented but was dead code until the helper
+  # above stopped returning non-zero. A caller that read "check-version aborts"
+  # as its no-plugin signal now gets this JSON at exit 0 instead.
   if [ -z "$latest_path" ]; then
     if [ "$quiet" = false ]; then
       echo "Warning: No installed aimi-cli.sh found via glob." >&2
@@ -10097,10 +10000,14 @@ cmd_cleanup_versions() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
-  # Resolve the latest installed path via glob
-  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  # Resolve the latest installed path. This verb rm -rf's every version
+  # directory it does NOT pick, so "latest" has to mean newest version rather
+  # than lexicographically last -- see _resolve_latest_cache_path.
+  latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
-  # No installed versions found
+  # No installed versions found. CALLER-VISIBLE: dead code until the helper
+  # stopped returning non-zero on an empty glob. Note it returns BEFORE
+  # write_global_cli_cache, so an empty cache still writes no cli-path.
   if [ -z "$latest_path" ]; then
     jq -n '{removed: 0, kept: null}'
     return 0
@@ -10146,6 +10053,36 @@ cmd_cleanup_versions() {
 # Used by install hooks and slash commands to populate the cache without relying
 # on the lazy-resolution layers.
 #
+# ---------------------------------------------------------------------------
+# WHY THIS VERB, AND THE THREE AROUND IT, STAY BASH + jq
+#
+# The normative statement for the version/cache family lives here because this
+# is the verb with the hardest constraint. `version`, `check-version`,
+# `cleanup-versions` and `prime-cache` DO NOT CROSS INTO PYTHON, and that is a
+# decision rather than an omission.
+#
+# These verbs, with the helper family beside them (read_global_cli_cache,
+# write_global_cli_cache, read_global_worktree_cache, _claude_config_dir,
+# _extract_version_from_path, _validate_plugin_dir), are what LOCATE
+# aimi-cli.sh. tasks.py, roadmap.py, models.py and story_merge.py live in the
+# same directory as the CLI being located, so a check_python3 gate here would
+# make finding the CLI depend on having found it. Concretely: install.sh calls
+# `prime-cache` DURING the OpenCode install, and commands/references/
+# cli-path-resolution.md calls `check-version --quiet --fix` immediately after
+# every path resolution -- both would start requiring an interpreter on hosts
+# that today need only Bash and jq. `version` is the CLI identity probe and has
+# the same problem for the same reason.
+#
+# `cleanup-versions` is the one verb off that hot path, and it stays Bash on
+# different grounds: the pure-Bash comparator that decides which install it
+# keeps landed six commits earlier in this same branch, and porting the verb
+# here would delete that comparator inside the branch that added it.
+#
+# The jq calls stay too. Rewriting four `jq -n` constructors as printf would
+# reproduce, not remove, the unescaped printf-built JSON already standing in
+# cmd_check_version.
+# ---------------------------------------------------------------------------
+#
 # JSON output: {status, path, host, version, message}
 #   status: 'ok' | 'already_current' | 'not_found' | 'error'
 #   path:   absolute path written (or null)
@@ -10172,25 +10109,36 @@ cmd_prime_cache() {
 
   # ---- Resolve path ----
   if [ "$host_label" = "opencode" ]; then
-    # OpenCode branch: AIMI_PLUGIN_DIR is set and CLAUDECODE is unset
+    # OpenCode branch: AIMI_PLUGIN_DIR is set and CLAUDECODE is unset.
+    #
+    # There is no traversal check here, and its absence is deliberate. One used
+    # to stand below: `if [ "$candidate" != "$plugin_dir/scripts/aimi-cli.sh" ]`
+    # -- compared against the expression `candidate` had been assigned from four
+    # lines earlier, so it was tautologically false and its error branch could
+    # not execute. Deleted rather than made real, because there is nothing here
+    # for it to reject: `candidate` is CONSTRUCTED from $plugin_dir and no
+    # caller-supplied component enters the string. What could genuinely be
+    # wrong -- a $plugin_dir that is relative, absent, or full of `..` -- is
+    # _validate_plugin_dir's job and it has already run; what the cache must not
+    # later ACCEPT is _validate_cached_cli_path's, and it re-checks on read. An
+    # unreachable branch left standing is worse than no branch, because it reads
+    # like an assurance that traversal is handled at this point.
     local candidate="$plugin_dir/scripts/aimi-cli.sh"
     if [ ! -x "$candidate" ]; then
       jq -n --arg msg "AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: $candidate" \
         '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
       return 1
     fi
-    # Validate: must be exactly $plugin_dir/scripts/aimi-cli.sh (no traversal)
-    if [ "$candidate" != "$plugin_dir/scripts/aimi-cli.sh" ]; then
-      jq -n --arg msg "Path rejected: does not match expected OpenCode pattern" \
-        '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
-      return 1
-    fi
     resolved_path="$candidate"
   else
-    # Claude Code branch: glob for latest installed path
+    # Claude Code branch: newest installed version (see
+    # _resolve_latest_cache_path). This verb needed a `|| resolved_path=""` here
+    # to survive an empty glob and reach its own not_found branch; the helper no
+    # longer has a failure mode, so the guard is gone rather than left standing
+    # as a hint that one exists.
     local config_dir
     config_dir=$(_claude_config_dir)
-    resolved_path=$(bash -c "ls \"$config_dir\"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1")
+    resolved_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
     if [ -z "$resolved_path" ]; then
       if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then
@@ -10280,31 +10228,31 @@ cmd_gate_pass() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Verify story has a gate field
-  local has_gate
-  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
-  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
-    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
-    exit 1
-  fi
+  # BEHAVIOUR CHANGE. The gate-present precondition was read in an unlocked jq
+  # and the {id, gate} echo-back re-read the file after the lock had been
+  # released -- three crossings with the lock around only the middle one. If
+  # the gate was removed in between, nothing re-asked: the write is a merge
+  # into `.gate`, and in jq `null + {status: "passed"}` is `{status:
+  # "passed"}`, so the verb did not refuse, it CREATED a gate on a story that
+  # no longer had one.
+  #
+  # One crossing, inside the lock: precondition, write and echo-back all decide
+  # against the same document. The refusal object and the exit status are
+  # unchanged -- it is only WHEN the question is asked that moved.
+  check_python3
+  local option_args=()
+  [ -n "$option" ] && option_args=(--option "$option")
 
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    if [ -n "$option" ]; then
-      jq --arg id "$story_id" --arg option "$option" \
-        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed", selectedOption: $option}' \
-        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-    else
-      jq --arg id "$story_id" \
-        '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "passed"}' \
-        "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-    fi
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+  local out rc=0
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" gate-pass \
+        --tasks-file "$tasks_file" --story-id "$story_id" "${option_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  ) || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || exit "$rc"
 }
 
 # Fail a gate on a story
@@ -10322,30 +10270,25 @@ cmd_gate_fail() {
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Verify story has a gate field
-  local has_gate
-  has_gate=$(jq --arg id "$story_id" '[.userStories[] | select(.id == $id) | .gate] | length' "$tasks_file")
-  if [ "$has_gate" -eq 0 ] || [ "$(jq --arg id "$story_id" '.userStories[] | select(.id == $id) | .gate' "$tasks_file")" = "null" ]; then
-    echo '{"valid":false,"errors":["Story '"$story_id"' has no gate defined"]}'
-    exit 1
-  fi
-
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" \
-      '(.userStories[] | select(.id == $id) | .gate) |= . + {status: "failed"}' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" '.userStories[] | select(.id == $id) | {id, gate}' "$tasks_file"
+  # Same three crossings, same behaviour change, same single call. See
+  # cmd_gate_pass above -- the guard these two carried was byte-identical, and
+  # it is one implementation now rather than two copies that could drift.
+  check_python3
+  local out rc=0
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" gate-fail \
+        --tasks-file "$tasks_file" --story-id "$story_id"
+    ) 200>"${tasks_file}.lock"
+  ) || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || exit "$rc"
 }
 
 # Update a nested field on a story
 # Usage: update-field US-NNN field.path value
-# Supports dotted paths like "verification.status"
+# field.path is a dotted chain of identifier segments, e.g. "verification.status"
 cmd_update_field() {
   local story_id="$1"
   local field_path="$2"
@@ -10353,36 +10296,43 @@ cmd_update_field() {
 
   if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
     echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    echo "  <field.path> is a dotted chain of identifier segments, e.g. verification.status" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
+  # The gate that used to stand between the caller's argument and a jq program
+  # built out of it. There is no such program any more -- tasks.py splits the
+  # path and indexes a dict with the segments -- so this is now the SOLE gate
+  # on the field path, and it stays exactly where it was, ahead of every reader
+  # of that argument.
+  validate_field_path "$field_path"
 
   local tasks_file
   tasks_file=$(get_tasks_file)
   validate_story_exists "$story_id" "$tasks_file"
 
-  # Build jq path from dotted notation (e.g., "verification.status" -> .verification.status)
-  # IFS-split on a herestring is trailing-newline-safe; avoids read returning non-zero
-  # on the final unterminated segment when piping through sed, which dropped the leaf.
-  local jq_path _parts _p
-  IFS=. read -ra _parts <<< "$field_path"
-  jq_path=''
-  for _p in "${_parts[@]}"; do
-    jq_path+=".$_p"
-  done
-
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
-  (
-    _lock "${tasks_file}.lock"
-    jq --arg id "$story_id" --arg val "$value" \
-      "(.userStories[] | select(.id == \$id) | ${jq_path}) = \$val" \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
-  ) 200>"${tasks_file}.lock"
-  rm -f "$tmp_file" 2>/dev/null
-
-  jq --arg id "$story_id" ".userStories[] | select(.id == \$id) | {id, ${field_path%%.*}}" "$tasks_file"
+  # One crossing, inside the lock. The assignment and the {id, <top-segment>}
+  # echo-back were two jq programs over the same file, the second re-reading
+  # what the first had just written; they are one call now, and the payload
+  # comes back from it. --value goes last -- see the note in cmd_mark_failed.
+  #
+  # No `|| exit $?`, and the two normalizers keep theirs, because that is the
+  # shape each verb already had. It is not a difference in behaviour: `set -euo
+  # pipefail` ends the script on the failing assignment either way, at the same
+  # status and before the payload is printed. update-field-lock-inutilizavel
+  # and update-field-intermediario-nao-objeto record both halves of that.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" update-field \
+        --tasks-file "$tasks_file" --story-id "$story_id" \
+        --field-path "$field_path" --value "$value"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
 }
 
 # Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches
@@ -10390,513 +10340,66 @@ cmd_validate_waves() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  jq '
-    . as $root |
-    ($root.userStories | map({(.id): (.dependsOn // [])}) | add // {}) as $deps |
-    ($root.userStories | map(.id)) as $all_ids |
-
-    # Compute waves iteratively
-    # Wave 0: stories with no dependencies
-    # Wave N: stories whose deps are all in waves < N
-    (
-      reduce range($all_ids | length) as $iteration (
-        {};
-        . as $assigned |
-        ($all_ids | map(select(. as $id | $assigned | has($id) | not))) as $remaining |
-        reduce $remaining[] as $id (
-          $assigned;
-          . as $current |
-          if (($deps[$id] // []) | length == 0) then
-            $current + {($id): 0}
-          elif (($deps[$id] // []) | all(. as $d | $current | has($d))) then
-            (($deps[$id] // []) | map($current[.]) | max + 1) as $wave |
-            $current + {($id): $wave}
-          else
-            $current
-          end
-        )
-      )
-    ) as $computed |
-
-    # Compare computed waves against stored wave fields
-    [
-      $root.userStories[] |
-      . as $story |
-      ($computed[$story.id] // null) as $computed_wave |
-      ($story.wave // null) as $stored_wave |
-      select(
-        ($computed_wave != null and $stored_wave != null and $computed_wave != $stored_wave) or
-        ($computed_wave != null and $stored_wave == null)
-      ) |
-      {
-        id: $story.id,
-        storedWave: $stored_wave,
-        computedWave: $computed_wave
-      }
-    ] as $mismatches |
-
-    if ($mismatches | length) == 0 then
-      {valid: true, errors: []}
-    else
-      {valid: false, errors: [$mismatches[] | "Wave mismatch: \(.id) stored=\(.storedWave) computed=\(.computedWave)"]}
-    end
-  ' "$tasks_file"
+  # NO exit-status handling, and that is not an omission to tidy up. This body
+  # ended at its jq call before the port and ends at the crossing now, so an
+  # invalid verdict still exits 0 -- the verdict is in `.valid`, never in `$?`.
+  # test-aimi-cli-part1-core.sh asserts the 0 against a wave-mismatch fixture.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-waves --tasks-file "$tasks_file"
 }
 
 # Validate tasks file citation fields
-# For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual stories
+# For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual
+# stories and BusinessSpec field citations for a frontend-only file's endpoints,
+# plus the metadata.execution enum, the execution/phase exclusivity, the
+# branchName charset and every story's verification.url charset.
 # For schemaVersion < 3.3: emits skip-info to stderr and exits 0
 # stdout: {valid, errors[]} JSON; exits non-zero when invalid
+#
+# ONE crossing, and NO lock: this is a pure reader, same as the four validators
+# beside it. What used to stand here read eight scalar metadata fields out of
+# one packed jq line, and carried three pieces of scaffolding to make that
+# packing safe -- a non-whitespace delimiter, an alternative operator that had
+# to emit a field rather than none, and a sentinel variable with no field to
+# receive it. All three are gone: tasks.py parses the document once and asks
+# eight ordinary questions of a dict. The section comment above
+# validate_tasks_metadata there says what each piece was defending and why a
+# single parse leaves nothing for any of them to do.
+#
+# PROJECT_ROOT is passed as a flag because it is bash's: find_aimi_root exports
+# it and get_tasks_file has already been gated against it. The two spec paths
+# cannot be confined out here -- they are read out of metadata.designBundle,
+# which is only visible after the crossing.
 cmd_validate_tasks() {
   local tasks_file
   tasks_file=$(get_tasks_file)
 
-  # ONE jq process for every scalar metadata field this function reads, rather
-  # than one process per field. This is a process-count fix, not an I/O fix:
-  # measured on this repo, a jq process costs ~18ms to start and ~1ms to read a
-  # 46KB tasks file, so eight separate reads of the same document paid ~8x the
-  # startup and bought nothing. Batching them costs one startup (~20ms) and cuts
-  # roughly 140ms off every validate-tasks invocation.
-  #
-  # EVERY FIELD USES `// ""`, NEVER `// empty` -- and that is load-bearing rather
-  # than stylistic. `empty` emits NO field at all when the value is absent, which
-  # shifts every following field one position left and assigns each variable its
-  # neighbour's value. Nothing would error; the wrong branchName would simply be
-  # validated against the wrong pattern. `// ""` always emits exactly one field
-  # per position, and the shell restores "absent" semantics by testing for the
-  # empty string -- which is what every consumer below already did.
-  #
-  # THE DELIMITER IS \037 (ASCII unit separator), NOT THE TAB @tsv EMITS, AND
-  # THAT SUBSTITUTION IS THE WHOLE CORRECTNESS ARGUMENT. `read` splits on IFS,
-  # but a tab is IFS *whitespace*, and bash collapses runs of IFS whitespace
-  # into a single delimiter -- so two adjacent empty fields (the common case
-  # here: no designBundle, no execution) silently vanish and every later value
-  # lands in the wrong variable. `// ""` keeps jq's output aligned; `IFS=$'\t'
-  # read` then throws that alignment away. \037 is not whitespace, so bash
-  # preserves every empty field exactly where it was.
-  #
-  # @tsv is still what produces the fields, because it escapes \t, \n, \r and \\
-  # inside each value -- so no value can contain a literal newline that would
-  # truncate `read`, nor a literal tab that would survive the tr below as a
-  # spurious separator. The tr is one ~2ms process; the seven jq processes it
-  # helps remove cost ~126ms.
-  local schema_version design_spec_rel prototype_count frontend_only
-  local business_spec_rel execution_mode has_phase branch_name
-  local _vt_meta _vt_probe
-  _vt_meta=$(jq -r '[
-    (.metadata.schemaVersion // .schemaVersion // "0"),
-    (.metadata.designBundle.designSpec // ""),
-    (.metadata.prototypePaths | if type == "array" then length else 0 end | tostring),
-    ((.metadata.frontendOnly // false) | tostring),
-    (.metadata.designBundle.businessSpec // ""),
-    (.metadata.execution // ""),
-    (if (.metadata.phase // null) != null then "true" else "false" end),
-    (.metadata.branchName // "")
-  ] | @tsv' "$tasks_file" 2>/dev/null | tr '\t' '\037')
-
-  if [ -n "$_vt_meta" ]; then
-    IFS=$'\037' read -r schema_version design_spec_rel prototype_count frontend_only \
-      business_spec_rel execution_mode has_phase branch_name _vt_probe <<< "$_vt_meta"
-    # The assertion is on what the SHELL parsed, never on what jq emitted --
-    # the bug this replaces passed a jq-side field count while the shell-side
-    # split had already dropped two fields. `_vt_probe` is a ninth name with no
-    # ninth field to receive it: `read` leaves it empty when the split produced
-    # exactly 8, and non-empty only if a future edit adds fields without adding
-    # variables. schema_version is separately required to be non-empty, which is
-    # what catches a split that produced too FEW.
-    if [ -n "$_vt_probe" ] || [ -z "$schema_version" ]; then
-      echo "validate-tasks: internal error: metadata read did not split into 8 fields" >&2
-      return 1
-    fi
-  fi
-  # An unreadable or malformed tasks file leaves every field empty, exactly as
-  # each individual `jq ... 2>/dev/null` did before.
-  schema_version="${schema_version:-}"
-
-  # Compare versions: below 3.3 → skip with info message
-  # Use sort -V to determine version ordering
-  if [ "$(printf '%s\n' "$schema_version" "3.3" | sort -V | head -n1)" != "3.3" ]; then
-    echo "skipping citation validation (schemaVersion ${schema_version} pre-dates citation enforcement)" >&2
-    return 0
-  fi
-
-  # Collect errors as a bash array
-  local errors=()
-
-  # DesignSpec scan: only when metadata.designBundle.designSpec is non-null
-  # AND metadata.prototypePaths is non-empty
-  # design_spec_rel and prototype_count come from the batched metadata read above.
-  prototype_count="${prototype_count:-0}"
-
-  if [ -n "$design_spec_rel" ] && [ "$prototype_count" -gt 0 ]; then
-    # Resolve DesignSpec path relative to PROJECT_ROOT
-    local design_spec_path
-    design_spec_path="${PROJECT_ROOT}/${design_spec_rel}"
-
-    if [ ! -f "$design_spec_path" ]; then
-      errors+=("${tasks_file}: DesignSpec file not found: ${design_spec_rel}")
-    else
-      # Extract visual stories: id + acceptanceCriteria entries as TSV lines
-      # Format: <story_id>\t<ac_index>\t<ac_text>
-      local visual_ac_data
-      visual_ac_data=$(jq -r '
-        .userStories[] |
-        select(.verification.strategy == "visual") |
-        . as $s |
-        .acceptanceCriteria | to_entries[] |
-        [$s.id, (.key | tostring), .value] | @tsv
-      ' "$tasks_file" 2>/dev/null)
-
-      if [ -n "$visual_ac_data" ]; then
-        # Process each AC entry
-        while IFS=$'\t' read -r story_id ac_index ac_text; do
-          [ -z "$story_id" ] && continue
-
-          # Extract all "literal" (DesignSpec § N.N L<line>) patterns from the AC
-          # Pattern: "some literal" (DesignSpec § N.N L<line>)
-          # Use grep to find all matches in the ac_text
-          local matches
-          matches=$(printf '%s' "$ac_text" | grep -oE '"[^"]+" \(DesignSpec § [0-9]+\.[0-9]+ L[0-9]+\)' 2>/dev/null || true)
-
-          [ -z "$matches" ] && continue
-
-          while IFS= read -r match; do
-            [ -z "$match" ] && continue
-
-            # Extract the literal string (between double quotes)
-            local literal section line_num
-            literal=$(printf '%s' "$match" | sed 's/^"\(.*\)" (DesignSpec § .*)$/\1/')
-            section=$(printf '%s' "$match" | grep -oE '§ [0-9]+\.[0-9]+' | sed 's/§ //')
-            line_num=$(printf '%s' "$match" | grep -oE 'L[0-9]+' | head -1 | sed 's/L//')
-
-            # Locate subsection in DesignSpec and check verbatim presence
-            if ! _validate_designspec_citation "$design_spec_path" "$literal" "$section"; then
-              errors+=("${tasks_file}: ${story_id} AC[${ac_index}]: missing DesignSpec citation for \"${literal}\" in section § ${section}")
-            fi
-          done <<< "$matches"
-        done <<< "$visual_ac_data"
-      fi
-    fi
-  fi
-
-  # BusinessSpec scan: only when metadata.frontendOnly is true AND metadata.designBundle.businessSpec is non-null
-  # frontend_only and business_spec_rel come from the batched metadata read above.
-  if [ "$frontend_only" = "true" ] && [ -n "$business_spec_rel" ]; then
-    # Resolve BusinessSpec path relative to PROJECT_ROOT
-    local business_spec_path
-    business_spec_path="${PROJECT_ROOT}/${business_spec_rel}"
-
-    if [ ! -f "$business_spec_path" ]; then
-      errors+=("${tasks_file}: BusinessSpec file not found: ${business_spec_rel}")
-    else
-      # Iterate every endpoints[] entry
-      local endpoint_count
-      endpoint_count=$(jq '.metadata.backendSpec.endpoints | if type == "array" then length else 0 end' "$tasks_file" 2>/dev/null)
-      endpoint_count="${endpoint_count:-0}"
-
-      local ep_index=0
-      while [ "$ep_index" -lt "$endpoint_count" ]; do
-        # Get source value for this endpoint
-        local ep_source
-        ep_source=$(jq -r --argjson idx "$ep_index" '.metadata.backendSpec.endpoints[$idx].source // empty' "$tasks_file" 2>/dev/null)
-
-        if [ -z "$ep_source" ]; then
-          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: missing source field")
-          ep_index=$((ep_index + 1))
-          continue
-        fi
-
-        # Check if source uses derived: prefix
-        if printf '%s' "$ep_source" | grep -q '^derived:'; then
-          # Warn to stderr, do not add to errors
-          printf '%s: backendSpec.endpoints[%s]: derived source — manual review required\n' \
-            "$tasks_file" "$ep_index" >&2
-          ep_index=$((ep_index + 1))
-          continue
-        fi
-
-        # Validate literal source format: "BusinessSpec § N[.N] L<line>"
-        if ! printf '%s' "$ep_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
-          errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}]: malformed source \"${ep_source}\" (expected 'BusinessSpec § N[.N] L<line>' or 'derived: ...')")
-          ep_index=$((ep_index + 1))
-          continue
-        fi
-
-        # Extract section from source
-        local ep_section
-        ep_section=$(printf '%s' "$ep_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
-
-        # Iterate every field in responseShape
-        local field_names
-        field_names=$(jq -r --argjson idx "$ep_index" \
-          '.metadata.backendSpec.endpoints[$idx].responseShape | if type == "object" then keys[] else empty end' \
-          "$tasks_file" 2>/dev/null)
-
-        while IFS= read -r field_name; do
-          [ -z "$field_name" ] && continue
-
-          # Get per-field source if it exists (responseShape field can be {type, source} or a scalar)
-          local field_source
-          field_source=$(jq -r --argjson idx "$ep_index" --arg fn "$field_name" \
-            '.metadata.backendSpec.endpoints[$idx].responseShape[$fn] | if type == "object" then .source // empty else empty end' \
-            "$tasks_file" 2>/dev/null)
-
-          # If field has its own source, validate it too
-          if [ -n "$field_source" ]; then
-            if printf '%s' "$field_source" | grep -q '^derived:'; then
-              printf '%s: backendSpec.endpoints[%s].responseShape.%s: derived source — manual review required\n' \
-                "$tasks_file" "$ep_index" "$field_name" >&2
-              continue
-            fi
-            if ! printf '%s' "$field_source" | grep -qE '^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$'; then
-              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: malformed source \"${field_source}\"")
-              continue
-            fi
-            # Use the field-level section for subsection lookup
-            local field_section
-            field_section=$(printf '%s' "$field_source" | grep -oE '§ [0-9]+(\.[0-9]+)?' | sed 's/§ //')
-            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$field_section"; then
-              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${field_section}")
-            fi
-          else
-            # No per-field source: check field name against the endpoint-level cited section
-            if ! _validate_businessspec_field "$business_spec_path" "$field_name" "$ep_section"; then
-              errors+=("${tasks_file}: backendSpec.endpoints[${ep_index}].responseShape.${field_name}: field name not found in BusinessSpec § ${ep_section}")
-            fi
-          fi
-        done <<< "$field_names"
-
-        ep_index=$((ep_index + 1))
-      done
-    fi
-  fi
-
-  # metadata.execution validation: optional discriminator, must be exactly
-  # "container" or "inline" when present. Absent is valid (defaults to inline
-  # for backward compatibility with every tasks.json written before this field
-  # existed) — see commands/references/execution-mode.md for the read contract.
-  # execution_mode comes from the batched metadata read above.
-  if [ -n "$execution_mode" ] && [ "$execution_mode" != "container" ] && [ "$execution_mode" != "inline" ]; then
-    errors+=("${tasks_file}: metadata.execution has invalid value \"${execution_mode}\" (expected \"container\" or \"inline\")")
-  fi
-
-  # metadata.execution / metadata.phase mutual exclusivity: a phase-scoped
-  # file (metadata.phase present) always executes inside its own phase
-  # container, so metadata.execution would be dead data there — the exact
-  # confusion US-006 corrects. /aimi:plan never writes both; this rule
-  # catches a hand-edited or stale file that carries both anyway.
-  # has_phase comes from the batched metadata read above.
-  if [ "$has_phase" = "true" ] && [ -n "$execution_mode" ]; then
-    errors+=("${tasks_file}: metadata.execution and metadata.phase cannot both be present (phase-scoped files never carry metadata.execution)")
-  fi
-
-  # metadata.branchName validation: must match the same mandated pattern
-  # already enforced by cmd_init_session and open-pr.md (see CLAUDE.md's
-  # Security Requirements) — branchName is interpolated into git/gh commands
-  # downstream, so a value outside this charset is a command-injection vector.
-  # An absent/empty value also fails, since the pattern requires a leading
-  # alphanumeric character.
-  # branch_name comes from the batched metadata read above.
-  if ! [[ "$branch_name" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
-    errors+=("${tasks_file}: metadata.branchName \"${branch_name}\" does not match the required pattern ^[a-zA-Z0-9][a-zA-Z0-9/_-]*\$")
-  fi
-
-  # verification.url charset validation: a conservative allowlist (letters,
-  # digits, and :/?#@!&*+,._~%=- , first character alphanumeric or /) that
-  # excludes backtick, $, quotes, ;, |, <, >, and whitespace — the characters
-  # needed for shell command injection when a URL is later interpolated into
-  # a quoted string (see I10 review finding). Stories without a verification
-  # object, or with a null/empty/non-string url, are ignored — same tolerance
-  # the metadata.execution check above gives to an absent field.
-  local url_charset_re='^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$'
-  local bad_urls
-  bad_urls=$(jq -r --arg re "$url_charset_re" '
-    .userStories[] |
-    select(.verification | type == "object") |
-    select((.verification.url | type == "string") and (.verification.url != "")) |
-    select((.verification.url | test($re)) | not) |
-    [.id, .verification.url] | @tsv
-  ' "$tasks_file" 2>/dev/null)
-
-  if [ -n "$bad_urls" ]; then
-    while IFS=$'\t' read -r story_id bad_url; do
-      [ -z "$story_id" ] && continue
-      errors+=("${tasks_file}: ${story_id} verification.url \"${bad_url}\" contains characters outside the allowed charset")
-    done <<< "$bad_urls"
-  fi
-
-  # Emit result JSON
-  if [ ${#errors[@]} -eq 0 ]; then
-    echo '{"valid": true, "errors": []}'
-    return 0
-  else
-    # Build JSON errors array
-    local errors_json
-    errors_json=$(printf '%s\n' "${errors[@]}" | jq -R . | jq -s .)
-    printf '{"valid": false, "errors": %s}\n' "$errors_json"
-    return 1
-  fi
-}
-
-# Helper: validate that a literal string appears verbatim in the cited DesignSpec subsection.
-# Subsection boundary: lines from "## N.N <heading>" (or "### N.N") to next heading of equal/higher level.
-# Normalizes Unicode quotes, em-dashes, non-breaking spaces, and HTML entities on both sides.
-# Usage: _validate_designspec_citation <spec_file> <literal> <section>
-# Returns 0 if found, 1 if not found.
-_validate_designspec_citation() {
-  local spec_file="$1"
-  local literal="$2"
-  local section="$3"
-
-  # Normalize a string: Unicode quotes → ASCII, em-dash → hyphen,
-  # non-breaking space → space, HTML entities to literal chars.
-  _normalize_text() {
-    local text="$1"
-    # Curly double quotes → straight double quote
-    text=$(printf '%s' "$text" | sed \
-      -e 's/\xe2\x80\x9c/"/g' \
-      -e 's/\xe2\x80\x9d/"/g' \
-      -e "s/\xe2\x80\x98/'/g" \
-      -e "s/\xe2\x80\x99/'/g" \
-      -e 's/\xe2\x80\x94/-/g' \
-      -e 's/\xc2\xa0/ /g' \
-      -e 's/&amp;/\&/g' \
-      -e 's/&nbsp;/ /g' \
-      -e 's/&lt;/</g' \
-      -e 's/&gt;/>/g' \
-      -e 's/&quot;/"/g')
-    printf '%s' "$text"
-  }
-
-  # Determine heading level for section N.N (always "##" — subsection level)
-  # Section like "3.1" is a sub-heading; we look for "## 3.1" or "### 3.1" etc.
-  # We scan for the section heading and collect lines until the next equal/higher heading.
-
-  local normalized_literal
-  normalized_literal=$(_normalize_text "$literal")
-
-  # Extract subsection body from the spec file
-  # Strategy: use awk to find the heading containing the section number,
-  # then collect lines until a heading of equal or higher level.
-  local subsection_body
-  subsection_body=$(awk -v section="$section" '
-    BEGIN { in_section = 0; heading_level = 0 }
-    {
-      # Detect markdown headings: count leading # characters
-      if (/^#+[[:space:]]/) {
-        level = 0
-        line_copy = $0
-        while (substr(line_copy, 1, 1) == "#") {
-          level++
-          line_copy = substr(line_copy, 2)
-        }
-        # Check if this heading contains the section number
-        if (!in_section) {
-          # Look for pattern like "§ N.N" or "N.N " at start of heading text
-          heading_text = substr($0, level + 1)
-          # Strip leading spaces
-          gsub(/^[[:space:]]+/, "", heading_text)
-          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
-              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
-            in_section = 1
-            heading_level = level
-            next
-          }
-        } else {
-          # We are in the section — stop at equal or higher level heading
-          if (level <= heading_level) {
-            exit
-          }
-        }
-      }
-      if (in_section) {
-        print $0
-      }
-    }
-  ' "$spec_file")
-
-  if [ -z "$subsection_body" ]; then
-    # Section not found in spec — treat as missing
-    return 1
-  fi
-
-  # Normalize the subsection body
-  local normalized_body
-  normalized_body=$(_normalize_text "$subsection_body")
-
-  # Check if normalized literal is a substring of normalized body
-  if printf '%s' "$normalized_body" | grep -qF "$normalized_literal"; then
-    return 0
-  fi
-  return 1
-}
-
-# Helper: validate that a field name appears as a literal substring in the cited BusinessSpec subsection.
-# Reuses the same subsection-boundary algorithm as _validate_designspec_citation.
-# Usage: _validate_businessspec_field <spec_file> <field_name> <section>
-# Returns 0 if found, 1 if not found.
-_validate_businessspec_field() {
-  local spec_file="$1"
-  local field_name="$2"
-  local section="$3"
-
-  # Extract subsection body from the spec file using the same awk strategy
-  local subsection_body
-  subsection_body=$(awk -v section="$section" '
-    BEGIN { in_section = 0; heading_level = 0 }
-    {
-      if (/^#+[[:space:]]/) {
-        level = 0
-        line_copy = $0
-        while (substr(line_copy, 1, 1) == "#") {
-          level++
-          line_copy = substr(line_copy, 2)
-        }
-        if (!in_section) {
-          heading_text = substr($0, level + 1)
-          gsub(/^[[:space:]]+/, "", heading_text)
-          if (heading_text ~ ("^(§[[:space:]]*)?" section "([[:space:]]|$)") || \
-              heading_text ~ ("§[[:space:]]*" section "([[:space:]]|$)")) {
-            in_section = 1
-            heading_level = level
-            next
-          }
-        } else {
-          if (level <= heading_level) {
-            exit
-          }
-        }
-      }
-      if (in_section) {
-        print $0
-      }
-    }
-  ' "$spec_file")
-
-  if [ -z "$subsection_body" ]; then
-    return 1
-  fi
-
-  # Check if field name appears as a literal substring in the subsection body
-  if printf '%s' "$subsection_body" | grep -qF "$field_name"; then
-    return 0
-  fi
-  return 1
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-tasks \
+    --tasks-file "$tasks_file" --project-root "$PROJECT_ROOT"
 }
 
 # Check whether a tasks file's stories are ALL terminal (completed or skipped)
 # and non-empty. Echoes nothing; return code only (0 = archivable-as-a-file).
+#
+# ONE crossing where there were two jq programs over the same file, and the
+# contract is unchanged: it says nothing, it returns 1 for a missing, malformed,
+# non-list or empty document, and it NEVER takes the command down. Both of those
+# properties still come from the same two places -- `2>/dev/null` swallows the
+# diagnostic, and every caller invokes this in a condition context where `set -e`
+# is suspended -- so a document tasks.py refuses is simply not archivable.
+#
+# ITS NON-EMPTY CLAUSE IS DELIBERATELY NOT op_archive_task's. The two rules
+# disagree about `userStories: []` -- refused here, archived there -- and the
+# disagreement predates any port; both sides are pinned in golden_from_jq.json
+# (la-zero-historias and archive-userstories-vazio). op_archivable_file_is_terminal
+# says at length why they share no helper.
 _archivable_file_is_terminal() {
   local tasks_file="$1"
-  local non_terminal
-  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$tasks_file" 2>/dev/null)
-  [ -z "$non_terminal" ] && return 1
-  [ "$non_terminal" -ne 0 ] && return 1
-
-  local total
-  total=$(jq '.userStories | length' "$tasks_file" 2>/dev/null)
-  [ -z "$total" ] && return 1
-  [ "$total" -eq 0 ] && return 1
+  local verdict
+  verdict=$( { check_python3 && python3 "$(_aimi_tasks_py)" \
+    archivable-file-is-terminal --tasks-file "$tasks_file"; } 2>/dev/null ) || return 1
+  [ "$verdict" = "true" ] || return 1
   return 0
 }
 
@@ -10906,8 +10409,9 @@ _archivable_file_is_terminal() {
 # tasks.json) via the shared discovery helper. A feature folder's nested
 # phase tasks files surface together as a single unit -- only when every
 # phase tasks file discovered under that feature is all-terminal AND the
-# feature's roadmap.json (read directly via jq, not a roadmap-lifecycle
-# subcommand, to avoid coupling to its still-evolving CLI surface) marks
+# feature's roadmap.json (read through roadmap.py's own list-archivable-phases
+# op, which owns roadmap.json's document logic; NOT through a roadmap-lifecycle
+# subcommand, whose wrapper wants a feature slug where this walks paths) marks
 # every phase completed -- rather than piecemeal as each phase happens to
 # finish. "completed" is the only terminal phase status (see the roadmap
 # status enum in cmd_roadmap_set_status); there is no "deferred" status. A
@@ -10981,22 +10485,59 @@ cmd_list_archivable() {
     done
     [ "$all_terminal" = true ] || continue
 
+    # ---- the seam with the tasks.json half. Above this line every file has
+    # been through _archivable_file_is_terminal, which is tasks.py's; below it
+    # the FEATURE is judged by what its roadmap.json says, which is roadmap.py's.
+    # Neither reads the other's document and the two rules stay separate.
+    #
+    # ONE crossing per roadmap, where there were three jq programs over the same
+    # file -- the `jq -e .` validity probe, the non-completed count and the
+    # verification_failed collect-and-join. Which statuses are terminal and
+    # which are stuck is roadmap.py's to say now; what survives here is bash's
+    # own control flow over the answer, unchanged line for line, plus the
+    # sentence, which stays here because it names $feature_dir.
+    #
+    # THE FOUR-FIELD SPLIT IS PARAMETER EXPANSION AND NOT jq, the way
+    # cmd_init_session splits its own first line off. op_list_archivable_phases
+    # documents the stream: usable, the count, the stuck ids raw (which may be
+    # empty, and may be several lines, because a phase id is whatever someone
+    # typed), and the whole verdict compact on the LAST line -- one line
+    # guaranteed, so a hostile id cannot shift the fields above it.
+    #
+    # `usable` carries what `jq -e .` used to decide: a malformed roadmap.json,
+    # or one whose value is null or false, is not readable and the feature is
+    # INCLUDED anyway by the fall-through below. An EMPTY file is the third
+    # state and still the only input that reaches the `-z` arm: jq exited 0
+    # over zero documents and printed no count, so the feature is EXCLUDED with
+    # nothing said. And a `.phases` that cannot be iterated still ends the whole
+    # command -- the assignment is a bare command under `set -euo pipefail`,
+    # exactly as the jq it replaced was -- except that roadmap.py now says which
+    # file and which shape instead of dying silently at jq's own status.
+    #
+    # No check_python3 here on purpose: an interpreter-less host never reaches
+    # this line, because _archivable_file_is_terminal has already answered "not
+    # terminal" for every file in the feature and the loop continued above. The
+    # verb's documented degrade -- an empty list rather than a broken command --
+    # is the predicate's, and this crossing does not take it away.
     local roadmap_path="$feature_dir/roadmap.json"
-    if [ -f "$roadmap_path" ] && jq -e . "$roadmap_path" >/dev/null 2>&1; then
-      local non_terminal_phases
-      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed")] | length' "$roadmap_path" 2>/dev/null)
-      [ -z "$non_terminal_phases" ] && continue
-      if [ "$non_terminal_phases" -ne 0 ]; then
-        # A stuck (verification_failed) phase is excluded the same as any
-        # other non-completed status, but never silently -- name it and the
-        # feature on stderr every run so the block stays visible instead of
-        # becoming an unexplained permanent absence from the result.
-        local stuck_ids
-        stuck_ids=$(jq -r '[.phases[] | select(.status == "verification_failed") | (.id|tostring)] | join(", ")' "$roadmap_path" 2>/dev/null)
-        if [ -n "$stuck_ids" ]; then
-          echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+    if [ -f "$roadmap_path" ]; then
+      local verdict rest usable non_terminal_phases stuck_ids
+      verdict=$(python3 "$(_aimi_roadmap_py)" list-archivable-phases --roadmap "$roadmap_path")
+      usable=${verdict%%$'\n'*};           rest=${verdict#*$'\n'}
+      non_terminal_phases=${rest%%$'\n'*}; rest=${rest#*$'\n'}
+      stuck_ids=${rest%$'\n'*}
+      if [ "$usable" = true ]; then
+        [ -z "$non_terminal_phases" ] && continue
+        if [ "$non_terminal_phases" -ne 0 ]; then
+          # A stuck (verification_failed) phase is excluded the same as any
+          # other non-completed status, but never silently -- name it and the
+          # feature on stderr every run so the block stays visible instead of
+          # becoming an unexplained permanent absence from the result.
+          if [ -n "$stuck_ids" ]; then
+            echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+          fi
+          continue
         fi
-        continue
       fi
     fi
     # No roadmap.json (or malformed): every discovered phase file already
@@ -11013,6 +10554,16 @@ cmd_list_archivable() {
 
 # Archive a task file (and linked brainstorm) to .aimi/archive/
 # Usage: archive-task <path>
+#
+# THE ONLY VERB IN THIS FILE THAT DELETES A USER'S FILES, and the split of
+# responsibility reflects it. Bash keeps the <path> ARGUMENT: it exists before
+# the document is read, so validate_path_in_project stays the sole authority
+# over it and refuses an escaping argument without python3 ever starting.
+# tasks.py owns the paths that come OUT of the document -- brainstormPath,
+# researchPaths[], prototypePaths[] -- because those exist only after the
+# crossing, and routing them back here would mean reading the file twice.
+# require_in_project over there is an exact port of validate_path_in_project,
+# refusal message and exit status included.
 cmd_archive_task() {
   local task_path="$1"
 
@@ -11031,123 +10582,11 @@ cmd_archive_task() {
   resolved_task=$(resolve_path "$task_path")
   validate_path_in_project "$resolved_task"
 
-  # Verify all stories are terminal
-  local non_terminal
-  non_terminal=$(jq '[.userStories[] | select(.status != "completed" and .status != "skipped")] | length' "$resolved_task" 2>/dev/null)
-  if [ -z "$non_terminal" ] || [ "$non_terminal" -ne 0 ]; then
-    echo "Error: Task file has non-terminal stories — cannot archive" >&2
-    exit 1
-  fi
-
-  # Create archive directory
-  local archive_dir="$AIMI_DIR/archive"
-  mkdir -p "$archive_dir"
-
-  # Helper: move a file to archive with collision handling
-  # Usage: _archive_move <source_path>
-  # Outputs the destination path
-  _archive_move() {
-    local src="$1"
-    local basename
-    basename=$(basename "$src")
-    local dest="$archive_dir/$basename"
-
-    if [ ! -e "$dest" ]; then
-      mv "$src" "$dest"
-      printf '%s' "$dest"
-      return
-    fi
-
-    # Handle collision: append -N suffix before extension
-    local name_no_ext ext
-    # Split on first dot for files like foo-tasks.json
-    name_no_ext="${basename%%.*}"
-    ext="${basename#"$name_no_ext"}"  # includes leading dot(s)
-
-    local n=2
-    while true; do
-      dest="$archive_dir/${name_no_ext}-${n}${ext}"
-      if [ ! -e "$dest" ]; then
-        mv "$src" "$dest"
-        printf '%s' "$dest"
-        return
-      fi
-      n=$((n + 1))
-    done
-  }
-
-  # Move the task file
-  local archived_task
-  archived_task=$(_archive_move "$resolved_task")
-
-  # Move companion .lock file if it exists
-  if [ -f "${resolved_task}.lock" ]; then
-    _archive_move "${resolved_task}.lock" > /dev/null
-  fi
-
-  # Move linked brainstorm if specified in metadata
-  local brainstorm_path archived_brainstorm=""
-  brainstorm_path=$(jq -r '.metadata.brainstormPath // empty' "$archived_task" 2>/dev/null)
-
-  if [ -n "$brainstorm_path" ]; then
-    # Resolve relative to project root
-    local resolved_brainstorm
-    if [ "${brainstorm_path#/}" = "$brainstorm_path" ]; then
-      # Relative path — resolve from project root
-      resolved_brainstorm="$PROJECT_ROOT/$brainstorm_path"
-    else
-      resolved_brainstorm="$brainstorm_path"
-    fi
-
-    # Validate brainstorm path stays within project root
-    if [ -e "$resolved_brainstorm" ]; then
-      validate_path_in_project "$resolved_brainstorm"
-      archived_brainstorm=$(_archive_move "$resolved_brainstorm")
-    fi
-  fi
-
-  # Delete linked research files (ephemeral — rm -f, not archived)
-  local research_cleaned=0
-  while IFS= read -r rpath; do
-    [ -z "$rpath" ] && continue
-    local resolved_research
-    if [ "${rpath#/}" = "$rpath" ]; then
-      # Relative path — resolve from project root
-      resolved_research="$PROJECT_ROOT/$rpath"
-    else
-      resolved_research="$rpath"
-    fi
-    validate_path_in_project "$resolved_research"
-    if [ -e "$resolved_research" ]; then
-      rm -f "$resolved_research"
-      research_cleaned=$((research_cleaned + 1))
-    fi
-  done < <(jq -r '.metadata.researchPaths[]? // empty' "$archived_task" 2>/dev/null)
-
-  # Delete linked prototype files (ephemeral — rm -f, not archived)
-  local prototype_cleaned=0
-  while IFS= read -r ppath; do
-    [ -z "$ppath" ] && continue
-    local resolved_prototype
-    if [ "${ppath#/}" = "$ppath" ]; then
-      # Relative path — resolve from project root
-      resolved_prototype="$PROJECT_ROOT/$ppath"
-    else
-      resolved_prototype="$ppath"
-    fi
-    validate_path_in_project "$resolved_prototype"
-    if [ -e "$resolved_prototype" ]; then
-      rm -f "$resolved_prototype"
-      prototype_cleaned=$((prototype_cleaned + 1))
-    fi
-  done < <(jq -r '.metadata.prototypePaths[]? // empty' "$archived_task" 2>/dev/null)
-
-  # Output result as JSON
-  jq -n --arg task "$archived_task" \
-    --arg brainstorm "${archived_brainstorm:-}" \
-    --argjson researchCleaned "$research_cleaned" \
-    --argjson prototypeCleaned "$prototype_cleaned" \
-    '{archived: {task: $task, brainstorm: (if $brainstorm == "" then null else $brainstorm end), researchCleaned: $researchCleaned, prototypeCleaned: $prototypeCleaned}}'
+  check_python3
+  python3 "$(_aimi_tasks_py)" archive-task \
+    --tasks-file "$resolved_task" \
+    --project-root "$PROJECT_ROOT" \
+    --archive-dir "$AIMI_DIR/archive"
 }
 
 # Usage: research-lookup [--ignore-missing-cited-paths] <path>
@@ -11445,20 +10884,24 @@ cmd_research_gc() {
   local referenced_set=""
 
   # --- Source 1: .aimi/tasks/*.json metadata.researchPaths ---
+  #
+  # ONE crossing for the whole directory, where there was one jq startup per
+  # file. The GLOB STAYS HERE and its expansion is handed over as arguments,
+  # because which file is read first decides what survives an abort and the
+  # shell's collation is the order that was recorded. check_python3 is called
+  # OUTSIDE the process substitution on purpose: an interpreter that failed to
+  # start inside it would end the subshell, leave the referenced-set empty, and
+  # the sweep below would then collect every live research file as an orphan.
   local tasks_dir="$AIMI_DIR/tasks"
   if [ -d "$tasks_dir" ]; then
+    check_python3
     while IFS= read -r rpath; do
       [ -z "$rpath" ] && continue
       # Normalize: strip leading ./ and collapse to a canonical relative path
       rpath="${rpath#./}"
       referenced_set="$referenced_set
 $rpath"
-    done < <(
-      for f in "$tasks_dir"/*.json; do
-        [ -f "$f" ] || continue
-        jq -r '.metadata.researchPaths[]? // empty' "$f" 2>/dev/null
-      done
-    )
+    done < <(python3 "$(_aimi_tasks_py)" research-paths "$tasks_dir"/*.json 2>/dev/null)
   fi
 
   # --- Source 2: .aimi/brainstorms/*.md frontmatter researchPaths ---
@@ -11589,18 +11032,20 @@ $rp_entry"
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>]
 # ============================================================================
-
-# _story_merge_assign_ids: given a JSON array of story objects (already loaded),
-# assign sequential US-NNN IDs by lexicographic order of their source filename.
-# The $1 array has objects with a synthetic "srcFile" key attached before this call.
-# Returns the array with id fields populated.
-
+#
+# Everything from "read the staging directory" to "the files are on disk" lives
+# in story_merge.py, which owns the merge, both split axes and the writes. What
+# stays here is the shell-shaped half: flag parsing, path confinement, and the
+# --phase-aware basename precondition, which is pure string manipulation on
+# --output and has to run before the writers so both of their `${base%-tasks}`
+# strips stay byte-identical.
+#
+# The locking moved with the writers rather than staying here the way the
+# roadmap verbs' does. It had to: on the PROJECT axis the output paths are
+# derived from the stories themselves, and bash cannot hold a lock on a name it
+# has not computed yet.
 cmd_story_merge() {
   local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
-  # Resolved by the --foundation injection sweep below and consumed (only) by
-  # the PROJECT-axis writer, which flags cross-group edges onto it distinctly.
-  # Stays "" whenever --foundation was omitted, so no real id can match it.
-  local foundation_id=""
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -11653,14 +11098,14 @@ cmd_story_merge() {
     exit 1
   fi
   # --phase-aware strips ONE trailing "-tasks" segment from the --output
-  # basename. Both writers do that strip with the same `${base_no_ext%-tasks}`
-  # expansion, and on a basename that is exactly "tasks" the strip is a no-op
-  # while on "-tasks" it collapses to the empty string -- either way the
-  # derived name degenerates (".../-frontend-tasks.json", ".../-<slug>-tasks.json":
-  # a basename starting with "-", which every downstream tool reads as a flag).
-  # Guarding inside the writers would mean either fixing one axis and leaving
-  # the other, or changing SIDE-axis behavior; refusing the input here leaves
-  # both strips byte-identical and costs the caller one well-named error.
+  # basename. Both writers do that strip with the same expansion, and on a
+  # basename that is exactly "tasks" the strip is a no-op while on "-tasks" it
+  # collapses to the empty string -- either way the derived name degenerates
+  # (".../-frontend-tasks.json", ".../-<slug>-tasks.json": a basename starting
+  # with "-", which every downstream tool reads as a flag). Guarding inside the
+  # writers would mean either fixing one axis and leaving the other, or changing
+  # SIDE-axis behavior; refusing the input here leaves both strips
+  # byte-identical and costs the caller one well-named error.
   # The derivation below mirrors the writers' exactly (basename, strip the
   # extension after the LAST dot) so the precondition can never drift from the
   # expansion it protects.
@@ -11697,1517 +11142,27 @@ cmd_story_merge() {
     exit 1
   fi
 
-  # --- Glob *.json files, sorted lexicographically ---
-  # Skip non-story sidecars written by plan.md Phase 3b (outline.json) and any
-  # future *outline*.json metadata files — they have a different shape and would
-  # be mis-merged as bogus stories.
-  local staging_files=()
-  while IFS= read -r f; do
-    local fbase
-    fbase=$(basename "$f")
-    case "$fbase" in
-      outline.json|*outline*.json|metadata.json|audit-result.json) continue ;;
-    esac
-    staging_files+=("$f")
-  done < <(find "$staging_dir" -maxdepth 1 -name '*.json' -type f | sort)
-
-  if [ ${#staging_files[@]} -eq 0 ]; then
-    echo "Error: story-merge: no *.json files found in $staging_dir" >&2
-    exit 1
+  check_python3
+  # $_ROADMAP_BRANCH_REGEX goes over as an argument rather than being restated
+  # in Python: the PROJECT axis validates every branchName it derives against
+  # it and quotes it back in the refusal, and one constant with two definitions
+  # is how the two drift apart.
+  local sm_args=(
+    --staging-dir "$staging_dir"
+    --output "$output_path"
+    --split "$split_mode"
+    --branch-regex "$_ROADMAP_BRANCH_REGEX"
+  )
+  if [ "$agent_mode" = true ]; then
+    sm_args+=(--agent-mode)
   fi
-
-  # --- Validate each file is valid JSON and extract numeric index prefix ---
-  # Also detect duplicate numeric index prefixes
-  local -A seen_indices
-  local files_ordered=()
-  for f in "${staging_files[@]}"; do
-    local base
-    base=$(basename "$f")
-    # Validate JSON
-    if ! jq -e . "$f" >/dev/null 2>&1; then
-      echo "Error: story-merge: malformed JSON in file: $base" >&2
-      exit 1
-    fi
-    # Extract numeric prefix (leading digits up to first non-digit)
-    local idx
-    idx=$(printf '%s' "$base" | sed 's/^\([0-9]*\).*/\1/')
-    if [ -n "$idx" ]; then
-      if [ -n "${seen_indices[$idx]+_}" ]; then
-        echo "Error: story-merge: duplicate index '$idx' in files: ${seen_indices[$idx]} and $base" >&2
-        exit 1
-      fi
-      seen_indices[$idx]="$base"
-    fi
-    files_ordered+=("$f")
-  done
-
-  # --- Load all staging story objects, attaching a _srcIdx field (0-based) ---
-  # Build a single merged JSON array from all files.
-  # Each staging file should be either a single story object or an array of stories.
-  local merged_array="[]"
-  local story_idx=0
-  for f in "${files_ordered[@]}"; do
-    local content
-    content=$(cat "$f")
-    # Detect if top-level is array or object
-    local kind
-    kind=$(printf '%s' "$content" | jq -r 'if type == "array" then "array" else "object" end')
-    if [ "$kind" = "array" ]; then
-      # Flatten array entries, attaching _srcIdx to each
-      local base
-      base=$(basename "$f")
-      merged_array=$(printf '%s\n%s' "$merged_array" "$content" | jq -s \
-        --arg base "$base" \
-        '.[0] as $acc | .[1] as $arr |
-         $acc + ($arr | map(. + {_srcIdx: ('$story_idx' + (. | path) | if . == null then 0 else . end)}))
-        ' 2>/dev/null) || true
-      # Simpler approach: just append with sequential indices
-      local arr_len
-      arr_len=$(printf '%s' "$content" | jq 'length')
-      local i
-      for (( i=0; i<arr_len; i++ )); do
-        local story_obj
-        story_obj=$(printf '%s' "$content" | jq ".[$i]")
-        merged_array=$(printf '%s' "$merged_array" | jq \
-          --argjson s "$story_obj" \
-          --argjson idx "$story_idx" \
-          '. + [$s + {_srcIdx: $idx}]')
-        story_idx=$((story_idx + 1))
-      done
-      merged_array=$(printf '%s' "$merged_array" | jq '.')
-    else
-      # Single story object
-      merged_array=$(printf '%s' "$merged_array" | jq \
-        --argjson s "$content" \
-        --argjson idx "$story_idx" \
-        '. + [$s + {_srcIdx: $idx}]')
-      story_idx=$((story_idx + 1))
-    fi
-  done
-
-  local total_stories
-  total_stories=$(printf '%s' "$merged_array" | jq 'length')
-
-  # --- Assign US-NNN IDs by source index (lex order of files, order within file) ---
-  merged_array=$(printf '%s' "$merged_array" | jq '
-    to_entries | map(
-      .value + {id: ("US-" + ((.key + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}
-    )
-  ')
-
-  # Also build index→id map (srcIdx → US-NNN) for outline:NN remap
-  local idx_to_id
-  idx_to_id=$(printf '%s' "$merged_array" | jq '[
-    .[] | {key: (.._srcIdx | tostring), value: .id} | select(.key != null)
-  ] | from_entries' 2>/dev/null || echo '{}')
-  # Simpler: build map as array of [srcIdx, id]
-  idx_to_id=$(printf '%s' "$merged_array" | jq '[.[] | {srcIdx: ._srcIdx, id: .id}]')
-
-  # --- Remap outline:NN tokens in dependsOn arrays ---
-  # "outline:02" → US-NNN where srcIdx == 2 (zero-padded 2 = index 1? no: outline index is 1-based per decision)
-  # Decision: "Sub-agents emit dependsOn entries as 'outline:NN' (zero-padded, matching the outline order)"
-  # The outline order matches file lex order → outline:01 = first story (srcIdx=0) → US-001
-  # So outline:NN (1-based) → srcIdx = NN - 1 → look up US-NNN
-  merged_array=$(printf '%s\n%s' "$merged_array" "$idx_to_id" | jq -s '
-    .[0] as $stories |
-    .[1] as $idx_map |
-
-    # Build outline-index → US-NNN map: outline:01 means 1-based index = srcIdx 0
-    ($stories | to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
-
-    $stories | map(
-      .dependsOn = [
-        (.dependsOn // [])[] |
-        if startswith("outline:") then
-          (ltrimstr("outline:")) as $nn |
-          if $outline_map[$nn] != null then $outline_map[$nn]
-          else "UNRESOLVED_OUTLINE:" + $nn
-          end
-        else
-          .
-        end
-      ]
-    )
-  ')
-
-  # Check for unresolved outline refs
-  local unresolved
-  unresolved=$(printf '%s' "$merged_array" | jq -r '
-    [.[] | .id as $sid | (.dependsOn // [])[] | select(startswith("UNRESOLVED_OUTLINE:")) | $sid + ": " + .] | .[]
-  ')
-  if [ -n "$unresolved" ]; then
-    echo "Error: story-merge: unresolved outline reference(s):" >&2
-    printf '%s\n' "$unresolved" >&2
-    exit 1
+  if [ "$phase_aware" = true ]; then
+    sm_args+=(--phase-aware)
   fi
-
-  # --- Remove synthetic _srcIdx field before further processing ---
-  merged_array=$(printf '%s' "$merged_array" | jq '[.[] | del(._srcIdx)]')
-
-  # --- Resolve the split axis (and refuse unrouteable .project values) ---
-  # Earliest point at which every story carries its final US-NNN id, and still
-  # ahead of --foundation, cycle detection, and the Phase 3.1/4.1/4.2 sweeps:
-  # a refusal here costs nothing and cannot emit a warning about a plan that
-  # was never going to be written. The axis is decided ONCE, here, and the
-  # writers below only read the answer.
-  local split_axis
-  split_axis=$(_story_merge_resolve_axis "$merged_array" "$split_mode") || exit 1
-
-  # --- Foundation dependsOn injection sweep (--foundation NN) ---
-  # Runs after the outline:NN remap and _srcIdx strip, and before both the
-  # Kahn's-algorithm cycle detection and wave computation below, so injected
-  # edges are naturally included in both without touching either block.
-  # foundation_idx is an outline position (1-based, same convention as
-  # outline:NN tokens) — resolved against the array's own position, not
-  # against a literal staging-filename digit.
-  # Cycle-safe by construction: the foundation's own dependsOn is asserted
-  # empty before any edge is added, and injection only ever adds edges
-  # pointing toward the foundation (never away from it), so no new cycle can
-  # be introduced; the Kahn's-algorithm check below still runs unmodified.
   if [ -n "$foundation_idx" ]; then
-    foundation_id=$(printf '%s' "$merged_array" | jq -r --arg nn "$foundation_idx" '
-      (to_entries | map({key: (.key + 1 | tostring | if length == 1 then "0" + . else . end), value: .value.id}) | from_entries) as $outline_map |
-      $outline_map[$nn] // ""
-    ')
-    if [ -z "$foundation_id" ]; then
-      echo "Error: story-merge: --foundation $foundation_idx not present among staging files" >&2
-      exit 1
-    fi
-
-    local foundation_depends_on
-    foundation_depends_on=$(printf '%s' "$merged_array" | jq -c --arg fid "$foundation_id" '[.[] | select(.id == $fid)][0].dependsOn // []')
-    if [ "$foundation_depends_on" != "[]" ]; then
-      echo "Error: story-merge: foundation story $foundation_id has non-empty dependsOn" >&2
-      exit 1
-    fi
-
-    merged_array=$(printf '%s' "$merged_array" | jq --arg fid "$foundation_id" '
-      map(
-        if .id == $fid then
-          .
-        else
-          .dependsOn = (
-            (.dependsOn // []) as $d |
-            if ($d | index($fid)) != null then $d else $d + [$fid] end
-          )
-        end
-      )
-    ')
+    sm_args+=(--foundation "$foundation_idx")
   fi
-
-  # --- DAG cycle detection via topological sort (Kahn's algorithm in jq) ---
-  local cycle_result
-  cycle_result=$(printf '%s' "$merged_array" | jq '
-    . as $stories |
-    ($stories | map(.id)) as $all_ids |
-
-    # Build adjacency: dependsOn edges (dep → story means story depends on dep)
-    # For cycle detection, we want to find if any node is reachable from itself
-    # via Kahn topological sort: if remaining nodes exist after sort, there is a cycle
-
-    # Compute in-degree for each node
-    (reduce $stories[] as $s (
-      {};
-      . + {($s.id): (($s.dependsOn // []) | length)}
-    )) as $in_degree |
-
-    # Compute adjacency list: adj[dep_id] = [story_ids that depend on dep_id]
-    (reduce $stories[] as $s (
-      {};
-      reduce ($s.dependsOn // [])[] as $dep (
-        .;
-        .[$dep] = (.[$dep] // []) + [$s.id]
-      )
-    )) as $adj |
-
-    # Kahn: start with zero in-degree nodes
-    ([$stories[] | select((($in_degree[.id]) // 0) == 0) | .id]) as $initial_queue |
-
-    # Iterate using fixed accumulator variable binding
-    (reduce range($stories | length) as $_ (
-      {queue: $initial_queue, deg: $in_degree, visited: []};
-      if (.queue | length) == 0 then .
-      else
-        .queue[0] as $node |
-        .deg as $cur_deg |
-        .visited as $cur_vis |
-        .queue[1:] as $rest_q |
-        ($adj[$node] // []) as $neighbors |
-        (reduce $neighbors[] as $n ($cur_deg; .[$n] = ((.[$n] // 1) - 1))) as $new_deg |
-        {
-          queue: ($rest_q + [$neighbors[] | . as $n | select(($new_deg[$n] // 0) == 0)]),
-          deg: $new_deg,
-          visited: ($cur_vis + [$node])
-        }
-      end
-    )) as $result |
-
-    if ($result.visited | length) == ($stories | length) then
-      {cycle: false, stories_in_cycle: []}
-    else
-      {
-        cycle: true,
-        stories_in_cycle: [$stories[] | .id | select(. as $id | ($result.visited | index($id)) == null)]
-      }
-    end
-  ')
-
-  local has_cycle
-  has_cycle=$(printf '%s' "$cycle_result" | jq -r '.cycle')
-  if [ "$has_cycle" = "true" ]; then
-    local cycle_stories
-    cycle_stories=$(printf '%s' "$cycle_result" | jq -r '.stories_in_cycle | join(", ")')
-    echo "Error: story-merge: circular dependency detected among stories: $cycle_stories" >&2
-    exit 1
-  fi
-
-  # --- Wave computation: roots = wave 1, others = max(dep waves) + 1 ---
-  merged_array=$(printf '%s' "$merged_array" | jq '
-    . as $stories |
-    # Iterative wave assignment: repeat until stable (max N iterations)
-    reduce range($stories | length) as $_ (
-      ($stories | map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)}));
-      . as $current |
-      map(
-        if .wave > 0 then .
-        else
-          . as $story |
-          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
-          if ($dep_waves | all(. > 0)) then
-            . + {wave: (($dep_waves | max) + 1)}
-          else
-            .
-          end
-        end
-      )
-    )
-  ')
-
-  # --- Rule 22: Mock-sync AC routing ---
-  # Process each schema-extending story: route mock-sync ACs to consumer stories.
-  # We implement this as a shell loop to avoid complex nested jq.
-  local schema_ids
-  schema_ids=$(printf '%s' "$merged_array" | jq -r '
-    .[] | select(
-      (.implementation.files // []) | any(
-        test("schemas/.*\\.(ts|js|py|rb)$") or
-        test("types/.*\\.(ts|js)$") or
-        test("zod/.*\\.(ts|js)$") or
-        test("\\.schema\\.ts$") or
-        test("\\.types\\.ts$")
-      )
-    ) | .id
-  ')
-
-  local schema_id
-  for schema_id in $schema_ids; do
-    # Check if schema story has a mock-sync AC
-    local has_mock
-    has_mock=$(printf '%s' "$merged_array" | jq -r \
-      --arg sid "$schema_id" \
-      '.[] | select(.id == $sid) | .acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; ""))) | length > 0')
-    [ "$has_mock" = "true" ] || continue
-
-    # Extract schema story text for field-name extraction
-    local schema_text
-    schema_text=$(printf '%s' "$merged_array" | jq -r \
-      --arg sid "$schema_id" \
-      '.[] | select(.id == $sid) | [.title, (.description // "")] + (.acceptanceCriteria // []) | join(" ")')
-
-    # Step 1: Extract camelCase field names (lowercase-starting)
-    local field_names
-    field_names=$(printf '%s' "$schema_text" | jq -rR \
-      '[scan("[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*|[a-z][a-z0-9_]*_[a-z][a-z0-9_]*")] | map(select(length > 3)) | .[]' 2>/dev/null || true)
-
-    # Step 2: Find consumers via field-name literal match
-    local consumer_ids=""
-    if [ -n "$field_names" ]; then
-      consumer_ids=$(printf '%s' "$merged_array" | jq -r \
-        --arg sid "$schema_id" \
-        --arg fields "$field_names" \
-        '
-        ($fields | split("\n") | map(select(length > 0))) as $fn_list |
-        .[] | select(.id != $sid) |
-        . as $c |
-        ([$c.title, ($c.description // "")] + ($c.acceptanceCriteria // []) | join(" ")) as $ctext |
-        select($fn_list | any(. as $fn | ($ctext | test($fn; "")))) |
-        .id
-        ' 2>/dev/null || true)
-    fi
-
-    # Step 3: CamelCase entity-name fuzzy fallback
-    if [ -z "$consumer_ids" ]; then
-      local schema_title
-      schema_title=$(printf '%s' "$merged_array" | jq -r --arg sid "$schema_id" '.[] | select(.id == $sid) | .title')
-      local word_parts
-      word_parts=$(printf '%s' "$schema_title" | jq -rR '[scan("[A-Z][a-z]+")] | .[]' 2>/dev/null || true)
-      if [ -n "$word_parts" ]; then
-        consumer_ids=$(printf '%s' "$merged_array" | jq -r \
-          --arg sid "$schema_id" \
-          --arg words "$word_parts" \
-          '
-          ($words | split("\n") | map(select(length > 0))) as $wp_list |
-          .[] | select(.id != $sid) |
-          . as $c |
-          ([$c.title, ($c.description // "")] + ($c.acceptanceCriteria // []) | join(" ")) as $ctext |
-          select($wp_list | any(. as $wp | ($ctext | test($wp; "i")))) |
-          .id
-          ' 2>/dev/null || true)
-      fi
-    fi
-
-    [ -n "$consumer_ids" ] || continue
-
-    # Route: move mock-sync AC from schema story to each consumer
-    merged_array=$(printf '%s' "$merged_array" | jq \
-      --arg sid "$schema_id" \
-      --arg consumer_list "$consumer_ids" \
-      '
-      ($consumer_list | split("\n") | map(select(length > 0))) as $cids |
-
-      # Extract mock-sync ACs from schema story
-      ((.[] | select(.id == $sid)).acceptanceCriteria // [] |
-        map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; "")))) as $mock_acs |
-
-      map(
-        . as $s |
-        if $s.id == $sid then
-          $s + {acceptanceCriteria: ($s.acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; "") | not)))}
-        elif ($cids | index($s.id)) != null then
-          ($s.acceptanceCriteria // [] | map(select(test("[Mm]ock.*updated|mock.*sync|[Uu]pdate.*mock|[Mm]ock.*data|[Vv]erify.*mock"; ""))) | length == 0) as $no_mock |
-          if $no_mock then
-            $s + {acceptanceCriteria: (($s.acceptanceCriteria // []) + $mock_acs)}
-          else $s
-          end
-        else $s
-        end
-      )
-      ')
-  done
-
-  # --- Phase 3.1: Reference Element Inventory verdict check ---
-  # Check for any story that has an inventory with unverdicted rows
-  local inventory_errors=""
-  local inventory_warnings=""
-  local inv_check
-  inv_check=$(printf '%s' "$merged_array" | jq '
-    [.[] |
-      . as $s |
-      select(
-        (.referenceInventory != null) and
-        (.referenceInventory | type) == "array" and
-        (.referenceInventory | length) > 0
-      ) |
-      . as $s |
-      [.referenceInventory[] | select(
-        (.verdict == null or .verdict == "" or (.verdict | test("^(encoded|excluded|deferred)$") | not))
-      )] as $unverdicted |
-      select(($unverdicted | length) > 0) |
-      {id: $s.id, unverdicted_count: ($unverdicted | length), elements: ($unverdicted | map(.element // "unknown"))}
-    ]
-  ')
-  local inv_violations
-  inv_violations=$(printf '%s' "$inv_check" | jq 'length')
-  if [ "$inv_violations" -gt 0 ]; then
-    local inv_msg
-    inv_msg=$(printf '%s' "$inv_check" | jq -r '.[] | "  Story \(.id): \(.unverdicted_count) unverdicted inventory row(s): \(.elements | join(", "))"')
-    if [ "$agent_mode" = "true" ]; then
-      echo "Warning: story-merge: Phase 3.1 inventory verdict incomplete (--agent-mode: proceeding):" >&2
-      printf '%s\n' "$inv_msg" >&2
-    else
-      echo "Error: story-merge: Phase 3.1 Reference Element Inventory has unverdicted rows:" >&2
-      printf '%s\n' "$inv_msg" >&2
-      exit 1
-    fi
-  fi
-
-  # --- Phase 4.1: Coverage Self-Check ---
-  # For each story with a referenceInventory, check ac_anchors >= floor(proto_elements * 0.6)
-  local coverage_check
-  coverage_check=$(printf '%s' "$merged_array" | jq '
-    [.[] |
-      select(
-        (.referenceInventory != null) and
-        (.referenceInventory | type) == "array" and
-        (.referenceInventory | length) > 0
-      ) |
-      . as $s |
-      (.referenceInventory | length) as $proto_elements |
-      ($s.ac_anchors // (.acceptanceCriteria // [] | length)) as $ac_anchors |
-      ($proto_elements * 0.6 | floor) as $threshold |
-      select($ac_anchors < $threshold) |
-      {id: $s.id, ac_anchors: $ac_anchors, proto_elements: $proto_elements, threshold: $threshold}
-    ]
-  ')
-  local coverage_violations
-  coverage_violations=$(printf '%s' "$coverage_check" | jq 'length')
-  if [ "$coverage_violations" -gt 0 ]; then
-    local cov_msg
-    cov_msg=$(printf '%s' "$coverage_check" | jq -r '.[] | "  Story \(.id): ac_anchors=\(.ac_anchors) < floor(\(.proto_elements) * 0.6)=\(.threshold)"')
-    if [ "$agent_mode" = "true" ]; then
-      echo "Warning: story-merge: Phase 4.1 coverage ratio not met (--agent-mode: proceeding):" >&2
-      printf '%s\n' "$cov_msg" >&2
-    else
-      echo "Error: story-merge: Phase 4.1 Coverage Self-Check failed:" >&2
-      printf '%s\n' "$cov_msg" >&2
-      exit 1
-    fi
-  fi
-
-  # --- Phase 4.2: Cross-Story Orphan-Symbol Smell ---
-  # Heuristic, WARNING-ONLY (never a hard block). NOT codebase dead-code
-  # detection: it scans only sibling STORY PROSE, not the codebase. It flags a
-  # story whose every extracted symbol (camelCase / PascalCase / snake_case,
-  # length >= 4) from implementation.approach appears in NO other story's text
-  # corpus (title + description + ACs + approach + files). Signal: a symbol the
-  # plan introduces that no sibling story mentions may be an orphan addition.
-  #
-  # Known limits (text vs. semantics; sibling-prose vs. call graph):
-  #   - Cannot prove a symbol is dead — that depends on existing callers in the
-  #     actual codebase, which this check does not inspect.
-  #   - False positives: legitimate leaf symbols (CLI entry points, webhook /
-  #     cron handlers) have no sibling-story mention by design.
-  #   - False negatives: a referencing story using a different name (alias,
-  #     import rename, dynamic dispatch) is invisible to a text scan.
-  # Skipped for single-story merges (no sibling corpus → every symbol would be
-  # trivially flagged). Mirrors Phase 4.1's agent-mode warn-vs-emit convention.
-  local _sm_story_count orphan_sym_check
-  _sm_story_count=$(printf '%s' "$merged_array" | jq 'length')
-  if [ "${_sm_story_count:-0}" -lt 2 ]; then
-    orphan_sym_check='[]'
-  else
-    orphan_sym_check=$(printf '%s' "$merged_array" | jq '
-      . as $all |
-      [.[] |
-        . as $s |
-        select(
-          (.implementation.approach != null) and
-          ((.implementation.approach | type) == "string") and
-          ((.implementation.approach | length) > 0)
-        ) |
-        (.implementation.approach) as $approach |
-        # camelCase / PascalCase / snake_case identifiers, length >= 4;
-        # single-case plain words are excluded to reduce noise.
-        ($approach | [scan("[A-Za-z][A-Za-z0-9_]*")] |
-          map(select(
-            length >= 4 and
-            (
-              test("^[a-z].*[A-Z]") or
-              test("^[A-Z][a-z]+[A-Z]") or
-              test("_[a-z]")
-            )
-          ))
-        ) as $symbols |
-        select(($symbols | length) > 0) |
-        ([$all[] |
-            select(.id != $s.id) |
-            [
-              (.title // ""),
-              (.description // ""),
-              ((.acceptanceCriteria // []) | join(" ")),
-              (.implementation.approach // ""),
-              ((.implementation.files // []) | join(" "))
-            ] | join(" ")
-          ] | join(" ")
-        ) as $other_corpus |
-        # Word-boundary match: `userId` is NOT treated as referenced by an
-        # unrelated `userIdentifier`. Symbols are [A-Za-z0-9_]+, so no regex
-        # metacharacter can reach test().
-        ($symbols | map(select(. as $sym | ($other_corpus | test("\\b" + $sym + "\\b")) | not))) as $unreferenced |
-        select(($unreferenced | length) == ($symbols | length)) |
-        {id: $s.id, symbols: $symbols}
-      ]
-    ')
-  fi
-  local orphan_sym_violations
-  orphan_sym_violations=$(printf '%s' "$orphan_sym_check" | jq 'length')
-  if [ "$orphan_sym_violations" -gt 0 ]; then
-    local orphan_msg
-    orphan_msg=$(printf '%s' "$orphan_sym_check" | jq -r \
-      '.[] | "  Story \(.id): introduces symbols no other story references: \(.symbols | join(", "))"')
-    if [ "$agent_mode" = "true" ]; then
-      echo "Warning: story-merge: Phase 4.2 orphan-symbol smell detected (--agent-mode: proceeding):" >&2
-      printf '%s\n' "$orphan_msg" >&2
-    else
-      echo "Warning: story-merge: Phase 4.2 orphan-symbol smell detected (heuristic; verify before proceeding):" >&2
-      printf '%s\n' "$orphan_msg" >&2
-    fi
-  fi
-
-  # ============================================================
-  # Phase 4.2 → smellWarnings metadata field
-  # ============================================================
-  # Surface orphan-symbol findings to the orchestrator's Step 5 report by
-  # embedding them in metadata.smellWarnings. The writers below inject this
-  # field only when non-empty; absent otherwise.
-  local smell_warnings
-  if [ "${orphan_sym_violations:-0}" -gt 0 ]; then
-    smell_warnings=$(printf '%s' "$orphan_sym_check" | jq '[.[] | {type: "orphan-symbol", storyId: .id, symbols: .symbols, message: "introduces symbols no sibling story references"}]')
-  else
-    smell_warnings='[]'
-  fi
-
-  # ============================================================
-  # Branch on split mode
-  # ============================================================
-  # The split AXIS was decided by _story_merge_resolve_axis immediately after
-  # id assignment, before any of the sweeps above ran. Nothing is recomputed
-  # here -- this block only dispatches on the answer, so there is no second
-  # partition rule that could disagree with the one the writer groups by.
-  if [ "$split_mode" = "full-stack" ]; then
-    if [ "$split_axis" = "project" ]; then
-      # foundation_id is threaded into the PROJECT writer ONLY. --foundation
-      # injects one edge onto the foundation story from every other story; in
-      # a multi-repo split every group that does not host the foundation loses
-      # that edge and would otherwise look like an ordinary hand-authored
-      # missing dependency. The SIDE writer keeps its byte-identical signature.
-      _story_merge_write_project_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware" "$foundation_id"
-    else
-      _story_merge_write_split "$merged_array" "$output_path" "$staging_dir" "$smell_warnings" "$phase_aware"
-    fi
-  else
-    _story_merge_write_legacy "$merged_array" "$output_path" "$staging_dir" "$smell_warnings"
-  fi
-}
-
-# jq `def`s spliced into every program that needs a story's .project either
-# classified or reduced to a stable grouping key. Shared by
-# _story_merge_resolve_axis and _story_merge_write_project_split so the two can
-# never drift apart -- an axis chosen from one rule and a group built from
-# another is exactly how issue #72 came back (one branch, two repositories).
-#
-# Grouping/counting/classification ONLY -- neither the normalized nor the
-# classified form is ever written back onto a story; .project must survive
-# verbatim into the output files.
-#
-#   norm_project  -- trims surrounding whitespace, strips one trailing slash,
-#                    and treats blank/whitespace-only (and absent) as null.
-#   project_state -- validates the RAW value against the grammar execute.md
-#                    publishes for .project, returning exactly one of
-#                    "untagged" / "tagged" / "invalid". Deliberately inspects
-#                    the raw string, not the trimmed one: " apps/web " is
-#                    invalid rather than being quietly trimmed into a value
-#                    whose raw form is what a downstream command would cd into.
-#                    Only a fully blank string counts as untagged.
-#   group_key     -- the single routing key. Both the axis decision and the
-#                    grouping pass go through this and nothing else.
-_STORY_MERGE_NORM_PROJECT_JQ='
-def norm_project:
-  if . == null then null
-  else
-    (. | gsub("^\\s+|\\s+$"; "")) as $t |
-    if $t == "" then null
-    elif ($t | endswith("/")) then $t[0:-1]
-    else $t
-    end
-  end;
-
-def project_state:
-  if . == null then "untagged"
-  elif (type != "string") then "invalid"
-  elif ((. | gsub("^\\s+|\\s+$"; "")) == "") then "untagged"
-  elif . == "." then "tagged"
-  elif (test("^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*$")
-        and ((split("/") | index("..")) == null)
-        and ((test("//")) | not)) then "tagged"
-  else "invalid"
-  end;
-
-def group_key: norm_project;
-'
-
-# Resolve the split AXIS from the merged array, refusing anything the axis
-# cannot route unambiguously. Echoes exactly "project" or "side"; returns 1
-# after printing a named refusal otherwise.
-#
-# Called once, early -- before --foundation, cycle detection, and the Phase
-# 3.1/4.1/4.2 sweeps -- so a refusal costs nothing and emits no warnings about
-# a plan that was never going to be written.
-#
-# Decision table (counts computed here, ONCE, and nowhere else):
-#   any story with an invalid .project     -> refuse, in EVERY --split mode
-#   distinct >= 1 AND untagged > 0         -> refuse (--split full-stack only)
-#   distinct >= 2                          -> "project"  (multi-repo)
-#   otherwise                              -> "side"     (single-repo/monorepo)
-#
-# The untagged rule tests distinct >= 1, not >= 2, deliberately: the failure
-# this exists to stop is ONE tagged repo plus untagged stories, which counts as
-# a single distinct project and would otherwise take the SIDE axis -- one file,
-# one branch, two repositories.
-#
-# _rm_sanitize is applied HERE and only here. These lines print values that
-# already failed validation and are therefore unbounded; on every success path
-# .project is a routing key that must stay byte-identical between the key that
-# groups and the key that is written.
-_story_merge_resolve_axis() {
-  local merged_array="$1"
-  local split_mode="$2"
-
-  # Malformed .project is refused in EVERY --split mode, legacy included: the
-  # value is a repository path a downstream command will cd into, so
-  # "../sibling-repo" must not reach a tasks file by any route.
-  local invalid_stories
-  invalid_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
-    [.[] | . as $s | select(($s.project | project_state) == "invalid")] | .[] |
-    "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): invalid project " + (.project | tostring | _rm_sanitize(120))
-  ')
-  if [ -n "$invalid_stories" ]; then
-    echo "Error: story-merge: story .project must match ^[a-zA-Z0-9_][a-zA-Z0-9_./@-]*\$ with no \"..\" component, no \"//\", no surrounding whitespace, and no leading \"./\" (use \".\" for the root repository); no files were written:" >&2
-    printf '%s\n' "$invalid_stories" >&2
-    return 1
-  fi
-
-  if [ "$split_mode" != "full-stack" ]; then
-    printf '%s' "side"
-    return 0
-  fi
-
-  local axis_counts distinct_count untagged_count
-  axis_counts=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
-    [.[] | . as $s | {state: ($s.project | project_state), key: ($s.project | group_key)}] as $st |
-    {
-      distinct: ([$st[] | select(.state == "tagged") | .key] | unique | length),
-      untagged: ([$st[] | select(.state == "untagged")] | length)
-    }
-  ')
-  distinct_count=$(printf '%s' "$axis_counts" | jq -r '.distinct')
-  untagged_count=$(printf '%s' "$axis_counts" | jq -r '.untagged')
-
-  if [ "${distinct_count:-0}" -ge 1 ] && [ "${untagged_count:-0}" -gt 0 ]; then
-    local untagged_stories
-    untagged_stories=$(printf '%s' "$merged_array" | jq -r "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
-      [.[] | . as $s | select(($s.project | project_state) == "untagged")] | .[] |
-      "  " + .id + " (" + (.title | _rm_sanitize(200)) + "): no project"
-    ')
-    echo "Error: story-merge: --split full-stack: this plan tags $distinct_count project(s), so it is a multi-repo plan and EVERY story needs a project. A story that belongs to the root repository must say so explicitly with \".\" -- an absent project is not the root, it is unrouteable. No files were written; the staging dir was kept. Stories missing a project:" >&2
-    printf '%s\n' "$untagged_stories" >&2
-    return 1
-  fi
-
-  if [ "${distinct_count:-0}" -ge 2 ]; then
-    printf '%s' "project"
-  else
-    printf '%s' "side"
-  fi
-  return 0
-}
-
-# Write a single merged tasks.json (legacy mode)
-_story_merge_write_legacy() {
-  local merged_array="$1"
-  local output_path="$2"
-  local staging_dir="$3"
-  local smell_warnings="${4:-[]}"
-
-  # Build the final tasks.json structure
-  # Metadata is minimal; the caller (plan command) fills in the full metadata.
-  # story-merge only provides structure; metadata.title, branchName, etc. come from
-  # the staging context or are set to sensible defaults.
-  # smellWarnings is injected only when non-empty so absent-by-default stays the norm.
-  local tasks_json
-  tasks_json=$(printf '%s\n%s' "$merged_array" "$smell_warnings" | jq -s '
-    .[0] as $stories | .[1] as $smells |
-    {
-      schemaVersion: "3.3",
-      metadata: (
-        {
-          title: "feat: merged tasks",
-          type: "feat",
-          branchName: "feat/merged",
-          createdAt: (now | strftime("%Y-%m-%d")),
-          planPath: null
-        } +
-        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
-      ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | (.status //= "pending")]
-    }
-  ')
-
-  # Ensure output directory exists
-  mkdir -p "$(dirname "$output_path")"
-
-  # Atomic write via _lock
-  local tmp_file
-  tmp_file=$(mktemp "${output_path}.XXXXXX")
-  (
-    _lock "${output_path}.lock"
-    printf '%s\n' "$tasks_json" > "$tmp_file"
-    mv "$tmp_file" "$output_path"
-  ) 200>"${output_path}.lock"
-  local exit_code=$?
-  rm -f "$tmp_file" 2>/dev/null
-  if [ $exit_code -ne 0 ]; then
-    echo "Error: story-merge: failed to write output file: $output_path" >&2
-    exit 1
-  fi
-
-  # On success: delete the staging dir
-  rm -rf "$staging_dir"
-
-  local story_count
-  story_count=$(printf '%s' "$merged_array" | jq 'length')
-  jq -n \
-    --arg output "$output_path" \
-    --argjson stories "$story_count" \
-    '{merged: $output, stories: $stories}'
-}
-
-# Write two split tasks files (full-stack mode, SIDE axis: frontend/backend).
-# Chosen by cmd_story_merge for single-repo/monorepo layouts only -- fewer than
-# 2 distinct normalized .project values across the merged array.
-_story_merge_write_split() {
-  local merged_array="$1"
-  local output_path="$2"
-  local staging_dir="$3"
-  local smell_warnings="${4:-[]}"
-  local phase_aware="${5:-false}"
-
-  # Partition by the per-story frontend heuristic, unconditionally.
-  #
-  # This writer only ever sees a single-repo/monorepo merge: cmd_story_merge
-  # routes every layout carrying >= 2 distinct normalized .project values to
-  # _story_merge_write_project_split instead, so there is no project group to
-  # vote on here and no project-aware branch. Every story is classified by its
-  # own file-pattern/title verdict (implementation.files matching tsx/jsx/
-  # components//pages//frontend//ui//client/, OR title+description matching the
-  # UI/Frontend/Component/Page/View/React/Tailwind keyword set) -- byte-
-  # identical to what the old monorepo-guard fallback produced, which covers
-  # both "no story has .project" and "every story shares exactly one project".
-  local tagged_stories
-  tagged_stories=$(printf '%s' "$merged_array" | jq '
-    def fe_heuristic:
-      ((.implementation.files // []) | any(
-        test("\\.(tsx|jsx)$") or test("components?/") or test("pages?/") or
-        test("frontend/") or test("ui/") or test("client/")
-      )) or
-      ((.title + " " + (.description // "")) | test("\\b(UI|Frontend|Component|Page|View|React|Tailwind)\\b"; "i"));
-    [.[] | . + {_fe: fe_heuristic}] | map(. + {_side: ._fe})
-  ')
-
-  # Bipartition: two select() passes over the single tagged-and-sided array,
-  # so every story id structurally lands in exactly one output (never lost,
-  # never duplicated) rather than incidentally so.
-  local frontend_stories backend_stories
-  frontend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == true)]')
-  backend_stories=$(printf '%s' "$tagged_stories" | jq '[.[] | select(._side == false)]')
-
-  # Re-assign unique IDs: frontend US-001 ... US-N, backend US-(N+1) ... US-M
-  local fe_count be_count
-  fe_count=$(printf '%s' "$frontend_stories" | jq 'length')
-  be_count=$(printf '%s' "$backend_stories" | jq 'length')
-
-  # An empty split side still writes its (empty userStories) file below --
-  # traced, does not crash downstream -- but is surfaced with a named warning
-  # rather than failing silently.
-  if [ "$fe_count" -eq 0 ]; then
-    echo "Warning: story-merge: frontend split produced zero stories" >&2
-  fi
-  if [ "$be_count" -eq 0 ]; then
-    echo "Warning: story-merge: backend split produced zero stories" >&2
-  fi
-
-  # Build ID remapping for frontend
-  local fe_id_map="{}"
-  fe_id_map=$(printf '%s' "$frontend_stories" | jq '
-    to_entries | map({key: .value.id, value: ("US-" + ((.key + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries
-  ')
-
-  # Build ID remapping for backend (offset by frontend count)
-  local fe_count_n
-  fe_count_n=$(printf '%s' "$frontend_stories" | jq 'length')
-  local be_id_map="{}"
-  be_id_map=$(printf '%s' "$backend_stories" | jq \
-    --argjson offset "$fe_count_n" \
-    'to_entries | map({key: .value.id, value: ("US-" + ((.key + $offset + 1) | tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end))}) | from_entries')
-
-  # Global pre-remap-id -> {newId, side, title} lookup map, built from BOTH
-  # sides' stories + id maps BEFORE either dependsOn-remap block below runs.
-  # A pre-remap id would exist in neither output file, so naming a dropped
-  # cross-file target usefully requires resolving it against this map now.
-  local global_id_map
-  global_id_map=$(printf '%s\n%s\n%s\n%s' "$frontend_stories" "$fe_id_map" "$backend_stories" "$be_id_map" | jq -s '
-    .[0] as $fe | .[1] as $fe_map | .[2] as $be | .[3] as $be_map |
-    ([$fe[] | {key: .id, value: {newId: ($fe_map[.id] // .id), side: "frontend", title: .title}}]
-     + [$be[] | {key: .id, value: {newId: ($be_map[.id] // .id), side: "backend", title: .title}}])
-    | from_entries
-  ')
-
-  # Apply ID remap and rebuild dependsOn (remove cross-file refs) for frontend.
-  # Alongside the existing remap, capture the pre-remap dep ids that did NOT
-  # resolve against the LOCAL id_map (i.e. cross-file) as __droppedDeps, and
-  # flag __becameRoot when the story had a non-empty dependsOn that is now
-  # entirely gone as a direct result of the drop.
-  frontend_stories=$(printf '%s\n%s' "$frontend_stories" "$fe_id_map" | jq -s '
-    .[0] as $stories | .[1] as $id_map |
-    $stories | map(
-      . as $story |
-      ($story.dependsOn // []) as $pre |
-      ($pre | length > 0) as $had_deps |
-      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
-      $story
-      | .id = ($id_map[.id] // .id)
-      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
-      | .__droppedDeps = $dropped_ids
-      | .__becameRoot = ($had_deps and (.dependsOn == []))
-    )
-  ')
-
-  # Apply ID remap and rebuild dependsOn for backend (same cross-file capture).
-  backend_stories=$(printf '%s\n%s' "$backend_stories" "$be_id_map" | jq -s '
-    .[0] as $stories | .[1] as $id_map |
-    $stories | map(
-      . as $story |
-      ($story.dependsOn // []) as $pre |
-      ($pre | length > 0) as $had_deps |
-      ([$pre[] | select(($id_map[.] // null) == null)]) as $dropped_ids |
-      $story
-      | .id = ($id_map[.id] // .id)
-      | .dependsOn = [$pre[] | . as $dep | ($id_map[$dep] // null) | select(. != null)]
-      | .__droppedDeps = $dropped_ids
-      | .__becameRoot = ($had_deps and (.dependsOn == []))
-    )
-  ')
-
-  # ============================================================
-  # Cross-file dependsOn: audible drop surfacing
-  # ============================================================
-  # Every dependsOn entry that failed local resolution above is, by
-  # construction, resolvable in the OTHER side's global_id_map -- the
-  # earlier outline:NN remap + unresolved-outline check (before this
-  # function runs) guarantees every dependsOn entry reaching this point
-  # names a real story somewhere in the merged array. Build one
-  # smellWarnings entry per affected story (both sides combined), with
-  # every title sanitized via _rm_sanitize before it enters JSON or stderr.
-  local cross_file_warnings
-  cross_file_warnings=$(printf '%s\n%s\n%s' "$frontend_stories" "$backend_stories" "$global_id_map" | jq -s "$_ROADMAP_SANITIZE_JQ"'
-    .[0] as $fe | .[1] as $be | .[2] as $gmap |
-    ( [$fe[] | . + {__side: "frontend"}] + [$be[] | . + {__side: "backend"}] ) as $all |
-    [
-      $all[] | select((.__droppedDeps // []) | length > 0) |
-      . as $story |
-      (
-        [
-          ($story.__droppedDeps // [])[] | . as $old |
-          ($gmap[$old] // {newId: $old, side: "unknown", title: ""}) |
-          {id: .newId, side: .side, title: (.title | _rm_sanitize(200))}
-        ]
-      ) as $dd |
-      {
-        type: "cross-file-dep-dropped",
-        storyId: $story.id,
-        side: $story.__side,
-        becameRoot: $story.__becameRoot,
-        droppedDeps: $dd,
-        message: (
-          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
-          ($dd | map(.title) | join("; ")) +
-          (if $story.__becameRoot then " (story became a false wave-1 root)" else "" end)
-        )
-      }
-    ]
-  ')
-
-  # Merge into the Phase 4.2 smell_warnings param BEFORE it is threaded into
-  # either output file build below, so both files carry the same combined set.
-  local combined_smell_warnings
-  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
-
-  # Aggregated stderr banner (never per-edge -- legitimate FE<->API edges and
-  # --foundation's one-injected-edge-per-story would otherwise flood every
-  # normal full-stack plan). One summary line with total dropped-edge count
-  # and distinct-affected-story count (both sides combined), followed by one
-  # enumeration line per FALSE-ROOT story only.
-  local total_dropped affected_count
-  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
-  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
-  if [ "$affected_count" -gt 0 ]; then
-    echo "Warning: story-merge: ${total_dropped} cross-file dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack; see metadata.smellWarnings)" >&2
-    local false_root_lines
-    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
-      .[] | select(.becameRoot == true) |
-      (.storyId + " (" + .side + "): became a false wave-1 root -- its cross-file dependsOn target(s) " +
-       ([.droppedDeps[] | (.id + " (" + .side + ")")] | join(", ")) + " were dropped")
-    ')
-    if [ -n "$false_root_lines" ]; then
-      printf '%s\n' "$false_root_lines" >&2
-    fi
-  fi
-
-  # Recompute waves independently per file
-  frontend_stories=$(printf '%s' "$frontend_stories" | jq '
-    reduce range(length) as $_ (
-      map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
-      . as $current |
-      map(
-        if .wave > 0 then .
-        else
-          . as $story |
-          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
-          if ($dep_waves | all(. > 0)) then
-            . + {wave: (($dep_waves | max) + 1)}
-          else
-            .
-          end
-        end
-      )
-    )
-  ')
-  backend_stories=$(printf '%s' "$backend_stories" | jq '
-    reduce range(length) as $_ (
-      map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
-      . as $current |
-      map(
-        if .wave > 0 then .
-        else
-          . as $story |
-          ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
-          if ($dep_waves | all(. > 0)) then
-            . + {wave: (($dep_waves | max) + 1)}
-          else
-            .
-          end
-        end
-      )
-    )
-  ')
-
-  # Derive output paths
-  local base_name ext fe_path be_path
-  base_name=$(basename "$output_path")
-  ext="${base_name##*.}"
-  local base_no_ext="${base_name%.$ext}"
-  # --phase-aware: the output basename for a phase-scoped invocation already
-  # ends in "-tasks" (e.g. "<feature>-phase-<N>-tasks.json"). Strip that single
-  # trailing "-tasks" segment once before appending "-frontend-tasks.json" /
-  # "-backend-tasks.json" so the split basenames keep a single "tasks" segment
-  # ("<feature>-phase-<N>-frontend-tasks.json") instead of doubling it. Default
-  # (unflagged) derivation is untouched -- it keeps appending directly to the
-  # full ".json"-stripped basename, preserving the existing double-"tasks"
-  # legacy basename (e.g. "<slug>-tasks-frontend-tasks.json").
-  if [ "$phase_aware" = true ]; then
-    base_no_ext="${base_no_ext%-tasks}"
-  fi
-  local dir_part
-  dir_part=$(dirname "$output_path")
-  fe_path="${dir_part}/${base_no_ext}-frontend-tasks.json"
-  be_path="${dir_part}/${base_no_ext}-backend-tasks.json"
-
-  # Ensure output directory exists
-  mkdir -p "$dir_part"
-
-  # Build and write frontend tasks.json atomically
-  # smellWarnings is injected only when non-empty; written to BOTH split files
-  # (combined_smell_warnings = Phase 4.2 orphan-symbol + cross-file-dep-dropped)
-  # so reviewers see the same full smell surface regardless of which file they
-  # inspect first.
-  local fe_json
-  fe_json=$(printf '%s\n%s' "$frontend_stories" "$combined_smell_warnings" | jq -s '
-    .[0] as $stories | .[1] as $smells |
-    {
-      schemaVersion: "3.3",
-      metadata: (
-        {
-          title: "feat: merged tasks (frontend)",
-          type: "feat",
-          branchName: "feat/merged-frontend",
-          createdAt: (now | strftime("%Y-%m-%d")),
-          planPath: null
-        } +
-        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
-      ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
-    }
-  ')
-  local tmp_fe
-  tmp_fe=$(mktemp "${fe_path}.XXXXXX")
-  (
-    _lock "${fe_path}.lock"
-    printf '%s\n' "$fe_json" > "$tmp_fe"
-    mv "$tmp_fe" "$fe_path"
-  ) 200>"${fe_path}.lock"
-  local fe_exit=$?
-  rm -f "$tmp_fe" 2>/dev/null
-  if [ $fe_exit -ne 0 ]; then
-    echo "Error: story-merge: failed to write frontend output: $fe_path" >&2
-    exit 1
-  fi
-
-  # Build and write backend tasks.json atomically
-  local be_json
-  be_json=$(printf '%s\n%s' "$backend_stories" "$combined_smell_warnings" | jq -s '
-    .[0] as $stories | .[1] as $smells |
-    {
-      schemaVersion: "3.3",
-      metadata: (
-        {
-          title: "feat: merged tasks (backend)",
-          type: "feat",
-          branchName: "feat/merged-backend",
-          createdAt: (now | strftime("%Y-%m-%d")),
-          planPath: null
-        } +
-        (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
-      ),
-      userStories: [$stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
-    }
-  ')
-  local tmp_be
-  tmp_be=$(mktemp "${be_path}.XXXXXX")
-  (
-    _lock "${be_path}.lock"
-    printf '%s\n' "$be_json" > "$tmp_be"
-    mv "$tmp_be" "$be_path"
-  ) 200>"${be_path}.lock"
-  local be_exit=$?
-  rm -f "$tmp_be" 2>/dev/null
-  if [ $be_exit -ne 0 ]; then
-    echo "Error: story-merge: failed to write backend output: $be_path" >&2
-    exit 1
-  fi
-
-  # On success: delete the staging dir
-  rm -rf "$staging_dir"
-
-  local fe_count_out be_count_out
-  fe_count_out=$(printf '%s' "$frontend_stories" | jq 'length')
-  be_count_out=$(printf '%s' "$backend_stories" | jq 'length')
-  jq -n \
-    --arg fe "$fe_path" \
-    --arg be "$be_path" \
-    --argjson fe_count "$fe_count_out" \
-    --argjson be_count "$be_count_out" \
-    '{frontend: $fe, backend: $be, frontend_stories: $fe_count, backend_stories: $be_count}'
-}
-
-# Write N split tasks files (full-stack mode, PROJECT axis: one file per repo).
-#
-# Chosen by cmd_story_merge when the merged array carries >= 2 distinct
-# normalized .project values -- a multi-repo layout. There is no
-# frontend/backend side decision on this path at all: the split axis IS the
-# project, so every repo named by a story gets its own valid, non-colliding
-# tasks file instead of being force-fit into two side files.
-#
-# All-or-nothing contract: every output path, slug, and branchName is derived
-# and validated BEFORE the first write, so a collision or an invalid branch
-# name lands zero files. Once the write loop starts, a mid-loop failure names
-# the files already on disk and keeps the staging dir so a retry is unambiguous.
-_story_merge_write_project_split() {
-  local merged_array="$1"
-  local output_path="$2"
-  local staging_dir="$3"
-  local smell_warnings="${4:-[]}"
-  local phase_aware="${5:-false}"
-  # Pre-remap id of the --foundation story, or "" when the flag was omitted.
-  # Compared against the PRE-remap dropped-dep ids below (the same namespace),
-  # so an empty value can never match a real story.
-  local foundation_id="${6:-}"
-
-  # ============================================================
-  # 1. Route every story to a project group
-  # ============================================================
-  # Group key = group_key, the same def _story_merge_resolve_axis chose the
-  # axis with. There is no fallback for a null key and there must not be one:
-  # this writer is only ever reached on the PROJECT axis, which the resolver
-  # enters only when every story is tagged, so group_key is non-null by
-  # construction. A `// "."` here would be a second normalization rule one
-  # function away from the first -- exactly the divergence that produced one
-  # file and one branch for two repositories (issue #72).
-  # Groups are emitted in lexicographic order by normalized project path
-  # (jq's `unique` sorts by codepoint), never staging-glob or first-encountered
-  # order.
-  local group_keys
-  group_keys=$(printf '%s' "$merged_array" | jq -c "$_STORY_MERGE_NORM_PROJECT_JQ"'
-    [.[] | . as $s | ($s.project | group_key)] | unique
-  ')
-
-  # ============================================================
-  # 2. Per-group id assignment + cross-group dependsOn sweep
-  # ============================================================
-  # Ids are reassigned US-001..US-M in group order, each group taking a
-  # contiguous block (mirrors the frontend-then-backend offset scheme of
-  # _story_merge_write_split), so ids stay unique across the whole N-file set.
-  # A dependsOn edge that crosses a group boundary cannot survive -- its target
-  # lives in another file -- so it is dropped and captured as __droppedDeps,
-  # with __becameRoot flagging a story whose entire dependsOn list vanished.
-  #
-  # Every select()/map() pass binds its story via `. as $s` first: piping a
-  # story into map/has() rebinds `.` away from the story object, which has
-  # already broken a prior fix to this function.
-  local prepared
-  prepared=$(printf '%s\n%s' "$merged_array" "$group_keys" | jq -s \
-    --arg foundation_id "$foundation_id" \
-    "$_STORY_MERGE_NORM_PROJECT_JQ$_ROADMAP_SANITIZE_JQ"'
-    def pad3: tostring | if length == 1 then "00" + . elif length == 2 then "0" + . else . end;
-    def recompute_waves:
-      reduce range(length) as $_ (
-        map(. + {wave: (if (.dependsOn // []) == [] then 1 else 0 end)});
-        . as $current |
-        map(
-          if .wave > 0 then .
-          else
-            . as $story |
-            ([$story.dependsOn[] | . as $dep_id | ($current[] | select(.id == $dep_id) | .wave)] | if length == 0 then [0] else . end) as $dep_waves |
-            if ($dep_waves | all(. > 0)) then
-              . + {wave: (($dep_waves | max) + 1)}
-            else
-              .
-            end
-          end
-        )
-      );
-    .[0] as $stories | .[1] as $keys |
-    # Stories bucketed per group, preserving merged (outline) order inside
-    # each bucket.
-    [ $keys[] | . as $g |
-      {project: $g, stories: [$stories[] | . as $s | select(($s.project | group_key) == $g)]}
-    ] as $buckets |
-    # Running offset -> contiguous US-NNN block per group, in group order.
-    (reduce range($buckets | length) as $i ({offset: 0, out: []};
-      .offset as $off |
-      ($buckets[$i].stories) as $bs |
-      {
-        offset: ($off + ($bs | length)),
-        out: (.out + [{
-          project: $buckets[$i].project,
-          idmap: ([$bs | to_entries[] | . as $e | {key: $e.value.id, value: ("US-" + (($off + $e.key + 1) | pad3))}] | from_entries),
-          stories: $bs
-        }])
-      }
-    ) | .out) as $blocks |
-    # Global pre-remap-id -> {newId, project, title} map, built across EVERY
-    # group before any dependsOn remap runs, so a dropped cross-group target
-    # can still be named usefully (it exists in no single output file).
-    ([$blocks[] | . as $b | ($b.stories[] | . as $s |
-       {key: $s.id, value: {newId: ($b.idmap[$s.id] // $s.id), project: $b.project, title: $s.title}})]
-     | from_entries) as $gmap |
-    [$blocks[] | . as $b |
-      {
-        project: $b.project,
-        stories: ([$b.stories[] | . as $s |
-          ($s.dependsOn // []) as $pre |
-          (($pre | length) > 0) as $had_deps |
-          ([$pre[] | . as $d | select(($b.idmap[$d] // null) == null)]) as $dropped_ids |
-          $s
-          | .id = ($b.idmap[$s.id] // $s.id)
-          | .dependsOn = [$pre[] | . as $dep | ($b.idmap[$dep] // null) | select(. != null)]
-          | .__droppedDeps = $dropped_ids
-          | .__becameRoot = ($had_deps and (.dependsOn == []))
-        ] | recompute_waves)
-      }
-    ] as $remapped |
-    # One cross-group dependsOn smellWarnings entry per affected story, every
-    # title sanitized before it enters JSON or stderr.
-    #
-    # This axis keys every entry by `project` -- the routing key of the group
-    # that owns it -- at BOTH the top level and in every droppedDeps[]. There is
-    # no frontend/backend verdict on this path, so there is no `side` field to
-    # emit; `side` remains exclusive to _story_merge_write_split. The two keys
-    # are mutually exclusive per axis, which is what lets the Step 5 renderer
-    # pick whichever one an entry actually carries.
-    #
-    # foundationEdge marks a dropped edge that --foundation itself injected
-    # into every non-foundation story. In a multi-repo split the foundation
-    # lives in exactly one group, so every OTHER group loses that edge and
-    # would otherwise be indistinguishable from a hand-authored missing
-    # dependency. $foundation_id is the PRE-remap id (same namespace as
-    # $old), and is "" when --foundation was omitted -- no real id matches it.
-    [$remapped[] | . as $b | ($b.stories[] | . as $s |
-      select(($s.__droppedDeps // []) | length > 0) |
-      ([($s.__droppedDeps // [])[] | . as $old |
-         ($gmap[$old] // {newId: $old, project: "unknown", title: ""}) |
-         {id: .newId, project: .project, title: (.title | _rm_sanitize(200)),
-          foundationEdge: (($foundation_id != "") and ($old == $foundation_id))}]) as $dd |
-      ($dd | map(select(.foundationEdge == true)) | length) as $fcount |
-      {
-        type: "cross-file-dep-dropped",
-        storyId: $s.id,
-        project: $b.project,
-        becameRoot: $s.__becameRoot,
-        droppedDeps: $dd,
-        message: (
-          ($dd | length | tostring) + " cross-file dependsOn edge(s) dropped targeting: " +
-          ($dd | map(.title) | join("; ")) +
-          (if $fcount > 0 then
-             " -- " + ($fcount | tostring) + " of these targets the shared --foundation story (" +
-             ($dd | map(select(.foundationEdge == true))
-                  | map(.id + " in project \"" + .project + "\"") | join(", ")) +
-             "), an edge --foundation injected into every story rather than a hand-authored dependency"
-           else "" end) +
-          (if $s.__becameRoot then " (story became a false wave-1 root)" else "" end)
-        )
-      })
-    ] as $cross_warnings |
-    {blocks: $remapped, crossWarnings: $cross_warnings}
-  ')
-
-  # Merge into the Phase 4.2 smell_warnings param BEFORE any file is built, so
-  # every one of the N files carries the same combined set.
-  local cross_file_warnings combined_smell_warnings
-  cross_file_warnings=$(printf '%s' "$prepared" | jq -c '.crossWarnings')
-  combined_smell_warnings=$(printf '%s\n%s' "$smell_warnings" "$cross_file_warnings" | jq -s '.[0] + .[1]')
-
-  # Aggregated stderr banner (never per-edge), mirroring the SIDE writer: one
-  # summary line, then one enumeration line per FALSE-ROOT story only.
-  local total_dropped affected_count
-  total_dropped=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps | length] | add // 0')
-  affected_count=$(printf '%s' "$cross_file_warnings" | jq 'length')
-  if [ "$affected_count" -gt 0 ]; then
-    echo "Warning: story-merge: ${total_dropped} cross-project dependsOn edge(s) dropped across ${affected_count} affected stories (--split full-stack, project axis; see metadata.smellWarnings)" >&2
-
-    # --foundation note: separate from the drop-count banner above, because
-    # these edges are structurally different -- the merge itself injected
-    # them, so every non-foundation project group losing one is expected
-    # fallout of combining --foundation with a multi-repo split, not a sign of
-    # a hand-authored dependency that went missing.
-    local foundation_edge_count foundation_story_count
-    foundation_edge_count=$(printf '%s' "$cross_file_warnings" | jq '[.[].droppedDeps[] | select(.foundationEdge == true)] | length')
-    foundation_story_count=$(printf '%s' "$cross_file_warnings" | jq '[.[] | select((.droppedDeps // []) | any(.foundationEdge == true))] | length')
-    if [ "${foundation_edge_count:-0}" -gt 0 ]; then
-      echo "Note: story-merge: ${foundation_edge_count} of those edge(s), across ${foundation_story_count} stories, target the shared --foundation story, which lives in only one project group; --foundation injected them, so their loss is expected on a multi-repo split (see droppedDeps[].foundationEdge)" >&2
-    fi
-
-    local false_root_lines
-    false_root_lines=$(printf '%s' "$cross_file_warnings" | jq -r '
-      .[] | select(.becameRoot == true) |
-      (.storyId + " (" + .project + "): became a false wave-1 root -- its cross-project dependsOn target(s) " +
-       ([.droppedDeps[] | (.id + " (" + .project + ")")] | join(", ")) + " were dropped")
-    ')
-    if [ -n "$false_root_lines" ]; then
-      printf '%s\n' "$false_root_lines" >&2
-    fi
-  fi
-
-  # ============================================================
-  # 3. Derive every output path / slug / branchName up front
-  # ============================================================
-  local base_name ext base_no_ext dir_part
-  base_name=$(basename "$output_path")
-  ext="${base_name##*.}"
-  base_no_ext="${base_name%.$ext}"
-  # --phase-aware: identical single-"tasks"-segment collapse the SIDE writer
-  # applies. Pure string manipulation on the --output basename, independent of
-  # the split axis, so it composes unchanged at any N.
-  if [ "$phase_aware" = true ]; then
-    base_no_ext="${base_no_ext%-tasks}"
-  fi
-  dir_part=$(dirname "$output_path")
-
-  # slugify: a project path is NEVER interpolated raw into a filename. Every
-  # character outside [A-Za-z0-9_-] (notably "/" and ".") becomes "-", runs
-  # collapse, and leading/trailing "-" are trimmed; a value that flattens to
-  # nothing (e.g. ".") becomes "root".
-  local plan
-  plan=$(printf '%s' "$prepared" | jq -c \
-    --arg dir "$dir_part" \
-    --arg base "$base_no_ext" '
-    def slugify:
-      (gsub("[^A-Za-z0-9_-]"; "-") | gsub("-+"; "-") | gsub("^-+|-+$"; "")) as $s |
-      if $s == "" then "root" else $s end;
-    .blocks | to_entries | map(
-      . as $e | $e.value as $b | ($b.project | slugify) as $slug |
-      {
-        index: ($e.key + 1),
-        # .project is carried through verbatim, never sanitized: it is the
-        # routing key, and a lossy transform would make the key that groups
-        # differ from the key that is written. Malformed values are refused
-        # outright by _story_merge_resolve_axis, before this writer is reached.
-        project: $b.project,
-        slug: $slug,
-        path: ($dir + "/" + $base + "-" + $slug + "-tasks.json"),
-        branchName: ("feat/merged-" + $slug),
-        storyCount: ($b.stories | length)
-      }
-    )
-  ')
-
-  # Basename collision: two distinct project values that flatten to the same
-  # slug would silently overwrite each other. Hard-fail the WHOLE merge here,
-  # before the first write, so zero output files land.
-  local slug_collisions
-  slug_collisions=$(printf '%s' "$plan" | jq -r '
-    group_by(.slug) | map(select(length > 1)) | .[] |
-    "  basename slug \"" + .[0].slug + "\" is shared by projects: " + (map(.project) | join(", "))
-  ')
-  if [ -n "$slug_collisions" ]; then
-    echo "Error: story-merge: --split full-stack: distinct project values collide on the same output basename; no files were written:" >&2
-    printf '%s\n' "$slug_collisions" >&2
-    exit 1
-  fi
-
-  # Derived-name validation: every invariant the derived slug / path /
-  # branchName must satisfy before a single file is opened. Abort the whole
-  # merge on the first failure -- no partial write, no mangled fallback name.
-  #
-  # REFUSE, never truncate. Truncating two long project values to a common
-  # prefix manufactures a slug collision, which the guard above would then
-  # report as a basename conflict between projects that do not actually
-  # conflict -- a wrong diagnosis for a limit the caller can fix directly.
-  #
-  # Legs, and why each limit is where it is:
-  #   branchName regex  -- the invariant plan.md enforces before any git
-  #                        operation. Currently unreachable given slugify's
-  #                        output; kept because it costs one test() and is the
-  #                        only thing standing between a future slugify edit
-  #                        and a branch name handed to git unchecked.
-  #   slug <= 64        -- plan.md rewrites branchName to a ~87-char prefix in
-  #                        phase mode; 87 + 64 stays inside every downstream
-  #                        limit.
-  #   basename <= 248   -- NAME_MAX (255) minus the 7 bytes mktemp appends for
-  #                        ".XXXXXX". This is the leg that actually prevents a
-  #                        mid-loop mktemp death, and it has to be checked on
-  #                        the basename rather than the slug because most of
-  #                        that basename comes from --output, not from .project.
-  #   path <= 4000      -- PATH_MAX (4096) with headroom for the lock/tmp
-  #                        suffixes appended to it.
-  #   branchName <= 100 -- worktree-manager places a worktree as a single
-  #                        directory component, so branchName feeds a
-  #                        NAME_MAX-bounded name downstream.
-  local bad_derived
-  bad_derived=$(printf '%s' "$plan" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
-    .[] | . as $g |
-    ($g.path | split("/") | last) as $base |
-    [
-      (if ($g.branchName | test($re)) then empty
-       else "derived branchName failed validation against " + $re + ": " + $g.branchName end),
-      (if ($g.slug | length) > 64 then
-         "derived basename slug is " + (($g.slug | length) | tostring) + " chars (limit 64): " + $g.slug
-       else empty end),
-      (if ($base | length) > 248 then
-         "derived output basename is " + (($base | length) | tostring) +
-         " chars (limit 248 = NAME_MAX 255 minus the 7-char mktemp suffix): " + $base
-       else empty end),
-      (if ($g.path | length) > 4000 then
-         "derived output path is " + (($g.path | length) | tostring) + " chars (limit 4000)"
-       else empty end),
-      (if ($g.branchName | length) > 100 then
-         "derived branchName is " + (($g.branchName | length) | tostring) + " chars (limit 100): " + $g.branchName
-       else empty end)
-    ] | .[] | "  project \"" + $g.project + "\": " + .
-  ')
-  if [ -n "$bad_derived" ]; then
-    echo "Error: story-merge: --split full-stack: derived output name(s) failed validation; no files were written (shorten the offending project value -- names are refused, never truncated, because truncation would manufacture a basename collision between two distinct projects):" >&2
-    printf '%s\n' "$bad_derived" >&2
-    exit 1
-  fi
-
-  # ============================================================
-  # 4. Write every group's file atomically
-  # ============================================================
-  mkdir -p "$dir_part"
-
-  local group_total
-  group_total=$(printf '%s' "$plan" | jq 'length')
-
-  local written_paths=""
-  local idx=0
-  while [ "$idx" -lt "$group_total" ]; do
-    # tmp_group and write_exit are declared at their use site below, where the
-    # initialization they need is part of the same statement.
-    local group_path group_json
-    group_path=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[$i].path')
-
-    # metadata.splitGroup is the self-describing marker for this file's place
-    # in the N-way split: its own project, its 1-based index, the total, and
-    # every sibling file's path. Downstream consumers discover the full set
-    # from it instead of re-deriving it from filename string conventions.
-    group_json=$(printf '%s\n%s\n%s' "$prepared" "$plan" "$combined_smell_warnings" | jq -s --argjson i "$idx" '
-      .[0] as $prep | .[1] as $plan | .[2] as $smells |
-      $plan[$i] as $g |
-      $prep.blocks[$i] as $b |
-      {
-        schemaVersion: "3.3",
-        metadata: (
-          {
-            title: ("feat: merged tasks (" + $g.slug + ")"),
-            type: "feat",
-            branchName: $g.branchName,
-            createdAt: (now | strftime("%Y-%m-%d")),
-            planPath: null,
-            splitGroup: {
-              project: $g.project,
-              index: $g.index,
-              total: ($plan | length),
-              siblings: [$plan[] | . as $sib | select($sib.index != $g.index) | $sib.path]
-            }
-          } +
-          (if ($smells | length) > 0 then {smellWarnings: $smells} else {} end)
-        ),
-        userStories: [$b.stories[] | del(.referenceInventory) | del(.ac_anchors) | del(._fe) | del(._side) | del(.__droppedDeps) | del(.__becameRoot) | (.status //= "pending")]
-      }
-    ')
-
-    # This script runs `set -euo pipefail`. A bare failing compound command
-    # exits the shell immediately, so a `write_exit=$?` on the NEXT line is
-    # unreachable and the whole error branch below with it -- which is exactly
-    # how a failed group write used to leave one file on disk advertising
-    # `total: 3` with two siblings that do not exist, an orphaned mktemp file,
-    # and no message at all.
-    #
-    # Three details keep this reachable, and all three are load-bearing:
-    #   1. `write_exit=0` is a real initialization. `-u` is on, and a bare
-    #      `local write_exit` leaves it declared-but-unset, which makes
-    #      `[ "$write_exit" -ne 0 ]` an unbound-variable error rather than a
-    #      false. It is also never `local write_exit=$?`: `local` is a builtin
-    #      and its own exit status overwrites `$?` before the assignment reads it.
-    #   2. The `|| write_exit=$?` makes the subshell the left side of an AND-OR
-    #      list, the one construct `set -e` is defined to exempt. The `200>`
-    #      redirect stays attached to the subshell, BEFORE the `||`, so a lock
-    #      path that cannot be opened (e.g. a directory) is a failure of the
-    #      exempted command rather than of the list.
-    #   3. mktemp gets the same treatment. It fails on ENOSPC/EACCES, and a
-    #      bare failing assignment is just as fatal under `set -e`.
-    local tmp_group=""
-    tmp_group=$(mktemp "${group_path}.XXXXXX" 2>/dev/null) || tmp_group=""
-    local write_exit=0
-    if [ -z "$tmp_group" ]; then
-      write_exit=1
-    else
-      (
-        _lock "${group_path}.lock"
-        printf '%s\n' "$group_json" > "$tmp_group"
-        mv "$tmp_group" "$group_path"
-      ) 200>"${group_path}.lock" || write_exit=$?
-      [ -n "$tmp_group" ] && rm -f "$tmp_group" 2>/dev/null || true
-    fi
-    if [ "$write_exit" -ne 0 ]; then
-      # Enumerate all THREE sets. The surviving files are the actionable part:
-      # each one advertises a splitGroup.total and a siblings[] list describing
-      # a complete N-way split that does not exist on disk, so the reader needs
-      # to know precisely which of those siblings landed and which never will.
-      local not_attempted remaining
-      remaining=$((group_total - idx - 1))
-      echo "Error: story-merge: failed to write project split output: $group_path" >&2
-      echo "  Written before this failure (${idx}):" >&2
-      if [ -n "$written_paths" ]; then
-        printf '%s\n' "$written_paths" >&2
-      else
-        echo "    (none)" >&2
-      fi
-      echo "  Failed:" >&2
-      echo "    $group_path" >&2
-      echo "  Not attempted (${remaining}):" >&2
-      if [ "$remaining" -gt 0 ]; then
-        not_attempted=$(printf '%s' "$plan" | jq -r --argjson i "$idx" '.[($i + 1):][] | "    " + .path')
-        printf '%s\n' "$not_attempted" >&2
-      else
-        echo "    (none)" >&2
-      fi
-      echo "  Staging dir preserved for retry:" >&2
-      echo "    $staging_dir" >&2
-      exit 1
-    fi
-    if [ -n "$written_paths" ]; then
-      written_paths="${written_paths}"$'\n'"    ${group_path}"
-    else
-      written_paths="    ${group_path}"
-    fi
-    idx=$((idx + 1))
-  done
-
-  # On success (all N writes landed): delete the staging dir
-  rm -rf "$staging_dir"
-
-  printf '%s' "$plan" | jq '[.[] | {path, project, branchName, storyCount}]'
+  python3 "$(_aimi_script_py story_merge.py)" "${sm_args[@]}"
 }
 
 # ============================================================================
@@ -13598,47 +11553,15 @@ _ROADMAP_FEATURE_REGEX='^[a-zA-Z0-9][a-zA-Z0-9_-]*$'
 # Reused branchName convention (see plugins/aimi-engineering/CLAUDE.md)
 _ROADMAP_BRANCH_REGEX='^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 
-# jq `def` spliced into programs that sanitize free-text roadmap fields
-# (name, goal, successCriteria entries, notes, branch, brainstormPath).
-# Strips code fences/backtick content, newlines, "$(" command-substitution
-# openers, HTML/XML tags, and common instruction-override phrases, then
-# truncates to maxlen. Mirrors commands/references/sanitization.md plus the
-# explicit newline/dollar-paren stripping called for in this story's notes.
-_ROADMAP_SANITIZE_JQ='
-def _rm_sanitize(maxlen):
-  if . == null then null else
-  ( .
-    | gsub("```[\\s\\S]*?```"; "")
-    | gsub("`[^`\n]*`"; "")
-    | gsub("`"; "")
-    | gsub("\r\n|\r|\n"; " ")
-    | gsub("\\$\\("; "")
-    | gsub("<[^>]*>"; "")
-    | gsub("ignore previous( instructions)?"; ""; "i")
-    | gsub("you are now"; ""; "i")
-    | gsub("system\\s*:"; ""; "i")
-    | if (length > maxlen) then .[0:maxlen] else . end
-  ) end;
-'
-
-# Process-liveness probe, ported from guard-runtime-state.py is_alive() (lines 26-34):
-# signal-zero kill probe. "No such process" -> not alive. "Exists, no permission
-# to signal" -> alive (mirrors ProcessLookupError=False / PermissionError=True).
-_is_pid_alive() {
-  local pid="$1"
-  if ! [[ "$pid" =~ ^[0-9]+$ ]] || [ "$pid" -le 0 ]; then
-    return 1
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    return 0
-  fi
-  local err
-  err=$(kill -0 "$pid" 2>&1 >/dev/null) || true
-  if printf '%s' "$err" | grep -qi "not permitted"; then
-    return 0
-  fi
-  return 1
-}
+# The stored roadmap.json shape every contract READER in this file requires.
+#
+# It tracks the shape of one creates/needs entry and nothing else -- not the
+# CLI version, not the plugin version, not any other roadmap.json field. "1.0"
+# means an entry is the single string "identity (description)"; "2.0" means it
+# is {identity, description}, two fields judged by two different rules. Bump it
+# only when that entry shape changes again, and ship the normalize-contracts
+# migration in the same commit.
+_ROADMAP_CONTRACT_VERSION="2.0"
 
 # Validate --feature is present and a safe single path component.
 # $2 is the optional verb label used to prefix the error; it defaults to the
@@ -13692,118 +11615,83 @@ _roadmap_require() {
   printf '%s\n' "$path"
 }
 
+# Refuse a roadmap whose stored creates/needs entries pre-date
+# $_ROADMAP_CONTRACT_VERSION.
+#   _roadmap_require_contracts <verb> <roadmap_path> <feature>
+#
+# IT REFUSES, IT DOES NOT SKIP, and that is the whole design of this helper.
+# The tempting alternative -- treat an old roadmap as "nothing to check" and
+# carry on -- makes validate-contracts answer valid:true about a document it
+# never parsed. A gate that reports success for an unread file is worse than
+# no gate: the caller acts on the verdict either way, and only one of the two
+# outcomes tells them the truth is unknown.
+#
+# WHO CALLS IT, AND WHO DELIBERATELY DOES NOT. Every verb that reads or writes
+# a creates/needs entry: validate-contracts, verify-creates, roadmap-sweep,
+# roadmap-write-handoff, roadmap-amend-phase, and roadmap-init --sync (which
+# would otherwise merge a 2.0 phase into a 1.0 document and leave one file
+# holding both shapes -- measured: that mixture drops an identity a later phase
+# still cites and only surfaces a whole phase later).
+#
+# The five LIFECYCLE verbs -- roadmap-get, roadmap-set-status, roadmap-claim,
+# roadmap-release-claim, roadmap-reconcile -- are ungated on purpose. None of
+# them reads an entry; they move status and claims. Gating them would mean a
+# session already in flight when the migration lands could not release its own
+# claim or record the phase it just finished, which is a worse failure than the
+# one this gate exists to prevent. normalize-contracts is ungated for the
+# obvious reason: it is the migration.
+#
+# phase-overlap is ungated too, and that is a judgement rather than an
+# oversight: it reads `dir` from roadmap.json and then two tasks files'
+# implementation.files. Its verdict does not depend on a contract entry, so
+# refusing it would strand a caller for a reason its answer never touched.
+#
+# The comparison is the sort -V idiom cmd_validate_tasks already uses for
+# schemaVersion, with a "0" floor so an absent or null roadmapVersion sorts
+# below every real one and is refused rather than silently accepted. A version
+# ABOVE the required one passes: this CLI can read a document a newer CLI
+# wrote for as long as the entry shape is compatible, and refusing it here
+# would strand a user mid-upgrade for no gain.
+_roadmap_require_contracts() {
+  local verb="$1" roadmap_path="$2" feature="$3"
+  local stored
+  stored=$(jq -r '.roadmapVersion // "0"' "$roadmap_path" 2>/dev/null) || stored="0"
+  if [ -z "$stored" ] || [ "$stored" = "null" ]; then
+    stored="0"
+  fi
+  if [ "$(printf '%s\n' "$stored" "$_ROADMAP_CONTRACT_VERSION" | sort -V | head -n1)" != "$_ROADMAP_CONTRACT_VERSION" ]; then
+    echo "Error: $verb: this roadmap stores creates/needs in the pre-$_ROADMAP_CONTRACT_VERSION form, where one entry is the single string \"identity (description)\". Nothing was read and nothing was checked. Migrate it once, in place:" >&2
+    echo "    aimi-cli.sh normalize-contracts --feature $feature" >&2
+    echo "The migration is idempotent and computes each identity with the same function every reader used before, so no identity changes by a byte. (found roadmapVersion $stored, need $_ROADMAP_CONTRACT_VERSION)" >&2
+    exit 1
+  fi
+}
+
 # Validate --phase is present and a bare numeric id (int or one-decimal-place).
+#
+# The integer half refuses a LEADING ZERO on purpose: every --phase consumer
+# hands the id to roadmap.py, which parses it with json.loads(), and JSON has
+# no "02". Admitting it here bought a 12-line uncaught JSONDecodeError instead
+# of the one readable line below. "0" itself is still a legal id -- the
+# alternation spells that out rather than leaving it to a lucky quantifier.
+# The decimal half is deliberately untouched: it is the only thing separating
+# 2.1 from 2.10, and both must keep passing (they are the same number, and the
+# Python side normalizes them to one).
 _roadmap_validate_phase_id() {
   local phase_id="$1"
   local label="$2"
-  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  if [ -z "$phase_id" ] || ! [[ "$phase_id" =~ ^(0|[1-9][0-9]*)(\.[0-9]+)?$ ]]; then
     echo "Error: $label: --phase <id> must be a numeric phase id" >&2
     exit 1
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Phase ground truth, has-work, and candidate selection
-#
-# One phase's status per roadmap.json is a claim about a session; what a phase
-# still has to DO is a fact on disk, in its own tasks file. These three pieces
-# turn that fact into the ordering both selectors use.
-# ---------------------------------------------------------------------------
-
-# Classify a phase from its own tasks file's story statuses. This is
-# roadmap-reconcile's original inline expression, lifted verbatim so reconcile
-# and the has-work map below cannot drift into two different answers about the
-# same file. Callers guarantee the file exists and parses.
-_ROADMAP_GROUND_TRUTH_JQ='
-  [.userStories[].status] as $statuses |
-  if ($statuses | length) == 0 then "unknown"
-  elif ($statuses | all(. == "completed")) then "completed"
-  elif ($statuses | any(. == "failed")) then "verification_failed"
-  else "in_progress"
-  end
-'
-
-# Emit {"<phase id>": <has work bool>} for every phase in a roadmap.
-#   $1 roadmap.json path   $2 feature slug
-#
-# A phase has NO work only when its own tasks file exists, parses, holds at
-# least one story, and every story is "completed" -- i.e. exactly when the
-# classification above says "completed". Every other case is has-work:
-#   - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
-#     a phase for being unplanned would rank the whole front of the roadmap
-#     last, which is the opposite of the intent.
-#   - unparseable: nothing is known, so nothing is demoted.
-#   - zero userStories ("unknown"): same reasoning reconcile already applies --
-#     it declines to correct a status from an empty story list.
-_roadmap_has_work_map() {
-  local roadmap_path="$1" feature="$2"
-  local feature_dir hw_id hw_dir hw_file hw_truth hw_map
-  feature_dir=$(dirname "$roadmap_path")
-  hw_map='{}'
-
-  while IFS=$'\t' read -r hw_id hw_dir; do
-    [ -z "$hw_id" ] && continue
-    hw_file="$feature_dir/$hw_dir/$feature-phase-$hw_id-tasks.json"
-    hw_truth="unknown"
-    if [ -f "$hw_file" ] && jq -e . "$hw_file" >/dev/null 2>&1; then
-      hw_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$hw_file")
-    fi
-    if [ "$hw_truth" = "completed" ]; then
-      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): false}')
-    else
-      hw_map=$(printf '%s' "$hw_map" | jq --arg k "$hw_id" '. + {($k): true}')
-    fi
-  done < <(jq -r '.phases[] | [(.id|tostring), .dir] | @tsv' "$roadmap_path")
-
-  printf '%s' "$hw_map"
-}
-
-# The single dependency-eligibility + ordering implementation, spliced into
-# both roadmap-get --next-eligible and roadmap-claim's auto-mode branch so the
-# two cannot drift apart again. Takes the phases array, the allowed status set,
-# and the has-work side map; returns the eligible candidates in claim order.
-#
-# The caller supplies the array it wants judged, and that is deliberate: it is
-# the second axis on which the two selectors differ. roadmap-claim passes
-# $cleared_phases (dead-PID claims already nulled, inside its own flock);
-# roadmap-get --next-eligible passes .phases raw, because it holds no lock and
-# clearing stale claims is a decision that belongs where the lock is. So a
-# phase held by a dead session stays claimable by one and invisible to the
-# other, exactly as before -- unifying the ordering was never meant to change
-# that, and a read-only verb has no business inferring liveness.
-#
-# ORDER, not the set, was the defect (issue #90). Two jq hazards live in the
-# rank helper, both of which silently make the ranking a no-op:
-#   - `$work[$k] // true` is wrong: `//` fires on false as well as null, so
-#     every legitimate false collapses to true and nothing is ever demoted.
-#   - `$work | has(.id|tostring)` is wrong: the pipe rebinds `.` to $work, so
-#     `.id` is null and every lookup misses.
-# Binding the key first and testing has() explicitly avoids both.
-_ROADMAP_SELECT_JQ='
-def _rm_rank($work):
-  (.id|tostring) as $k
-  | if ($work | has($k)) then (if $work[$k] then 0 else 1 end) else 0 end;
-
-def _rm_candidates($phases; $allowed; $work):
-  (reduce $phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id
-  | [ $phases[]
-      # `.status` is bound BEFORE the pipe into $allowed. Written the obvious
-      # way -- `$allowed | index(.status)` -- the pipe rebinds `.` to $allowed
-      # and jq dies with "Cannot index array with string". Same hazard as the
-      # rank helper above, different expression.
-      | select(.status as $st | ($allowed | index($st)) != null)
-      | select(.claim == null)
-      | select(((.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")))
-    ]
-  | sort_by([_rm_rank($work), .id]);
-'
-
 # Read a phases JSON array on stdin; print one human-readable error line per
 # creates[]/needs[] entry whose *identity* can never name a real artifact.
 #
-# The rule is deliberately narrow -- exactly four shapes are rejected, judged
-# over the identity (text before the first "(", trimmed) and nothing else:
-#   (a) empty after _cv_identity
+# The rule is deliberately narrow -- exactly six shapes are rejected, judged
+# over the identity FIELD and nothing else:
+#   (a) empty
 #   (b) a ".." PATH SEGMENT, i.e. (^|/)\.\.($|/) -- not any byte pair "..",
 #       so an identity like services/foo..bar is untouched
 #   (c) a leading "/" anchored at position 0 -- the Endpoint kind
@@ -13812,6 +11700,14 @@ def _rm_candidates($phases; $allowed; $work):
 #   (d) whitespace in the token verify-creates will actually SEARCH, judged
 #       after the same METHOD-space-slash strip verify-creates step 2 performs
 #       (see _roadmap_reject_unfindable_identity below)
+#   (e) a shell metacharacter from _SHELL_CLASS -- the class [$`;|&] that
+#       validate-contracts reads through cv_shell_char -- so the writer and
+#       the reader consult one table rather than two that overlap by accident
+#   (f) more than 500 characters. This one is a REFUSAL where every other
+#       roadmap free-text field truncates, and the asymmetry is the point: a
+#       truncated goal is still the goal, while a truncated identity is a name
+#       verify-creates would grep for and never find. Nothing rewrites an
+#       identity, so nothing may shorten one either.
 # Identity *strength* is explicitly not judged: at declaration time research has
 # not run, so a bare Table name ("notifications") or a bare directory
 # ("db/migrations") must pass -- guessing a path here fails at phase close for a
@@ -13841,6 +11737,39 @@ def _rm_candidates($phases; $allowed; $work):
 # to rename the file. That is the deliberate trade -- see
 # commands/references/scope-contexts.md, which teaches the rule and its limit.
 #
+# Why (e) judges the IDENTITY and not both fields. Before it existed the two
+# sides disagreed twice over. The writer let ";" "|" "&" and a lone "$" through
+# untouched while validate-contracts refused that whole class, so roadmap-init
+# wrote phases its own contract gate then hard-failed; and the reader judged the
+# whole entry, so a semicolon anywhere in the human description killed an
+# identity that was itself clean ("cmd_clean", "does x; then y").
+# Both sides now judge the same text -- the identity carries the class ban and
+# the description does not -- which is also what verify-creates has always done:
+# it searches by identity alone, so a check scoped to anything wider was talking
+# about a different string than the search it guards.
+#
+# The description nevertheless KEEPS validate-contracts' injection half
+# (ignore previous / system: / INSTRUCTIONS / code fences / "$("), because it is
+# not human-only prose: /aimi:plan collects every completed phase's handoff.md
+# into phaseHandoffBlocks (grep that symbol in commands/plan.md) and threads it verbatim
+# into every story-expander sub-agent prompt (grep phaseHandoffBlocks in
+# commands/plan.md; line numbers there drift). Freeing the description of the
+# character class is a legibility fix; freeing it of the injection patterns
+# would reopen a prompt-injection path that is closed today.
+#
+# ALL FIVE class characters reach (e), the backtick included. That is new. It
+# used to be unreachable: a splitting sanitizer ran over the entry first and its
+# marker half unwrapped a backticked span, so no backtick survived into a stored
+# identity. Nothing sanitizes an identity now, so a backticked name arrives here
+# intact and is refused by name -- which is the outcome the unwrap was
+# approximating, reached by saying so instead of by rewriting.
+#
+# "$(" is NOT a sixth class member and never was: it is a two-character
+# SEQUENCE, and the class member it starts with, "$", reaches this rule like any
+# other. Counting it as a member is what made an earlier draft of this comment
+# say "two of the five", which is wrong by one and reads as though a "$" were
+# somehow exempt. It is not.
+#
 # RETROACTIVITY IS THE CALLER'S PROPERTY, NOT THIS HELPER'S. Nothing here scopes
 # anything; this judges every phase object it is handed. Existing roadmaps stay
 # readable only because every caller hands over just the phases IT writes:
@@ -13857,46 +11786,8 @@ def _rm_candidates($phases; $allowed; $work):
 # two shapes at once -- validate-contracts then reports a permanently unmet
 # need, which halts /aimi:plan, and agent mode never demotes an unmet need.
 #
-# Reuses $_CONTRACT_JQ_DEFS so the guard and validate-contracts agree on what an
-# identity is; a second copy of _cv_identity would drift.
-_roadmap_identity_errors() {
-  # _roadmap_reject_unfindable_identity lives HERE, not in $_CONTRACT_JQ_DEFS:
-  # that block is the shared vocabulary of validate-contracts and roadmap-sweep,
-  # and neither of them enforces this rule -- defining it there would imply they
-  # do. Input is an identity, output is true when the entry must be refused.
-  #
-  # The method alternation and the single-space-then-slash shape are byte-for-byte
-  # the ones verify-creates step 2 strips (`case` over 'GET /'*|'POST /'*|...
-  # then "${identity#* }"), so the token judged at write time is exactly the
-  # token searched at close time. "POST  /api/x" with two spaces does not match
-  # that shape there and must not match it here -- verify-creates would search
-  # it whole. CR and LF are in the class as insurance: roadmap-init's
-  # _rm_sanitize already folds newlines to spaces, but the amend path reaches
-  # this helper too and may sanitize differently.
-  jq -r "$_CONTRACT_JQ_DEFS"'
-    def _roadmap_reject_unfindable_identity:
-      (if test("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) /")
-         then sub("^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) "; "")
-         else . end)
-      | test("[ \t\r\n]");
-    [ .[]
-      | . as $p
-      | (["creates", "needs"][]) as $list
-      | (($p[$list] // [])[]) as $raw
-      | ($raw | if type == "string" then . else "" end) as $entry
-      | ($entry | _cv_identity) as $ident
-      | (
-          if ($ident | length) == 0 then "empty once the description is stripped"
-          elif ($ident | test("(^|/)\\.\\.($|/)")) then "contains a \"..\" path segment"
-          elif ($ident | test("^/")) then "begins with \"/\""
-          elif ($ident | _roadmap_reject_unfindable_identity) then "contains whitespace, so no source token could match it -- name the symbol, path, table or \"METHOD /path\" endpoint the phase will actually produce"
-          else empty end
-        ) as $reason
-      | "phase " + ($p.id|tostring) + ": " + $list + " entry \"" + $entry + "\" is not a usable artifact identity: " + $reason
-    ] | .[]
-  '
-}
-
+# The guard and validate-contracts read the same cv_identity in roadmap.py, so
+# they agree on what an identity is; a second copy of it would drift.
 cmd_roadmap_init() {
   local feature="" file="" sync_mode=false brainstorm_path=""
 
@@ -13933,169 +11824,36 @@ cmd_roadmap_init() {
     input_json=$(cat)
   fi
 
-  if ! printf '%s' "$input_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "Error: roadmap-init: phases payload must be a JSON array" >&2
-    exit 1
-  fi
-
-  # --- Structural validation (payload-only; no I/O yet). Dangling dependsOn refs
-  # are checked later, inside the lock, against existing-file ids unioned with
-  # this payload's ids -- so a --sync phase may legitimately depend on a phase
-  # materialized by an earlier roadmap-init call. ---
-  local validation_errors
-  validation_errors=$(printf '%s' "$input_json" | jq -r '
-    . as $phases |
-    ([$phases[] | .id]) as $ids |
-    ([$ids | group_by(.) | map(select(length > 1)) | map(.[0])[]]) as $dup_ids |
-    [
-      ($dup_ids[] | "duplicate phase id: " + (.|tostring)),
-      ($phases[] | . as $p | if ($p.id == null or ($p.id|type) != "number") then "phase " + ($p.id|tostring) + ": id must be a number" else empty end),
-      ($phases[] | . as $p | if ($p.name == null or ($p.name|type) != "string" or ($p.name|length) == 0) then "phase " + ($p.id|tostring) + ": name is required" else empty end),
-      ($phases[] | . as $p | if ($p.goal == null or ($p.goal|type) != "string" or ($p.goal|length) == 0) then "phase " + ($p.id|tostring) + ": goal is required" else empty end),
-      ($phases[] | . as $p | if ($p.dependsOn != null and ($p.dependsOn|type) != "array") then "phase " + ($p.id|tostring) + ": dependsOn must be an array" else empty end),
-      ($phases[] | . as $p | (($p.dependsOn // [])[] | select(type != "number") | "phase " + ($p.id|tostring) + ": dependsOn entries must be numbers"))
-    ] | .[]
-  ')
-  if [ -n "$validation_errors" ]; then
-    echo "Error: roadmap-init: invalid phase payload:" >&2
-    printf '%s\n' "$validation_errors" >&2
-    exit 1
-  fi
-
-  # --- Sanitize free-text fields, compute dir, validate dir + branch patterns ---
+  # --- Everything that must be judged BEFORE the lock ---------------------
+  # The split is not cosmetic: today an invalid payload never reaches the
+  # mkdir -p below, so a refusal creates no feature directory. Validating
+  # inside the lock would create one as a side effect of saying no.
+  check_python3
   local new_phases
-  new_phases=$(printf '%s' "$input_json" | jq "$_ROADMAP_SANITIZE_JQ"'
-    map(
-      .name = (.name | _rm_sanitize(200)) |
-      .goal = (.goal | _rm_sanitize(2000)) |
-      .slug = ((.slug // "") | _rm_sanitize(100)) |
-      .notes = (if .notes != null then (.notes | _rm_sanitize(5000)) else null end) |
-      .successCriteria = ((.successCriteria // []) | map(_rm_sanitize(2000))) |
-      .creates = ((.creates // []) | map(_rm_sanitize(500))) |
-      .needs = ((.needs // []) | map(_rm_sanitize(500))) |
-      .areas = ((.areas // []) | map(_rm_sanitize(500))) |
-      .dependsOn = (.dependsOn // []) |
-      .branch = (if .branch != null then (.branch | _rm_sanitize(200)) else null end) |
-      .dir = ("phase-" + (.id|tostring) + (if (.slug|length) > 0 then "-" + .slug else "" end)) |
-      .status = "pending" |
-      .claim = null
-    )
-  ')
+  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate) || exit $?
 
-  local dir_errors
-  dir_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_DIR_REGEX" '
-    [.[] | select((.dir | test($re)) | not) | "phase " + (.id|tostring) + ": computed dir \"" + .dir + "\" fails required pattern"] | .[]
-  ')
-  if [ -n "$dir_errors" ]; then
-    echo "Error: roadmap-init: invalid phase directory slug(s):" >&2
-    printf '%s\n' "$dir_errors" >&2
-    exit 1
-  fi
-
-  local branch_errors
-  branch_errors=$(printf '%s' "$new_phases" | jq -r --arg re "$_ROADMAP_BRANCH_REGEX" '
-    [.[] | select(.branch != null and ((.branch | test($re)) | not)) | "phase " + (.id|tostring) + ": branch \"" + .branch + "\" contains invalid characters"] | .[]
-  ')
-  if [ -n "$branch_errors" ]; then
-    echo "Error: roadmap-init: invalid branch name(s):" >&2
-    printf '%s\n' "$branch_errors" >&2
-    exit 1
+  # A --sync merges 2.0 phases into whatever is already there. Into a pre-2.0
+  # document that produces one file holding both entry shapes, which is worse
+  # than either shape alone: the readers see a list they cannot judge uniformly.
+  # Gated only when the file exists, because a fresh roadmap-init has nothing to
+  # be old, and only under --sync, because without it the "already exists; pass
+  # --sync" refusal below is the more actionable message.
+  if [ "$sync_mode" = true ] && [ -f "$roadmap_path" ]; then
+    _roadmap_require_contracts "roadmap-init" "$roadmap_path" "$feature"
   fi
 
   mkdir -p "$(dirname "$roadmap_path")"
 
   # --- Locked read-modify-write: existence/--sync check, additive merge, atomic write ---
+  local sync_flag=""
+  [ "$sync_mode" = true ] && sync_flag="--sync"
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if [ -f "$roadmap_path" ]; then
-        if [ "$sync_mode" != true ]; then
-          echo "Error: roadmap-init: $roadmap_path already exists; pass --sync to merge additively" >&2
-          exit 1
-        fi
-        if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-          echo "Error: roadmap-init: existing roadmap.json is malformed: $roadmap_path" >&2
-          exit 1
-        fi
-
-        existing_meta=$(jq '{roadmapVersion, feature, createdAt, brainstormPath}' "$roadmap_path")
-        filtered_new=$(jq --argjson new "$new_phases" '
-          [.phases[].id] as $eids | [$new[] | select((.id as $i | $eids | index($i)) == null)]
-        ' "$roadmap_path")
-
-        # Dangling dependsOn check: allowed ids are existing-file ids unioned with
-        # this payload's own ids (covers both already-materialized phases and
-        # sibling phases introduced in this same call).
-        dangling=$(jq --argjson new "$new_phases" --argjson add "$filtered_new" -r '
-          ([.phases[].id] + [$new[].id] | unique) as $ids |
-          [$add[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
-        ' "$roadmap_path")
-        if [ -n "$dangling" ]; then
-          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
-          printf '%s\n' "$dangling" >&2
-          exit 1
-        fi
-
-        # Identity well-formedness, over filtered_new ONLY -- the phases this
-        # call actually writes. Never over the whole payload: plan.md always
-        # submits the full phase array and both call sites downgrade a
-        # roadmap-init failure to a warning, so a check that fired on a legacy
-        # phase would silently drop the new one instead of reporting anything.
-        identity_errors=""
-        identity_errors=$(printf '%s' "$filtered_new" | _roadmap_identity_errors)
-        if [ -n "$identity_errors" ]; then
-          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
-          printf '%s\n' "$identity_errors" >&2
-          exit 1
-        fi
-
-        merged_phases=$(jq --argjson add "$filtered_new" '
-          (.phases + $add) | sort_by(.id)
-        ' "$roadmap_path")
-        roadmap_doc=$(printf '%s' "$existing_meta" | jq --argjson phases "$merged_phases" '. + {phases: $phases}')
-        added_count=$(printf '%s' "$filtered_new" | jq 'length')
-      else
-        dangling=$(printf '%s' "$new_phases" | jq -r '
-          ([.[].id] | unique) as $ids |
-          [.[] | . as $p | ($p.dependsOn // [])[] | select((. as $d | $ids | index($d)) == null) | "phase " + ($p.id|tostring) + ": dependsOn references unknown phase id " + (.|tostring)] | .[]
-        ')
-        if [ -n "$dangling" ]; then
-          echo "Error: roadmap-init: dangling dependsOn reference(s):" >&2
-          printf '%s\n' "$dangling" >&2
-          exit 1
-        fi
-
-        # Creation mode: every phase in new_phases is by definition new, so the
-        # same guard applies to the whole array here.
-        identity_errors=""
-        identity_errors=$(printf '%s' "$new_phases" | _roadmap_identity_errors)
-        if [ -n "$identity_errors" ]; then
-          echo "Error: roadmap-init: malformed creates/needs identity in new phase(s):" >&2
-          printf '%s\n' "$identity_errors" >&2
-          exit 1
-        fi
-
-        merged_phases=$(printf '%s' "$new_phases" | jq 'sort_by(.id)')
-        roadmap_doc=$(jq -n --arg feature "$feature" --arg bp "$brainstorm_path" --argjson phases "$merged_phases" "$_ROADMAP_SANITIZE_JQ"'
-          {
-            roadmapVersion: "1.0",
-            feature: $feature,
-            createdAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
-            brainstormPath: (if ($bp|length) == 0 then null else ($bp | _rm_sanitize(500)) end),
-            phases: $phases
-          }
-        ')
-        added_count=$(printf '%s' "$merged_phases" | jq 'length')
-      fi
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --arg path "$roadmap_path" --argjson added "$added_count" --argjson total "$(printf '%s' "$merged_phases" | jq 'length')" \
-        '{roadmap: $path, added: $added, phases: $total}'
+      printf '%s' "$new_phases" | python3 "$(_aimi_roadmap_py)" init-write \
+        --roadmap "$roadmap_path" --feature "$feature" \
+        --brainstorm-path "$brainstorm_path" $sync_flag
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14113,66 +11871,6 @@ cmd_roadmap_init() {
 # the caller to "the roadmap-* verbs". This verb is what makes that redirect
 # truthful.
 #
-# The amendable set is exactly six keys, and the discriminator is "contract
-# field with no other writer":
-#   * branch IS amendable, for precisely that reason -- roadmap-init sets it at
-#     creation and --sync never revisits it, which is why a decimal phase's null
-#     branch could not be filled in.
-#   * status and claim are NOT, on the opposite ground: roadmap-set-status owns
-#     status (transition graph plus the handoff.md precondition) and
-#     roadmap-claim / roadmap-release-claim own claim (PID liveness,
-#     self-reclaim). A second writer would duplicate those guarantees rather
-#     than reuse them, so both keys are rejected by name with their owner named.
-#   * id, dir, slug, name and dependsOn are phase identity, written once by
-#     roadmap-init; they are rejected by name too. name and notes are outside
-#     the six deliberately -- widening the set later is one entry here plus its
-#     sanitize cap.
-_ROADMAP_AMENDABLE_KEYS='["goal","successCriteria","creates","needs","areas","branch"]'
-
-# jq `def` used wherever roadmap-amend-phase asks whether an artifact identity
-# is a member of a set. Written as explicit `==` equality rather than `index`
-# because the entire orphan check hinges on never treating a longer or shorter
-# identity as a match: phases 3 and 4 of this repo's own forge-abstraction
-# roadmap both cite "account override applied inside the forge command surface"
-# verbatim, and a substring rule would let a partial-word rewrite silently
-# corrupt both of them.
-_ROADMAP_AMEND_JQ_DEFS='
-def _ra_in($arr): . as $v | ($arr | map(select(. == $v)) | length) > 0;
-'
-
-# Print one indented line per downstream needs entry that cites a creates
-# identity this amendment drops without authorization.
-#   $1 = stored phase object (JSON)   $2 = amended phase object (JSON)
-#   $3 = roadmap.json path            $4 = JSON array of authorized old identities
-# Dropped identities are the _cv_identity set difference stored-creates minus
-# amended-creates; comparison is exact equality via _ra_in throughout. A dropped
-# identity nobody cites produces no line, which is what lets an unreferenced
-# creates entry be removed without a --retarget-needs pair.
-_roadmap_amend_orphan_errors() {
-  local stored_phase="$1" amended_phase="$2" roadmap_path="$3" authorized_json="${4:-[]}"
-  jq -r \
-    --argjson stored "$stored_phase" \
-    --argjson amended "$amended_phase" \
-    --argjson authorized "$authorized_json" \
-    "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-    ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-    ([ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique
-      | map(select((_ra_in($new)) | not))
-      | map(select((_ra_in($authorized)) | not))) as $orphaned |
-    [ .phases[]
-      | select(.id != $amended.id)
-      | . as $p
-      | (($p.needs // [])[] | select(type == "string") | _cv_identity) as $ident
-      | select($ident | _ra_in($orphaned))
-      | {phase: $p.id, identity: $ident}
-    ]
-    | unique_by([.phase, .identity])
-    | sort_by(.phase)
-    | .[]
-    | "  phase " + (.phase|tostring) + " needs \"" + .identity + "\""
-  ' "$roadmap_path"
-}
-
 cmd_roadmap_amend_phase() {
   local feature="" phase_id="" file="" goal_flag="" branch_flag=""
   local have_goal=false have_branch=false
@@ -14235,273 +11933,42 @@ cmd_roadmap_amend_phase() {
     payload='{}'
   fi
 
-  if ! printf '%s' "$payload" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "Error: roadmap-amend-phase: amendment payload must be a JSON object, got: $(printf '%s' "$payload" | tr -d '\n' | cut -c1-200)" >&2
-    exit 1
-  fi
-
-  # Scalar flags fold into the same object so there is exactly one validation,
-  # sanitization and merge path -- no second code path to keep in step.
-  if [ "$have_goal" = true ]; then
-    payload=$(printf '%s' "$payload" | jq -c --arg v "$goal_flag" '. + {goal: $v}')
-  fi
-  if [ "$have_branch" = true ]; then
-    payload=$(printf '%s' "$payload" | jq -c --arg v "$branch_flag" '. + {branch: $v}')
-  fi
-
-  # --- Six-key allowlist, with the two owned keys redirected by name -------
-  local key_errors
-  key_errors=$(printf '%s' "$payload" | jq -r --argjson allowed "$_ROADMAP_AMENDABLE_KEYS" "$_ROADMAP_AMEND_JQ_DEFS"'
-    [ keys_unsorted[]
-      | select((_ra_in($allowed)) | not)
-      | . as $k
-      | "  \"" + $k + "\" is not amendable" +
-        (if $k == "status" then " -- phase status is owned by roadmap-set-status"
-         elif $k == "claim" then " -- phase claims are owned by roadmap-claim / roadmap-release-claim"
-         elif ($k | _ra_in(["id","dir","slug","name","dependsOn"])) then " -- it is phase identity, written once by roadmap-init"
-         else " -- amendable fields are: " + ($allowed | join(", ")) end)
-    ] | .[]
-  ')
-  if [ -n "$key_errors" ]; then
-    echo "Error: roadmap-amend-phase: unamendable key(s) in the amendment payload:" >&2
-    printf '%s\n' "$key_errors" >&2
-    exit 1
-  fi
-
-  if [ "$(printf '%s' "$payload" | jq 'keys | length')" -eq 0 ]; then
-    echo "Error: roadmap-amend-phase: the amendment carries no field to change -- pass at least one of $(printf '%s' "$_ROADMAP_AMENDABLE_KEYS" | jq -r 'join(", ")')" >&2
-    exit 1
-  fi
-
-  local type_errors
-  type_errors=$(printf '%s' "$payload" | jq -r '
-    [ (if has("goal") and (((.goal|type) != "string") or ((.goal|length) == 0)) then "  goal must be a non-empty string" else empty end),
-      (if has("branch") and ((.branch != null) and ((.branch|type) != "string")) then "  branch must be a string or null" else empty end),
-      ( . as $o
-        | (["successCriteria","creates","needs","areas"][]) as $k
-        | select($o | has($k))
-        | if (($o[$k]|type) != "array") then "  " + $k + " must be an array of strings"
-          elif (($o[$k] | map(select(type != "string")) | length) > 0) then "  " + $k + " entries must all be strings"
-          else empty end
-      )
-    ] | .[]
-  ')
-  if [ -n "$type_errors" ]; then
-    echo "Error: roadmap-amend-phase: invalid amendment value(s):" >&2
-    printf '%s\n' "$type_errors" >&2
-    exit 1
-  fi
-
-  # --- Same sanitizer and same caps roadmap-init applies to a fresh phase ---
+  # --- Everything judged BEFORE the lock ----------------------------------
+  # Same split, and for the same reason, as roadmap-init: a refusal must not
+  # take the lock and must not touch the file.
+  check_python3
+  local goal_args=() branch_args=()
+  [ "$have_goal" = true ] && goal_args=(--goal "$goal_flag")
+  [ "$have_branch" = true ] && branch_args=(--branch "$branch_flag")
   local sanitized
-  sanitized=$(printf '%s' "$payload" | jq -c "$_ROADMAP_SANITIZE_JQ"'
-    (if has("goal") then .goal = (.goal | _rm_sanitize(2000)) else . end)
-    | (if has("successCriteria") then .successCriteria = (.successCriteria | map(_rm_sanitize(2000))) else . end)
-    | (if has("creates") then .creates = (.creates | map(_rm_sanitize(500))) else . end)
-    | (if has("needs") then .needs = (.needs | map(_rm_sanitize(500))) else . end)
-    | (if has("areas") then .areas = (.areas | map(_rm_sanitize(500))) else . end)
-    | (if has("branch") then .branch = (if .branch == null then null else (.branch | _rm_sanitize(200)) end) else . end)
-  ')
-
-  local branch_present branch_value
-  branch_present=$(printf '%s' "$sanitized" | jq -r 'if (has("branch") and .branch != null) then "yes" else "no" end')
-  if [ "$branch_present" = "yes" ]; then
-    branch_value=$(printf '%s' "$sanitized" | jq -r '.branch')
-    if ! [[ "$branch_value" =~ $_ROADMAP_BRANCH_REGEX ]]; then
-      echo "Error: roadmap-amend-phase: branch \"$branch_value\" contains invalid characters" >&2
-      exit 1
-    fi
-  fi
+  sanitized=$(printf '%s' "$payload" | python3 "$(_aimi_roadmap_py)" amend-validate \
+    "${goal_args[@]}" "${branch_args[@]}") || exit $?
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-amend-phase" "$feature")
+  _roadmap_require_contracts "roadmap-amend-phase" "$roadmap_path" "$feature"
 
-  # --- Locked read-modify-write: every remaining check reads the file under
-  # the lock, and every refusal happens before mktemp, so a refused amendment
-  # leaves roadmap.json byte-for-byte unchanged. ---
+  # --- Locked read-modify-write ------------------------------------------
+  # Bash holds the lock; roadmap.py does the whole read-modify-write inside it.
+  # Every refusal still happens before the file is touched, so a refused
+  # amendment leaves roadmap.json byte-for-byte unchanged.
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-amend-phase: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      stored_phase=$(jq -c --argjson pid "$phase_id" '(.phases[] | select(.id == $pid)) // empty' "$roadmap_path")
-      if [ -z "$stored_phase" ]; then
-        echo "Error: roadmap-amend-phase: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      # Partial merge by key presence. A shallow object merge keeps every key the
-      # stored phase already had -- id, dir, slug, name, dependsOn, status and
-      # claim included -- at its original position and value; only the keys the
-      # payload actually carries are replaced, and each is replaced wholesale.
-      amended_phase=$(printf '%s' "$stored_phase" | jq -c --argjson patch "$sanitized" '. + $patch')
-
-      # Judge ONLY the lists this call actually writes. Handing over the merged
-      # phase would re-judge a list the amendment never touched, which turns
-      # every tightening of _roadmap_identity_errors into a retroactive refusal:
-      # a phase whose stored creates holds a legacy whitespace identity could no
-      # longer have its needs amended at all -- and repairing exactly those
-      # phases is what this verb exists for. An absent creates/needs key already
-      # yields an empty list inside the helper, so no helper change is needed.
-      identity_check_phase=$(jq -c -n --argjson amended "$amended_phase" --argjson patch "$sanitized" '
-        {id: $amended.id}
-        + (if ($patch | has("creates")) then {creates: ($amended.creates // [])} else {} end)
-        + (if ($patch | has("needs")) then {needs: ($amended.needs // [])} else {} end)
-      ')
-      identity_errors=$(printf '%s' "$identity_check_phase" | jq -c '[.]' | _roadmap_identity_errors)
-      if [ -n "$identity_errors" ]; then
-        echo "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:" >&2
-        printf '%s\n' "$identity_errors" >&2
-        exit 1
-      fi
-
-      dropped=$(jq -c -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-        [ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique | map(select((_ra_in($new)) | not))
-      ')
-      added=$(jq -c -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $old |
-        [ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique | map(select((_ra_in($old)) | not))
-      ')
-
-      # A pair that authorizes nothing is a caller mistake, not a no-op: it means
-      # the rename they meant to make did not happen the way they thought.
-      pair_errors=$(jq -r -n --argjson pairs "$retarget_pairs" --argjson dropped "$dropped" --argjson amended "$amended_phase" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ]) as $newidents |
-        [ $pairs[]
-          | . as $p
-          | if (($p.old | _ra_in($dropped)) | not) then
-              "  \"" + $p.old + "=" + $p.new + "\": this amendment does not drop the creates identity \"" + $p.old + "\""
-            elif (($p.new | _ra_in($newidents)) | not) then
-              "  \"" + $p.old + "=" + $p.new + "\": the amended phase declares no creates entry whose identity is \"" + $p.new + "\""
-            else empty end
-        ] | .[]
-      ')
-      if [ -n "$pair_errors" ]; then
-        echo "Error: roadmap-amend-phase: unusable --retarget-needs pair(s):" >&2
-        printf '%s\n' "$pair_errors" >&2
-        exit 1
-      fi
-
-      authorized=$(printf '%s' "$retarget_pairs" | jq -c '[.[].old] | unique')
-
-      orphan_errors=$(_roadmap_amend_orphan_errors "$stored_phase" "$amended_phase" "$roadmap_path" "$authorized")
-      if [ -n "$orphan_errors" ]; then
-        echo "Error: roadmap-amend-phase: this amendment drops creates identities other phases still cite in needs:" >&2
-        printf '%s\n' "$orphan_errors" >&2
-        echo "Re-run with the pairing that authorizes the rewrite:" >&2
-        # The set difference proves an identity was dropped but never which new
-        # identity replaced it, so the pairing is the caller's to state. When the
-        # amendment adds exactly one identity the suggestion is filled in
-        # completely; otherwise the new side stays a placeholder rather than a guess.
-        jq -r -n --argjson stored "$stored_phase" --argjson amended "$amended_phase" \
-          --argjson added "$added" --argjson authorized "$authorized" \
-          --arg feature "$feature" --arg pid "$phase_id" \
-          "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-          ([ ($amended.creates // [])[] | select(type == "string") | _cv_identity ] | unique) as $new |
-          (if ($added | length) == 1 then $added[0] else "<new identity>" end) as $target |
-          [ ($stored.creates // [])[] | select(type == "string") | _cv_identity ] | unique
-          | map(select((_ra_in($new)) | not))
-          | map(select((_ra_in($authorized)) | not))
-          | map("  aimi-cli.sh roadmap-amend-phase --feature " + $feature + " --phase " + $pid +
-                " ... --retarget-needs \"" + . + "=" + $target + "\"")
-          | .[]
-        ' >&2
-        exit 1
-      fi
-
-      # Duplicate creates is a hard block because validate-contracts hard-fails on
-      # it outside --agent-mode, and that halts /aimi:plan -- writing the amendment
-      # would produce a roadmap its own consumer rejects. Scope is the identities
-      # THIS amendment introduces: a collision that predates it is not this verb's
-      # to adjudicate, and blocking on one would wall off the very repair the verb exists for.
-      dup_errors=$(jq -r --argjson pid "$phase_id" --argjson added "$added" \
-        "$_CONTRACT_JQ_DEFS$_ROADMAP_AMEND_JQ_DEFS"'
-        [ .phases[]
-          | select(.id != $pid)
-          | . as $p
-          | (($p.creates // [])[] | select(type == "string") | _cv_identity) as $ident
-          | select($ident | _ra_in($added))
-          | {phase: $p.id, identity: $ident}
-        ]
-        | unique_by([.phase, .identity]) | sort_by(.phase) | .[]
-        | "  phase " + (.phase|tostring) + " already declares \"" + .identity + "\""
-      ' "$roadmap_path")
-      if [ -n "$dup_errors" ]; then
-        echo "Error: roadmap-amend-phase: phase $phase_id would declare a creates identity another phase already declares:" >&2
-        printf '%s\n' "$dup_errors" >&2
-        echo "  Convert the collision into a creates/needs contract between the two phases, or promote the artifact to a shared foundation phase." >&2
-        exit 1
-      fi
-
-      # old identity -> the amended phase's new creates entry VERBATIM (identity
-      # plus its parenthetical), so provider and consumer stay byte-identical.
-      retarget_map=$(jq -c -n --argjson pairs "$retarget_pairs" --argjson amended "$amended_phase" "$_CONTRACT_JQ_DEFS"'
-        ($amended.creates // []) as $creates |
-        reduce $pairs[] as $p ({};
-          . + { ($p.old): ([ $creates[] | select(type == "string") | select(_cv_identity == $p.new) ][0]) })
-      ')
-
-      retargeted=$(jq -c --argjson pid "$phase_id" --argjson retargets "$retarget_map" "$_CONTRACT_JQ_DEFS"'
-        [ .phases[]
-          | select(.id != $pid)
-          | . as $p
-          | (($p.needs // [])[] | select(type == "string")) as $entry
-          | ($entry | _cv_identity) as $i
-          | select($retargets | has($i))
-          | {phase: $p.id, from: $entry, to: $retargets[$i]}
-        ]
-      ' "$roadmap_path")
-
-      # One write: the phase swap and every authorized downstream needs rewrite.
-      roadmap_doc=$(jq --argjson pid "$phase_id" --argjson amended "$amended_phase" --argjson retargets "$retarget_map" \
-        "$_CONTRACT_JQ_DEFS"'
-        .phases |= map(
-          if .id == $pid then $amended
-          elif (($retargets | length) > 0) and has("needs") and ((.needs | type) == "array") then
-            .needs |= map(if type == "string" then (. as $e | ($retargets[($e | _cv_identity)] // $e)) else . end)
-          else . end
-        )
-      ' "$roadmap_path")
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      # Advisory only, exit status stays 0: correcting an already-completed
-      # phase's prose creates is precisely the repair this verb exists for, so no
-      # status value gates the amend in either direction.
-      phase_status=$(printf '%s' "$amended_phase" | jq -r '.status // ""')
-      if [ "$phase_status" = "completed" ] && [ "$(printf '%s' "$added" | jq 'length')" -gt 0 ]; then
-        handoff_path="$(dirname "$roadmap_path")/$(printf '%s' "$amended_phase" | jq -r '.dir // ""')/handoff.md"
-        if [ -f "$handoff_path" ]; then
-          added_idents=$(printf '%s' "$added" | jq -r '.[]')
-          while IFS= read -r ident; do
-            [ -z "$ident" ] && continue
-            if ! _cv_handoff_lists_artifact "$handoff_path" "$ident"; then
-              echo "Advisory: roadmap-amend-phase: phase $phase_id is completed and its handoff.md does not list \"$ident\" under Artifacts Created -- update the handoff so the phase's prose matches its contract." >&2
-            fi
-          done <<< "$added_idents"
-        fi
-      fi
-
-      jq -n --arg path "$roadmap_path" --argjson pid "$phase_id" \
-        --argjson amended "$(printf '%s' "$sanitized" | jq -c 'keys')" \
-        --argjson retargeted "$retargeted" \
-        '{roadmap: $path, phase: $pid, amended: $amended, retargeted: $retargeted}'
+      printf '%s' "$sanitized" | python3 "$(_aimi_roadmap_py)" amend-write \
+        --roadmap "$roadmap_path" --feature "$feature" --phase "$phase_id" \
+        --retargets "$retarget_pairs"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
 }
 
+# The only lifecycle verb that takes no lock: it reads and reports, so there is
+# nothing for a lock to protect. That is also why it never clears a stale
+# dead-PID claim the way roadmap-claim does -- inferring liveness is a decision
+# that belongs where the lock is, and a phase held by a dead session therefore
+# stays claimable by roadmap-claim and invisible here, exactly as before.
 cmd_roadmap_get() {
   local feature="" phase_id="" next_eligible=false
 
@@ -14523,38 +11990,57 @@ cmd_roadmap_get() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-get" "$feature")
 
+  local phase_args=() next_args=()
   if [ -n "$phase_id" ]; then
     _roadmap_validate_phase_id "$phase_id" "roadmap-get"
-    if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-      echo "Error: roadmap-get: phase $phase_id not found in $roadmap_path" >&2
-      exit 1
-    fi
-    jq --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path"
-    return 0
+    phase_args=(--phase "$phase_id")
   fi
+  [ "$next_eligible" = true ] && next_args=(--next-eligible)
 
-  if [ "$next_eligible" = true ]; then
-    # Same selection implementation roadmap-claim's auto branch uses, narrowed
-    # to the two statuses this verb reports. `.phases` is passed raw: this verb
-    # holds no lock, so it never clears stale dead-PID claims (see the note on
-    # _ROADMAP_SELECT_JQ). Reading one tasks file per phase is new cost for a
-    # verb that previously touched only roadmap.json, and it is unsynchronized
-    # -- a tasks file rewritten mid-read yields "has work", the safe answer,
-    # since only an all-completed file demotes anything.
-    local eligible has_work
-    has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
-    eligible=$(jq --argjson work "$has_work" "$_ROADMAP_SELECT_JQ"'
-      _rm_candidates(.phases; ["pending","planned"]; $work) | (.[0] // null)
-    ' "$roadmap_path")
-    if [ "$eligible" = "null" ]; then
-      echo "Error: roadmap-get: no eligible phase found" >&2
-      exit 1
-    fi
-    printf '%s\n' "$eligible"
-    return 0
-  fi
+  check_python3
+  python3 "$(_aimi_roadmap_py)" roadmap-get \
+    --roadmap "$roadmap_path" --feature "$feature" "${phase_args[@]}" "${next_args[@]}"
+}
 
-  cat "$roadmap_path"
+# Which phases may be expanded, and for each of the rest, what is holding it.
+#
+# Structurally cmd_roadmap_get, and that is the whole decision: no
+# _roadmap_require_contracts. Eligibility reads id, status, claim and dependsOn,
+# not one creates/needs entry, so the 2.0 contract gate would refuse a
+# pre-migration roadmap over a shape this verb never looks at -- and refusing
+# here means /aimi:plan cannot expand any phase of it. The five lifecycle verbs
+# are ungated for the same reason, spelled out at _roadmap_require_contracts.
+#
+# It takes no lock (nothing to protect, it only reads) and passes no --feature
+# to roadmap.py: unlike roadmap-get --next-eligible it reads no per-phase tasks
+# file, which is what makes its answer depend on roadmap.json alone while a
+# concurrent /aimi:execute rewrites those files.
+cmd_roadmap_eligible() {
+  local feature="" statuses=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --statuses) shift; statuses="${1:-}" ;;
+      *)
+        echo "Error: roadmap-eligible: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature" "roadmap-eligible"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-eligible" "$feature")
+
+  local status_args=()
+  [ -n "$statuses" ] && status_args=(--statuses "$statuses")
+
+  check_python3
+  python3 "$(_aimi_roadmap_py)" roadmap-eligible \
+    --roadmap "$roadmap_path" "${status_args[@]}"
 }
 
 cmd_roadmap_set_status() {
@@ -14588,82 +12074,24 @@ cmd_roadmap_set_status() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-set-status" "$feature")
 
+  # One crossing, not the two roadmap-init and roadmap-amend-phase make. Their
+  # split exists because a payload arrives on stdin and can be refused without
+  # reading roadmap.json at all -- refusing inside the lock would create the
+  # feature directory as a side effect of saying no. This verb has no payload:
+  # every refusal it can reach without the document (feature, phase id, status
+  # enum) has already happened above, and every remaining one needs the file, so
+  # a second call could only re-read what the first one holds.
+  check_python3
+  local force_args=()
+  [ "$force" = true ] && force_args=(--force)
+
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-set-status: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      current_status=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .status) // empty' "$roadmap_path")
-      if [ -z "$current_status" ]; then
-        echo "Error: roadmap-set-status: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      # verification_failed is reachable from any non-terminal state (execute
-      # sets it when creates-verification fails). The rest of the graph:
-      #   pending -> planned            plan expands the phase
-      #   pending -> in_progress        execute claims a phase whose planned
-      #                                 transition was lost (plan aborted after
-      #                                 writing tasks.json but before setting
-      #                                 planned) -- allowing it makes execute
-      #                                 self-healing instead of silently
-      #                                 diverging from roadmap.json
-      #   planned -> in_progress        normal start
-      #   in_progress -> in_progress    idempotent resume of a crashed session
-      #   verification_failed -> in_progress   re-verify retry
-      #   in_progress|verification_failed -> completed
-      allowed=false
-      if [ "$new_status" = "verification_failed" ]; then
-        allowed=true
-      else
-        case "$current_status:$new_status" in
-          pending:planned|pending:in_progress|planned:in_progress|in_progress:in_progress|verification_failed:in_progress|in_progress:completed|verification_failed:completed) allowed=true ;;
-        esac
-      fi
-
-      if [ "$allowed" != true ] && [ "$force" != true ]; then
-        echo "Error: roadmap-set-status: transition $current_status -> $new_status is not allowed without --force" >&2
-        exit 1
-      fi
-
-      # Hard rule, not an --force-able ordering convention: a phase can never
-      # reach "completed" without handoff.md already on disk at its phase dir
-      # (see outline 11). handoff.md is written only via roadmap-write-handoff,
-      # which is the guard-protected path guard-runtime-state.py points callers
-      # at. This check runs even when --force is set -- --force overrides
-      # transition *order*, never this physical artifact precondition.
-      if [ "$new_status" = "completed" ]; then
-        phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-        feature_dir=$(dirname "$roadmap_path")
-        if [ ! -f "$feature_dir/$phase_dir/handoff.md" ]; then
-          echo "Error: roadmap-set-status: phase $phase_id cannot transition to completed -- no handoff.md found at $feature_dir/$phase_dir/handoff.md. Write it first with roadmap-write-handoff." >&2
-          exit 1
-        fi
-      fi
-
-      # Completing a phase also releases its claim in the same atomic write --
-      # no window where status reads completed while the phase still shows
-      # claimed (see outline 11; mirrors cmd_mark_complete's single-write pattern).
-      if [ "$new_status" = "completed" ]; then
-        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
-          .phases |= map(if .id == $pid then .status = $status | .claim = null else . end)
-        ' "$roadmap_path")
-      else
-        roadmap_doc=$(jq --argjson pid "$phase_id" --arg status "$new_status" '
-          .phases |= map(if .id == $pid then .status = $status else . end)
-        ' "$roadmap_path")
-      fi
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --argjson pid "$phase_id" --arg from "$current_status" --arg to "$new_status" '{phase: $pid, from: $from, to: $to}'
+      python3 "$(_aimi_roadmap_py)" set-status \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$new_status" \
+        "${force_args[@]}"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14698,187 +12126,28 @@ cmd_roadmap_claim() {
   if [ -n "$phase_override" ]; then
     _roadmap_validate_phase_id "$phase_override" "roadmap-claim"
   fi
-  # Sanitize the caller-supplied session id before it is ever written to roadmap.json.
-  session_id=$(printf '%s' "$session_id" | jq -Rr "$_ROADMAP_SANITIZE_JQ"'_rm_sanitize(200)')
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-claim" "$feature" " (run roadmap-init first)")
 
-  # --phase is a bare numeric id at this point (validated above); pass it through
-  # to jq as a number, or JSON null when no override was given.
-  local phase_override_json="null"
-  [ -n "$phase_override" ] && phase_override_json="$phase_override"
+  # The session id is sanitized on the far side, by rm_sanitize in
+  # scripts/sanitize.py -- the same function every other free-text roadmap
+  # field goes through -- before it is ever written to roadmap.json.
+  #
+  # The exit statuses are the contract, not a detail: execute.md branches on 4
+  # ("there is nothing left to claim") and 3 ("there is, and you cannot have
+  # it"), so they travel out of the subshell through `|| exit $?` unchanged.
+  check_python3
+  local phase_args=()
+  [ -n "$phase_override" ] && phase_args=(--phase "$phase_override")
 
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-claim: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      # Identify stale claims (claimedPid no longer alive) inside this locked pass.
-      # sessionId travels alongside pid here so the release report line below
-      # ("released stale claim on phase <id> (session <sid> pid <pid> not
-      # alive)") can be built without a second read of roadmap.json.
-      # _is_pid_alive is a bash kill(2) probe, not something jq can do, so
-      # the loop itself stays bash -- but it only accumulates plain phase-id
-      # lines while the lock is held, then converts them to a JSON array in
-      # one jq pass at the end, instead of spawning one jq process per stale
-      # claim to grow the array incrementally.
-      claimed_pids=$(jq -c '[.phases[] | select(.claim != null) | {id: .id, pid: .claim.claimedPid, sessionId: .claim.claimedBy}]' "$roadmap_path")
-      stale_id_lines=""
-      while IFS=$'\t' read -r pid_phase_id pid_val; do
-        [ -z "$pid_phase_id" ] && continue
-        if ! _is_pid_alive "$pid_val"; then
-          stale_id_lines="${stale_id_lines}${pid_phase_id}"$'\n'
-        fi
-      done < <(printf '%s' "$claimed_pids" | jq -r '.[] | [(.id|tostring), (.pid|tostring)] | @tsv')
-      stale_ids=$(printf '%s' "$stale_id_lines" | jq -R -s 'split("\n") | map(select(length > 0) | tonumber)')
-      stale_released=$(printf '%s' "$claimed_pids" | jq --argjson stale_ids "$stale_ids" '
-        [.[] | select((.id) as $id | ($stale_ids | index($id)) != null)]
-      ')
-
-      now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-      # Has-work pre-pass, inside this same lock, so the ordering below reads a
-      # tasks-file snapshot no concurrent claim can move under it. It is a SIDE
-      # MAP handed to jq as one --argjson, never a field merged onto the phase
-      # objects: $cleared_phases is the very array written back to roadmap.json
-      # at the end of this function, so a synthetic key added here would be
-      # persisted forever and would then flow into validate-contracts,
-      # roadmap-sweep and roadmap-reconcile.
-      has_work=$(_roadmap_has_work_map "$roadmap_path" "$feature")
-
-      result=$(jq -n \
-        --slurpfile cur "$roadmap_path" \
-        --argjson stale_ids "$stale_ids" \
-        --argjson stale_released "$stale_released" \
-        --arg session_id "$session_id" \
-        --arg now "$now" \
-        --argjson session_pid "$session_pid" \
-        --argjson phase_override "$phase_override_json" \
-        --argjson work "$has_work" \
-        "$_ROADMAP_SELECT_JQ"'
-          ($cur[0]) as $current |
-          ($current.phases | map(if ((.id) as $id | ($stale_ids | index($id)) != null) then .claim = null else . end)) as $cleared_phases |
-          (reduce $cleared_phases[] as $p ({}; . + {($p.id|tostring): $p.status})) as $status_by_id |
-          # Self-reclaim: this exact session already owns an unreleased claim on a
-          # still-active phase (matching the requested --phase when given). Return
-          # it again instead of erroring or re-running eligibility -- this is what
-          # makes re-running /aimi:execute on an already-claimed phase idempotent.
-          ($cleared_phases | map(select(
-            .claim != null and .claim.claimedBy == $session_id and
-            (.status == "pending" or .status == "planned" or .status == "in_progress") and
-            ($phase_override == null or .id == $phase_override)
-          ))) as $self_claimed |
-          (if ($self_claimed | length) > 0 then
-            ($self_claimed | sort_by(.id) | .[0]) as $mine |
-            {claimed: true, phase: $mine, phases: $cleared_phases}
-          elif $phase_override != null then
-            ($cleared_phases | map(select(.id == $phase_override))) as $target_arr |
-            if ($target_arr | length) == 0 then
-              {claimed: false, reason: "phase-not-found", phases: null}
-            else
-              ($target_arr[0]) as $target |
-              if ((["pending","planned","in_progress","verification_failed"] | index($target.status)) == null) then
-                {claimed: false, reason: "not-claimable", detail: ("phase status is " + $target.status), phases: null}
-              elif $target.claim != null then
-                {claimed: false, reason: "claimed", detail: "claimed by a live session", phases: null}
-              elif ((($target.dependsOn // []) | all(. as $d | $status_by_id[$d|tostring] == "completed")) | not) then
-                {claimed: false, reason: "blocked", detail: ("depends on incomplete phase(s): " + ((($target.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", ")))), phases: null}
-              else
-                ($cleared_phases | map(if .id == $target.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
-                {claimed: true, phase: ($final_phases[] | select(.id == $target.id)), phases: $final_phases}
-              end
-            end
-          else
-            # Resumable = not yet terminal AND carrying no live claim. Stale
-            # claims were already cleared above, so an unclaimed in_progress
-            # phase is leftover from a crashed session and verification_failed
-            # is awaiting a re-verify run -- both must be re-claimable or crash
-            # recovery and verification retry are dead ends, which is exactly
-            # what execute.md tells the user to recover by re-running.
-            #
-            # The ORDER within that set, not the set itself, was issue #90. A
-            # stuck phase is by construction older and therefore lower-id than
-            # whatever came after it, so plain sort_by(.id) made it win every
-            # auto-claim indefinitely, ahead of the phase genuinely ready to
-            # run. Candidates are now ranked by remaining work first and id
-            # second. Ranking DEMOTES, it never excludes: the moment a zero-work
-            # phase is the only eligible candidate it is claimed, which is what
-            # keeps crash recovery and the verification retry reachable.
-            (_rm_candidates($cleared_phases; ["pending","planned","in_progress","verification_failed"]; $work)) as $eligible |
-            if ($eligible | length) > 0 then
-              ($eligible | .[0]) as $chosen |
-              ($cleared_phases | map(if .id == $chosen.id then . + {claim: {claimedBy: $session_id, claimedAt: $now, claimedPid: $session_pid}} else . end)) as $final_phases |
-              {claimed: true, phase: ($final_phases[] | select(.id == $chosen.id)), phases: $final_phases}
-            else
-              ($cleared_phases | map(select(.status == "pending" or .status == "planned" or .status == "in_progress" or .status == "verification_failed"))) as $remaining |
-              if ($remaining | length) == 0 then
-                {claimed: false, reason: "none-eligible", phases: null}
-              else
-                ($remaining | map(
-                  if .claim != null then
-                    {id: .id, reason: ("claimed by session " + .claim.claimedBy)}
-                  else
-                    {id: .id, reason: ("depends on incomplete phase(s): " + (((.dependsOn // []) | map(select($status_by_id[(.|tostring)] != "completed")) | map(tostring) | join(", "))))}
-                  end
-                )) as $blocked_reasons |
-                {claimed: false, reason: "all-blocked", blocked: $blocked_reasons, phases: null}
-              end
-            end
-          end) as $outcome |
-          # INTERNAL envelope, never stdout. This attaches staleReleased to the
-          # $outcome wrapper ({claimed, phase, phases, reason...}) that the bash
-          # below destructures. Actual stdout is the SECOND `+ {staleReleased`
-          # further down -- `.phase + {staleReleased: .staleReleased}` -- and
-          # that one is the claim envelope execute.md Step 1.7 reads
-          # .id/.dir/.slug/.branch/.status off. So a grep for `+ {staleReleased`
-          # returns two hits, and always has; only the lower one is a contract.
-          # Projecting it would silently disable the re-verify branch in
-          # execute.md Step 3, which is why test-aimi-cli.sh pins all six of
-          # those fields on the auto path.
-          $outcome + {staleReleased: $stale_released}
-        ')
-
-      claimed=$(printf '%s' "$result" | jq -r '.claimed')
-
-      if [ "$claimed" = "true" ]; then
-        new_phases_out=$(printf '%s' "$result" | jq '.phases')
-        roadmap_doc=$(jq --argjson phases "$new_phases_out" '.phases = $phases' "$roadmap_path")
-
-        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-        printf '%s\n' "$roadmap_doc" > "$tmp_file"
-        mv "$tmp_file" "$roadmap_path"
-
-        printf '%s' "$result" | jq '.phase + {staleReleased: .staleReleased}'
-        exit 0
-      fi
-
-      reason=$(printf '%s' "$result" | jq -r '.reason')
-      case "$reason" in
-        none-eligible)
-          echo "Error: roadmap-claim: no phase remains in pending, planned, in_progress or verification_failed status" >&2
-          exit 4
-          ;;
-        phase-not-found)
-          echo "Error: roadmap-claim: phase $phase_override not found in $roadmap_path" >&2
-          exit 4
-          ;;
-        not-claimable|claimed|blocked)
-          detail=$(printf '%s' "$result" | jq -r '.detail')
-          echo "Error: roadmap-claim: phase $phase_override is not claimable: $detail" >&2
-          exit 3
-          ;;
-        *)
-          echo "Error: roadmap-claim: all remaining pending/planned phases are blocked:" >&2
-          printf '%s' "$result" | jq -r '.blocked[] | "  phase " + (.id|tostring) + ": " + .reason' >&2
-          exit 3
-          ;;
-      esac
+      python3 "$(_aimi_roadmap_py)" claim \
+        --roadmap "$roadmap_path" --feature "$feature" \
+        --session-id "$session_id" --session-pid "$session_pid" "${phase_args[@]}"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14905,25 +12174,13 @@ cmd_roadmap_release_claim() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-release-claim" "$feature" "" --skip-malformed)
 
+  check_python3
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-release-claim: phase $phase_id not found in $roadmap_path" >&2
-        exit 1
-      fi
-
-      roadmap_doc=$(jq --argjson pid "$phase_id" '
-        .phases |= map(if .id == $pid then .claim = null else . end)
-      ' "$roadmap_path")
-
-      tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-      printf '%s\n' "$roadmap_doc" > "$tmp_file"
-      mv "$tmp_file" "$roadmap_path"
-
-      jq -n --argjson pid "$phase_id" '{released: $pid}'
+      python3 "$(_aimi_roadmap_py)" release-claim \
+        --roadmap "$roadmap_path" --phase "$phase_id"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14948,76 +12205,13 @@ cmd_roadmap_reconcile() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-reconcile" "$feature")
 
-  local feature_dir
-  feature_dir=$(dirname "$roadmap_path")
-
+  check_python3
   local out
   out=$(
     (
       _lock "${roadmap_path}.lock"
-
-      if ! jq -e . "$roadmap_path" >/dev/null 2>&1; then
-        echo "Error: roadmap-reconcile: malformed roadmap.json: $roadmap_path" >&2
-        exit 1
-      fi
-
-      phase_dirs=$(jq -c '[.phases[] | {id: .id, dir: .dir, status: .status}]' "$roadmap_path")
-      corrections='[]'
-
-      blocked='[]'
-
-      while IFS=$'\t' read -r rc_id rc_dir rc_status; do
-        [ -z "$rc_id" ] && continue
-        # Phase tasks files follow <feature>-phase-<id>-tasks.json (the same
-        # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
-        # status.md use). Reading a bare tasks.json here made every lookup miss,
-        # so reconcile silently reported zero corrections.
-        rc_tasks_file="$feature_dir/$rc_dir/$feature-phase-$rc_id-tasks.json"
-        if [ ! -f "$rc_tasks_file" ]; then
-          continue
-        fi
-        if ! jq -e . "$rc_tasks_file" >/dev/null 2>&1; then
-          continue
-        fi
-        # Shared with the has-work map roadmap-claim ranks on
-        # (_ROADMAP_GROUND_TRUTH_JQ) -- one rule, so the two cannot disagree
-        # about the same tasks file.
-        ground_truth=$(jq -r "$_ROADMAP_GROUND_TRUTH_JQ" "$rc_tasks_file")
-        if [ "$ground_truth" != "unknown" ] && [ "$ground_truth" != "$rc_status" ]; then
-          # Same hard precondition roadmap-set-status enforces: a phase never
-          # reaches "completed" without handoff.md on disk. Reconcile must not
-          # be a second write path with weaker invariants -- an otherwise-valid
-          # completed correction is reported as blocked instead of applied, so
-          # the divergence stays visible rather than silently healed wrong.
-          if [ "$ground_truth" = "completed" ] && [ ! -f "$feature_dir/$rc_dir/handoff.md" ]; then
-            blocked=$(printf '%s' "$blocked" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" \
-              '. + [{id: $id, from: $from, to: $to, reason: "no handoff.md -- write it with roadmap-write-handoff, then re-run"}]')
-          else
-            corrections=$(printf '%s' "$corrections" | jq --argjson id "$rc_id" --arg from "$rc_status" --arg to "$ground_truth" '. + [{id: $id, from: $from, to: $to}]')
-          fi
-        fi
-      done < <(printf '%s' "$phase_dirs" | jq -r '.[] | [(.id|tostring), .dir, .status] | @tsv')
-
-      if [ "$(printf '%s' "$corrections" | jq 'length')" -gt 0 ]; then
-        # Reaching "completed" also releases the claim in the same atomic write,
-        # mirroring roadmap-set-status -- otherwise a reconciled phase reads as
-        # done while still showing claimed by a dead session.
-        roadmap_doc=$(jq --argjson corr "$corrections" '
-          .phases |= map(
-            . as $p |
-            (($corr | map(select(.id == $p.id)) | .[0]) // null) as $c |
-            if $c != null then
-              ($p + {status: $c.to} | if $c.to == "completed" then .claim = null else . end)
-            else $p end
-          )
-        ' "$roadmap_path")
-
-        tmp_file=$(mktemp "${roadmap_path}.XXXXXX")
-        printf '%s\n' "$roadmap_doc" > "$tmp_file"
-        mv "$tmp_file" "$roadmap_path"
-      fi
-
-      jq -n --argjson corr "$corrections" --argjson blocked "$blocked" '{corrections: $corr, blocked: $blocked}'
+      python3 "$(_aimi_roadmap_py)" reconcile \
+        --roadmap "$roadmap_path" --feature "$feature"
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -15029,12 +12223,13 @@ cmd_roadmap_reconcile() {
 # back at this verb -- this is the only path that may create or overwrite
 # that file. Reads a JSON object from --file or stdin with five optional
 # array-of-string fields (decisions, artifacts, deviations, deferred,
-# contracts); each entry is sanitized and length-capped with the same
-# _rm_sanitize regime as every other free-text roadmap field. Always emits
+# contracts); each entry is sanitized and length-capped by rm_sanitize in
+# scripts/sanitize.py, the same regime every other free-text roadmap field
+# goes through. Always emits
 # exactly five "## " headings in the fixed order
 # "Decisions Made" / "Artifacts Created" / "Deviations" / "Deferred Items" /
 # "Contracts Delivered" -- the order roadmap-set-status's completed-requires-
-# handoff precondition and _cv_handoff_lists_artifact's "Artifacts Created"
+# handoff precondition and handoff_lists_artifact's "Artifacts Created"
 # lookup both depend on. Overwrites any existing handoff.md at that path
 # (idempotent retry after a verification_failed -> completed re-run).
 cmd_roadmap_write_handoff() {
@@ -15058,7 +12253,13 @@ cmd_roadmap_write_handoff() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-write-handoff" "$feature")
+  _roadmap_require_contracts "roadmap-write-handoff" "$roadmap_path" "$feature"
 
+  # The one roadmap read that stays here: the handoff path is built from this
+  # phase's stored dir, and validate_path_in_project below is a bash rule about
+  # where this process may write. Resolving the dir in roadmap.py would mean
+  # either a second call just to learn the path, or moving path confinement into
+  # a file that has no business owning it.
   local phase_dir
   phase_dir=$(jq -r --argjson pid "$phase_id" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
   if [ -z "$phase_dir" ]; then
@@ -15078,38 +12279,13 @@ cmd_roadmap_write_handoff() {
     input_json=$(cat)
   fi
 
-  if ! printf '%s' "$input_json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    echo "Error: roadmap-write-handoff: payload must be a JSON object" >&2
-    exit 1
-  fi
-
-  local key
-  for key in decisions artifacts deviations deferred contracts; do
-    if ! printf '%s' "$input_json" | jq -e --arg k "$key" '(.[$k] // []) as $v | ($v|type) == "array" and ($v | all(type == "string"))' >/dev/null 2>&1; then
-      echo "Error: roadmap-write-handoff: field '$key' must be an array of strings" >&2
-      exit 1
-    fi
-  done
-
+  # Payload validation, the declared-identity lookup, the render and the
+  # lost-identity tripwire are one call: they are all judgements about the same
+  # document and the tripwire needs the rendered body to make its own.
+  check_python3
   local body
-  body=$(printf '%s' "$input_json" | jq -r "$_ROADMAP_SANITIZE_JQ"'
-    def clean: map(_rm_sanitize(2000));
-    def section(title; items):
-      "## " + title + "\n\n" +
-      (if (items | length) == 0 then "_None._\n" else ((items | map("- " + .)) | join("\n")) + "\n" end);
-    {
-      decisions: ((.decisions // []) | clean),
-      artifacts: ((.artifacts // []) | clean),
-      deviations: ((.deviations // []) | clean),
-      deferred: ((.deferred // []) | clean),
-      contracts: ((.contracts // []) | clean)
-    } as $s |
-    section("Decisions Made"; $s.decisions) + "\n" +
-    section("Artifacts Created"; $s.artifacts) + "\n" +
-    section("Deviations"; $s.deviations) + "\n" +
-    section("Deferred Items"; $s.deferred) + "\n" +
-    section("Contracts Delivered"; $s.contracts)
-  ')
+  body=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" write-handoff \
+    --roadmap "$roadmap_path" --phase "$phase_id") || exit $?
 
   local feature_dir handoff_path
   feature_dir=$(dirname "$roadmap_path")
@@ -15135,333 +12311,93 @@ cmd_roadmap_write_handoff() {
 # Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
 # need (no phase in the needing phase's dependsOn closure creates it) and a
 # duplicate creates (the same artifact identity declared by two or more
-# phases). Artifact identity is the substring before a creates/needs entry's
-# first "(", trimmed of surrounding whitespace (see outline 01's shared
-# scope-context reference).
+# phases). Artifact identity is a creates/needs entry's own `identity` field
+# (see outline 01's shared scope-context reference); both verbs refuse a
+# pre-2.0 roadmap outright rather than reporting on entries they cannot read.
 #
-# Schema note: the roadmap phase status enum is pending/planned/in_progress/
-# completed/verification_failed (see cmd_roadmap_set_status above) -- there
-# is no "deferred" status. roadmap-sweep's deferredNeeds check substitutes
-# the existing "provider resolved but status != completed" signal for the
-# undefined "deferred" status value, per this story's authoritative notes
-# reconciling the schema gap against outline 02/outline 14.
+# Both verbs are argument parsing here and one call into roadmap.py; the shared
+# contract vocabulary they used to read through -- what an identity is, which
+# characters it may not hold, what makes an entry suspicious -- moved there with
+# them, so there is one definition and no bash copy left to drift from it.
 
-# jq `def`s shared by validate-contracts and roadmap-sweep.
-_CONTRACT_JQ_DEFS='
-def _cv_identity: sub("\\(.*"; "") | gsub("^[ \t]+|[ \t]+$"; "");
-def _cv_suspicious: test("ignore previous|system:|INSTRUCTIONS|```|\\$\\("; "i") or test("[$`;|&]");
-'
+# ============================================================================
+# normalize-contracts — migrate stored creates/needs from 1.0 to 2.0
+# ============================================================================
+#
+# 1.0 stores one entry as the string "identity (description)"; 2.0 stores
+# {identity, description}. This verb is the only writer of that transition, and
+# it exists rather than "just regenerate the roadmap" because roadmaps live
+# outside this repository too -- a phases array is authored once, by hand or by
+# /aimi:brainstorm, and re-deriving one loses every amendment made since.
+#
+# THE CORRECTNESS ARGUMENT IS THAT IT CALLS cv_identity, NOT A COPY OF IT.
+# Every reader in this file has always computed the identity as
+# `sub("\\(.*"; "")` then trim. A migration that re-derived that split with its
+# own regex would be a fourth ruler, and any disagreement -- even on one entry
+# in one roadmap -- silently repoints a downstream needs at nothing, because
+# needs are matched against creates by exact byte equality. Reusing the
+# function makes the migrated identity byte-identical to what the pre-migration
+# readers saw, by construction rather than by testing.
+#
+# It therefore does NOT judge. A whitespace-bearing prose identity the current
+# writer would refuse migrates unchanged; the reader gate is what surfaces it
+# afterwards, in a diagnostic that names the entry. Repairing on the way past
+# would silently change what a phase promises.
+#
+# nc_description is the exact inverse of cv_identity's cut: everything from
+# the first "(" on, minus one leading "(" and one trailing ")". An entry with
+# no "(" at all yields "" -- absent description, not null, so no reader needs a
+# string-or-null branch.
+cmd_normalize_contracts() {
+  local feature=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        feature="${2:-}"
+        shift 2
+        ;;
+      *)
+        echo "Error: normalize-contracts: unknown argument: $1" >&2
+        echo "Usage: aimi-cli.sh normalize-contracts --feature <slug>" >&2
+        exit 1
+        ;;
+    esac
+  done
 
-# Print newline-separated phase ids reachable via transitive dependsOn
-# closure from $2 (excluding $2 itself). $1 = roadmap_path.
-_cv_reachable_ids() {
-  local roadmap_path="$1" start_id="$2"
-  jq -r --argjson start "$start_id" '
-    (reduce .phases[] as $p ({}; . + {($p.id|tostring): ($p.dependsOn // [])})) as $deps |
-    def _cv_expand($cur): ($cur + ($cur | map($deps[(.|tostring)] // []) | add // [])) | unique;
-    ([$start] | until(_cv_expand(.) == .; _cv_expand(.))) - [$start] | .[]
-  ' "$roadmap_path"
-}
+  _roadmap_validate_feature "$feature" "normalize-contracts"
+  local roadmap_path
+  roadmap_path=$(_roadmap_require normalize-contracts "$feature" " (run roadmap-init first)")
 
-# Print "id<TAB>identity<TAB>status<TAB>dir" for every creates[] entry of
-# every phase whose id is in the given newline-separated id list ($2),
-# sorted by phase id ascending (deterministic first-match order for
-# provider lookup). $1 = roadmap_path.
-_cv_creates_in_scope() {
-  local roadmap_path="$1" ids_input="$2"
-  local ids_json='[]'
-  if [ -n "$ids_input" ]; then
-    ids_json=$(printf '%s\n' "$ids_input" | jq -R 'select(length > 0) | tonumber' | jq -s '.')
-  fi
-  jq -r --argjson ids "$ids_json" "$_CONTRACT_JQ_DEFS"'
-    [.phases[] | select(.id as $i | $ids | index($i) != null)] | sort_by(.id) | .[] |
-    . as $p | ((.creates // [])[]? | _cv_identity) as $ident |
-    "\($p.id)\t\($ident)\t\($p.status)\t\($p.dir // "")"
-  ' "$roadmap_path"
-}
-
-# True (exit 0) when handoff.md at $1 lists artifact identity $2 under an
-# "Artifacts Created" section (any heading level). Fixed-string match (-F)
-# so an identity containing regex metacharacters cannot alter the search.
-_cv_handoff_lists_artifact() {
-  local handoff_path="$1" identity="$2"
-  [ -f "$handoff_path" ] || return 1
-  awk '
-    /^#+[ \t]+Artifacts Created/ { flag=1; next }
-    /^#+[ \t]/ { flag=0 }
-    flag { print }
-  ' "$handoff_path" | grep -qF -- "$identity"
+  check_python3
+  # Bash holds the lock; roadmap.py does the whole read-modify-write inside it,
+  # including the re-read that catches a file which turned malformed between
+  # _roadmap_require's check and lock acquisition. One crossing, not four.
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      python3 "$(_aimi_roadmap_py)" normalize-contracts --roadmap "$roadmap_path"
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
 }
 
 # ============================================================================
 # verify-creates — prove a phase's creates[] exist in code, not in prose
 # ============================================================================
 #
-# Creates verification used to live as executable prose in /aimi:execute's
-# "Creates Verification" section: an orchestrator read a numbered procedure and
-# ran `[ -f "$PHASE_CONTAINER_PATH/$identity" ]`, then a bare `git grep -l -F`.
-# No Bash suite could reach it, and the procedure was wrong in three ways a
-# test would have caught the day it shipped:
+# The whole rule lives in roadmap.py: the ':(glob)' pathspec, the 27-entry
+# exclusion list, the endpoint-prefix strip, the TODO/FIXME marker rejection and
+# the git exit-code ladder that separates "the phase did not build it" from "we
+# could not look". It moved there because every one of those pathspecs carries
+# ':', '*' and '(' -- characters a shell is free to reinterpret -- and the
+# pathspec defect this verb was fixed for came from exactly that. An argument
+# list has no quoting layer to get wrong.
 #
-#   * `[ -f ]` is false for a directory, so a creates entry naming one
-#     ("db/migrations") could never verify by path.
-#   * The text search carried no exclusions, so an identity mentioned once in
-#     docs/plano.md, in a test file, or in a `// TODO:` comment closed the
-#     phase — a phase could pass on a mention of the work instead of the work.
-#   * An endpoint identity is written "POST /api/notifications" (see the
-#     Creates/Needs Contracts table in commands/references/scope-contexts.md),
-#     but source code holds the path, not the method-plus-path literal, so a
-#     delivered endpoint read as missing while its documentation read as done.
-#
-# This is the move split-detect already made (see its header above): pure,
-# deterministic, file-only logic belongs where both Bash suites can reach it,
-# in exactly one copy, with every rule a test case.
-#
-# It is a QUERY, not a gate. Producing a verdict array exits 0 — including an
-# array where every entry is "missing". Non-zero is reserved for real errors
-# (unknown flag, absent/non-numeric --phase, absent/malformed roadmap.json,
-# --dir that is not a directory), which is what lets the caller loop over the
-# result instead of branching on the exit status.
-#
-# Deliberately NOT kind-aware: it does not try to map a table identity to a
-# migration file or an endpoint identity to a route file. Every identity runs
-# the same four steps; the kind column in scope-contexts.md stays a naming
-# convention, not a dispatch table.
-
-# Paths whose content is a MENTION of an artifact rather than the artifact:
-# documentation and tests.
-#
-# Every pattern uses the LONG ":(exclude)" form. The short "!" form is not
-# interchangeable — git reads the character after the colon as pathspec magic,
-# so ':!__tests__/*' aborts the whole invocation with
-#   fatal: Unimplemented pathspec magic '_' in ':!__tests__/*'
-# and exit 128, which would turn every artifact of every phase into "missing".
-# Long form only, for all patterns, so no future edit reintroduces the short
-# form by copying a neighbour.
-#
-# Default pathspec matching is fnmatch without FNM_PATHNAME — "*" crosses "/"
-# — so "*.md" excludes .md files at any depth, while "docs/*" is anchored at
-# the search root and needs the "*/docs/*" companion for nested copies.
-#
-# .aimi/* is excluded for a specific reason: roadmap.json holds the creates[]
-# strings themselves, so without it every identity would find itself in the
-# very file that declared it.
-_VERIFY_CREATES_EXCLUDES=(
-  ':(exclude)*.md'
-  ':(exclude)*.mdx'
-  ':(exclude)*.rst'
-  ':(exclude)*.adoc'
-  ':(exclude)*.txt'
-  ':(exclude)docs/*'
-  ':(exclude)doc/*'
-  ':(exclude)documentation/*'
-  ':(exclude)*/docs/*'
-  ':(exclude)*/doc/*'
-  ':(exclude)*/documentation/*'
-  ':(exclude)README*'
-  ':(exclude)CHANGELOG*'
-  ':(exclude)CONTRIBUTING*'
-  ':(exclude).aimi/*'
-  ':(exclude)*_test.*'
-  ':(exclude)*.test.*'
-  ':(exclude)*_spec.*'
-  ':(exclude)*.spec.*'
-  ':(exclude)test/*'
-  ':(exclude)tests/*'
-  ':(exclude)spec/*'
-  ':(exclude)__tests__/*'
-  ':(exclude)*/test/*'
-  ':(exclude)*/tests/*'
-  ':(exclude)*/spec/*'
-  ':(exclude)*/__tests__/*'
-)
-
-# The tracked-files caveat, stated in every "missing" verdict so the caller
-# reports the limit instead of silently owning it.
-_VERIFY_CREATES_TRACKED_NOTE='Note: git ls-files and git grep see tracked (committed) files only, so uncommitted work reads as missing.'
-
-# True (exit 0) when the identity names documentation itself. For those, a hit
-# under docs/ IS the artifact rather than a mention of it, so the exclusion
-# list is bypassed for that one entry.
-_verify_creates_is_doc_identity() {
-  local identity="$1"
-  case "$identity" in
-    docs/*|doc/*|*/docs/*|*/doc/*|*.md|*.rst|*.adoc|*.txt) return 0 ;;
-  esac
-  return 1
-}
-
-# True (exit 0) when a matched line is nothing but a TODO/FIXME/XXX/HACK
-# marker inside a comment — a note that the work is still owed, which must
-# never count as the work being done.
-_verify_creates_is_marker_line() {
-  local content="$1"
-  grep -Eq '^[[:space:]]*(//+|#+|--+|\*+|/\*+|<!--)[[:space:]]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)' <<< "$content"
-}
-
-# Verify ONE creates identity against <dir>'s tracked files.
-# Prints one compact JSON object: {identity, status, method, evidence, gitStatus}.
-#   status    verified | missing | error
-#   method    "path" (step 1) | "text" (step 3) | null (not verified)
-#   gitStatus the highest exit status any git invocation returned for this
-#             entry — 0 or 1 in normal operation, above 1 only on tool failure.
-# Always returns 0: a verdict of "missing" or "error" is data, not failure.
-_verify_creates_one() {
-  local dir="$1" identity="$2"
-  local status="missing" method="" evidence=""
-  local git_max=0 rc=0
-
-  if [ -z "$identity" ]; then
-    _verify_creates_emit "$identity" "missing" "" \
-      "Malformed creates entry: empty artifact identity (expected \"<artifact-name> (<description>)\"). $_VERIFY_CREATES_TRACKED_NOTE" 0
-    return 0
-  fi
-
-  # --- Step 1: tracked path ------------------------------------------------
-  # Matches a FILE and a DIRECTORY alike. `[ -f ]`, which this replaces, is
-  # false on a directory, so a directory identity could only ever verify by
-  # text search — and usually did not verify at all.
-  # An absolute or traversing identity is never handed to git as a pathspec
-  # (same escape-prevention posture validate_path_in_project enforces); it
-  # falls through to the content search instead, which cannot leave the repo.
-  local path_safe=true
-  case "$identity" in
-    /*|../*|*/../*|*/..) path_safe=false ;;
-  esac
-  if [ "$path_safe" = true ]; then
-    local ls_out=""
-    rc=0
-    ls_out=$(git -C "$dir" ls-files -- "$identity" "$identity/*" 2>/dev/null) || rc=$?
-    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-    if [ "$rc" -gt 1 ]; then
-      _verify_creates_emit "$identity" "error" "" \
-        "git ls-files exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-      return 0
-    fi
-    if [ -n "$ls_out" ]; then
-      local first_path="${ls_out%%$'\n'*}"
-      _verify_creates_emit "$identity" "verified" "path" \
-        "tracked path: $first_path" "$git_max"
-      return 0
-    fi
-  fi
-
-  # --- Step 2: endpoint path extraction -----------------------------------
-  # Load-bearing, not a nicety. In a repository that genuinely serves the
-  # route, the literal "POST /api/notifications" was found in docs/plano.md
-  # and nowhere else — real code writes router.post('/api/notifications', …).
-  # Excluding documentation without this step turns every endpoint-kind phase
-  # into verification_failed, and the only way to unblock it would be to write
-  # the literal into a comment: exactly the hole this verb closes.
-  #
-  # Only a leading HTTP method token followed by a space and a "/" is
-  # stripped. Every other identity reaches the search untouched — "DELETE
-  # user_sessions" is a table-shaped identity, not an endpoint, and searching
-  # it for "user_sessions" alone would weaken the check.
-  local search="$identity"
-  case "$identity" in
-    'GET /'*|'POST /'*|'PUT /'*|'PATCH /'*|'DELETE /'*|'HEAD /'*|'OPTIONS /'*)
-      search="${identity#* }"
-      ;;
-  esac
-  local searched_note=""
-  if [ "$search" != "$identity" ]; then
-    searched_note=" (searched \"$search\")"
-  fi
-
-  # --- Step 3: text search over tracked source ----------------------------
-  # rc is pre-initialized and captured with `|| rc=$?` because this script
-  # runs under `set -euo pipefail` (line 2) and git grep exits 1 on a
-  # legitimate no-match. `local rc=$?` would mask the status behind local's
-  # own success and is used nowhere here.
-  local grep_out=""
-  rc=0
-  if _verify_creates_is_doc_identity "$identity"; then
-    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
-  else
-    grep_out=$(git -C "$dir" grep -n -I -F -e "$search" -- "${_VERIFY_CREATES_EXCLUDES[@]}" 2>/dev/null) || rc=$?
-  fi
-  if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-  if [ "$rc" -gt 1 ]; then
-    _verify_creates_emit "$identity" "error" "" \
-      "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-    return 0
-  fi
-
-  # --- Step 4: drop marker-only comment lines -----------------------------
-  local kept="" first_marker=""
-  if [ -n "$grep_out" ]; then
-    local gline rest hit_file hit_num hit_content
-    while IFS= read -r gline; do
-      [ -n "$gline" ] || continue
-      hit_file="${gline%%:*}"
-      rest="${gline#*:}"
-      hit_num="${rest%%:*}"
-      hit_content="${rest#*:}"
-      if _verify_creates_is_marker_line "$hit_content"; then
-        if [ -z "$first_marker" ]; then first_marker="$hit_file:$hit_num"; fi
-        continue
-      fi
-      kept="$hit_file:$hit_num"
-      break
-    done <<< "$grep_out"
-  fi
-
-  if [ -n "$kept" ]; then
-    _verify_creates_emit "$identity" "verified" "text" \
-      "tracked source: ${kept}${searched_note}" "$git_max"
-    return 0
-  fi
-
-  # --- Missing: name what was found and rejected, not just "not found" ----
-  local rejected=""
-  if [ -n "$first_marker" ]; then
-    rejected=" Found and rejected at $first_marker: TODO/FIXME marker comment, not an implementation."
-  else
-    local all_out=""
-    rc=0
-    all_out=$(git -C "$dir" grep -n -I -F -e "$search" 2>/dev/null) || rc=$?
-    if [ "$rc" -gt "$git_max" ]; then git_max=$rc; fi
-    if [ "$rc" -gt 1 ]; then
-      _verify_creates_emit "$identity" "error" "" \
-        "git grep exited $rc under $dir — tool failure, not an absent artifact." "$git_max"
-      return 0
-    fi
-    if [ -n "$all_out" ]; then
-      local aline afile arest anum acontent
-      aline="${all_out%%$'\n'*}"
-      afile="${aline%%:*}"
-      arest="${aline#*:}"
-      anum="${arest%%:*}"
-      acontent="${arest#*:}"
-      if _verify_creates_is_marker_line "$acontent"; then
-        rejected=" Found and rejected at $afile:$anum: TODO/FIXME marker comment, not an implementation."
-      else
-        rejected=" Found and rejected at $afile:$anum: documentation or test path, excluded from the source search."
-      fi
-    fi
-  fi
-
-  status="missing"
-  method=""
-  evidence="No tracked artifact for \"$identity\" under ${dir}${searched_note}.${rejected} $_VERIFY_CREATES_TRACKED_NOTE"
-  _verify_creates_emit "$identity" "$status" "$method" "$evidence" "$git_max"
-  return 0
-}
-
-# Emit one verdict object. jq builds it so an identity carrying quotes,
-# spaces or backslashes cannot break the array.
-_verify_creates_emit() {
-  jq -nc \
-    --arg identity "$1" \
-    --arg status "$2" \
-    --arg method "$3" \
-    --arg evidence "$4" \
-    --argjson gitStatus "$5" \
-    '{identity: $identity, status: $status,
-      method: (if $method == "" then null else $method end),
-      evidence: $evidence, gitStatus: $gitStatus}'
-}
+# Verified against 24 captured cases before the jq was deleted: every documented
+# identity kind, the doc and test exclusions, the marker rejection, an empty
+# repository, and the three pathspec-magic forms. 72 of 72 field comparisons
+# identical. tests/golden_from_jq.json keeps them.
 
 cmd_verify_creates() {
   local feature="" phase_id="" dir=""
@@ -15484,11 +12420,17 @@ cmd_verify_creates() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "verify-creates" "$feature")
+  _roadmap_require_contracts "verify-creates" "$roadmap_path" "$feature"
 
-  if ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: verify-creates: phase $phase_id not found in $roadmap_path" >&2
-    exit 1
-  fi
+  # No phase-exists check here: roadmap.py's verify_creates owns it and prints
+  # the same bytes through die(msg, code=1). Keeping a bash copy meant two
+  # readers of .phases[].id, and only one of them normalized the number.
+  #
+  # It follows that the phase check now runs AFTER the three guards below --
+  # the --dir directory test, validate_path_in_project, and check_python3 --
+  # so a bad --dir or a host with no python3 is reported first. That is the
+  # intended order: those three are statements about this process's own
+  # environment, and none of them can be answered by reading the roadmap.
 
   # --dir is the phase container's absolute path. It defaults to PROJECT_ROOT
   # rather than erroring, so the only --dir failure is a path that is not a
@@ -15503,23 +12445,9 @@ cmd_verify_creates() {
   dir=$(resolve_path "$dir")
   validate_path_in_project "$dir"
 
-  # Identities come from the one existing definition (_cv_identity), never a
-  # second copy: the substring before the first "(", trimmed.
-  local creates_raw
-  creates_raw=$(jq -r --argjson pid "$phase_id" "$_CONTRACT_JQ_DEFS"'
-    .phases[] | select(.id == $pid) | (.creates // [])[] | _cv_identity
-  ' "$roadmap_path")
-
-  local result='[]'
-  if [ -n "$creates_raw" ]; then
-    local identity entry
-    while IFS= read -r identity; do
-      entry=$(_verify_creates_one "$dir" "$identity")
-      result=$(printf '%s' "$result" | jq -c --argjson e "$entry" '. + [$e]')
-    done <<< "$creates_raw"
-  fi
-
-  printf '%s' "$result" | jq '.'
+  check_python3
+  python3 "$(_aimi_roadmap_py)" verify-creates \
+    --roadmap "$roadmap_path" --phase "$phase_id" --dir "$dir"
 }
 
 cmd_validate_contracts() {
@@ -15551,132 +12479,20 @@ cmd_validate_contracts() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "validate-contracts" "$feature")
-  if [ -n "$phase_id" ] && ! jq -e --argjson pid "$phase_id" '.phases[] | select(.id == $pid)' "$roadmap_path" >/dev/null 2>&1; then
-    echo "Error: validate-contracts: phase $phase_id not found in $roadmap_path" >&2
-    exit 1
-  fi
+  # Before the phase-exists check, so a pre-2.0 roadmap is named as such rather
+  # than reported as a missing phase. The check itself now lives in roadmap.py's
+  # validate_contracts, which prints the same bytes through die(msg, code=1) --
+  # but this call must stay ABOVE the python3 hand-off for the same reason it
+  # was written above the deleted jq block.
+  _roadmap_require_contracts "validate-contracts" "$roadmap_path" "$feature"
 
-  local feature_dir
-  feature_dir=$(dirname "$roadmap_path")
-
-  # --- Sanitization pass: always blocks; never demoted by --agent-mode ---
-  # (a duplicate-creates finding is the only check this story demotes)
-  local sanitize_hits
-  sanitize_hits=$(jq -r "$_CONTRACT_JQ_DEFS"'
-    [.phases[] | . as $p |
-      ("creates","needs") as $field |
-      select(($p[$field] // []) | any(_cv_suspicious)) |
-      {phase: $p.id, field: $field}
-    ] | unique_by([.phase,.field]) | .[] | "\(.phase)\t\(.field)"
-  ' "$roadmap_path")
-  if [ -n "$sanitize_hits" ]; then
-    while IFS=$'\t' read -r hit_phase hit_field; do
-      [ -z "$hit_phase" ] && continue
-      echo "Error: validate-contracts: phase $hit_phase field '$hit_field' contains suspicious content" >&2
-    done <<< "$sanitize_hits"
-    exit 1
-  fi
-
-  # --- Duplicate-creates collision check (across all phases, any status) ---
-  local dup_check dup_count
-  dup_check=$(jq "$_CONTRACT_JQ_DEFS"'
-    [.phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id}]
-    | group_by(.identity)
-    | map(select(length > 1))
-    | map({identity: .[0].identity, phases: ([.[].phase] | unique | sort)})
-  ' "$roadmap_path")
-  dup_count=$(printf '%s' "$dup_check" | jq 'length')
-
-  if [ "$dup_count" -gt 0 ]; then
-    local dup_msg
-    dup_msg=$(printf '%s' "$dup_check" | jq -r '
-      .[] | "  phase " + (.phases | map(tostring) | join(" and phase ")) +
-      ": both declare \"" + .identity + "\" -- convert the collision into a" +
-      " creates/needs contract between the two phases or promote the" +
-      " artifact to a shared foundation phase"
-    ')
-    if [ "$agent_mode" = "true" ]; then
-      echo "Warning: validate-contracts: duplicate creates (--agent-mode: proceeding):" >&2
-      printf '%s\n' "$dup_msg" >&2
-    else
-      echo "Error: validate-contracts: duplicate creates:" >&2
-      printf '%s\n' "$dup_msg" >&2
-      exit 1
-    fi
-  fi
-
-  # --- Needs resolution: scope is --phase (if given) or every phase ---
-  local scope_ids
-  if [ -n "$phase_id" ]; then
-    scope_ids=$(jq --argjson pid "$phase_id" -r '.phases[] | select(.id == $pid) | .id' "$roadmap_path")
-  else
-    scope_ids=$(jq -r '.phases[].id' "$roadmap_path")
-  fi
-
-  local missing_json='[]'
-  local providers_json='{}'
-
-  local sid
-  while IFS= read -r sid; do
-    [ -z "$sid" ] && continue
-
-    local reach_ids creates_tsv
-    reach_ids=$(_cv_reachable_ids "$roadmap_path" "$sid")
-    creates_tsv=$(_cv_creates_in_scope "$roadmap_path" "$reach_ids")
-
-    local need_ident
-    while IFS= read -r need_ident; do
-      [ -z "$need_ident" ] && continue
-
-      local prov_line
-      prov_line=$(printf '%s\n' "$creates_tsv" | awk -F'\t' -v want="$need_ident" '$2 == want { print; exit }')
-
-      if [ -z "$prov_line" ]; then
-        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "no-provider"}]')
-        continue
-      fi
-
-      local prov_id prov_status prov_dir
-      IFS=$'\t' read -r prov_id _ prov_status prov_dir <<< "$prov_line"
-
-      if [ -z "$phase_id" ]; then
-        # Unscoped run: identity resolution within the dependsOn closure is
-        # sufficient; the completed+handoff delivery gate only applies when
-        # --phase pins the check to one phase's execution readiness.
-        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
-        continue
-      fi
-
-      local delivered=false
-      if [ "$prov_status" = "completed" ] && _cv_handoff_lists_artifact "$feature_dir/$prov_dir/handoff.md" "$need_ident"; then
-        delivered=true
-      fi
-
-      if [ "$delivered" = "true" ]; then
-        providers_json=$(printf '%s' "$providers_json" | jq --arg k "$need_ident" --argjson v "$prov_id" '. + {($k): $v}')
-      else
-        missing_json=$(printf '%s' "$missing_json" | jq --argjson pid "$sid" --arg need "$need_ident" '. + [{phase: $pid, need: $need, reason: "not-delivered"}]')
-      fi
-    done < <(jq -r --argjson pid "$sid" "$_CONTRACT_JQ_DEFS"'.phases[] | select(.id == $pid) | (.needs // [])[] | _cv_identity' "$roadmap_path")
-  done < <(printf '%s\n' "$scope_ids")
-
-  local valid_bool="true"
-  if [ "$(printf '%s' "$missing_json" | jq 'length')" -gt 0 ]; then
-    valid_bool="false"
-  fi
-
-  if [ "$dup_count" -gt 0 ] && [ "$agent_mode" = "true" ]; then
-    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" --argjson dupw "$dup_check" \
-      '{valid: $valid, missing: $missing, providers: $providers, duplicateWarnings: $dupw}'
-  else
-    jq -n --argjson valid "$valid_bool" --argjson missing "$missing_json" --argjson providers "$providers_json" \
-      '{valid: $valid, missing: $missing, providers: $providers}'
-  fi
-
-  if [ "$valid_bool" = "false" ]; then
-    exit 1
-  fi
-  exit 0
+  check_python3
+  local phase_args=()
+  [ -n "$phase_id" ] && phase_args=(--phase "$phase_id")
+  local agent_args=()
+  [ "$agent_mode" = "true" ] && agent_args=(--agent-mode)
+  python3 "$(_aimi_roadmap_py)" validate-contracts \
+    --roadmap "$roadmap_path" "${phase_args[@]}" "${agent_args[@]}"
 }
 
 # phase-overlap <feature> <phase-a> <phase-b>
@@ -15720,50 +12536,13 @@ cmd_phase_overlap() {
   local roadmap_path
   roadmap_path=$(_roadmap_require "phase-overlap" "$feature" " (run roadmap-init first)")
 
-  local feature_dir
-  feature_dir=$(dirname "$roadmap_path")
-
-  local dir_a dir_b
-  dir_a=$(jq -r --argjson pid "$phase_a" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-  dir_b=$(jq -r --argjson pid "$phase_b" '(.phases[] | select(.id == $pid) | .dir) // empty' "$roadmap_path")
-
-  if [ -z "$dir_a" ]; then
-    echo "Error: phase-overlap: phase $phase_a not found in $roadmap_path" >&2
-    exit 1
-  fi
-  if [ -z "$dir_b" ]; then
-    echo "Error: phase-overlap: phase $phase_b not found in $roadmap_path" >&2
-    exit 1
-  fi
-
-  # Mirrors execute.md Step 1.7's PHASE_TASKS_PATH convention:
-  # <feature_dir>/<phase_dir>/<feature>-phase-<id>-tasks.json
-  local tasks_a tasks_b
-  tasks_a="$feature_dir/$dir_a/$feature-phase-$phase_a-tasks.json"
-  tasks_b="$feature_dir/$dir_b/$feature-phase-$phase_b-tasks.json"
-
-  if [ ! -f "$tasks_a" ]; then
-    echo "Error: phase-overlap: phase $phase_a has no tasks file yet ($tasks_a) -- run /aimi:plan --phase $phase_a to materialize it first" >&2
-    exit 1
-  fi
-  if [ ! -f "$tasks_b" ]; then
-    echo "Error: phase-overlap: phase $phase_b has no tasks file yet ($tasks_b) -- run /aimi:plan --phase $phase_b to materialize it first" >&2
-    exit 1
-  fi
-  if ! jq -e . "$tasks_a" >/dev/null 2>&1; then
-    echo "Error: phase-overlap: malformed tasks file: $tasks_a" >&2
-    exit 1
-  fi
-  if ! jq -e . "$tasks_b" >/dev/null 2>&1; then
-    echo "Error: phase-overlap: malformed tasks file: $tasks_b" >&2
-    exit 1
-  fi
-
-  jq -n --slurpfile a "$tasks_a" --slurpfile b "$tasks_b" '
-    ([$a[0].userStories[]?.implementation.files[]?] | unique) as $files_a |
-    ([$b[0].userStories[]?.implementation.files[]?] | unique) as $files_b |
-    {overlapping_files: ([$files_a[] | select(. as $f | $files_b | index($f) != null)] | unique | sort)}
-  '
+  # Phase directory resolution, the two tasks-file paths and the intersection
+  # itself all live in roadmap.py -- the ids go over as the strings the caller
+  # typed, because every refusal quotes them back and the filename is built from
+  # them.
+  check_python3
+  python3 "$(_aimi_roadmap_py)" phase-overlap \
+    --roadmap "$roadmap_path" --feature "$feature" --phase-a "$phase_a" --phase-b "$phase_b"
 }
 
 cmd_roadmap_sweep() {
@@ -15786,40 +12565,15 @@ cmd_roadmap_sweep() {
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-sweep" "$feature")
+  # The one non-zero exit this advisory verb has. "Advisory" is about what it
+  # does with a finding, not a licence to report a clean roadmap it never read.
+  _roadmap_require_contracts "roadmap-sweep" "$roadmap_path" "$feature"
 
-  # Single-pass, advisory-only computation: never exits non-zero. Suspicious
-  # creates/needs entries are dropped from $clean_phases before orphan/deferred
-  # computation so a flagged entry can never leak into any other output field
-  # -- only its owning phase id and field name are reported, via $warnings.
-  jq "$_CONTRACT_JQ_DEFS"'
-    (
-      [.phases[] | . as $p |
-        ("creates","needs") as $field |
-        select(($p[$field] // []) | any(_cv_suspicious)) |
-        {phase: $p.id, field: $field, message: "contains suspicious content"}
-      ] | unique_by([.phase,.field])
-    ) as $warnings |
-
-    (.phases | map(
-      .creates = ((.creates // []) | map(select(_cv_suspicious | not))) |
-      .needs = ((.needs // []) | map(select(_cv_suspicious | not)))
-    )) as $clean_phases |
-
-    ([$clean_phases[] | (.needs // [])[] | _cv_identity] | unique) as $need_idents |
-    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident |
-      select(($need_idents | index($ident)) == null) |
-      {phase: $p.id, creates: $ident}
-    ]) as $orphan_creates |
-
-    ([$clean_phases[] | . as $p | (($p.creates // [])[] | _cv_identity) as $ident | {identity: $ident, phase: $p.id, status: $p.status}]) as $providers_flat |
-    ([$clean_phases[] | . as $np | (($np.needs // [])[] | _cv_identity) as $ident |
-      ([$providers_flat[] | select(.identity == $ident)] | sort_by(.phase) | .[0]) as $prov |
-      select($prov != null and $prov.status != "completed") |
-      {phase: $np.id, need: $ident, deferred: $prov.phase}
-    ]) as $deferred_needs |
-
-    {orphanCreates: $orphan_creates, deferredNeeds: $deferred_needs, warnings: $warnings}
-  ' "$roadmap_path"
+  # Single-pass, advisory-only computation: never exits non-zero for a roadmap
+  # it could read. The drop-and-report rule, and why the drop must be reported
+  # rather than silent, live with the code in roadmap.py's roadmap-sweep section.
+  check_python3
+  python3 "$(_aimi_roadmap_py)" sweep --roadmap "$roadmap_path"
 
   exit 0
 }
@@ -16003,14 +12757,16 @@ COMMANDS:
                               Pass a gate on a story; optionally store selected option
     gate-fail <id>            Fail a gate on a story
     update-field <id> <field.path> <value>
-                              Update a nested field on a story (e.g., verification.status passed)
+                              Update a nested field on a story (e.g., verification.status passed).
+                              <field.path> must be a dotted chain of identifier segments
+                              ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
     validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id>         Skip all stories depending on failed story
     reset-orphaned            Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
     get-story <id>            Get full story object by ID (read-only)
-    get-story-context <id>    Get story slice + metadata + skills[] + designContext as JSON
+    get-story-context <id>    Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
@@ -16221,6 +12977,8 @@ COMMANDS:
                               Claude Code: ["opus","sonnet","haiku"].
                               OpenCode: reads `opencode models`; falls back to built-in
                               Anthropic list with one warning when opencode is absent.
+                              Entries are normalized (ends trimmed, empties dropped), so
+                              every id offered here is one resolve-models accepts.
                               stdout is always a valid JSON array; warnings go to stderr.
     resolve-models            Resolve configured model for each agent category.
                               Reads ~/.config/aimi/models.json (schema v2.0) and emits
@@ -16249,6 +13007,11 @@ COMMANDS:
                               category-to-model assignments directly. Preserves the
                               other host's categories sub-table when a file already exists.
                               All five category flags must be supplied together.
+                              Each value is normalized (ends trimmed) before it is
+                              written; an id that is not valid for the host draws a
+                              stderr warning and is still written (validation happens at
+                              read, in resolve-models), while a value that is non-empty
+                              but normalizes to empty is an error and writes nothing.
                               Interactive (stdin TTY, no flags): prompts per category,
                               validates answer against available-model list.
                               Non-interactive (no flags, stdin not TTY): default mapping
@@ -16536,6 +13299,20 @@ COMMANDS:
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
                               and length-capped per commands/references/sanitization.md.
+                              A creates/needs entry is {identity, description};
+                              an entry that is not that object, or that carries
+                              any other key, is rejected naming the key. Also
+                              rejects, per entry, an IDENTITY that is empty,
+                              carries whitespace, a ".." segment, a leading "/",
+                              one of [$`;|&], runs past 500 characters, or matches
+                              an injection pattern -- and an areas[] glob that is
+                              absolute or traverses. The identity is what
+                              verify-creates greps for literally and is stored
+                              exactly as submitted; the description is judged only
+                              for injection patterns, may hold the rest, and is
+                              the half the prose sanitizer applies to. Full rules
+                              and rationale: commands/references/scope-contexts.md
+                              section "Creates/Needs Contracts".
     roadmap-amend-phase --feature <slug> --phase <id> [--goal <text>] [--branch <name>]
                               [--file <path>] [--retarget-needs "<old>=<new>"]...
                               Correct an EXISTING phase's contract in place --
@@ -16582,6 +13359,26 @@ COMMANDS:
                               only (exit 0): a completed phase whose handoff.md
                               omits a newly introduced identity.
                               Prints {roadmap, phase, amended[], retargeted[]}.
+    normalize-contracts --feature <slug>
+                              Migrate a roadmap's stored creates/needs entries from
+                              the 1.0 form -- one string, "identity (description)" --
+                              to the 2.0 form {identity, description}, in place,
+                              under the same lock and mktemp-then-mv swap every
+                              other roadmap writer uses.
+                              Each identity is computed by the SAME function every
+                              reader used before the migration, so no identity
+                              changes by a byte and no downstream needs is
+                              repointed. An entry with no "(" gets description ""
+                              (never null). An entry already in object form is left
+                              untouched, which is what makes a second run a no-op.
+                              It does not judge: a prose or whitespace-bearing
+                              identity the current writer would refuse migrates
+                              unchanged, and the reader reports it afterwards by
+                              name. Repairing silently would change what a phase
+                              promises.
+                              Prints {roadmap, converted, roadmapVersion}, where
+                              converted counts entries that were strings BEFORE
+                              this run -- so a second run prints 0.
     roadmap-get --feature <slug> [--phase <id>] [--next-eligible]
                               Read-only. Bare: print the full roadmap.json.
                               --phase <id>: print one phase object.
@@ -16593,6 +13390,26 @@ COMMANDS:
                               last, not first. Exits 1 if none. Does not clear
                               stale dead-PID claims (roadmap-claim does that,
                               under its lock); reads one tasks file per phase.
+    roadmap-eligible --feature <slug> [--statuses <a,b>]
+                              Read-only. Print ONE JSON object naming every
+                              phase in roadmap order --
+                              {id, name, status, claim, eligible, unmet[]} --
+                              plus the ordered ids of the eligible ones and
+                              their count: {phases, eligible, eligibleCount}.
+                              A phase is eligible when its status is in the
+                              requested set, it carries no claim, and every
+                              dependsOn phase is completed; each unmet entry is
+                              {id, status}. Structured fields only, no prose --
+                              the caller composes the wording.
+                              Zero eligible is a normal answer, not an error:
+                              it exits 0 with an empty list, so a command
+                              substitution can tell "no phase ready" apart from
+                              a broken CLI.
+                              --statuses defaults to pending,planned; an
+                              unknown name is refused by name rather than
+                              silently returning nothing.
+                              Reads no tasks file, so its answer depends on
+                              roadmap.json alone and is ordered by numeric id.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
                               Locked read-modify-write. Enforces the guarded order
                               pending -> planned -> in_progress -> completed, plus
@@ -16698,9 +13515,12 @@ ENVIRONMENT:
                        bypasses Claude cache resolution.
 
 EXAMPLES:
-    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR)
+    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR).
+    # Sort on the VERSION segment, never on the whole path and never plain `ls`:
+    # `ls` collates 1.121.3 before 1.9.0, and a whole-path sort orders by
+    # marketplace-entry directory first. Canonical rule: _resolve_latest_cache_path.
     CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d' ' -f2-)
 
     # Initialize a new session
     $AIMI_CLI init-session
@@ -16843,7 +13663,9 @@ main() {
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;
+    normalize-contracts)   shift; cmd_normalize_contracts "$@" ;;
     roadmap-get)           shift; cmd_roadmap_get "$@" ;;
+    roadmap-eligible)      shift; cmd_roadmap_eligible "$@" ;;
     roadmap-set-status)    shift; cmd_roadmap_set_status "$@" ;;
     roadmap-claim)         shift; cmd_roadmap_claim "$@" ;;
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;

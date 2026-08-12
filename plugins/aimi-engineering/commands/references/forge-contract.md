@@ -219,8 +219,8 @@ existing `verified`/`missing`/`error` trio in `aimi-cli.sh`:
 today exits non-zero for both "no PR exists for this branch" and "gh itself
 is broken" — that is exactly the ambiguity this convention exists to remove.
 A verb built on top of `_forge_emit_status` must distinguish the two before
-calling it, the same way `_verify_creates_one` distinguishes a `missing`
-identity from a `git` tool failure before calling `_verify_creates_emit`.
+calling it, the same way `roadmap.py`'s `verify_creates_one` distinguishes a
+`missing` identity from a `git` tool failure before building its verdict.
 
 Shape (built by `_forge_emit_status` — see **Shared Builder Functions**
 below):
@@ -626,7 +626,7 @@ the missing binary reach the shell and fail the caller with an unguarded
 
 Implemented in `plugins/aimi-engineering/scripts/aimi-cli.sh`. Every later
 forge verb builds its result through these functions instead of hand-rolling
-JSON assembly per verb — mirroring how `_verify_creates_emit` centralizes
+JSON assembly per verb — mirroring how `roadmap.py`'s `_verdict` centralizes
 `verify-creates`'s own verdict construction.
 
 - **`_forge_build_pr_json`** — `jq -nc` builder for the normalized PR object

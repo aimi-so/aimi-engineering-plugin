@@ -25,6 +25,7 @@ set -uo pipefail
 #   - get-current-models Tests
 #   - list-models Tests
 #   - detect-models Tests
+#   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
 #   - split-detect Tests (TC36-TC46, TC50-TC52)
@@ -563,6 +564,129 @@ test_detect_parent_branch_per_repo_scoping() {
 # ============================================================================
 # Archive Task Tests
 # ============================================================================
+
+# Build a project root under mktemp holding a terminal task file, the three
+# decoys every archive test needs -- an unlisted sibling research file, a file
+# already in .aimi/archive/, and a file outside .aimi/ entirely -- and a
+# companion .lock. Echoes the root. Callers rm -rf it.
+_archive_fixture() {
+  local basename="$1"
+  local dir
+  dir=$(mktemp -d)
+  mkdir -p "$dir/.aimi/tasks" "$dir/.aimi/research" "$dir/.aimi/archive"
+  printf 'decoy: never named in metadata\n' > "$dir/.aimi/research/nao-listado.md"
+  printf 'decoy: already in the archive\n' > "$dir/.aimi/archive/ja-arquivado.md"
+  printf 'decoy: outside .aimi entirely\n' > "$dir/fora-do-aimi.txt"
+  printf '' > "$dir/.aimi/tasks/$basename.lock"
+  cat > "$dir/.aimi/tasks/$basename" << 'TASKEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Archive collision",
+    "type": "feat",
+    "branchName": "feat/archive-collision",
+    "maxConcurrency": 1,
+    "researchPaths": [".aimi/research/listado.md"]
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Done story",
+      "status": "completed",
+      "dependsOn": []
+    }
+  ]
+}
+TASKEOF
+  printf 'listado\n' > "$dir/.aimi/research/listado.md"
+  echo "$dir"
+}
+
+test_archive_task_collision_suffix() {
+  echo ""
+  echo "=== Testing archive-task: -N collision suffix, and its split on the first dot ==="
+
+  local stdout exit_code archived kept arch_dir
+
+  # A destination that is already taken, with the companion lock taken too.
+  arch_dir=$(_archive_fixture "2026-02-01-collide-tasks.json")
+  printf 'ja estava aqui\n' > "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json"
+  printf '' > "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json.lock"
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/2026-02-01-collide-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task collision: exit code"
+  archived=$(printf '%s' "$stdout" | jq -r '.archived.task')
+  assert_eq "2026-02-01-collide-tasks-2.json" "$(basename "$archived")" \
+    "archive-task collision: the task lands on the -2 suffix"
+
+  # The file that was already there keeps its own bytes -- the suffix exists so
+  # that an archive is never overwritten.
+  kept=$(cat "$arch_dir/.aimi/archive/2026-02-01-collide-tasks.json")
+  assert_eq "ja estava aqui" "$kept" "archive-task collision: the occupant is not overwritten"
+
+  # The companion lock is MOVED into the archive rather than left behind, and
+  # finds its own free slot independently of the task's.
+  local lock_moved="no"
+  [ -f "$arch_dir/.aimi/archive/2026-02-01-collide-tasks-2.json.lock" ] && lock_moved="yes"
+  assert_eq "yes" "$lock_moved" "archive-task collision: the companion lock moves into the archive"
+
+  local lock_left="yes"
+  [ -e "$arch_dir/.aimi/tasks/2026-02-01-collide-tasks.json.lock" ] || lock_left="no"
+  assert_eq "no" "$lock_left" "archive-task collision: and nothing is left in .aimi/tasks/"
+
+  rm -rf "$arch_dir"
+
+  # The suffix splits the basename on the FIRST dot, so everything from that
+  # dot onward counts as the extension.
+  arch_dir=$(_archive_fixture "collide.v2-tasks.json")
+  printf 'ja estava aqui\n' > "$arch_dir/.aimi/archive/collide.v2-tasks.json"
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/collide.v2-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task collision (early dot): exit code"
+  archived=$(printf '%s' "$stdout" | jq -r '.archived.task')
+  assert_eq "collide-2.v2-tasks.json" "$(basename "$archived")" \
+    "archive-task collision (early dot): the suffix goes before the FIRST dot"
+
+  rm -rf "$arch_dir"
+}
+
+test_archive_task_survivors() {
+  echo ""
+  echo "=== Testing archive-task: what SURVIVES, as a set rather than a spot check ==="
+
+  local stdout exit_code research_cleaned survivors arch_dir
+
+  arch_dir=$(_archive_fixture "2026-02-02-survivors-tasks.json")
+
+  pushd "$arch_dir" >/dev/null
+  stdout=$("$CLI" archive-task .aimi/tasks/2026-02-02-survivors-tasks.json 2>/dev/null) \
+    && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "archive-task survivors: exit code"
+
+  research_cleaned=$(printf '%s' "$stdout" | jq -r '.archived.researchCleaned')
+  assert_eq "1" "$research_cleaned" \
+    "archive-task survivors: only the file metadata named is counted"
+
+  # Set equality, decoys included. A delete that reached one directory too far
+  # would show up here and nowhere else in this file.
+  survivors=$(cd "$arch_dir" && find . -mindepth 1 | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')
+  assert_eq ".aimi .aimi/archive .aimi/archive/2026-02-02-survivors-tasks.json \
+.aimi/archive/2026-02-02-survivors-tasks.json.lock .aimi/archive/ja-arquivado.md \
+.aimi/research .aimi/research/nao-listado.md .aimi/tasks fora-do-aimi.txt " \
+    "$survivors" "archive-task survivors: the exact surviving tree"
+
+  rm -rf "$arch_dir"
+}
 
 test_archive_task_with_research_paths() {
   echo ""
@@ -1367,6 +1491,80 @@ RESEOF
   rm -f "$symlink_target" "$symlink_path"
 
   rm -rf "$es_dir"
+}
+
+# The archivable predicate and research-gc's referenced-set walk, whose jq left
+# aimi-cli.sh in the same commit.
+#
+# Static half: retargeted greps, aimi-cli.sh for the deleted programs and
+# tasks.py for what replaced them, -F because the deleted text is jq source.
+# The bash FUNCTION _archivable_file_is_terminal survives -- only its two jq
+# calls went -- so it is asserted present rather than absent.
+#
+# Behavioural half covers the predicate's two properties a corpus replay would
+# not make obvious to a reader: it NEVER speaks and never aborts, and it still
+# disagrees with archive-task about an empty document. That disagreement is
+# deliberate and pinned from both sides in golden_from_jq.json; story 09 moves
+# list-archivable and must consume this predicate rather than re-derive its
+# non-empty clause, or the disagreement reconciles by accident.
+test_archivable_predicate_and_research_walk_crossed() {
+  echo ""
+  echo "=== Testing tasks.py boundary: the archivable predicate and research-gc ==="
+
+  local tasks_py
+  tasks_py="$(dirname "$CLI")/tasks.py"
+
+  assert_eq "0" \
+    "$(grep -cF 'select(.status != "completed" and .status != "skipped")' "$CLI" || true)" \
+    "archivable: no jq copy of the non-terminal count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF "jq '.userStories | length'" "$CLI" || true)" \
+    "archivable: no jq copy of the total count survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF '.metadata.researchPaths[]?' "$CLI" || true)" \
+    "research-gc: no jq read of researchPaths survives in aimi-cli.sh"
+  assert_eq "1" "$(grep -c '^def op_archivable_file_is_terminal(' "$tasks_py" || true)" \
+    "archivable: exactly one op_archivable_file_is_terminal definition in tasks.py"
+  assert_eq "1" "$(grep -c '^def research_path_lines(' "$tasks_py" || true)" \
+    "research-gc: exactly one research_path_lines definition in tasks.py"
+  assert_eq "1" "$(grep -c '^_archivable_file_is_terminal()' "$CLI" || true)" \
+    "archivable: the bash predicate stays -- only the two jq programs inside it went"
+
+  local pred_dir
+  pred_dir=$(mktemp -d)
+  mkdir -p "$pred_dir/.aimi/tasks"
+
+  # (a) every story terminal, and non-empty: listed
+  cat > "$pred_dir/.aimi/tasks/2020-01-01-terminal-tasks.json" << 'TERMEOF'
+{"schemaVersion":"3.3","metadata":{"branchName":"feat/t"},
+ "userStories":[{"id":"US-001","status":"completed"},{"id":"US-002","status":"skipped"}]}
+TERMEOF
+  local output
+  output=$(cd "$pred_dir" && "$CLI" list-archivable)
+  assert_eq "1" "$(printf '%s' "$output" | jq 'length')" \
+    "list-archivable: an all-terminal file is listed"
+  rm -f "$pred_dir/.aimi/tasks/2020-01-01-terminal-tasks.json"
+
+  # (b) userStories: [] -- REFUSED here, while archive-task archives the same
+  # document. One rule, two implementations, disagreeing on purpose.
+  printf '%s\n' '{"schemaVersion":"3.3","metadata":{"branchName":"feat/t"},"userStories":[]}' \
+    > "$pred_dir/.aimi/tasks/2020-01-02-vazio-tasks.json"
+  output=$(cd "$pred_dir" && "$CLI" list-archivable)
+  assert_eq "[]" "$output" \
+    "list-archivable: an empty userStories is NOT archivable (archive-task disagrees, on purpose)"
+  rm -f "$pred_dir/.aimi/tasks/2020-01-02-vazio-tasks.json"
+
+  # (c) a document the predicate cannot read: not archivable, and SILENT. Its
+  # whole contract is that it echoes nothing and never takes the command down.
+  printf 'NOT JSON AT ALL\n' > "$pred_dir/.aimi/tasks/2020-01-03-mal-tasks.json"
+  local stderr_file exit_code=0
+  stderr_file=$(mktemp)
+  output=$(cd "$pred_dir" && "$CLI" list-archivable 2>"$stderr_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" \
+    "list-archivable: a malformed tasks file does not take the command down"
+  assert_eq "[]" "$output" "list-archivable: a malformed tasks file is not archivable"
+  assert_eq "" "$(cat "$stderr_file")" \
+    "list-archivable: the predicate says nothing about a document it cannot read"
+
+  rm -rf "$pred_dir" "$stderr_file"
 }
 
 test_research_gc() {
@@ -2970,6 +3168,30 @@ test_list_models_claudecode_returns_three_aliases() {
   assert_eq "true" "$has_haiku"  "list-models claudecode: array contains 'haiku'"
 }
 
+# The Claude Code branch of list-models answers with a literal JSON array and
+# crosses into nothing -- its answer is a constant, so there is no document to
+# read and no interpreter to need, which is what keeps `list-models` working on
+# a host with no python3. The price is that the three aliases are spelled
+# twice: once as data in _host_valid_models, once as JSON here. This runs both
+# and compares them, so the second spelling cannot drift from the first without
+# a test saying so.
+test_list_models_claudecode_matches_the_host_valid_set() {
+  echo ""
+  echo "=== Testing list-models' Claude Code literal against _host_valid_models ==="
+
+  local from_helper from_verb
+  from_helper=$(
+    eval "$(sed -n '/^_is_claude_code_host() {$/,/^}$/p' "$CLI")"
+    eval "$(sed -n '/^_normalize_model_id() {$/,/^}$/p' "$CLI")"
+    eval "$(sed -n '/^_host_valid_models() {$/,/^}$/p' "$CLI")"
+    CLAUDECODE=1 _host_valid_models | jq -R . | jq -cs .
+  )
+  from_verb=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 "$CLI" list-models 2>/dev/null | jq -c .)
+
+  assert_eq "$from_helper" "$from_verb" \
+    "list-models claudecode: the literal array is _host_valid_models' set, in its order"
+}
+
 test_list_models_opencode_absent_fallback() {
   echo ""
   echo "=== Testing list-models on OpenCode host with opencode binary absent — fallback with warning ==="
@@ -3258,6 +3480,672 @@ test_detect_models_default_mode_preserves_other_host() {
     echo -e "${RED}✗${NC} detect-models default-mode-preserves: merged models.json is not valid JSON: $result"
     ((TESTS_FAILED++))
   fi
+}
+
+# ============================================================================
+# Model-validity predicate comparison
+# ============================================================================
+#
+# aimi-cli.sh answers "is this model id valid?" in FOUR places, and they do not
+# agree with each other:
+#
+#   P1  cmd_resolve_models, Claude Code branch -- exact match against the set
+#       {opus, sonnet, haiku}.
+#   P2  cmd_resolve_models, OpenCode branch -- membership in the `opencode
+#       models` list. The LIST entries are trimmed with jq's ltrimstr(" ") /
+#       rtrimstr(" "), which strip ONE space each rather than all of them, and
+#       the candidate id is never trimmed at all.
+#   P3  cmd_detect_models flag mode -- no validation whatsoever; whatever the
+#       flag carries is written into models.json verbatim.
+#   P4  cmd_detect_models' nested _prompt_category -- `tr -d '[:space:]'` over
+#       the answer (which deletes INTERNAL whitespace too, not just the ends),
+#       then `grep -qxF` against the host's available-model list.
+#
+# The matrix below drives ONE table of ids through all four and asserts every
+# cell, so story 04's collapse into a single predicate has a recorded
+# before-state to be judged against. Where two sites disagree about one id,
+# both answers are asserted rather than one averaged claim.
+#
+# Every predicate here gets at least one id it ACCEPTS and one it REJECTS. P3's
+# rejections are not in the matrix because P3 accepts every id there is -- its
+# only rejections are argument-shaped, and they are asserted with their exact
+# stderr and exit status in test_detect_models_flag_mode_rejections below.
+#
+# ---- STORY 04 LANDED, AND THIS MATRIX IS WHERE IT IS READ OFF ---------------
+# The four sites now share one shape: _normalize_model_id (trim the ends only,
+# never internal), _host_valid_models (the per-host set -- DATA, not a second
+# predicate), _model_id_valid_for_host (membership, no trimming of its own).
+# The paragraph above is left standing as the before-state it described. Three
+# cells inverted, and each is annotated beside the row it lives on:
+#   P2 on the padded id  reject -> accept  (the headline fix)
+#   P3 on the padded id  accept -> reject  (flag mode writes the NORMALIZED id,
+#                                           so the padded string is no longer
+#                                           what lands in models.json)
+#   P4 on 'son net'      accept -> reject  (the second, smaller behaviour change
+#                                           riding along: internal whitespace is
+#                                           no longer deleted, so a typo is a
+#                                           typo again rather than a repair)
+# ----------------------------------------------------------------------------
+
+# The `opencode` stub the OpenCode-branch predicate is measured against. Two
+# ids, neither padded: the padding in the table is on the CANDIDATE side, which
+# is where P2's asymmetry lives.
+_make_opencode_stub() {
+  local dir
+  dir=$(mktemp -d)
+  cat > "$dir/opencode" << 'OC_STUB'
+#!/usr/bin/env bash
+printf 'anthropic/claude-sonnet-4-6\nanthropic/claude-haiku-4-5\n'
+OC_STUB
+  chmod +x "$dir/opencode"
+  printf '%s\n' "$dir"
+}
+
+# Lift _prompt_category out of cmd_detect_models. It is a nested function, so
+# the extraction cannot key on column 0, and the `</dev/tty` redirect is
+# rewritten away so the predicate can be driven without a pty. The indent is
+# matched rather than counted: it was four spaces until the two assembly
+# branches collapsed into one shared tail, which moved the interactive branch a
+# level deeper, and a test that has to be edited for that is a test that says
+# something about layout instead of about behaviour. Deleting the function
+# still fails everything below, because eval of nothing leaves the calls
+# unresolved. The lines the predicate actually IS are lifted from aimi-cli.sh
+# untouched -- since story 04 those are the _normalize_model_id call and the
+# _model_id_valid_for_host call, so the two shared helpers are lifted alongside
+# it, by the same means and equally untouched.
+source_prompt_category() {
+  eval "$(sed -n '/^[[:space:]]*_prompt_category() {$/,/^[[:space:]]*}$/p' "$CLI" | sed 's#</dev/tty##')"
+  eval "$(sed -n '/^_normalize_model_id() {$/,/^}$/p' "$CLI")"
+  eval "$(sed -n '/^_model_id_valid_for_host() {$/,/^}$/p' "$CLI")"
+}
+
+# P1: resolve-models on a Claude Code host.
+#
+# STORY 04 changed what "accept" has to mean here. The resolver now emits the
+# NORMALIZED id, so "reached stdout unchanged" would read a padded-but-accepted
+# id as a rejection. The verdict is taken from the user-visible property the
+# story is actually about instead: did this category silently degrade to
+# "inherit"? No id in the table is the literal string "inherit", so the reading
+# is unambiguous. For every unpadded id in the table the two definitions give
+# the same answer -- only the padded row can tell them apart.
+_predicate_p1_resolve_models_claude_code() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+  rm -rf "$tmpdir"
+  if [ "$out" = "inherit" ]; then printf 'reject\n'; else printf 'accept\n'; fi
+}
+
+# P2: resolve-models on an OpenCode host, against the stub in _OC_STUB_DIR.
+# Same "did it degrade to inherit?" reading as P1, for the same reason.
+_predicate_p2_resolve_models_opencode() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{opencode:{
+    research:$m,review:"anthropic/claude-haiku-4-5",design:"anthropic/claude-haiku-4-5",
+    workflow:"anthropic/claude-haiku-4-5",executor:"anthropic/claude-haiku-4-5"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$_OC_STUB_DIR:$PATH" \
+    AIMI_CONFIG_DIR="$tmpdir" bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+  rm -rf "$tmpdir"
+  if [ "$out" = "inherit" ]; then printf 'reject\n'; else printf 'accept\n'; fi
+}
+
+# P3: detect-models flag mode. "accept" means the id reached models.json verbatim.
+_predicate_p3_detect_models_flag() {
+  local model="$1" tmpdir written
+  tmpdir=$(mktemp -d)
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research "$model" --review opus --design sonnet \
+      --workflow sonnet --executor sonnet > /dev/null 2>&1 < /dev/null
+  written=$(jq -r '.categories.claudeCode.research // "<absent>"' "$tmpdir/models.json" 2>/dev/null)
+  rm -rf "$tmpdir"
+  if [ "$written" = "$model" ]; then printf 'accept\n'; else printf 'reject\n'; fi
+}
+
+# P4: _prompt_category. The default is "opus" and no id in the table normalises
+# to it, so "came back as the default" is an unambiguous reading of "rejected".
+_predicate_p4_prompt_category() {
+  local model="$1" out
+  out=$(printf '%s\n' "$model" | _prompt_category research opus 2>/dev/null)
+  if [ "$out" = "opus" ]; then printf 'reject\n'; else printf 'accept\n'; fi
+}
+
+# One table row through all four sites. Spaces in the id are rendered as U+2423
+# in the assertion label so a padded id and its trimmed twin stay tellable apart
+# in the transcript.
+_assert_predicate_row() {
+  local id="$1" want_p1="$2" want_p2="$3" want_p3="$4" want_p4="$5"
+  local label
+  label=$(printf '%s' "$id" | sed 's/ /␣/g')
+
+  assert_eq "$want_p1" "$(_predicate_p1_resolve_models_claude_code "$id")" \
+    "predicate P1 (resolve-models, Claude Code exact-match) on [$label]"
+  assert_eq "$want_p2" "$(_predicate_p2_resolve_models_opencode "$id")" \
+    "predicate P2 (resolve-models, OpenCode list-membership) on [$label]"
+  assert_eq "$want_p3" "$(_predicate_p3_detect_models_flag "$id")" \
+    "predicate P3 (detect-models flag mode, unvalidated) on [$label]"
+  assert_eq "$want_p4" "$(_predicate_p4_prompt_category "$id")" \
+    "predicate P4 (_prompt_category, whitespace-deleted grep -qxF) on [$label]"
+}
+
+test_model_validity_predicate_matrix() {
+  echo ""
+  echo "=== Testing the four model-validity predicates against one shared id table ==="
+
+  _OC_STUB_DIR=$(_make_opencode_stub)
+  source_prompt_category
+  # Claude Code's available-model list, exactly as cmd_detect_models builds it.
+  # Since story 04 that set comes from _host_valid_models, which is also what
+  # list-models offers -- hence the opus/sonnet/haiku order rather than the
+  # haiku/sonnet/opus one detect-models used to build for itself.
+  _available_models=$'opus\nsonnet\nhaiku'
+  _prompt_models="opus|sonnet|haiku"
+
+  #                    id                                  P1     P2     P3     P4
+  _assert_predicate_row "sonnet"                          accept reject accept accept
+  _assert_predicate_row "anthropic/claude-sonnet-4-6"     reject accept accept reject
+  # INVERTED BY STORY 04, two cells on this row. P2: the padded id is now
+  # normalized before the membership question and accepted -- this is the
+  # headline fix, and the reason nothing the picker offers is refused any more.
+  # P3: flag mode writes the NORMALIZED id, so the padded string itself no
+  # longer reaches models.json verbatim, which is what P3 calls "accept".
+  _assert_predicate_row "  anthropic/claude-sonnet-4-6  " reject accept reject reject
+  # INVERTED BY STORY 04, one cell. P4: _prompt_category trims the ends only
+  # now, so 'son net' stays 'son net' and is refused instead of being silently
+  # repaired into the valid alias 'sonnet' by `tr -d '[:space:]'`.
+  _assert_predicate_row "son net"                         reject reject accept reject
+
+  # The P3/P1 disagreement end to end, in one config file: detect-models writes
+  # an id that resolve-models -- same host, same file, one command later --
+  # refuses. Story 04 did NOT close this one, deliberately: flag mode keeps
+  # writing an id the resolver will refuse, because /aimi:setup-models offers a
+  # free-form "Other" and validation in this CLI happens at READ time. What
+  # story 04 added is that flag mode now SAYS SO at write time.
+  local rt rt_err rt_out rt_write_err
+  rt=$(mktemp -d)
+  rt_write_err=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" bash "$CLI" detect-models \
+    --research anthropic/claude-sonnet-4-6 --review opus --design sonnet \
+    --workflow sonnet --executor sonnet 2>&1 1>/dev/null < /dev/null)
+
+  assert_eq "anthropic/claude-sonnet-4-6" \
+    "$(jq -r '.categories.claudeCode.research' "$rt/models.json" 2>/dev/null)" \
+    "predicate round-trip: detect-models writes the id into models.json anyway"
+  assert_stderr_contains "Warning: detect-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file" \
+    "$rt_write_err" "predicate round-trip: but warns at write time about the refusal to come"
+
+  rt_err=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  rt_out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$rt" \
+    bash "$CLI" resolve-models 2>/dev/null | jq -r '.research')
+
+  assert_eq "inherit" "$rt_out" \
+    "predicate round-trip: resolve-models drops that same id to inherit one command later"
+  assert_stderr_contains "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit" \
+    "$rt_err" "predicate round-trip: with the exact rejection warning"
+
+  rm -rf "$rt" "$_OC_STUB_DIR"
+}
+
+test_prompt_category_predicate_edges() {
+  echo ""
+  echo "=== Testing _prompt_category: whitespace deletion, then exact membership ==="
+
+  source_prompt_category
+  # The set and its order come from _host_valid_models since story 04 -- see
+  # the note in test_model_validity_predicate_matrix.
+  _available_models=$'opus\nsonnet\nhaiku'
+  _prompt_models="opus|sonnet|haiku"
+
+  local err out ec
+  err=$(mktemp)
+
+  # ACCEPT: the exact alias.
+  out=$(printf 'sonnet\n' | _prompt_category research opus 2>"$err") && ec=0 || ec=$?
+  assert_eq "sonnet" "$out" "_prompt_category: accepts the exact alias 'sonnet'"
+  assert_exit_code "0" "$ec" "_prompt_category: an accepted answer exits 0"
+  assert_stderr_contains "Category research — model [opus|sonnet|haiku] (default: opus): " \
+    "$(cat "$err")" "_prompt_category: prompts on stderr with the available list and the default"
+
+  # ACCEPT: a padded alias. Same verdict as before story 04, different reason --
+  # it used to survive because `tr -d '[:space:]'` deleted every space, and it
+  # survives now because the shared normalizer trims the ENDS. The next
+  # assertion is where those two rules stop agreeing.
+  assert_eq "sonnet" "$(printf '  sonnet  \n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: accepts a padded 'sonnet' that resolve-models rejects verbatim"
+  # INVERTED BY STORY 04. The normalizer never touches internal whitespace, so
+  # 'son net' is a typo again: it is refused and the category default comes
+  # back, where `tr -d '[:space:]'` used to rewrite it into the valid 'sonnet'.
+  assert_eq "opus" "$(printf 'son net\n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: refuses 'son net' -- internal whitespace is preserved, not deleted"
+
+  # REJECT: a fully-qualified id, which is exactly what list-models offers on
+  # the other host.
+  out=$(printf 'anthropic/claude-sonnet-4-6\n' | _prompt_category research opus 2>"$err") && ec=0 || ec=$?
+  assert_eq "opus" "$out" "_prompt_category: rejects a fully-qualified id and returns the default"
+  assert_exit_code "0" "$ec" "_prompt_category: a rejected answer still exits 0 -- there is no error channel"
+  assert_stderr_contains "Category research — model [opus|sonnet|haiku] (default: opus): " \
+    "$(cat "$err")" "_prompt_category: the rejection is silent; the prompt is the only stderr"
+
+  # REJECT: an empty answer.
+  assert_eq "opus" "$(printf '\n' | _prompt_category research opus 2>/dev/null)" \
+    "_prompt_category: an empty answer falls back to the default"
+
+  rm -f "$err"
+}
+
+# ----------------------------------------------------------------------------
+# list-models offers ids that resolve-models then rejects.
+#
+# THIS IS A REAL USER-FACING BUG, pinned rather than fixed: /aimi:setup-models
+# lists the choices with list-models and stores them for resolve-models to read
+# back, so a user can pick an offered id and silently get "inherit". STORY 04
+# OWNS THE FIX -- it collapses the four predicates into one, and this test is
+# what proves the fix reached the user-visible symptom.
+# ----------------------------------------------------------------------------
+test_list_models_offers_ids_resolve_models_rejects() {
+  echo ""
+  echo "=== Testing the user-visible disagreement: list-models offers, resolve-models rejects ==="
+
+  # --- Direction 1: the OpenCode fallback list, driven into a Claude Code host.
+  local offered
+  offered=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="/usr/bin:/bin" \
+    bash "$CLI" list-models 2>/dev/null | jq -r '.[1]')
+  assert_eq "anthropic/claude-sonnet-4-6" "$offered" \
+    "list-models: the OpenCode fallback offers anthropic/claude-sonnet-4-6"
+
+  local tmpdir stderr stdout ec
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$offered" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+
+  stderr=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>/dev/null) && ec=0 || ec=$?
+
+  assert_stderr_contains "Warning: resolve-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit" \
+    "$stderr" "cross-host: resolve-models rejects the id list-models offered, with the exact warning"
+  assert_exit_code "0" "$ec" \
+    "cross-host: the rejection is not an error -- resolve-models still exits 0"
+  assert_eq "inherit" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "cross-host: the offered id silently becomes inherit"
+  rm -rf "$tmpdir"
+
+  # --- Direction 2: a padded id from a real `opencode models`.
+  # This half INVERTED IN STORY 04, all four assertions, and the inversion is
+  # the reviewable statement of what that story changed. It used to read:
+  # cmd_list_models piped the list through `jq -R .` with no trimming and
+  # offered the padding verbatim, while cmd_resolve_models trimmed the LIST
+  # with jq's ltrimstr(" ")/rtrimstr(" ") -- one space each, not all -- and
+  # never trimmed the candidate, so BOTH the offered id and its fully-trimmed
+  # form were refused and nothing the user could copy out of the list was
+  # acceptable. Both sides now normalize through the one helper: list-models
+  # offers the TRIMMED id, and resolve-models accepts it -- and accepts the
+  # padded form too, since normalization runs before the membership question.
+  local stub padded
+  stub=$(mktemp -d)
+  cat > "$stub/opencode" << 'OC_PAD'
+#!/usr/bin/env bash
+printf '  anthropic/claude-sonnet-4-6  \nanthropic/claude-haiku-4-5\n'
+OC_PAD
+  chmod +x "$stub/opencode"
+
+  padded=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$stub" bash "$CLI" list-models 2>/dev/null | jq -r '.[0]')
+  assert_eq "anthropic/claude-sonnet-4-6" "$padded" \
+    "list-models: offers the opencode id trimmed, not with its padding intact"
+
+  local pad_dir trim_dir
+  pad_dir=$(mktemp -d)
+  jq -n '{schemaVersion:"2.0",categories:{opencode:{
+    research:"  anthropic/claude-sonnet-4-6  ",review:"anthropic/claude-haiku-4-5",
+    design:"anthropic/claude-haiku-4-5",workflow:"anthropic/claude-haiku-4-5",
+    executor:"anthropic/claude-haiku-4-5"}}}' > "$pad_dir/models.json"
+  stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad_dir" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad_dir" bash "$CLI" resolve-models 2>/dev/null)
+  assert_eq "" "$(printf '%s' "$stderr" | grep 'is not valid for OpenCode host' || true)" \
+    "padded id: resolve-models no longer rejects a padded id stored by hand"
+  assert_eq "anthropic/claude-sonnet-4-6" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "padded id: it resolves to the trimmed id instead of becoming inherit"
+
+  trim_dir=$(mktemp -d)
+  jq -n '{schemaVersion:"2.0",categories:{opencode:{
+    research:"anthropic/claude-sonnet-4-6",review:"anthropic/claude-haiku-4-5",
+    design:"anthropic/claude-haiku-4-5",workflow:"anthropic/claude-haiku-4-5",
+    executor:"anthropic/claude-haiku-4-5"}}}' > "$trim_dir/models.json"
+  stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$trim_dir" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  stdout=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$trim_dir" bash "$CLI" resolve-models 2>/dev/null)
+  assert_eq "" "$(printf '%s' "$stderr" | grep 'is not valid for OpenCode host' || true)" \
+    "trimmed id: accepted too, because the LIST is normalized by the same rule as the candidate"
+  assert_eq "anthropic/claude-sonnet-4-6" "$(printf '%s' "$stdout" | jq -r '.research')" \
+    "trimmed id: what the user copies out of the offered list is what the resolver keeps"
+
+  rm -rf "$stub" "$pad_dir" "$trim_dir"
+}
+
+# ----------------------------------------------------------------------------
+# STORY 04's user-visible outcome, as one regression: every id list-models
+# offers is an id resolve-models accepts.
+#
+# The stub emits the four lines the research reproduced, because that is a
+# shape `opencode models` output genuinely has: a plain id, an id padded with
+# two spaces on each side, an EMPTY line, and a second plain id. Before story
+# 04, cmd_list_models piped that straight through `jq -R . | jq -s .` -- which
+# neither trims nor filters -- so the picker offered the padded entry AND the
+# empty string, and cmd_resolve_models then refused both the padded id and its
+# fully trimmed twin: its list-side trim was jq's ltrimstr(" ")/rtrimstr(" "),
+# one space each rather than all, and it never trimmed the candidate at all.
+# Nothing the user could copy out of the offered list was acceptable.
+#
+# This is the regression guard, not scaffolding to delete once green: it stays
+# green only while both sides keep asking the one shared question.
+# ----------------------------------------------------------------------------
+test_list_models_and_resolve_models_agree_on_every_offered_id() {
+  echo ""
+  echo "=== Testing that every id list-models offers is an id resolve-models accepts ==="
+
+  local stub root offered n i id cfg stderr resolved pad
+  stub=$(mktemp -d)
+  cat > "$stub/opencode" << 'OC_RESEARCH'
+#!/usr/bin/env bash
+printf 'anthropic/claude-opus-4-7\n  anthropic/claude-sonnet-4-6  \n\nanthropic/claude-haiku-4-5\n'
+OC_RESEARCH
+  chmod +x "$stub/opencode"
+
+  # Throwaway root: AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR both point at it, so
+  # nothing here can reach the developer's real ~/.config/aimi/models.json or
+  # ~/.claude/plugins/cache/. The stub lives on a test-local PATH only.
+  root=$(mktemp -d)
+  offered=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$root" CLAUDE_CONFIG_DIR="$root" bash "$CLI" list-models 2>/dev/null)
+
+  assert_eq "3" "$(printf '%s' "$offered" | jq -r 'length')" \
+    "offered set: the empty line is dropped, leaving three ids"
+  assert_eq "0" "$(printf '%s' "$offered" | jq -r '[.[] | select(test("^\\s|\\s$"))] | length')" \
+    "offered set: no entry carries leading or trailing whitespace"
+  assert_eq "0" "$(printf '%s' "$offered" | jq -r '[.[] | select(. == "")] | length')" \
+    "offered set: no entry is the empty string"
+  assert_eq "anthropic/claude-opus-4-7 anthropic/claude-sonnet-4-6 anthropic/claude-haiku-4-5" \
+    "$(printf '%s' "$offered" | jq -r 'join(" ")')" \
+    "offered set: the three ids, in the order opencode printed them"
+
+  # Each offered id, stored exactly as /aimi:setup-models would store it.
+  n=$(printf '%s' "$offered" | jq -r 'length')
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    id=$(printf '%s' "$offered" | jq -r --argjson i "$i" '.[$i]')
+    cfg=$(mktemp -d)
+    jq -n --arg m "$id" '{schemaVersion:"2.0",categories:{opencode:{
+      research:$m,review:$m,design:$m,workflow:$m,executor:$m}}}' > "$cfg/models.json"
+    stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+      AIMI_CONFIG_DIR="$cfg" CLAUDE_CONFIG_DIR="$cfg" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+    resolved=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+      AIMI_CONFIG_DIR="$cfg" CLAUDE_CONFIG_DIR="$cfg" bash "$CLI" resolve-models 2>/dev/null \
+      | jq -r '.research')
+    assert_eq "$id" "$resolved" \
+      "offered id [$id]: resolve-models keeps it -- no silent degrade to inherit"
+    assert_eq "" "$(printf '%s' "$stderr" | grep 'is not valid for OpenCode host' || true)" \
+      "offered id [$id]: resolve-models emits no not-valid warning"
+    rm -rf "$cfg"
+    i=$((i + 1))
+  done
+
+  # models.json is hand-edited, so a padded id can reach the resolver without
+  # ever passing through list-models. Normalization is a step applied BEFORE
+  # validity, so the trimmed twin is both what gets judged and what gets
+  # emitted -- a downstream consumer never receives a padded model id.
+  pad=$(mktemp -d)
+  jq -n '{schemaVersion:"2.0",categories:{opencode:{
+    research:"  anthropic/claude-sonnet-4-6  ",review:"anthropic/claude-haiku-4-5",
+    design:"anthropic/claude-haiku-4-5",workflow:"anthropic/claude-haiku-4-5",
+    executor:"anthropic/claude-haiku-4-5"}}}' > "$pad/models.json"
+  stderr=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad" CLAUDE_CONFIG_DIR="$pad" bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  resolved=$(env -u AIMI_PLUGIN_DIR -u CLAUDECODE PATH="$stub:$PATH" \
+    AIMI_CONFIG_DIR="$pad" CLAUDE_CONFIG_DIR="$pad" bash "$CLI" resolve-models 2>/dev/null \
+    | jq -r '.research')
+  assert_eq "anthropic/claude-sonnet-4-6" "$resolved" \
+    "hand-padded id: accepted, and emitted trimmed rather than as stored"
+  assert_eq "" "$(printf '%s' "$stderr" | grep 'is not valid for OpenCode host' || true)" \
+    "hand-padded id: no not-valid warning"
+
+  rm -rf "$stub" "$root" "$pad"
+}
+
+# ----------------------------------------------------------------------------
+# resolve-models' warnings, driven with hostile model ids.
+#
+# WHAT THIS USED TO BE MEASURING. cmd_resolve_models marked an invalid entry by
+# prefixing the literal string "INVALID\t" onto the model id inside jq, then
+# split that tagged value back apart in a `while IFS=$'\t' read -r _cat _val`
+# loop. The tab was chosen so a model id containing "=" could not truncate the
+# message -- the comment beside it recorded that the delimiter had ALREADY been
+# changed once for exactly that reason. But a tab is only one of the characters
+# that survives into a value, and NEWLINE was the one that broke the frame: the
+# read loop is line-oriented, so a two-line model id produced TWO iterations,
+# and the second reported a category that does not exist while claiming an
+# empty model id.
+#
+# ---- STORY 05 LANDED, AND THE SCAFFOLDING IS WHERE IT IS READ OFF -----------
+# There is no delimiter now. models.py parses the config once and answers the
+# three questions the tag used to carry between processes -- which entries are
+# invalid, what the clean result is, what to warn about -- as three expressions
+# over one list of (category, model, valid) tuples. The tab, backslash and
+# space rows below did NOT move: the first two are values a delimiter never
+# had to survive in the first place, and the third is the normalizer's, not the
+# delimiter's. THREE ASSERTIONS ON THE NEWLINE ROW INVERTED, and each is
+# annotated where it stands:
+#   warning count   2 -> 1  (one invalid id is one warning)
+#   the message     first line only -> the WHOLE id, newline included
+#   the second line fabricated 'category: opus' -> gone, and asserted absent
+# Reproducing the fabricated line would have meant re-implementing the
+# tab-split loop, which is the thing this story exists to delete. It is a
+# named divergence, not an accident: KNOWN_DIVERGENCES in tests/test_models.py
+# carries it by corpus label with what it costs.
+# ----------------------------------------------------------------------------
+
+# Run resolve-models on a Claude Code host with `model` in the research slot and
+# return only its stderr.
+_invalid_tag_stderr() {
+  local model="$1" tmpdir out
+  tmpdir=$(mktemp -d)
+  jq -n --arg m "$model" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$tmpdir/models.json"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" resolve-models 2>&1 1>/dev/null)
+  rm -rf "$tmpdir"
+  printf '%s' "$out"
+}
+
+test_resolve_models_invalid_tag_hostile_ids() {
+  echo ""
+  echo "=== Testing the INVALID<TAB> tagging against hostile model ids ==="
+
+  local suffix="is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: research), falling back to inherit"
+
+  # A literal TAB inside the id. `read -r _cat _val` gives the remainder of the
+  # line to the last variable, so the embedded tab survives into the message.
+  assert_stderr_contains "$(printf "Warning: resolve-models: model 'son\tnet' %s" "$suffix")" \
+    "$(_invalid_tag_stderr "$(printf 'son\tnet')")" \
+    "INVALID<TAB> edge: an id containing a tab keeps the tab in its warning"
+
+  # INVERTED BY STORY 04, both assertions. Leading and trailing spaces used to
+  # be preserved verbatim -- nothing trimmed the id on this branch, so '  sonnet'
+  # and 'sonnet  ' were each tagged INVALID and warned about. The shared
+  # normalizer trims the ends before the membership question is asked, so both
+  # are now the alias 'sonnet' and neither reaches the INVALID<TAB> path at all.
+  # The tab and backslash cases above and the newline case below did NOT invert:
+  # that whitespace is INTERNAL, and the normalizer never touches internal
+  # whitespace.
+  assert_eq "" "$(_invalid_tag_stderr "  sonnet")" \
+    "INVALID<TAB> edge: a leading space is trimmed, so 'sonnet' stays valid and nothing warns"
+  assert_eq "" "$(_invalid_tag_stderr "sonnet  ")" \
+    "INVALID<TAB> edge: a trailing space is trimmed, so 'sonnet' stays valid and nothing warns"
+
+  # A backslash reaches the message uninterpreted -- neither jq's "INVALID\t"
+  # construction nor the read loop re-escapes it.
+  assert_stderr_contains 'Warning: resolve-models: model '"'"'son\net'"'"' '"$suffix" \
+    "$(_invalid_tag_stderr 'son\net')" \
+    "INVALID<TAB> edge: a backslash in the id survives uninterpreted"
+
+  # THE NEWLINE CASE, all three assertions INVERTED BY STORY 05. The read loop
+  # used to consume 'sonnet' from line 1 and then read line 2 -- 'opus', the
+  # tail of the model id -- as a CATEGORY NAME with an empty model id, so one
+  # invalid id produced two warnings and the second named a category that has
+  # never existed. Nothing splits on lines now: one invalid category is one
+  # warning, and it carries the id it was given.
+  local nl_stderr nl_stdout nl_count nl_ec
+  nl_stderr=$(_invalid_tag_stderr "$(printf 'sonnet\nopus')")
+  nl_count=$(printf '%s\n' "$nl_stderr" | grep -c 'Warning: resolve-models')
+  assert_eq "1" "$nl_count" \
+    "hostile-id newline edge: ONE invalid id produces ONE warning"
+  assert_stderr_contains "$(printf "Warning: resolve-models: model 'sonnet\nopus' %s" "$suffix")" \
+    "$nl_stderr" \
+    "hostile-id newline edge: the warning carries the WHOLE id, newline included"
+  assert_eq "" "$(printf '%s\n' "$nl_stderr" | grep 'category: opus' || true)" \
+    "hostile-id newline edge: no fabricated warning names a category that does not exist"
+
+  local nl_dir
+  nl_dir=$(mktemp -d)
+  jq -n --arg m "$(printf 'sonnet\nopus')" '{schemaVersion:"2.0",categories:{claudeCode:{
+    research:$m,review:"sonnet",design:"sonnet",workflow:"sonnet",executor:"sonnet"}}}' \
+    > "$nl_dir/models.json"
+  nl_stdout=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$nl_dir" \
+    bash "$CLI" resolve-models 2>/dev/null) && nl_ec=0 || nl_ec=$?
+
+  assert_eq "design executor research review workflow" \
+    "$(printf '%s' "$nl_stdout" | jq -r 'keys | join(" ")')" \
+    "INVALID<TAB> newline edge: stdout still carries the five real categories -- 'opus' is not one"
+  assert_eq "inherit" "$(printf '%s' "$nl_stdout" | jq -r '.research')" \
+    "INVALID<TAB> newline edge: the multi-line id falls back to inherit"
+  assert_exit_code "0" "$nl_ec" \
+    "INVALID<TAB> newline edge: the fabricated warning does not change the exit status"
+
+  rm -rf "$nl_dir"
+}
+
+# ----------------------------------------------------------------------------
+# detect-models' argument rejections.
+#
+# The writer path itself is covered by test_detect_models_tier_flags_claudecode
+# (schema-v2.0 write of all five categories) and
+# test_detect_models_tier_flags_preserve_other_host (the other host's sub-table
+# survives a re-run). What neither reaches is the refusal: this verb WRITES the
+# file every later command reads, so what it declines to write matters.
+# ----------------------------------------------------------------------------
+test_detect_models_flag_mode_rejections() {
+  echo ""
+  echo "=== Testing detect-models: partial flag set and unknown flag are both refused ==="
+
+  local tmpdir err out ec
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+
+  # Partial flag set: two of the five.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research haiku --review opus 2>"$err" < /dev/null) \
+    && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "detect-models (partial flags): exits 1"
+  assert_stderr_contains "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" \
+    "$(cat "$err")" "detect-models (partial flags): exact error on stderr"
+  assert_eq "" "$out" "detect-models (partial flags): stdout stays empty"
+  assert_eq "no" "$([ -e "$tmpdir/models.json" ] && echo yes || echo no)" \
+    "detect-models (partial flags): models.json is not written"
+
+  # Unknown flag.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --bogus x 2>"$err" < /dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "detect-models (unknown flag): exits 1"
+  assert_stderr_contains "Error: detect-models: unknown flag: --bogus" \
+    "$(cat "$err")" "detect-models (unknown flag): exact error on stderr"
+  assert_stderr_contains "Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]" \
+    "$(cat "$err")" "detect-models (unknown flag): exact usage line on stderr"
+  assert_eq "no" "$([ -e "$tmpdir/models.json" ] && echo yes || echo no)" \
+    "detect-models (unknown flag): models.json is not written"
+
+  rm -rf "$tmpdir"
+}
+
+# ----------------------------------------------------------------------------
+# detect-models flag mode after story 04: it validates, and it says so.
+#
+# The boundary this test draws is deliberate and is stated in story 04's commit:
+# a merely-INVALID id still WRITES and still exits 0, because /aimi:setup-models
+# writes through this path (its picker offers a free-form "Other") and this
+# CLI's discipline is that an id is refused at READ time, by resolve-models.
+# What flag mode gains is the warning, so the refusal one command later is no
+# longer a surprise. The ONE new hard error is the case that is an argument
+# mistake rather than a wrong id: a value that is non-empty but normalizes to
+# empty, which takes the same path as the pre-existing "all five must be
+# provided" check above.
+# ----------------------------------------------------------------------------
+test_detect_models_flag_mode_normalizes_and_warns() {
+  echo ""
+  echo "=== Testing detect-models flag mode: normalizes what it writes, warns on an invalid id ==="
+
+  local tmpdir err out ec
+
+  # A padded but valid id: the NORMALIZED id is what lands in models.json, and
+  # nothing warns -- it is a valid id, merely typed with padding.
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research "  sonnet  " --review opus --design sonnet \
+      --workflow sonnet --executor sonnet 2>"$err" < /dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" "detect-models (padded valid id): exits 0"
+  assert_eq "sonnet" "$(jq -r '.categories.claudeCode.research' "$tmpdir/models.json" 2>/dev/null)" \
+    "detect-models (padded valid id): writes the trimmed id, not the padded one"
+  assert_eq "sonnet" "$(printf '%s' "$out" | jq -r '.categories.claudeCode.research')" \
+    "detect-models (padded valid id): its stdout reports the trimmed id too"
+  assert_eq "" "$(grep 'is not valid for' "$err" || true)" \
+    "detect-models (padded valid id): a valid id typed with padding draws no warning"
+  rm -rf "$tmpdir"
+
+  # An id that is not valid for this host: warned about, written anyway, exit 0.
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research anthropic/claude-sonnet-4-6 --review opus \
+      --design sonnet --workflow sonnet --executor sonnet 2>"$err" < /dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "detect-models (invalid id): exits 0 -- an invalid id is not a new failure mode here"
+  assert_stderr_contains "Warning: detect-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file" \
+    "$(cat "$err")" "detect-models (invalid id): exact warning on stderr"
+  assert_eq "anthropic/claude-sonnet-4-6" \
+    "$(jq -r '.categories.claudeCode.research' "$tmpdir/models.json" 2>/dev/null)" \
+    "detect-models (invalid id): written anyway -- validation stays a read-time concern"
+  rm -rf "$tmpdir"
+
+  # Whitespace only: the one NEW hard error. It passes the "all five provided"
+  # check (the string is non-empty) and fails on normalizing to nothing.
+  tmpdir=$(mktemp -d)
+  err="$tmpdir/stderr"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_CONFIG_DIR="$tmpdir" \
+    bash "$CLI" detect-models --research "   " --review opus --design sonnet \
+      --workflow sonnet --executor sonnet 2>"$err" < /dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "detect-models (whitespace-only value): exits 1"
+  assert_stderr_contains "Error: detect-models: --research value is whitespace only, which is not a model id" \
+    "$(cat "$err")" "detect-models (whitespace-only value): exact error on stderr"
+  assert_eq "" "$out" "detect-models (whitespace-only value): stdout stays empty"
+  assert_eq "no" "$([ -e "$tmpdir/models.json" ] && echo yes || echo no)" \
+    "detect-models (whitespace-only value): models.json is not written"
+  rm -rf "$tmpdir"
 }
 
 # ============================================================================
@@ -6534,6 +7422,8 @@ main() {
   # Archive-task tests — each creates its own isolated temp dir
   echo ""
   echo "--- Archive Task Tests ---"
+  test_archive_task_collision_suffix
+  test_archive_task_survivors
   test_archive_task_with_research_paths
   test_archive_task_without_research_paths
   test_archive_task_missing_research_files
@@ -6555,6 +7445,7 @@ main() {
   # Research-gc tests — each creates its own isolated temp dir
   echo ""
   echo "--- Research GC Tests ---"
+  test_archivable_predicate_and_research_walk_crossed
   test_research_gc
 
   # Interactivity mode detection tests
@@ -6598,6 +7489,7 @@ main() {
   echo ""
   echo "--- list-models Tests ---"
   test_list_models_claudecode_returns_three_aliases
+  test_list_models_claudecode_matches_the_host_valid_set
   test_list_models_opencode_absent_fallback
 
   # detect-models tests
@@ -6612,6 +7504,17 @@ main() {
   test_detect_models_tier_flags_preserve_other_host
   test_detect_models_preserves_other_host
   test_detect_models_default_mode_preserves_other_host
+  test_detect_models_flag_mode_rejections
+  test_detect_models_flag_mode_normalizes_and_warns
+
+  # model-validity predicate comparison
+  echo ""
+  echo "--- Model-Validity Predicate Tests ---"
+  test_model_validity_predicate_matrix
+  test_prompt_category_predicate_edges
+  test_list_models_offers_ids_resolve_models_rejects
+  test_list_models_and_resolve_models_agree_on_every_offered_id
+  test_resolve_models_invalid_tag_hostile_ids
 
   # models-prompt-check / models-prompt-dismiss tests
   echo ""

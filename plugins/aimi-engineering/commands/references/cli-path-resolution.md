@@ -36,8 +36,18 @@ if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 
 Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
 
+The pipeline picks the newest **version**, and that is not the same as the last
+line `ls` prints: `ls` collates `1.121.3` before `1.9.0`, because `1` sorts
+below `9` at the third character. A plain `sort -V` over the whole path is
+wrong too — the glob spans two wildcards, so it would order by
+marketplace-entry directory first and by version only inside one entry. So each
+candidate is prefixed with its own version segment and `sort -V` keys on that.
+This is an inline copy of `_resolve_latest_cache_path` in `aimi-cli.sh`, which
+is the canonical rule; it cannot be called here because it lives inside the
+file this block is still looking for.
+
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time
@@ -86,10 +96,14 @@ if [ -n "$WORKTREE_MGR" ] && [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi
 
 ### Layer 2: Glob fallback (zsh-safe)
 
-Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
+Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors, and
+keys the version comparison on the version path segment for the same reason the
+CLI's own Layer 2 above does — canonical rule: `_resolve_latest_cache_path` in
+`aimi-cli.sh`. The two must agree: resolving the worktree manager from a
+different install than the CLI is the same defect one file over.
 
 ```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | tail -1'); fi
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time
@@ -118,7 +132,19 @@ After resolving `$AIMI_CLI`, verify the cached CLI path is current:
 $AIMI_CLI check-version --quiet --fix
 ```
 
-If `check-version` exits 0, no action is needed — proceed normally. The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
+The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
+
+**Read the `status` field, not the exit code alone.** Exit 0 covers four different situations, and one of them is not a healthy host:
+
+| `status`   | Exit | Meaning |
+|------------|------|---------|
+| `current`  | 0 | Stored cli-path is the newest install. Proceed. |
+| `fixed`    | 0 | Was stale; `--fix` repointed it. Proceed. |
+| `missing`  | 0 | No stored cli-path yet; the JSON names the latest one. Proceed. |
+| `unknown`  | 0 | **No plugin version is installed at all.** Nothing was resolved and nothing was fixed. |
+| `stale`    | 1 | Stored cli-path is behind and `--fix` was not passed. The JSON is still valid — read it. |
+
+`unknown` used to be unreachable: an empty plugin cache aborted the verb before it could be emitted, so "exits 0" and "a plugin is installed" happened to mean the same thing. They no longer do. A command that treats any exit 0 as healthy will now walk past a host with no plugin installed and fail later at a less obvious place; a command that needs a real install should check for `"status": "unknown"` and tell the user to run `/plugin install aimi-engineering`.
 
 **`$AIMI_CLI` does not persist across Bash tool calls.** Re-read the cache at the top of every subsequent call — see [Per-Call Resolution](#per-call-resolution) below.
 
