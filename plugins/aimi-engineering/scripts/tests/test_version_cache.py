@@ -42,13 +42,13 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
 
 CASES = {c["label"]: c for c in GOLDEN["version_cache_cases"]}
 
-# The cases the D2 fix deliberately inverted, each with what it cost. Everything
-# NOT named here must replay byte for byte -- that is the whole assurance this
-# block buys, and the reason the list is spelled out instead of computed.
+# The cases the D2 fix deliberately inverted, each with what it cost.
 #
 # Read this table as the compatibility event itself: these are exactly the runs
-# whose observable behaviour a caller could notice changing.
-KNOWN_DIVERGENCES = {
+# whose observable behaviour a caller could notice changing. It is kept apart
+# from D11_AND_D13 below because every entry here shares one recorded shape --
+# exit 1, both streams empty -- and that shape is asserted rather than trusted.
+D2_ABORTS = {
     "cv-cache-vazio-cc": (
         "D2 FIXED: was exit 1 with both streams empty (the helper's `return 1` "
         "carried into a bare assignment under `set -euo pipefail`); now reaches "
@@ -88,6 +88,36 @@ KNOWN_DIVERGENCES = {
         "separately and did not move."
     ),
 }
+
+# The second commit's repairs. Separate from D2 because these were captured as
+# ordinary answers rather than as aborts -- what the recordings show is the
+# defect SUCCEEDING quietly, which is the harder kind to notice.
+D11_AND_D13 = {
+    "cv-fix-simlink-worktrees-cc": (
+        "D11 FIXED: the recording shows a global cli-path written to a "
+        "plugin-cache entry that is a symlink into a worktree -- precisely the "
+        "exit 127 the refusal exists to prevent, reached because the refusal "
+        "matched the path STRING. write_global_cli_cache now also checks the "
+        "resolved path, so nothing is written. The state cli-path is unchanged: "
+        "write_state is a different writer and the guard was never its rule."
+    ),
+    "clv-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via cleanup-versions.",
+    "pc-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via prime-cache.",
+    "ver-chave-ausente": (
+        "D13 FIXED: was the literal string `null` at exit 0, which reads as a "
+        "version; now exit 1 naming the file."
+    ),
+    "ver-nao-string": (
+        "D13 FIXED: was a JSON object pretty-printed across four lines at exit "
+        "0; now exit 1 naming the file."
+    ),
+    "ver-json-malformado": (
+        "D13 FIXED: was jq's own parse error at exit 4; now the CLI's own "
+        "message at exit 1, so all three bad-document shapes answer alike."
+    ),
+}
+
+KNOWN_DIVERGENCES = {**D2_ABORTS, **D11_AND_D13}
 
 
 # ---------------------------------------------------------------------------
@@ -300,11 +330,11 @@ def test_the_divergence_table_names_only_cases_that_exist():
     assert set(KNOWN_DIVERGENCES) <= set(CASES)
 
 
-@pytest.mark.parametrize("label", sorted(KNOWN_DIVERGENCES), ids=sorted(KNOWN_DIVERGENCES))
-def test_each_excused_case_recorded_the_abort_it_is_excused_for(label):
+@pytest.mark.parametrize("label", sorted(D2_ABORTS), ids=sorted(D2_ABORTS))
+def test_each_d2_case_recorded_the_abort_it_is_excused_for(label):
     """The excuse is only good while the RECORDING still shows the D2 abort.
 
-    Every entry in the table was captured as exit 1 with both streams empty --
+    Every entry in that table was captured as exit 1 with both streams empty --
     that is what "the documented branch was dead code" looks like from outside.
     If a future edit to the capture makes one of them an ordinary answer, it
     stops belonging here, and this says so instead of letting the skip stand.
@@ -315,8 +345,8 @@ def test_each_excused_case_recorded_the_abort_it_is_excused_for(label):
     assert case["stderr"] == "", label + ": the recording warned about something"
 
 
-@pytest.mark.parametrize("label", sorted(KNOWN_DIVERGENCES), ids=sorted(KNOWN_DIVERGENCES))
-def test_each_excused_case_now_answers_at_exit_zero(label, tmp_path):
+@pytest.mark.parametrize("label", sorted(D2_ABORTS), ids=sorted(D2_ABORTS))
+def test_each_d2_case_now_answers_at_exit_zero(label, tmp_path):
     """And the inversion is asserted, not merely skipped past.
 
     A skip that named the change but never checked it would be exactly the hole
@@ -333,6 +363,47 @@ def test_each_excused_case_now_answers_at_exit_zero(label, tmp_path):
     # The abort used to precede write_global_cli_cache. Reaching the handler must
     # not start writing a cli-path that names nothing.
     assert actual["global_cli_path"] is None, label + ": wrote a cli-path for an empty cache"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["cv-fix-simlink-worktrees-cc", "clv-simlink-worktrees-cc", "pc-simlink-worktrees-cc"],
+)
+def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_path):
+    """D11: the refusal has to survive the indirection that defeated it.
+
+    Each recording shows the global cli-path written to a plugin-cache entry
+    whose TARGET is under `.worktrees/`. Caching that path is what produces the
+    exit 127 on every later session once the worktree is cleaned up, so the
+    before-state is asserted too -- a case that stopped exercising the symlink
+    would otherwise pass this quietly.
+    """
+    assert CASES[label]["global_cli_path"] is not None, label + ": the recording refused already"
+    actual = replay(CASES[label]["input"], str(tmp_path))
+    assert actual["global_cli_path"] is None, label + ": still persisted a worktree path"
+    # The refusal is a no-op success, not an error: the verb's own answer stands.
+    assert actual["exit"] == CASES[label]["exit"], label + ": the refusal changed the exit status"
+    assert actual["stdout"] == CASES[label]["stdout"], label + ": the refusal changed the answer"
+
+
+@pytest.mark.parametrize("label", ["ver-chave-ausente", "ver-nao-string", "ver-json-malformado"])
+def test_version_refuses_a_document_with_no_string_version(label, tmp_path):
+    """D13: three ways of not having a version, one answer.
+
+    `null` at exit 0, a four-line object at exit 0, and jq's parse error at exit
+    4 all now exit 1 with the CLI's own message naming the file.
+    """
+    actual = replay(CASES[label]["input"], str(tmp_path))
+    assert actual["exit"] == 1, label
+    assert actual["stdout"] == "", label + ": printed something that is not a version"
+    assert 'declares no string "version"' in actual["stderr"], label
+
+
+def test_version_still_prints_a_plain_version_when_there_is_one(tmp_path):
+    """The guard must not have made the ordinary answer conditional."""
+    actual = replay(CASES["ver-normal"]["input"], str(tmp_path))
+    assert actual["exit"] == 0
+    assert actual["stdout"] == "1.2.3\n"
 
 
 # ---------------------------------------------------------------------------

@@ -582,11 +582,33 @@ write_aimi_models_config() {
 # segment is invoked from a throwaway checkout (e.g. test-aimi-cli.sh running
 # inside a worktree, or an /aimi:execute wave). Caching it globally would point
 # every later session at a file that vanishes on worktree cleanup (exit 127).
+#
+# THE REFUSAL LOOKS AT THE RESOLVED PATH AS WELL AS THE GIVEN ONE. Matching the
+# string alone was defeated by exactly the thing the guard exists to catch: a
+# plugin-cache entry that is a SYMLINK into a worktree has no `.worktrees/`
+# segment in its own name, so it passed and was persisted -- and then produced
+# the 127 anyway when the worktree was removed. Recorded from the failing side
+# in golden_from_jq.json's cv-fix-simlink-worktrees-cc, clv-simlink-worktrees-cc
+# and pc-simlink-worktrees-cc before this line existed.
+#
+# The string check stays FIRST and answers on its own for the common case, so
+# the resolution below is reached only by a path that already looks acceptable.
+# It is best-effort by design: a path that cannot be resolved (it may not exist
+# yet) falls back to the string verdict rather than refusing, because refusing
+# is the branch that silently does nothing.
 write_global_cli_cache() {
   local path="$1"
   case "$path" in
     */.worktrees/*)
       # Refuse to cache a worktree-local copy globally; treat as no-op success.
+      return 0
+      ;;
+  esac
+  local resolved
+  resolved=$(resolve_path "$path" 2>/dev/null) || resolved=""
+  case "$resolved" in
+    */.worktrees/*)
+      # Same refusal, reached through a symlink rather than through the name.
       return 0
       ;;
   esac
@@ -9826,15 +9848,34 @@ cmd_clear_state() {
 }
 
 # Print the plugin version from plugin.json
+# Print the installed plugin version.
+#
+# The only guard used to be that plugin.json EXISTS, and `jq -r '.version'`
+# answers something for almost anything below that bar: the literal string
+# `null` at exit 0 for a document with no version key, a JSON object
+# pretty-printed across four lines at exit 0 when the key is not a string, and
+# jq's own parse error at exit 4 for malformed JSON. This is the CLI identity
+# probe -- a caller comparing its output against a version, or a human reading
+# it, is entitled to a version string or an explanation, not `null` dressed as
+# one. All three shapes are recorded in golden_from_jq.json's ver-* cases as
+# they were.
 cmd_version() {
-  local script_path plugin_json
+  local script_path plugin_json version
   script_path="${BASH_SOURCE[0]:-$0}"
   plugin_json="$(cd "$(dirname "$script_path")/.." && pwd)/.claude-plugin/plugin.json"
   if [ ! -f "$plugin_json" ]; then
     echo "Error: plugin.json not found" >&2
     exit 1
   fi
-  jq -r '.version' "$plugin_json"
+  # `jq -e` exits non-zero when the filter produces no output, which is what
+  # `empty` yields for a missing or non-string key -- so one expression covers
+  # both, and a parse failure lands in the same branch.
+  if ! version=$(jq -er 'if (.version | type) == "string" then .version else empty end' \
+      "$plugin_json" 2>/dev/null); then
+    echo "Error: plugin.json declares no string \"version\": $plugin_json" >&2
+    exit 1
+  fi
+  printf '%s\n' "$version"
 }
 
 # Check CLI version staleness
@@ -10048,16 +10089,23 @@ cmd_prime_cache() {
 
   # ---- Resolve path ----
   if [ "$host_label" = "opencode" ]; then
-    # OpenCode branch: AIMI_PLUGIN_DIR is set and CLAUDECODE is unset
+    # OpenCode branch: AIMI_PLUGIN_DIR is set and CLAUDECODE is unset.
+    #
+    # There is no traversal check here, and its absence is deliberate. One used
+    # to stand below: `if [ "$candidate" != "$plugin_dir/scripts/aimi-cli.sh" ]`
+    # -- compared against the expression `candidate` had been assigned from four
+    # lines earlier, so it was tautologically false and its error branch could
+    # not execute. Deleted rather than made real, because there is nothing here
+    # for it to reject: `candidate` is CONSTRUCTED from $plugin_dir and no
+    # caller-supplied component enters the string. What could genuinely be
+    # wrong -- a $plugin_dir that is relative, absent, or full of `..` -- is
+    # _validate_plugin_dir's job and it has already run; what the cache must not
+    # later ACCEPT is _validate_cached_cli_path's, and it re-checks on read. An
+    # unreachable branch left standing is worse than no branch, because it reads
+    # like an assurance that traversal is handled at this point.
     local candidate="$plugin_dir/scripts/aimi-cli.sh"
     if [ ! -x "$candidate" ]; then
       jq -n --arg msg "AIMI_PLUGIN_DIR/scripts/aimi-cli.sh is not executable: $candidate" \
-        '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
-      return 1
-    fi
-    # Validate: must be exactly $plugin_dir/scripts/aimi-cli.sh (no traversal)
-    if [ "$candidate" != "$plugin_dir/scripts/aimi-cli.sh" ]; then
-      jq -n --arg msg "Path rejected: does not match expected OpenCode pattern" \
         '{status:"error",path:null,host:"opencode",version:null,message:$msg}'
       return 1
     fi
