@@ -8786,6 +8786,113 @@ _oc_models_cache_path() {
   printf '%s\n' "$aimi_dir/models-oc-cache-${mtime}.txt"
 }
 
+# ---------------------------------------------------------------------------
+# "Is this model id valid for this host?" — ONE implementation, three parts.
+#
+# The question used to be answered in four places that disagreed with each
+# other (resolve-models' two per-host branches, detect-models' interactive
+# prompt, detect-models' flag mode, which answered "yes" to everything), plus a
+# fifth representation of the same set in list-models. What is shared is the
+# SHAPE, not the answer: normalize the candidate, obtain the host's valid set,
+# decide membership, report the same verdict everywhere. The valid set still
+# differs per host — Claude Code's three short aliases versus OpenCode's
+# runtime `opencode models` output — because that is DATA, not a second
+# implementation.
+#
+# NORMALIZATION IS A SEPARATE STEP APPLIED BEFORE VALIDITY, NOT PART OF IT.
+# Two reasons, both load-bearing:
+#   1. cmd_list_models needs the normalized SET without any validity question
+#      being asked of it, so normalization has to be independently callable.
+#   2. Keeping the trim OUT of the predicate means the predicate can never
+#      quietly accept a value that was stored untrimmed — a caller that skips
+#      normalization gets a refusal, not a silent repair.
+# ---------------------------------------------------------------------------
+
+# Normalize one model id: trim LEADING and TRAILING whitespace only, NEVER
+# internal. Prints the normalized id; returns non-zero when the result is empty
+# ("no id"), printing nothing.
+#
+# Internal whitespace is deliberately preserved: 'son net' must stay 'son net'
+# and be REFUSED, not repaired into the valid alias 'sonnet'. The interactive
+# prompt used to do exactly that repair with `tr -d '[:space:]'`.
+#
+# It also assigns the global _MODEL_ID_NORMALIZED, so a caller normalizing a
+# whole list (_host_valid_models, below) can read the result without paying a
+# subshell fork per entry. One trim rule, one place — there is no second
+# expression of it anywhere in this file.
+_normalize_model_id() {
+  local _raw="${1-}"
+  _MODEL_ID_NORMALIZED="${_raw#"${_raw%%[![:space:]]*}"}"
+  _MODEL_ID_NORMALIZED="${_MODEL_ID_NORMALIZED%"${_MODEL_ID_NORMALIZED##*[![:space:]]}"}"
+  [ -n "$_MODEL_ID_NORMALIZED" ] || return 1
+  printf '%s' "$_MODEL_ID_NORMALIZED"
+}
+
+# Print the current host's valid model set, one NORMALIZED id per line.
+#   Claude Code — the three short aliases the Task tool accepts, and only those.
+#   OpenCode    — `opencode models` output, normalized, empty entries dropped,
+#                 cached by models.json mtime exactly as cmd_resolve_models
+#                 cached it before this helper existed.
+#
+# Prints NOTHING when there is no valid set to be had (the opencode binary is
+# absent, or it returned nothing). Callers read empty as "no valid set
+# available" and preserve the existing fail-safe: the configured value is used
+# as-is rather than refused against a set nobody could produce.
+_host_valid_models() {
+  if _is_claude_code_host; then
+    printf 'opus\nsonnet\nhaiku\n'
+    return 0
+  fi
+
+  command -v opencode >/dev/null 2>&1 || return 0
+
+  local _config_file _mtime _cache_file _raw="" _line _dir
+  _config_file=$(_aimi_models_config_path)
+  _mtime=$(stat -c '%Y' "$_config_file" 2>/dev/null || stat -f '%m' "$_config_file" 2>/dev/null || echo "0")
+  _cache_file=$(_oc_models_cache_path "$_mtime")
+
+  if [ -f "$_cache_file" ]; then
+    _raw=$(cat "$_cache_file" 2>/dev/null) || _raw=""
+  fi
+  if [ -z "$_raw" ]; then
+    _raw=$(opencode models 2>/dev/null) || _raw=""
+    if [ -n "$_raw" ]; then
+      # Write to cache (best-effort; failure is non-fatal)
+      _dir=$(_aimi_config_dir)
+      mkdir -p "$_dir" 2>/dev/null || true
+      printf '%s\n' "$_raw" > "$_cache_file" 2>/dev/null || true
+    fi
+  fi
+
+  [ -n "$_raw" ] || return 0
+
+  while IFS= read -r _line; do
+    _normalize_model_id "$_line" >/dev/null || continue
+    printf '%s\n' "$_MODEL_ID_NORMALIZED"
+  done <<< "$_raw"
+}
+
+# Membership of an ALREADY-NORMALIZED candidate in the host's valid set.
+# Usage: _model_id_valid_for_host <normalized-candidate> [<valid-set>]
+#
+# It never trims — normalization is the caller's separate, earlier step, which
+# is what stops this predicate from quietly accepting a value stored untrimmed.
+# The valid set defaults to _host_valid_models; a caller that already holds one
+# passes it explicitly (cmd_detect_models substitutes a built-in Anthropic list
+# when the opencode binary is absent) so that exactly one membership rule runs
+# everywhere. An empty valid set means "no valid set available" and yields the
+# fail-safe verdict: valid.
+_model_id_valid_for_host() {
+  local _candidate="${1-}" _valid
+  if [ $# -ge 2 ]; then
+    _valid="$2"
+  else
+    _valid=$(_host_valid_models)
+  fi
+  [ -n "$_valid" ] || return 0
+  printf '%s\n' "$_valid" | grep -qxF -- "$_candidate"
+}
+
 # Resolve which interactivity mode applies to the current shell.
 # Prints exactly one of: picker, agent
 #   agent  - AIMI_AGENT_MODE=true or CI=true (explicit overrides), OR no host
@@ -8909,21 +9016,41 @@ cmd_resolve_models() {
     return 0
   fi
 
-  # Validate resolved model IDs per host in a single jq pass:
-  #   - invalid entries get value "INVALID\t<original>" (tab-delimited to handle = in model names)
+  # Validate the resolved model IDs against the host's valid set.
+  #
+  # ONE tagging program serves both hosts; only the DATA differs — see
+  # _host_valid_models, which yields Claude Code's three short aliases or
+  # OpenCode's normalized `opencode models` output. Both sides of the question
+  # are normalized (candidate and every list entry) by the one normalizer, and
+  # that normalization happens BEFORE the membership test, never inside it.
+  #
+  # The INVALID\t tagging pipeline itself is unchanged:
+  #   - invalid entries get value "INVALID\t<normalized>" (tab-delimited to handle = in model names)
   #   - warnings emitted via tab-delimited IFS read loop
   #   - validated result has INVALID entries replaced with "inherit"
+  local _valid_models _host_name _host_qualifier
+  _valid_models=$(_host_valid_models)
   if _is_claude_code_host; then
-    # Claude Code: exact-match against the set {opus, sonnet, haiku}.
-    # The Task tool only accepts these short aliases — no version suffixes.
+    _host_name="Claude Code"
+    _host_qualifier="must be exactly opus, sonnet, or haiku; "
+  else
+    _host_name="OpenCode"
+    _host_qualifier=""
+  fi
+
+  # An empty valid set means "no valid set available" (the opencode binary is
+  # absent, or returned nothing). Skipping validation entirely there is the
+  # deliberate fail-safe: the configured value is used as-is.
+  if [ -n "$_valid_models" ]; then
     local _tagged
-    _tagged=$(printf '%s' "$_result" | jq -r '
+    _tagged=$(printf '%s' "$_result" | jq -r --arg valid "$_valid_models" '
+      def norm: sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "");
+      ($valid | split("\n") | map(norm) | map(select(. != ""))) as $valid_list |
       to_entries | map(
         .key as $cat |
-        .value as $model |
-        if $model == "inherit" then {key: $cat, value: "inherit"}
-        elif ($model == "opus" or $model == "sonnet" or $model == "haiku") then
-          {key: $cat, value: $model}
+        (.value | norm) as $model |
+        if $model == "" or $model == "inherit" then {key: $cat, value: "inherit"}
+        elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
         else {key: $cat, value: ("INVALID\t" + $model)}
         end
       ) | from_entries | @json
@@ -8942,69 +9069,10 @@ cmd_resolve_models() {
     # Print warnings for invalid entries (tab delimiter avoids = truncation)
     while IFS=$'\t' read -r _cat _val; do
       [ -n "$_cat" ] || continue
-      echo "Warning: resolve-models: model '$_val' is not valid for Claude Code host (must be exactly opus, sonnet, or haiku; category: $_cat), falling back to inherit" >&2
+      echo "Warning: resolve-models: model '$_val' is not valid for $_host_name host (${_host_qualifier}category: $_cat), falling back to inherit" >&2
     done < <(printf '%s' "$_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
 
     _result="$_validated"
-  else
-    # OpenCode: validate against `opencode models` output; skip validation when binary absent.
-    # Cache the models list by models.json mtime to avoid shelling out on every call.
-    if command -v opencode >/dev/null 2>&1; then
-      local _config_mtime
-      _config_mtime=$(stat -c '%Y' "$config_file" 2>/dev/null || stat -f '%m' "$config_file" 2>/dev/null || echo "0")
-      local _oc_cache_file
-      _oc_cache_file=$(_oc_models_cache_path "$_config_mtime")
-
-      local _oc_models=""
-      if [ -f "$_oc_cache_file" ]; then
-        _oc_models=$(cat "$_oc_cache_file" 2>/dev/null) || _oc_models=""
-      fi
-
-      if [ -z "$_oc_models" ]; then
-        _oc_models=$(opencode models 2>/dev/null) || _oc_models=""
-        if [ -n "$_oc_models" ]; then
-          # Write to cache (best-effort; failure is non-fatal)
-          local _oc_aimi_dir
-          _oc_aimi_dir=$(_aimi_config_dir)
-          mkdir -p "$_oc_aimi_dir" 2>/dev/null || true
-          printf '%s\n' "$_oc_models" > "$_oc_cache_file" 2>/dev/null || true
-        fi
-      fi
-
-      if [ -n "$_oc_models" ]; then
-        # Single jq pass: tag invalid entries with INVALID\t prefix
-        local _oc_tagged
-        _oc_tagged=$(printf '%s' "$_result" | jq -r --arg ocmodels "$_oc_models" '
-          ($ocmodels | split("\n") | map(select(. != "")) | map(ltrimstr(" ") | rtrimstr(" "))) as $valid_list |
-          to_entries | map(
-            .key as $cat |
-            .value as $model |
-            if $model == "inherit" then {key: $cat, value: "inherit"}
-            elif ($valid_list | index($model)) != null then {key: $cat, value: $model}
-            else {key: $cat, value: ("INVALID\t" + $model)}
-            end
-          ) | from_entries | @json
-        ' 2>/dev/null)
-
-        local _oc_validated
-        _oc_validated=$(printf '%s' "$_oc_tagged" | jq -r '
-          to_entries | map(
-            if (.value | startswith("INVALID\t")) then {key: .key, value: "inherit"}
-            else .
-            end
-          ) | from_entries | @json
-        ' 2>/dev/null)
-
-        while IFS=$'\t' read -r _cat _val; do
-          [ -n "$_cat" ] || continue
-          echo "Warning: resolve-models: model '$_val' is not valid for OpenCode host (category: $_cat), falling back to inherit" >&2
-        done < <(printf '%s' "$_oc_tagged" | jq -r 'to_entries[] | select(.value | startswith("INVALID\t")) | .key + "\t" + (.value | ltrimstr("INVALID\t"))' 2>/dev/null)
-
-        _result="$_oc_validated"
-      fi
-      # If opencode models output is empty, skip validation and use configured values
-    fi
-    # If opencode binary is absent, skip validation (fail-safe: use configured value as-is)
   fi
 
   printf '%s\n' "$_result"
@@ -9082,26 +9150,22 @@ cmd_get_current_models() {
 }
 
 # List available models for the current host as a JSON array on stdout.
-# Claude Code host: fixed array ["opus","sonnet","haiku"].
-# OpenCode host: runs `opencode models` and parses its output into a JSON array.
+# Claude Code host: the three short aliases opus/sonnet/haiku.
+# OpenCode host: the `opencode models` output.
 #   Falls back to the built-in default Anthropic list when the opencode binary is absent,
 #   printing one warning to stderr.
 # stdout is always a valid JSON array; warnings go to stderr.
+#
+# The set comes from _host_valid_models, so what the picker OFFERS is byte for
+# byte the set cmd_resolve_models validates against: entries normalized, empty
+# entries dropped. This array can no longer contain "  anthropic/claude-sonnet-4-6  "
+# or "". No validity question is asked here — normalization is a separate,
+# independently callable step, and this is the caller that needs only that half.
 cmd_list_models() {
   check_jq
 
   local _models_list
-  if _is_claude_code_host; then
-    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
-    printf '["opus","sonnet","haiku"]\n'
-    return 0
-  fi
-
-  # OpenCode: query `opencode models`
-  _models_list=""
-  if command -v opencode >/dev/null 2>&1; then
-    _models_list=$(opencode models 2>/dev/null) || _models_list=""
-  fi
+  _models_list=$(_host_valid_models)
 
   if [ -z "${_models_list:-}" ]; then
     echo "Warning: list-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
@@ -9190,6 +9254,39 @@ cmd_detect_models() {
       exit 1
     fi
 
+    # Route every flag value through the one normalizer and the one predicate
+    # before writing. Two deliberate boundaries here:
+    #
+    #   - A merely-INVALID id WARNS and is still written. Flag mode does not
+    #     gain a new non-zero exit for it: /aimi:setup-models writes through
+    #     this path (its picker offers a free-form "Other"), and this CLI's
+    #     discipline is that validation happens at READ time — cmd_resolve_models
+    #     is where an id is refused, and it says so with the same shape of
+    #     message this warning uses.
+    #   - A value that is non-empty but normalizes to EMPTY (whitespace only) is
+    #     an argument error, not an invalid id, and takes the same hard-error
+    #     path as the "all five must be provided" check directly above.
+    local _flag_valid_set _flag_host_name
+    _flag_valid_set=$(_host_valid_models)
+    if _is_claude_code_host; then _flag_host_name="Claude Code"; else _flag_host_name="OpenCode"; fi
+
+    _check_flag_model() {
+      local _cat="$1" _raw="$2"
+      if ! _normalize_model_id "$_raw" >/dev/null; then
+        echo "Error: detect-models: --$_cat value is whitespace only, which is not a model id" >&2
+        exit 1
+      fi
+      if ! _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_flag_valid_set"; then
+        echo "Warning: detect-models: model '$_MODEL_ID_NORMALIZED' is not valid for $_flag_host_name host (category: $_cat); writing it anyway — resolve-models will fall back to inherit when it reads this file" >&2
+      fi
+    }
+
+    _check_flag_model research "$_flag_research"; _flag_research="$_MODEL_ID_NORMALIZED"
+    _check_flag_model review   "$_flag_review";   _flag_review="$_MODEL_ID_NORMALIZED"
+    _check_flag_model design   "$_flag_design";   _flag_design="$_MODEL_ID_NORMALIZED"
+    _check_flag_model workflow "$_flag_workflow"; _flag_workflow="$_MODEL_ID_NORMALIZED"
+    _check_flag_model executor "$_flag_executor"; _flag_executor="$_MODEL_ID_NORMALIZED"
+
     # Read existing config to preserve the other host's categories sub-table
     local _existing_json
     _existing_json=$(read_aimi_models_config) || _existing_json=""
@@ -9253,23 +9350,17 @@ cmd_detect_models() {
   local _available_models
   local _oc_absent=0
 
-  if _is_claude_code_host; then
-    # Claude Code: short aliases only — the Task tool only accepts haiku/sonnet/opus
-    _available_models="haiku
-sonnet
-opus"
-  else
-    # OpenCode: query `opencode models`; fall back to built-in list if absent
-    if command -v opencode >/dev/null 2>&1; then
-      _available_models=$(opencode models 2>/dev/null) || _available_models=""
-    fi
-    if [ -z "${_available_models:-}" ]; then
-      _oc_absent=1
-      echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
-      _available_models="anthropic/claude-haiku-4-5
+  # The host's valid set, normalized, from the one producer — the same set
+  # cmd_list_models offers and cmd_resolve_models validates against.
+  _available_models=$(_host_valid_models)
+  if [ -z "${_available_models:-}" ]; then
+    # Only reachable on OpenCode: _host_valid_models prints nothing when the
+    # opencode binary is absent or returned nothing.
+    _oc_absent=1
+    echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+    _available_models="anthropic/claude-haiku-4-5
 anthropic/claude-sonnet-4-6
 anthropic/claude-opus-4-7"
-    fi
   fi
 
   # ---- Build per-category model defaults ------------------------------------
@@ -9312,12 +9403,15 @@ anthropic/claude-opus-4-7"
       local answer
       printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
       read -r answer </dev/tty
-      answer=$(printf '%s' "$answer" | tr -d '[:space:]')
-      # Validate against available models; fall back to default on empty or invalid input
-      if [ -z "$answer" ]; then
+      # Normalize FIRST, as its own step: trim the ends only. This used to be
+      # `tr -d '[:space:]'`, which deleted INTERNAL whitespace too and so
+      # silently rewrote the typo 'son net' into the valid alias 'sonnet'.
+      # Then ask the shared predicate — no second membership test lives here.
+      # Fall back to the category default on empty or invalid input, unchanged.
+      if ! _normalize_model_id "$answer" >/dev/null; then
         printf '%s' "$default"
-      elif printf '%s\n' "$_available_models" | grep -qxF "$answer"; then
-        printf '%s' "$answer"
+      elif _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_available_models"; then
+        printf '%s' "$_MODEL_ID_NORMALIZED"
       else
         printf '%s' "$default"
       fi
@@ -12807,6 +12901,8 @@ COMMANDS:
                               Claude Code: ["opus","sonnet","haiku"].
                               OpenCode: reads `opencode models`; falls back to built-in
                               Anthropic list with one warning when opencode is absent.
+                              Entries are normalized (ends trimmed, empties dropped), so
+                              every id offered here is one resolve-models accepts.
                               stdout is always a valid JSON array; warnings go to stderr.
     resolve-models            Resolve configured model for each agent category.
                               Reads ~/.config/aimi/models.json (schema v2.0) and emits
@@ -12835,6 +12931,11 @@ COMMANDS:
                               category-to-model assignments directly. Preserves the
                               other host's categories sub-table when a file already exists.
                               All five category flags must be supplied together.
+                              Each value is normalized (ends trimmed) before it is
+                              written; an id that is not valid for the host draws a
+                              stderr warning and is still written (validation happens at
+                              read, in resolve-models), while a value that is non-empty
+                              but normalizes to empty is an error and writes nothing.
                               Interactive (stdin TTY, no flags): prompts per category,
                               validates answer against available-model list.
                               Non-interactive (no flags, stdin not TTY): default mapping
