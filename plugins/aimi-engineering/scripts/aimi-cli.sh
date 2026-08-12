@@ -1008,6 +1008,52 @@ cmd_verification_report() {
   python3 "$(_aimi_tasks_py)" verification-report --tasks-file "$tasks_file"
 }
 
+# Which project groups a tasks file participates in -- the sorted-unique,
+# blank-dropped, "."-defaulted group list five execute.md sites used to
+# compute inline with their own `jq -r '.userStories[] | (.project // ".")'`
+# plus a `sort -u` and an empty-fallback line, and the non-null-project story
+# count a sixth site (the routability guard) asked as a separate question.
+# Validates every group other than "." against the same traversal-case-list
+# and character-regex pair execute.md Step 0.9 and plan.md Phase 3e already
+# apply to the same field, reporting every offender before refusing -- see
+# project_groups's own docstring in tasks.py for the full contract and the
+# deliberate tightening this introduces (these five sites never validated
+# before).
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file, unlike
+# cmd_status/cmd_metadata -- every one of the six call sites this replaces
+# names an explicit phase, split-member or main tasks file, never the
+# session-bound one, same convention verification-report established).
+cmd_project_groups() {
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh project-groups [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- same rule verification-report applies at its
+    # own equivalent branch.
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" project-groups --tasks-file "$tasks_file"
+}
+
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
 # Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
@@ -12771,6 +12817,11 @@ COMMANDS:
     verification-report [--tasks-file <path>]
                               Visual stories (id/project/url) plus the malformed-verification
                               partition (repairable/unrepairable). Defaults to get_tasks_file.
+    project-groups [--tasks-file <path>]
+                              {groups, projectStoryCount}: sorted-unique project groups this
+                              tasks file participates in, plus the count of stories carrying a
+                              non-null project. Validates each group and refuses (all offenders
+                              named) on an invalid one. Defaults to get_tasks_file.
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
     list-ready [--brief]      List stories ready to execute (dependency-aware)
@@ -13659,6 +13710,7 @@ main() {
     status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
     verification-report) shift; cmd_verification_report "$@" ;;
+    project-groups)     shift; cmd_project_groups "$@" ;;
     next-story)        cmd_next_story ;;
     current-story)     cmd_current_story ;;
     list-ready)        shift; cmd_list_ready "$@" ;;

@@ -44079,7 +44079,8 @@
       "line": 1129,
       "operand": "$PHASE_MAIN_TASKS",
       "program": "[.userStories[]? | select((.project // null) != null)] | length",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq -e '(.metadata.splitGroup | type) == \"object\"\n            and (.metadata.splitGroup.total | type) == \"number\"\n            and (.metadata.splitGroup.siblings | type) == \"array\"' \"$candidate\" >/dev/null 2>&1",
@@ -44149,7 +44150,8 @@
       "line": 1367,
       "operand": "$PHASE_MAIN_TASKS",
       "program": ".userStories[] | (.project // \".\")",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq '[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\")] | length' \"$PHASE_TASKS_PATH\" 2>/dev/null",
@@ -44172,7 +44174,8 @@
       "line": 1487,
       "operand": "$PHASE_MAIN_TASKS",
       "program": ".userStories[] | (.project // \".\")",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq --arg p \"$GROUP_PROJECT\" \\\n    '[.userStories[] | select((.project // \".\") == $p) | select(.verification | type == \"object\" and .strategy == \"visual\")] | length' \\\n    \"$PHASE_MAIN_TASKS\"",
@@ -44315,7 +44318,8 @@
       "line": 3255,
       "operand": "$PHASE_TASKS_PATH",
       "program": ".userStories[] | (.project // \".\")",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.project // \".\"' \"$split_file\"",
@@ -44338,7 +44342,8 @@
       "line": 3538,
       "operand": "$PHASE_TASKS_PATH",
       "program": ".userStories[] | (.project // \".\")",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.project // \".\"' \"$split_file\"",
@@ -44361,7 +44366,8 @@
       "line": 3599,
       "operand": "$PHASE_TASKS_PATH",
       "program": ".userStories[] | (.project // \".\")",
-      "question": "which project does this story (or split member) belong to"
+      "question": "which project does this story (or split member) belong to",
+      "retiredIn": "US-004"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",

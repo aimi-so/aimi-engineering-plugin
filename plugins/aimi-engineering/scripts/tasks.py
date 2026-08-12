@@ -2460,6 +2460,107 @@ def verification_report(doc):
     }
 
 
+PROJECT_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$")
+
+
+def _project_traversal_shaped(value):
+    """bash's `case "$X" in /*|..|../*|*/..|*/../*)`, ported arm for arm: a
+    leading slash, the bare string "..", a leading "../", a trailing "/..",
+    or "/../" anywhere in the middle. Exactly the two-guard pair
+    commands/execute.md Step 0.9 and commands/plan.md Phase 3e both apply to
+    the same field today, kept byte-identical so a diff of the two still
+    means something."""
+    return (
+        value.startswith("/")
+        or value == ".."
+        or value.startswith("../")
+        or value.endswith("/..")
+        or "/../" in value
+    )
+
+
+def _invalid_project(value):
+    """True unless `value` is the root group's own routing key (".", always
+    exempt) or passes both guards above: not traversal-shaped, and every
+    character inside `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`."""
+    if value == ".":
+        return False
+    return _project_traversal_shaped(value) or not PROJECT_PATTERN.match(value)
+
+
+def project_groups(doc):
+    """The END STATE five command-layer sites (execute.md's Derive
+    Participating Project Groups, Phase Container Dev Server Bootstrap,
+    Procedure/verify-creates, Mark Phase Completed, Offer a Pull Request) used
+    to compute inline -- `jq -r '.userStories[] | (.project // ".")'` piped
+    through `grep -v '^$' | sort -u`, then a bash fallback to `.` when that
+    came back empty -- plus the answer a sixth site, the Unsupported
+    Combination Guard, asked as a SEPARATE question: how many stories carry a
+    project at all. One call now answers both, because the group list alone
+    cannot: a story authored with `project: "."` and one with no `project`
+    field both collapse into the same "." group, and only the first should
+    count toward `projectStoryCount`.
+
+    `.project` is normalized through `_report_project` first -- the same
+    array-valued-project collapse `verification_report` (US-003) already
+    applies to the same field, made to agree rather than reinvented. That
+    normalization reaches `projectStoryCount` too, not only the group list:
+    a non-string `.project` (an array, a number, an object) is treated as no
+    project throughout this verb, a deliberate, stated divergence from the
+    guard's old raw `(.project // null) != null` -- which counted a
+    non-null NON-STRING project too. This verb never lets one through to a
+    filesystem join in the first place, so there is nothing left for that
+    raw check to catch that normalization has not already caught.
+
+    Every distinct group other than "." is then validated against
+    `_invalid_project` -- the same two-guard pair `commands/execute.md` Step
+    0.9 and `commands/plan.md` Phase 3e already apply to `SPLIT_PROJECT`, now
+    applied here to the FIVE sites that used to skip it entirely. Every
+    offender is collected, not just the first, mirroring plan.md's own
+    "report every offending value and STOP" gate; MalformedTasks carries all
+    of them in one message rather than aborting at the first.
+
+    A document with no `userStories` key raises MalformedTasks via `_stories`
+    -- the same abort the five grouping sites' own strict `.userStories[]`
+    already produced (recorded as site-013's `userstories-absent` case,
+    exit 5, "Cannot iterate over null"), and deliberately NOT the guard's old
+    `.userStories[]?`, which answered a silent 0 for that same document
+    (site-007, same fixture, exit 0). One call now answers both questions, so
+    it keeps the STRICTER of the two: a malformed document must refuse, not
+    silently agree with the guard that nothing here carries a project.
+    """
+    stories = _stories(doc)
+    projects = [_report_project(story) for story in stories]
+    raw_groups = [jq_alternative(project, ".") for project in projects]
+    project_story_count = len([project for project in projects if isinstance(project, str)])
+    groups = sorted({group for group in raw_groups if group != ""})
+    if not groups:
+        groups = ["."]
+    offenders = [group for group in groups if _invalid_project(group)]
+    if offenders:
+        raise MalformedTasks(
+            "invalid project "
+            + ", ".join('"' + offender + '"' for offender in offenders)
+        )
+    return {"groups": groups, "projectStoryCount": project_story_count}
+
+
+def op_project_groups(argv):
+    """The verb five command-layer grouping sites and one routability guard
+    replace, in `execute.md` -- see `project_groups`'s own docstring for the
+    shape and the deliberate tightening it introduces. Same explicit-path
+    convention `verification-report` established: the caller always names a
+    tasks file explicitly (the phase, split-member or main tasks file), never
+    the session-bound one, so aimi-cli.sh's wrapper is what falls back to
+    `get_tasks_file` when the flag is omitted."""
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py project-groups --tasks-file <path>")
+    for doc in read_docs(path, "project-groups"):
+        _emit(project_groups(doc))
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # The four rules that used to be evaluated before the lock
 # ---------------------------------------------------------------------------
@@ -3742,6 +3843,7 @@ _OPS = {
     "status": op_status,
     "metadata": op_metadata,
     "verification-report": op_verification_report,
+    "project-groups": op_project_groups,
     "get-story": op_get_story,
     "get-story-context": op_get_story_context,
     "current-story": op_current_story,

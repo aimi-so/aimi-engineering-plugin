@@ -2977,6 +2977,116 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
     assert report == {"visual": [], "malformed": {"repairable": [], "unrepairable": []}}
 
 
+# ---------------------------------------------------------------------------
+# project_groups -- proven against story 01's own recorded corpus
+# (golden_from_jq.json's command_block_jq_cases, site-013 and site-007) below,
+# then against the deliberate divergences this verb introduces on top of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "fixture,groups",
+    [
+        ("no-metadata", ["apps/api", "apps/web"]),
+        ("stories-with-project", ["."] + ["apps/api", "apps/web"]),
+        ("stories-without-project", ["."]),
+        ("all-completed", ["."]),
+        ("splitgroup-present-siblings-populated", ["apps/api", "apps/web"]),
+    ],
+)
+def test_project_groups_matches_story_01s_recorded_group_lists(fixture, groups):
+    """Replays site-013's own recorded `input` (Derive Participating Project
+    Groups, execute.md) -- the group list this verb must reproduce is the
+    BLOCK's end state (sorted, unique, blank-dropped, "." for a groupless
+    file), not the raw jq stream site-013 recorded, which never sorted or
+    deduped. `stories-with-project` is the one fixture whose raw jq output
+    (`apps/api\\napps/web\\n.`) already contains three DISTINCT values, so its
+    expected groups are the full sorted-unique set of all three."""
+    case = _CB_CASES["site-013"][fixture]
+    doc = json.loads(case["input"])
+    result = T.project_groups(doc)
+    assert result["groups"] == sorted(set(groups))
+
+
+def test_project_groups_userstories_absent_refuses_like_the_grouping_sites_did():
+    """site-013's `.userStories[]` (strict) errored on this fixture (exit 5,
+    "Cannot iterate over null"); site-007's guard `.userStories[]?` (lenient)
+    answered a silent 0 on the SAME fixture. One verb now answers both
+    questions, and this asserts it keeps the STRICTER of the two: a malformed
+    document must refuse, not silently agree with the guard."""
+    case = _CB_CASES["site-013"]["userstories-absent"]
+    doc = json.loads(case["input"])
+    assert case["stderr"].startswith("jq: error") and "Cannot iterate over null" in case["stderr"]
+    with pytest.raises(T.MalformedTasks):
+        T.project_groups(doc)
+
+
+def test_project_groups_userstories_empty_answers_the_dot_group_and_zero_count():
+    """site-013 itself printed nothing for `userStories: []` (its `stdout` is
+    empty) -- the "." fallback is bash's `[ -n ... ] || X="."` line, which this
+    verb must reproduce since the whole block's end state is the contract, not
+    the raw jq stream."""
+    case = _CB_CASES["site-013"]["userstories-empty"]
+    doc = json.loads(case["input"])
+    assert case["stdout"] == ""
+    assert T.project_groups(doc) == {"groups": ["."], "projectStoryCount": 0}
+
+
+def test_project_groups_distinguishes_a_literal_dot_project_from_no_project():
+    """The routability guard's own reason for existing: a story authored with
+    `project: "."` and a project-less story both collapse into the same "."
+    group, but only the first should count toward `projectStoryCount` -- the
+    guard's `(.project // null) != null` question. Story 01's own
+    `stories-with-project` fixture carries exactly this pair (a `.` project
+    alongside two named ones), so this reuses it rather than inventing a
+    second fixture."""
+    case = _CB_CASES["site-013"]["stories-with-project"]
+    doc = json.loads(case["input"])
+    result = T.project_groups(doc)
+    assert result == {"groups": [".", "apps/api", "apps/web"], "projectStoryCount": 3}
+
+
+def test_project_groups_refuses_every_offending_value_not_just_the_first():
+    """plan.md's own Phase 3e gate reports every offending value before
+    stopping ('On failure: report every offending value and STOP'); this verb
+    keeps that property rather than aborting at the first bad group."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "project": "../escape"},
+            {"id": "US-002", "project": "/etc/passwd"},
+            {"id": "US-003", "project": "apps/web"},
+        ]
+    }
+    with pytest.raises(T.MalformedTasks) as excinfo:
+        T.project_groups(doc)
+    assert '"../escape"' in str(excinfo.value)
+    assert '"/etc/passwd"' in str(excinfo.value)
+    assert "apps/web" not in str(excinfo.value)
+
+
+def test_project_groups_dot_is_always_exempt_from_validation():
+    doc = {"userStories": [{"id": "US-001"}]}
+    assert T.project_groups(doc) == {"groups": ["."], "projectStoryCount": 0}
+
+
+def test_project_groups_collapses_a_non_string_project_like_verification_report_does():
+    """Deliberate agreement with US-003's own choice for the same field
+    (`_report_project`), not a fresh decision: an array-valued `.project`
+    collapses to "no project" for BOTH halves of this verb's answer -- the
+    group list (closing the same jq -r multi-line-pretty-print hazard
+    verification_report already closed) and `projectStoryCount` (which the
+    guard's old raw `!= null` check would have counted, since a non-null
+    array is not null -- a stated divergence, not an oversight)."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "project": ["apps/web", "apps/api"]},
+            {"id": "US-002", "project": "apps/api"},
+        ]
+    }
+    result = T.project_groups(doc)
+    assert result == {"groups": [".", "apps/api"], "projectStoryCount": 1}
+
+
 def test_every_op_is_named_after_the_verb_that_calls_it():
     """roadmap.py needed a _VERB_FOR_OP table because its op names drifted from
     its verb names, and a diagnostic then quoted a command nobody could run.
@@ -2993,6 +3103,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "status",
         "metadata",
         "verification-report",
+        "project-groups",
         "get-story",
         "get-story-context",
         "current-story",

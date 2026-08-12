@@ -1143,7 +1143,18 @@ if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
       # split has no single governing file, and that is not a refusal case.
       PHASE_MAIN_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-tasks.json"
       if [ -f "$PHASE_MAIN_TASKS" ]; then
-        GUARD_PROJECT_STORIES=$(jq '[.userStories[]? | select((.project // null) != null)] | length' "$PHASE_MAIN_TASKS")
+        # project-groups answers both this guard's question
+        # (projectStoryCount) and Derive Participating Project Groups' own
+        # question (groups) from one call -- see aimi-cli.sh's
+        # cmd_project_groups. A refusal here is a genuinely malformed tasks
+        # file (no userStories key, or an invalid project value) and is
+        # handled directly rather than through $GUARD_REFUSAL, which names
+        # only the two routability reasons below.
+        GUARD_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || {
+          $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+          exit 1
+        }
+        GUARD_PROJECT_STORIES=$(printf '%s' "$GUARD_GROUPS_JSON" | jq -r '.projectStoryCount')
         [ "${GUARD_PROJECT_STORIES:-0}" -eq 0 ] && GUARD_REFUSAL="no-project-anywhere"
       fi
       ;;
@@ -1392,10 +1403,10 @@ This phase's participating project groups cannot be known until **Detect a Full-
 
 ```bash
 PHASE_MAIN_TASKS="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 
 if [ "$PHASE_SPLIT_MODE" = true ]; then
-  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
   # Hoisted once, above the loop -- never re-called per split_file.
   PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
@@ -1405,11 +1416,21 @@ if [ "$PHASE_SPLIT_MODE" = true ]; then
     GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_ACTIVE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline (aimi-cli.sh's
+  # cmd_project_groups) -- and, new here, validates every group other than
+  # "." before returning it. A refusal (an invalid project value, every
+  # offender named on stderr) is a deliberate tightening: this site never
+  # validated before.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || {
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  }
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
 An empty result (a phase, or an active split file, whose `userStories` array is empty — legal, see Active Split Files above) falls back to exactly one `.` group, preserving today's single-container behavior rather than creating zero containers.
@@ -1428,6 +1449,14 @@ PHASE_GROUP_TOPLEVELS_SEEN=""
 PHASE_LAST_GROUP_TOPLEVEL=""
 while IFS= read -r GROUP_PROJECT; do
   [ -n "$GROUP_PROJECT" ] || continue
+  # This loop is fed by BOTH branches of Derive Participating Project Groups
+  # above: for PHASE_SPLIT_MODE=true, $GROUP_PROJECT is a split member's own
+  # metadata.splitGroup.project (validated only here, not by project-groups,
+  # which that branch never calls); for PHASE_SPLIT_MODE=false it is already
+  # project-groups-validated. Validating unconditionally here is therefore
+  # still required for the split-mode source and a harmless no-op re-check
+  # for the other -- removing it would leave split-mode's own project value
+  # unvalidated before it is joined onto GROUP_ROOT below.
   case "$GROUP_PROJECT" in
     .)
       GROUP_KEY="DEFAULT"
@@ -1528,11 +1557,15 @@ PHASE_VISUAL_STORIES=$($AIMI_CLI verification-report --tasks-file "$PHASE_TASKS_
 **Otherwise**, compute each group's *own* `HAS_VISUAL_STORY` gate — filtering `PHASE_MAIN_TASKS`'s visual stories (fetched ONCE, before the loop, from the same verb) by that group's own `.project` value, never the whole-file count just computed above — into a `<toplevel>\t<true|false>` plan-line list, mirroring Split Container Dev Server Bootstrap's plan-line technique (Phase-Mode Paired Split, below) so a bare `HAS_VISUAL_STORY` scalar is never read after being reassigned across groups in a loop:
 
 ```bash
-PHASE_GROUP_PROJECTS=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS" | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
-
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+# This subsection only runs for PHASE_SPLIT_MODE=false (see above), so
+# project-groups' single tasks-file mode is always the right one here --
+# unlike Derive Participating Project Groups, there is no split branch to
+# preserve. A refusal here (an invalid project value) is new: this site
+# never validated before.
+PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || exit 1
+PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 PHASE_MAIN_VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$PHASE_MAIN_TASKS" 2>/dev/null)
 
 PHASE_SERVER_PLAN=""
@@ -3344,11 +3377,18 @@ if [ "$PHASE_SPLIT_MODE" = true ]; then
     CV_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     CV_GROUP_RAW="${CV_GROUP_RAW}${CV_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PARTICIPATING_GROUP_KEYS=$(printf '%s\n' "$CV_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PARTICIPATING_GROUP_KEYS" ] || PARTICIPATING_GROUP_KEYS="."
 else
-  CV_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. A refusal here (an
+  # invalid project value) is new: this site never validated before.
+  CV_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || {
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  }
+  PARTICIPATING_GROUP_KEYS=$(printf '%s' "$CV_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PARTICIPATING_GROUP_KEYS=$(printf '%s\n' "$CV_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PARTICIPATING_GROUP_KEYS" ] || PARTICIPATING_GROUP_KEYS="."
 
 # One verify-creates call per participating repository. Each repository's own
 # container is recomputed fresh here — <repo toplevel>/.worktrees/$PHASE_BRANCH,
@@ -3620,9 +3660,9 @@ $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status c
 Stop every participating repository's own phase dev server before the report below is composed — never just `$AIMI_ROOT`'s — so no server is left orphaned, still holding its port: phase mode's own container is never removed anywhere in this document (see Step 5's Container removal is completion-path-only note), so an un-stopped server here would stay alive indefinitely, not just until some later cleanup step. Derive this phase's participating project groups the same way **Create Phase Containers Per Project Group**'s Derive Participating Project Groups above already did when this phase's containers were created — `$PHASE_TASKS_PATH`'s own `userStories[].project` in single-file mode, or every member of `$PHASE_SPLIT_FILES`'s own `metadata.splitGroup.project` in split mode. Reading the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset, mirrors Multi-File Pending Count's own reasoning above: a repository whose split member completed in an earlier session still had its own phase container and must still be named and stopped here, even though this run never touched it:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ "$PHASE_SPLIT_MODE" = true ]; then
-  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
   # Hoisted once, above the loop -- never re-called per split_file.
   PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
@@ -3632,11 +3672,17 @@ if [ "$PHASE_SPLIT_MODE" = true ]; then
     GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. Status is already
+  # `completed` and the claim already released by this point (roadmap-set-
+  # status above), so a refusal here is a plain stop rather than a release --
+  # there is nothing left to release.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || exit 1
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
 ```
 
@@ -3686,9 +3732,9 @@ With exactly one participating group — today's only supported case — `PHASE_
 Best-effort only — never reverts or changes the already-`completed` status on failure or refusal. Runs once per participating repository — the same project groups **Mark Phase Completed**'s report above already derived. Re-derived fresh in this block, since each Bash call is an isolated shell and nothing from that earlier block persists here:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ "$PHASE_SPLIT_MODE" = true ]; then
-  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
   # Hoisted once, above the loop -- never re-called per split_file.
   PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
@@ -3698,11 +3744,16 @@ if [ "$PHASE_SPLIT_MODE" = true ]; then
     GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. A refusal here just skips
+  # this best-effort step -- the already-`completed` status above is never
+  # reverted.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || exit 1
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
 #### Select the acting forge account per repository

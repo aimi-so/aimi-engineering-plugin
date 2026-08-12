@@ -4481,6 +4481,122 @@ test_verification_report_rejects_a_path_outside_the_project() {
   rm -f "$outside_file"
 }
 
+test_project_groups_answers_both_groups_and_count() {
+  echo ""
+  echo "=== Testing project-groups: --tasks-file answers the group list AND the non-null-project count from one read ==="
+
+  local fixture_file
+  fixture_file="$TASKS_DIR/9999-99-96-project-groups.json"
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "userStories": [
+    {"id": "US-001", "project": "apps/api", "status": "completed"},
+    {"id": "US-002", "project": "apps/web", "status": "pending"},
+    {"id": "US-003", "project": ".", "status": "pending"},
+    {"id": "US-004", "status": "pending"}
+  ]
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" project-groups --tasks-file "$fixture_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "project-groups: exits 0 on a well-formed file"
+
+  assert_eq '[".","apps/api","apps/web"]' "$(printf '%s' "$output" | jq -c '.groups')" "project-groups: sorted-unique groups, dot and two named ones"
+  assert_eq "3" "$(printf '%s' "$output" | jq '.projectStoryCount')" "project-groups: a literal dot project counts, an absent one does not"
+
+  rm -f "$fixture_file"
+}
+
+test_project_groups_empty_userstories_answers_dot_and_zero() {
+  echo ""
+  echo "=== Testing project-groups: an empty userStories array answers the dot-only group and a zero count ==="
+
+  local fixture_file
+  fixture_file="$TASKS_DIR/9999-99-96-project-groups-empty.json"
+  echo '{"schemaVersion": "3.3", "userStories": []}' > "$fixture_file"
+
+  local output exit_code
+  output=$("$CLI" project-groups --tasks-file "$fixture_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "project-groups: exits 0 on an empty userStories array"
+  assert_eq '["."]' "$(printf '%s' "$output" | jq -c '.groups')" "project-groups: empty userStories falls back to the dot group"
+  assert_eq "0" "$(printf '%s' "$output" | jq '.projectStoryCount')" "project-groups: empty userStories has no project-carrying story"
+
+  rm -f "$fixture_file"
+}
+
+test_project_groups_userstories_absent_refuses() {
+  echo ""
+  echo "=== Testing project-groups: a document with no userStories key refuses (strict, like the grouping sites' own jq did) ==="
+
+  local fixture_file
+  fixture_file="$TASKS_DIR/9999-99-96-project-groups-no-userstories.json"
+  echo '{"schemaVersion": "3.3"}' > "$fixture_file"
+
+  local exit_code
+  "$CLI" project-groups --tasks-file "$fixture_file" > /dev/null 2>&1
+  exit_code=$?
+  assert_exit_code "1" "$exit_code" "project-groups: refuses a document with no userStories key rather than answering an empty group set"
+
+  rm -f "$fixture_file"
+}
+
+test_project_groups_defaults_to_get_tasks_file() {
+  echo ""
+  echo "=== Testing project-groups: omitting --tasks-file falls back to get_tasks_file ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local output exit_code
+  output=$("$CLI" project-groups 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "project-groups: exits 0 with no --tasks-file"
+  assert_eq '["."]' "$(printf '%s' "$output" | jq -c '.groups')" "project-groups: session tasks file with no project falls back to the dot group"
+}
+
+test_project_groups_rejects_a_path_outside_the_project() {
+  echo ""
+  echo "=== Testing project-groups: --tasks-file is a CLI argument, so validate_path_in_project refuses an escape ==="
+
+  local outside_file
+  outside_file=$(mktemp /tmp/test-project-groups-escape-XXXXXX.json)
+  echo '{"userStories": []}' > "$outside_file"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" project-groups --tasks-file "$outside_file" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "project-groups: refuses a --tasks-file outside PROJECT_ROOT"
+  assert_stderr_contains "Path escapes project root" "$stderr_output" "project-groups: names the escape the same way every other CLI-argument path does"
+
+  rm -f "$outside_file"
+}
+
+test_project_groups_refuses_every_offending_value_not_just_the_first() {
+  echo ""
+  echo "=== Testing project-groups: an invalid project value refuses, naming every offender rather than just the first ==="
+
+  local fixture_file
+  fixture_file="$TASKS_DIR/9999-99-96-project-groups-invalid.json"
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "userStories": [
+    {"id": "US-001", "project": "../escape"},
+    {"id": "US-002", "project": "/etc/passwd"},
+    {"id": "US-003", "project": "apps/web"}
+  ]
+}
+EOF
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" project-groups --tasks-file "$fixture_file" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "project-groups: refuses a document carrying an invalid project value"
+  assert_stderr_contains "../escape" "$stderr_output" "project-groups: names the first offender"
+  assert_stderr_contains "/etc/passwd" "$stderr_output" "project-groups: names the second offender too, not just the first"
+
+  rm -f "$fixture_file"
+}
+
 test_validate_stories_rejects_string_verification() {
   echo ""
   echo "=== Testing validate-stories rejects bare-string verification ==="
@@ -8058,6 +8174,12 @@ main() {
   test_verification_report_visual_and_malformed_shape
   test_verification_report_defaults_to_get_tasks_file
   test_verification_report_rejects_a_path_outside_the_project
+  test_project_groups_answers_both_groups_and_count
+  test_project_groups_empty_userstories_answers_dot_and_zero
+  test_project_groups_userstories_absent_refuses
+  test_project_groups_defaults_to_get_tasks_file
+  test_project_groups_rejects_a_path_outside_the_project
+  test_project_groups_refuses_every_offending_value_not_just_the_first
   test_validate_stories_rejects_string_verification
   test_validate_stories_accepts_object_verification
 
