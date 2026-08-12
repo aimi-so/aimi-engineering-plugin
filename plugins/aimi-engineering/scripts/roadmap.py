@@ -1483,12 +1483,20 @@ def handoff_lost_identities(payload, identities, body):
 
 
 def _jq_raw(value):
-    """`jq -r`: a string prints as itself, anything else as its JSON form."""
+    """`tostring`: a string prints as itself, anything else as its JSON form.
+
+    THE SEPARATORS ARE NOT COSMETIC. jq's tostring is COMPACT -- `[1,2]`, not
+    `[1, 2]` -- and Python's default json.dumps puts a space after every comma
+    and colon. Nothing had ever handed this an array or an object until
+    list_archivable_roadmap_cases recorded a phase whose id was one, and the
+    recording (`phase(s) [1,2]`) is what named the difference. Both other
+    callers that can reach a composite value put the result in a message.
+    """
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return _num(value)
-    return json.dumps(value, ensure_ascii=False)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def phase_dirs(doc, phase_id):
@@ -2634,6 +2642,131 @@ def op_roadmap_eligible(argv):
     return 0
 
 
+def _index(value, key, path):
+    """jq's `.<key>`: legal on an object and on null, an error on anything else."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value.get(key)
+    die(
+        "Error: list-archivable: " + path + ': cannot index ' + _json_type(value)
+        + ' with "' + key + '"'
+    )
+
+
+def op_list_archivable_phases(argv):
+    """Every phase's terminal/stuck verdict, for list-archivable's roadmap half.
+
+    WHY THIS IS NOT roadmap-eligible. That verb carries the same status column
+    and the question was real. Two things settle it. Consuming its payload from
+    bash would still leave bash counting `.status != "completed"` over the
+    OUTPUT -- the same rule, still in jq, still in aimi-cli.sh, merely moved.
+    And it reaches its document through read_doc, which die()s on malformed
+    JSON, where list-archivable's `jq -e .` probe failed silently and the
+    feature was INCLUDED. Routing through it would turn a silent include into a
+    hard abort. So: a new op, in roadmap-eligible's GENERAL form -- a verdict
+    for every phase plus the derived aggregates -- rather than a boolean shaped
+    for one caller.
+
+    THE DOCUMENT'S USABILITY IS PART OF THE ANSWER, NOT AN ABORT. `usable`
+    reproduces `jq -e . <file>`: false for a parse error and for a document
+    whose value is null or false, because -e exits 1 on those and bash then
+    skipped the whole `if`. An EMPTY (or whitespace-only) file is a third state
+    and not a fourth line in the payload: jq -e exits 0 over zero documents, and
+    the counting jq then printed nothing, which is what made bash's
+    `[ -z "$non_terminal_phases" ] && continue` arm fire. That state is
+    `usable: true` with `nonTerminalCount: null`.
+
+    WHAT STILL TAKES THE VERB DOWN, because it did before. `.phases[]` over a
+    null, a string or a number, and `.status` on a phase that is not an object,
+    are jq ERRORS, and under `set -euo pipefail` the assignment that ran them
+    ended the whole command at jq's own exit 5 with its message swallowed. That
+    is preserved as a refusal -- the verb stops, stdout stays empty -- with one
+    stderr line naming the verb, the file and the shape instead of nothing at
+    all. Only the engine's number moves.
+
+    THE STREAM SHAPE OF stdout, and why the payload is compact and last:
+
+        1  usable            true | false
+        2  nonTerminalCount  empty for no document, else decimal digits
+        3..N-1  stuckIds     raw, possibly empty, possibly MULTI-LINE
+        N  payload           the whole verdict, compact, exactly one line
+
+    bash splits this with parameter expansion and no jq, the way cmd_init_session
+    already splits its own first line off. stuckIds is `tostring` output, and a
+    string id carrying a newline prints one -- so it goes last of the raw fields
+    and the payload is compact, which is what keeps a hostile id from shifting
+    the fields above it.
+    """
+    path = _flag(argv, "--roadmap")
+    if not path:
+        die("Usage: roadmap.py list-archivable-phases --roadmap <path>")
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        text = None
+
+    records = []
+    count = None
+    stuck_ids = ""
+    if text is None:
+        usable = False
+    elif text.strip() == "":
+        # jq -e over zero documents exits 0, and the counting jq printed
+        # nothing: usable, with no count for bash to test.
+        usable = True
+    else:
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            # A parse error AND a multi-document stream both land here. jq read
+            # the second document happily; what the two share is that bash
+            # never got a single usable count out of them, and both ended with
+            # the feature included.
+            doc = None
+            usable = False
+        else:
+            usable = doc is not None and doc is not False
+
+        if usable:
+            stored = _index(doc, "phases", path)
+            if isinstance(stored, list):
+                entries = stored
+            elif isinstance(stored, dict):
+                entries = list(stored.values())  # `.[]` over an object yields its values
+            else:
+                die(
+                    "Error: list-archivable: " + path + ": cannot iterate over "
+                    + _json_type(stored) + " (.phases)"
+                )
+            for entry in entries:
+                status = _index(entry, "status", path)
+                records.append(
+                    {
+                        "id": _index(entry, "id", path),
+                        "status": status,
+                        "terminal": status == "completed",
+                        "stuck": status == "verification_failed",
+                    }
+                )
+            count = sum(1 for row in records if not row["terminal"])
+            stuck_ids = _joined([row["id"] for row in records if row["stuck"]])
+
+    payload = {
+        "usable": usable,
+        "phases": records,
+        "nonTerminalCount": count,
+        "stuckIds": stuck_ids,
+    }
+    sys.stdout.write("true\n" if usable else "false\n")
+    sys.stdout.write(("" if count is None else str(count)) + "\n")
+    sys.stdout.write(stuck_ids + "\n")
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    return 0
+
+
 def op_set_status(argv):
     """The locked read-modify-write. Bash holds the lock and has already refused
     every argument it can judge on its own, so what is left here needs the
@@ -2950,6 +3083,7 @@ _OPS = {
     "judge-phases": op_judge_phases,
     "roadmap-get": op_roadmap_get,
     "roadmap-eligible": op_roadmap_eligible,
+    "list-archivable-phases": op_list_archivable_phases,
     "set-status": op_set_status,
     "claim": op_claim,
     "release-claim": op_release_claim,
@@ -2971,6 +3105,9 @@ _OPS = {
 # names a command the reader can actually run: "Error: sweep:" points at nothing
 # a caller has ever typed, and the agent reading that stream needs the verb.
 _VERB_FOR_OP = {
+    # The one entry whose verb is outside the roadmap-* family: list-archivable
+    # is a tasks.json verb that reads one roadmap.json per feature folder.
+    "list-archivable-phases": "list-archivable",
     "sweep": "roadmap-sweep",
     "set-status": "roadmap-set-status",
     "claim": "roadmap-claim",

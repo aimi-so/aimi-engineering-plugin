@@ -10401,8 +10401,9 @@ _archivable_file_is_terminal() {
 # tasks.json) via the shared discovery helper. A feature folder's nested
 # phase tasks files surface together as a single unit -- only when every
 # phase tasks file discovered under that feature is all-terminal AND the
-# feature's roadmap.json (read directly via jq, not a roadmap-lifecycle
-# subcommand, to avoid coupling to its still-evolving CLI surface) marks
+# feature's roadmap.json (read through roadmap.py's own list-archivable-phases
+# op, which owns roadmap.json's document logic; NOT through a roadmap-lifecycle
+# subcommand, whose wrapper wants a feature slug where this walks paths) marks
 # every phase completed -- rather than piecemeal as each phase happens to
 # finish. "completed" is the only terminal phase status (see the roadmap
 # status enum in cmd_roadmap_set_status); there is no "deferred" status. A
@@ -10476,22 +10477,59 @@ cmd_list_archivable() {
     done
     [ "$all_terminal" = true ] || continue
 
+    # ---- the seam with the tasks.json half. Above this line every file has
+    # been through _archivable_file_is_terminal, which is tasks.py's; below it
+    # the FEATURE is judged by what its roadmap.json says, which is roadmap.py's.
+    # Neither reads the other's document and the two rules stay separate.
+    #
+    # ONE crossing per roadmap, where there were three jq programs over the same
+    # file -- the `jq -e .` validity probe, the non-completed count and the
+    # verification_failed collect-and-join. Which statuses are terminal and
+    # which are stuck is roadmap.py's to say now; what survives here is bash's
+    # own control flow over the answer, unchanged line for line, plus the
+    # sentence, which stays here because it names $feature_dir.
+    #
+    # THE FOUR-FIELD SPLIT IS PARAMETER EXPANSION AND NOT jq, the way
+    # cmd_init_session splits its own first line off. op_list_archivable_phases
+    # documents the stream: usable, the count, the stuck ids raw (which may be
+    # empty, and may be several lines, because a phase id is whatever someone
+    # typed), and the whole verdict compact on the LAST line -- one line
+    # guaranteed, so a hostile id cannot shift the fields above it.
+    #
+    # `usable` carries what `jq -e .` used to decide: a malformed roadmap.json,
+    # or one whose value is null or false, is not readable and the feature is
+    # INCLUDED anyway by the fall-through below. An EMPTY file is the third
+    # state and still the only input that reaches the `-z` arm: jq exited 0
+    # over zero documents and printed no count, so the feature is EXCLUDED with
+    # nothing said. And a `.phases` that cannot be iterated still ends the whole
+    # command -- the assignment is a bare command under `set -euo pipefail`,
+    # exactly as the jq it replaced was -- except that roadmap.py now says which
+    # file and which shape instead of dying silently at jq's own status.
+    #
+    # No check_python3 here on purpose: an interpreter-less host never reaches
+    # this line, because _archivable_file_is_terminal has already answered "not
+    # terminal" for every file in the feature and the loop continued above. The
+    # verb's documented degrade -- an empty list rather than a broken command --
+    # is the predicate's, and this crossing does not take it away.
     local roadmap_path="$feature_dir/roadmap.json"
-    if [ -f "$roadmap_path" ] && jq -e . "$roadmap_path" >/dev/null 2>&1; then
-      local non_terminal_phases
-      non_terminal_phases=$(jq '[.phases[] | select(.status != "completed")] | length' "$roadmap_path" 2>/dev/null)
-      [ -z "$non_terminal_phases" ] && continue
-      if [ "$non_terminal_phases" -ne 0 ]; then
-        # A stuck (verification_failed) phase is excluded the same as any
-        # other non-completed status, but never silently -- name it and the
-        # feature on stderr every run so the block stays visible instead of
-        # becoming an unexplained permanent absence from the result.
-        local stuck_ids
-        stuck_ids=$(jq -r '[.phases[] | select(.status == "verification_failed") | (.id|tostring)] | join(", ")' "$roadmap_path" 2>/dev/null)
-        if [ -n "$stuck_ids" ]; then
-          echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+    if [ -f "$roadmap_path" ]; then
+      local verdict rest usable non_terminal_phases stuck_ids
+      verdict=$(python3 "$(_aimi_roadmap_py)" list-archivable-phases --roadmap "$roadmap_path")
+      usable=${verdict%%$'\n'*};           rest=${verdict#*$'\n'}
+      non_terminal_phases=${rest%%$'\n'*}; rest=${rest#*$'\n'}
+      stuck_ids=${rest%$'\n'*}
+      if [ "$usable" = true ]; then
+        [ -z "$non_terminal_phases" ] && continue
+        if [ "$non_terminal_phases" -ne 0 ]; then
+          # A stuck (verification_failed) phase is excluded the same as any
+          # other non-completed status, but never silently -- name it and the
+          # feature on stderr every run so the block stays visible instead of
+          # becoming an unexplained permanent absence from the result.
+          if [ -n "$stuck_ids" ]; then
+            echo "Warning: list-archivable: $feature_dir not archivable -- phase(s) $stuck_ids stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)" >&2
+          fi
+          continue
         fi
-        continue
       fi
     fi
     # No roadmap.json (or malformed): every discovered phase file already

@@ -5578,6 +5578,101 @@ EOF
   rm -rf "$iso_dir"
 }
 
+# list-archivable's ROADMAP half, after it crossed into roadmap.py.
+#
+# Static half: retargeted greps, aimi-cli.sh for the three deleted jq programs
+# and roadmap.py for the op that replaced them, -F because the deleted text is
+# jq source. The sentence stays in bash and is asserted present, because it
+# names $feature_dir and only bash knows that.
+#
+# Behavioural half covers the four things a reader would otherwise have to
+# trust: the include-anyway fallback for a document that cannot be read, the
+# EXCLUDE-and-say-nothing answer for an empty one (the only input that ever
+# reached the `-z` arm), the pre-2.0 roadmap this verb still reads because it
+# is ungated by _roadmap_require_contracts, and the abort a `.phases` that
+# cannot be iterated still causes.
+test_list_archivable_roadmap_half_crossed() {
+  echo ""
+  echo "=== Testing roadmap.py boundary: list-archivable's roadmap half ==="
+
+  local roadmap_py
+  roadmap_py="$(dirname "$CLI")/roadmap.py"
+
+  assert_eq "0" \
+    "$(grep -cF '[.phases[] | select(.status != "completed")] | length' "$CLI" || true)" \
+    "list-archivable: no jq copy of the non-terminal phase count survives in aimi-cli.sh"
+  assert_eq "0" \
+    "$(grep -cF 'select(.status == "verification_failed") | (.id|tostring)' "$CLI" || true)" \
+    "list-archivable: no jq copy of the stuck-id collect-and-join survives in aimi-cli.sh"
+  assert_eq "0" "$(grep -cF 'jq -e . "$roadmap_path"' "$CLI" || true)" \
+    "list-archivable: no jq validity probe over roadmap.json survives in aimi-cli.sh"
+  assert_eq "1" "$(grep -c '^def op_list_archivable_phases(' "$roadmap_py" || true)" \
+    "list-archivable: exactly one op_list_archivable_phases definition in roadmap.py"
+  assert_eq "1" \
+    "$(awk '/^cmd_list_archivable\(\)/,/^}/' "$CLI" | grep -c 'python3 "\$(_aimi_roadmap_py)"' || true)" \
+    "list-archivable: exactly one crossing into roadmap.py per roadmap"
+  assert_eq "1" \
+    "$(grep -cF 'stuck in verification_failed (re-verify via roadmap-set-status' "$CLI" || true)" \
+    "list-archivable: the warning sentence stays in bash, which is what knows the feature dir"
+
+  local rm_dir out err exit_code
+  rm_dir=$(mktemp -d)
+  mkdir -p "$rm_dir/.aimi/tasks/feat/phase-1"
+  cat > "$rm_dir/.aimi/tasks/feat/phase-1/feat-phase-1-tasks.json" << 'RMEOF'
+{"schemaVersion":"3.3","metadata":{"branchName":"feat/t"},
+ "userStories":[{"id":"US-001","status":"completed"}]}
+RMEOF
+  err=$(mktemp)
+
+  # (a) a roadmap.json jq could not read: the feature is INCLUDED anyway, which
+  # is what the failing `jq -e .` probe used to do by skipping the whole if.
+  printf 'NOT JSON AT ALL\n' > "$rm_dir/.aimi/tasks/feat/roadmap.json"
+  out=$(cd "$rm_dir" && "$CLI" list-archivable 2>"$err")
+  assert_eq "1" "$(printf '%s' "$out" | jq 'length')" \
+    "list-archivable: a malformed roadmap.json still includes the feature"
+  assert_eq "" "$(cat "$err")" "list-archivable: and says nothing about it"
+
+  # (b) an EMPTY roadmap.json is the opposite answer, and the only input that
+  # ever reached `[ -z "$non_terminal_phases" ] && continue`.
+  : > "$rm_dir/.aimi/tasks/feat/roadmap.json"
+  out=$(cd "$rm_dir" && "$CLI" list-archivable 2>"$err")
+  assert_eq "[]" "$out" "list-archivable: an empty roadmap.json EXCLUDES the feature"
+  assert_eq "" "$(cat "$err")" "list-archivable: and excludes it silently"
+
+  # (c) a pre-2.0 roadmap is READ, not refused: this verb touches no
+  # creates/needs entry, so _roadmap_require_contracts does not stand over it.
+  printf '%s\n' '{"roadmapVersion":"1.0","feature":"feat","phases":[{"id":1,"status":"verification_failed","creates":["services/Foo (does a thing)"]}]}' \
+    > "$rm_dir/.aimi/tasks/feat/roadmap.json"
+  out=$(cd "$rm_dir" && "$CLI" list-archivable 2>"$err")
+  assert_eq "[]" "$out" "list-archivable: a pre-2.0 roadmap is read rather than refused"
+  assert_contains "stuck in verification_failed" "$(cat "$err")" \
+    "list-archivable: and its stuck phase is still named on stderr"
+  assert_eq "0" "$(grep -c 'normalize-contracts' "$err" || true)" \
+    "list-archivable: stays ungated by _roadmap_require_contracts"
+
+  # (d) two stuck phases: the separator and the document order, in one place.
+  printf '%s\n' '{"roadmapVersion":"2.0","feature":"feat","phases":[{"id":3,"status":"verification_failed"},{"id":1,"status":"verification_failed"}]}' \
+    > "$rm_dir/.aimi/tasks/feat/roadmap.json"
+  out=$(cd "$rm_dir" && "$CLI" list-archivable 2>"$err")
+  assert_contains "phase(s) 3, 1 stuck" "$(cat "$err")" \
+    "list-archivable: stuck ids are joined with ', ' in document order"
+
+  # (e) a .phases jq could not iterate still ends the command, as it did under
+  # set -euo pipefail -- with a sentence now instead of jq's swallowed exit 5.
+  printf '%s\n' '{"roadmapVersion":"2.0","feature":"feat"}' \
+    > "$rm_dir/.aimi/tasks/feat/roadmap.json"
+  exit_code=0
+  out=$(cd "$rm_dir" && "$CLI" list-archivable 2>"$err") || exit_code=$?
+  local down="zero"
+  [ "$exit_code" -ne 0 ] && down="nonzero"
+  assert_eq "nonzero" "$down" "list-archivable: a phases-less roadmap.json still takes the verb down"
+  assert_eq "" "$out" "list-archivable: and prints no array at all"
+  assert_contains "Error: list-archivable:" "$(cat "$err")" \
+    "list-archivable: naming the verb and the file where jq said nothing"
+
+  rm -rf "$rm_dir" "$err"
+}
+
 # ============================================================================
 # Payload Budget Estimation Tests (US-004)
 # ============================================================================
@@ -8128,6 +8223,7 @@ main() {
   test_list_archivable_nested_roadmap_completed_unit
   test_list_archivable_nested_roadmap_in_progress_excluded
   test_list_archivable_verification_failed_surfaced
+  test_list_archivable_roadmap_half_crossed
 
   # Payload budget estimation tests (US-004) — each creates its own isolated temp dir
   echo ""

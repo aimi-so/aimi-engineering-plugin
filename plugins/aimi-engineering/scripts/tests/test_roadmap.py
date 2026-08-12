@@ -16,8 +16,10 @@ end-to-end through the CLI. This suite covers the rules directly, at a
 granularity that suite cannot reach and roughly five hundred times faster.
 """
 
+import inspect
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -1482,8 +1484,13 @@ def test_the_diagnostic_names_the_verb_a_caller_can_run_not_the_internal_op():
     """Half the ops are named differently from the aimi-cli.sh verb that invokes
     them. "Error: sweep:" points at nothing anybody has typed."""
     assert R._VERB_FOR_OP["sweep"] == "roadmap-sweep"
+    # The prefix was a stand-in for the real rule -- every value is a verb a
+    # caller can type -- and it held only while every op here served a
+    # roadmap-* verb. list-archivable is a tasks.json verb that reads one
+    # roadmap.json per feature folder, so it is named rather than dropped.
     for op in R._VERB_FOR_OP.values():
-        assert op.startswith("roadmap-"), op
+        assert op.startswith("roadmap-") or op == "list-archivable", op
+    assert R._VERB_FOR_OP["list-archivable-phases"] == "list-archivable"
     # Every op either appears in the map or is already named after its verb.
     for op in R._OPS:
         assert op in R._VERB_FOR_OP or op in (
@@ -1849,3 +1856,321 @@ def test_the_two_existing_selectors_still_choose_what_they_always_chose(tmp_path
         else:
             assert claimed.returncode in (3, 4), label
     assert checked_success >= 4, "the regression proof never saw a successful selection"
+
+
+# ---------------------------------------------------------------------------
+# list-archivable's roadmap half: the three jq sites cmd_list_archivable used
+# to run over <feature>/roadmap.json
+# ---------------------------------------------------------------------------
+#
+# THE OTHER HALF OF THIS VERB IS IN test_tasks.py. _archivable_file_is_terminal
+# reads tasks.json and is recorded in session_doc_cases under the la-* labels;
+# what follows is roadmap.json only, and the two never read each other's file.
+
+LA_ROADMAP = {c["label"]: c for c in GOLDEN["list_archivable_roadmap_cases"]}
+LA_FIELDS = ("exit", "stdout", "stderr")
+
+_BASH_LINE = re.compile(r"^(.*?): line \d+:", re.M)
+LA_CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
+
+
+def _la_env(base):
+    """Every path the CLI could reach outside the fixture, pointed back into it.
+
+    The repository's own .aimi/tasks holds the tasks file this plan runs from,
+    and list-archivable is what feeds archive-task. A case that walked up to it
+    would be reading live state.
+    """
+    env = dict(os.environ)
+    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
+        env.pop(name, None)
+    env["HOME"] = base
+    env["AIMI_CONFIG_DIR"] = os.path.join(base, "cfg")
+    env["XDG_CONFIG_HOME"] = os.path.join(base, ".config")
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(base, ".claude")
+    env["LC_ALL"] = "C"
+    return env
+
+
+def _replay_la_roadmap(case, tmp_path):
+    """Rebuild the project root, run the CLI, read the three streams back.
+
+    The mtimes are not decoration: _find_tasks_files_all pipes through `ls -t`,
+    so without them the discovery ORDER -- and therefore the order of the JSON
+    array this verb prints -- would be decided by whichever file the filesystem
+    happened to stamp first.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+
+    written = []
+    for rel, text in sorted(case["input"]["files"].items()):
+        full = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        written.append(full)
+    stamp = 1600000000
+    for offset, full in enumerate(written):
+        os.utime(full, (stamp - offset, stamp - offset))
+
+    proc = subprocess.run(
+        ["bash", LA_CLI] + case["args"],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_la_env(base),
+    )
+
+    def norm(text):
+        text = text.replace(root, "/TMP").replace(base, "/OUTSIDE")
+        text = text.replace(LA_CLI, "/CLI/aimi-cli.sh")
+        return _BASH_LINE.sub(r"\1: line <N>:", text)
+
+    return {"exit": proc.returncode, "stdout": norm(proc.stdout), "stderr": norm(proc.stderr)}
+
+
+# The 10 fields that could not survive the crossing, in the same two classes
+# every block before this one recorded.
+#
+# (A) THE ENGINE'S OWN STATUS WITH NO MESSAGE AT ALL. `.phases[]` over a
+#     non-iterable, and `.status` on a phase that is not an object, are jq
+#     ERRORS: jq died at its own exit 5 and `set -euo pipefail` took the verb
+#     down with it, its message swallowed by the 2>/dev/null on the assignment.
+#     roadmap.py refuses at 1 and says which file and which shape. Nine cases,
+#     and all nine still stop the verb with nothing on stdout.
+# (B) BASH'S COMPLAINT ABOUT ITS OWN COMPARISON. jq printed one count per
+#     document, `[` was handed "0\n1", said "integer expression expected" and
+#     returned 2, which the `if` read as false. The port cannot parse a
+#     two-document file at all, takes the same include-anyway path, and says
+#     nothing -- the feature is still INCLUDED, which is the defect preserved.
+LA_ROADMAP_DIVERGENCES = {
+    "la-rm-doc-true": ("exit", "stderr"),
+    "la-rm-doc-numero": ("exit", "stderr"),
+    "la-rm-doc-array": ("exit", "stderr"),
+    "la-rm-doc-string": ("exit", "stderr"),
+    "la-rm-phases-ausente": ("exit", "stderr"),
+    "la-rm-phases-null": ("exit", "stderr"),
+    "la-rm-phases-string": ("exit", "stderr"),
+    "la-rm-phases-numero": ("exit", "stderr"),
+    "la-rm-fase-nao-objeto": ("exit", "stderr"),
+    "la-rm-dois-documentos": ("stderr",),
+}
+
+
+@pytest.mark.parametrize("label", sorted(LA_ROADMAP), ids=sorted(LA_ROADMAP))
+def test_the_list_archivable_roadmap_port_reproduces_the_jq(label, tmp_path):
+    case = LA_ROADMAP[label]
+    actual = _replay_la_roadmap(case, tmp_path)
+    excused = LA_ROADMAP_DIVERGENCES.get(label, ())
+    for field in LA_FIELDS:
+        if field in excused:
+            continue
+        assert actual[field] == case[field], label + " . " + field
+
+
+def test_every_recorded_stdout_survived_the_crossing():
+    """The claim worth stating separately: not one case is excused on stdout.
+
+    /aimi:execute Step 0.5 and /aimi:plan branch on this array and on its empty
+    `[]` form, so a divergence there would be the verb changing its mind.
+    """
+    assert "stdout" not in sum(LA_ROADMAP_DIVERGENCES.values(), ())
+    assert len(LA_ROADMAP) >= 40
+
+
+@pytest.mark.parametrize(
+    "label", sorted(LA_ROADMAP_DIVERGENCES), ids=sorted(LA_ROADMAP_DIVERGENCES)
+)
+def test_each_excused_roadmap_case_keeps_its_verdict(label, tmp_path):
+    """An excused case may lose the engine's wording and its exit number. It may
+    not change its answer."""
+    recorded = LA_ROADMAP[label]
+    actual = _replay_la_roadmap(recorded, tmp_path)
+    assert actual["stdout"] == recorded["stdout"], label
+    if label == "la-rm-dois-documentos":
+        assert "integer expression expected" in recorded["stderr"]
+        assert actual["exit"] == 0 and actual["stderr"] == ""
+        assert "phase-1" in actual["stdout"], "still included, which is the defect kept"
+        return
+    assert recorded["exit"] == 5 and recorded["stderr"] == "", label
+    assert actual["exit"] != 0 and actual["stdout"] == "", label
+    assert actual["stderr"].startswith("Error: list-archivable: "), label
+    assert actual["stderr"].count("\n") == 1, label
+
+
+def test_the_roadmap_divergence_table_names_only_cases_that_exist():
+    assert set(LA_ROADMAP_DIVERGENCES) <= set(LA_ROADMAP)
+    assert len(LA_ROADMAP_DIVERGENCES) == 10, "the comment above names 10; keep them in step"
+
+
+# --- the op itself ---------------------------------------------------------
+
+
+def _la_op(tmp_path, text, name="roadmap.json"):
+    path = os.path.join(str(tmp_path), name)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return _run(["list-archivable-phases", "--roadmap", path])
+
+
+def test_the_op_takes_a_path_and_never_a_feature_slug():
+    """cmd_roadmap_eligible's slug requirement lives in the BASH wrapper, not in
+    op_roadmap_eligible, which already takes --roadmap. list-archivable walks
+    whatever roadmaps it finds and has no slug to give, so the op copies the
+    path-shaped signature and the problem does not arise."""
+    result = _run(["list-archivable-phases"])
+    assert result.returncode == 1
+    assert result.stderr.startswith("Usage: roadmap.py list-archivable-phases --roadmap")
+    assert "--feature" not in result.stderr
+
+
+def test_the_payload_names_every_phase_not_only_the_blocking_ones(tmp_path):
+    """roadmap-eligible's general form, followed rather than narrowed: one call
+    answers the archivable question AND serves a by-id lookup."""
+    doc = json.dumps({"phases": [
+        {"id": 1, "status": "completed"},
+        {"id": 2, "status": "pending"},
+        {"id": 3.1, "status": "verification_failed"},
+    ]})
+    result = _la_op(tmp_path, doc)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout.split("\n")[3])
+    assert [p["id"] for p in payload["phases"]] == [1, 2, 3.1]
+    assert [p["terminal"] for p in payload["phases"]] == [True, False, False]
+    assert [p["stuck"] for p in payload["phases"]] == [False, False, True]
+    assert payload["nonTerminalCount"] == 2
+    assert payload["stuckIds"] == "3.1"
+    assert payload["usable"] is True
+
+
+def test_the_stuck_ids_arrive_pre_joined_so_bash_never_reimplements_tostring(tmp_path):
+    """Document order, ", " between, and `tostring` applied per id. Handing bash
+    the ids one per line instead would put `(.id|tostring)` back in the shell
+    and meet the jq -r trap on the way: a composite id pretty-prints over four
+    lines inside a read loop."""
+    doc = json.dumps({"phases": [
+        {"id": 3, "status": "verification_failed"},
+        {"id": 1, "status": "verification_failed"},
+        {"id": [1, 2], "status": "verification_failed"},
+        {"status": "verification_failed"},
+    ]})
+    lines = _la_op(tmp_path, doc).stdout.split("\n")
+    assert lines[2] == "3, 1, [1,2], null"
+    assert json.loads(lines[3])["stuckIds"] == lines[2]
+
+
+def test_tostring_is_compact_the_way_jq_writes_it():
+    """The one thing the corpus caught in a helper rather than at a call site.
+    jq's tostring writes [1,2]; json.dumps' default writes [1, 2]."""
+    assert R._jq_raw([1, 2]) == "[1,2]"
+    assert R._jq_raw({"n": 1}) == '{"n":1}'
+    assert R._joined([[1, 2], {"n": 1}]) == '[1,2], {"n":1}'
+
+
+def test_usability_is_reported_in_the_payload_and_never_by_dying(tmp_path):
+    """The whole reason this is a new op and not a call to roadmap-eligible.
+    read_doc die()s on malformed JSON; here the `jq -e .` probe failed, bash
+    skipped the entire if, and the feature was INCLUDED. An abort would turn a
+    silent include into a broken command."""
+    for text in ("NOT JSON AT ALL\n", "null\n", "false\n", '{"a":1}\n{"b":2}\n'):
+        result = _la_op(tmp_path, text)
+        assert result.returncode == 0, text
+        assert result.stdout.split("\n")[0] == "false", text
+        assert json.loads(result.stdout.split("\n")[3])["usable"] is False, text
+
+
+def test_a_missing_file_is_unusable_rather_than_an_error(tmp_path):
+    result = _run(["list-archivable-phases", "--roadmap", os.path.join(str(tmp_path), "nada.json")])
+    assert result.returncode == 0
+    assert result.stdout.split("\n")[0] == "false"
+
+
+def test_an_empty_document_is_usable_with_no_count_which_is_the_third_state(tmp_path):
+    """jq -e exits 0 over zero documents and the counting jq printed nothing, so
+    `[ -z "$non_terminal_phases" ] && continue` fired and the feature was
+    EXCLUDED. Collapsing this into "unusable" would include it instead."""
+    for text in ("", "   \n"):
+        result = _la_op(tmp_path, text)
+        assert result.returncode == 0, repr(text)
+        assert result.stdout.split("\n")[:3] == ["true", "", ""], repr(text)
+        assert json.loads(result.stdout.split("\n")[3])["nonTerminalCount"] is None
+
+
+def test_zero_is_truthy_here_because_it_is_truthy_in_jq(tmp_path):
+    """`jq -e` exits 1 only on null and false. Testing Python truthiness instead
+    would make a roadmap.json holding `0` unusable and include the feature,
+    where jq entered the if and died at .phases."""
+    result = _la_op(tmp_path, "0\n")
+    assert result.returncode == 1
+    assert result.stderr.startswith('Error: list-archivable: ')
+    assert 'cannot index a number with "phases"' in result.stderr
+
+
+@pytest.mark.parametrize(
+    "text,fragment",
+    [
+        ('{"a": 1}', "cannot iterate over null (.phases)"),
+        ('{"phases": null}', "cannot iterate over null (.phases)"),
+        ('{"phases": "duas"}', "cannot iterate over a string (.phases)"),
+        ('{"phases": 5}', "cannot iterate over a number (.phases)"),
+        ('{"phases": [7]}', 'cannot index a number with "status"'),
+        ('[]', 'cannot index an array with "phases"'),
+        ('"texto"', 'cannot index a string with "phases"'),
+        ('true', 'cannot index a boolean with "phases"'),
+    ],
+)
+def test_what_jq_could_not_iterate_still_stops_the_verb(tmp_path, text, fragment):
+    """Preserved, not improved. Under `set -euo pipefail` the assignment that
+    ran the failing jq ended the whole command before `[ -z ... ]` was ever
+    evaluated, so one hand-broken roadmap.json still takes list-archivable down
+    -- with a sentence now, instead of jq's swallowed exit 5."""
+    result = _la_op(tmp_path, text)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert fragment in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_phases_as_an_object_yields_its_values_and_a_null_entry_is_legal(tmp_path):
+    """`.[]` over an object iterates VALUES, and `null | .status` is null rather
+    than an error -- so a null phase counts as non-terminal where a number in
+    the same position aborts."""
+    result = _la_op(tmp_path, json.dumps({"phases": {"a": {"id": 1, "status": "completed"}}}))
+    assert json.loads(result.stdout.split("\n")[3])["nonTerminalCount"] == 0
+    result = _la_op(tmp_path, json.dumps({"phases": [None]}))
+    assert result.returncode == 0
+    assert json.loads(result.stdout.split("\n")[3])["nonTerminalCount"] == 1
+
+
+def test_the_status_comparison_is_exact_equality(tmp_path):
+    """No normalization anywhere: a missing status, a null one and a capitalized
+    one are all non-terminal, and none of the three is stuck."""
+    doc = json.dumps({"phases": [
+        {"id": 1}, {"id": 2, "status": None}, {"id": 3, "status": "Completed"},
+    ]})
+    payload = json.loads(_la_op(tmp_path, doc).stdout.split("\n")[3])
+    assert payload["nonTerminalCount"] == 3
+    assert payload["stuckIds"] == ""
+    assert [p["stuck"] for p in payload["phases"]] == [False, False, False]
+
+
+def test_the_payload_is_the_last_line_and_is_exactly_one_line(tmp_path):
+    """What lets bash split this with parameter expansion and no jq. A phase id
+    can carry a newline, so the raw ids go last of the raw fields and the JSON
+    goes behind them, compact -- any pretty payload would let a hostile id shift
+    the fields above it."""
+    doc = json.dumps({"phases": [{"id": "a\nb", "status": "verification_failed"}]})
+    out = _la_op(tmp_path, doc).stdout
+    assert out.endswith("}\n")
+    assert out.count("\n") == 5, "usable, count, two id lines, payload"
+    assert json.loads(out.rsplit("\n", 2)[-2])["stuckIds"] == "a\nb"
+
+
+def test_the_op_reads_no_tasks_file(tmp_path):
+    """Same property roadmap-eligible documents: the answer depends on
+    roadmap.json alone, so a concurrent /aimi:execute rewriting tasks files
+    cannot move it. list-archivable has already read those files itself."""
+    body = inspect.getsource(R.op_list_archivable_phases)
+    body = re.sub(r' *"""(?:.|\n)*?"""\n', "", body)  # the docstring EXPLAINS tasks.json
+    body = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
+    assert "tasks" not in body
+    assert body.count("open(") == 1
