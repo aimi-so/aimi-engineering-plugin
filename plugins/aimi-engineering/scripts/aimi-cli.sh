@@ -9174,6 +9174,15 @@ anthropic/claude-opus-4-7"
 #       populate both claudeCode and opencode tables.
 cmd_detect_models() {
   check_jq
+  # python3 owns this verb's document half, and unlike the four READERS beside
+  # it there is no degrade a writer may take. Writing the current host's five
+  # values alone is the 1.97.2 regression; writing nothing and returning 0
+  # tells /aimi:setup-models the config was saved when it was not. So this
+  # refuses at exit 1 BEFORE a prompt is shown, a cache is written or a flag is
+  # judged — which is exactly what setup-models.md already promises its reader:
+  # "if detect-models exits non-zero, report the error verbatim and STOP — the
+  # config file was not written."
+  check_python3
 
   # ---- Parse category flags --------------------------------------------------
   local _flag_research="" _flag_review="" _flag_design="" _flag_workflow="" _flag_executor=""
@@ -9216,8 +9225,14 @@ cmd_detect_models() {
     _host_key="opencode"
   fi
 
-  # ---- Flag mode: category flags provided → non-interactive write -----------
+  # The five values the document gets, however they were arrived at. Both modes
+  # fill these in and then STOP: the read, the merge, the write and the two
+  # notes below are one tail serving both, where they used to be two verbatim
+  # copies of the same forty lines.
+  local _model_research _model_review _model_design _model_workflow _model_executor
+
   if [ -n "$_flag_research" ] || [ -n "$_flag_review" ] || [ -n "$_flag_design" ] || [ -n "$_flag_workflow" ] || [ -n "$_flag_executor" ]; then
+    # ---- Flag mode: category flags provided → non-interactive write ---------
     # Require all five categories when using flag mode
     if [ -z "$_flag_research" ] || [ -z "$_flag_review" ] || [ -z "$_flag_design" ] || [ -z "$_flag_workflow" ] || [ -z "$_flag_executor" ]; then
       echo "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor" >&2
@@ -9251,203 +9266,123 @@ cmd_detect_models() {
       fi
     }
 
-    _check_flag_model research "$_flag_research"; _flag_research="$_MODEL_ID_NORMALIZED"
-    _check_flag_model review   "$_flag_review";   _flag_review="$_MODEL_ID_NORMALIZED"
-    _check_flag_model design   "$_flag_design";   _flag_design="$_MODEL_ID_NORMALIZED"
-    _check_flag_model workflow "$_flag_workflow"; _flag_workflow="$_MODEL_ID_NORMALIZED"
-    _check_flag_model executor "$_flag_executor"; _flag_executor="$_MODEL_ID_NORMALIZED"
+    _check_flag_model research "$_flag_research"; _model_research="$_MODEL_ID_NORMALIZED"
+    _check_flag_model review   "$_flag_review";   _model_review="$_MODEL_ID_NORMALIZED"
+    _check_flag_model design   "$_flag_design";   _model_design="$_MODEL_ID_NORMALIZED"
+    _check_flag_model workflow "$_flag_workflow"; _model_workflow="$_MODEL_ID_NORMALIZED"
+    _check_flag_model executor "$_flag_executor"; _model_executor="$_MODEL_ID_NORMALIZED"
+  else
+    # ---- Available model sets per host --------------------------------------
+    local _available_models
+    local _oc_absent=0
 
-    # Read existing config to preserve the other host's categories sub-table
-    local _existing_json
-    _existing_json=$(read_aimi_models_config) || _existing_json=""
-
-    local _models_json
-    if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
-      # Merge: preserve other host's categories block, replace current host's block
-      _models_json=$(printf '%s' "$_existing_json" | jq \
-        --arg host_key  "$_host_key" \
-        --arg research  "$_flag_research" \
-        --arg review    "$_flag_review" \
-        --arg design    "$_flag_design" \
-        --arg workflow  "$_flag_workflow" \
-        --arg executor  "$_flag_executor" \
-        '{
-          schemaVersion: "2.0",
-          categories: ((.categories // {}) + {
-            ($host_key): {
-              research: $research,
-              review:   $review,
-              design:   $design,
-              workflow: $workflow,
-              executor: $executor
-            }
-          })
-        }')
-    else
-      # No existing config or malformed — create fresh
-      _models_json=$(jq -n \
-        --arg host_key  "$_host_key" \
-        --arg research  "$_flag_research" \
-        --arg review    "$_flag_review" \
-        --arg design    "$_flag_design" \
-        --arg workflow  "$_flag_workflow" \
-        --arg executor  "$_flag_executor" \
-        '{
-          schemaVersion: "2.0",
-          categories: {
-            ($host_key): {
-              research: $research,
-              review:   $review,
-              design:   $design,
-              workflow: $workflow,
-              executor: $executor
-            }
-          }
-        }')
-    fi
-
-    write_aimi_models_config "$_models_json"
-
-    local _config_path
-    _config_path=$(_aimi_models_config_path)
-    printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
-    printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
-    printf '%s\n' "$_models_json"
-    return 0
-  fi
-
-  # ---- Available model sets per host ----------------------------------------
-  local _available_models
-  local _oc_absent=0
-
-  # The host's valid set, normalized, from the one producer — the same set
-  # cmd_list_models offers and cmd_resolve_models validates against.
-  _available_models=$(_host_valid_models)
-  if [ -z "${_available_models:-}" ]; then
-    # Only reachable on OpenCode: _host_valid_models prints nothing when the
-    # opencode binary is absent or returned nothing.
-    _oc_absent=1
-    echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
-    _available_models="anthropic/claude-haiku-4-5
+    # The host's valid set, normalized, from the one producer — the same set
+    # cmd_list_models offers and cmd_resolve_models validates against.
+    _available_models=$(_host_valid_models)
+    if [ -z "${_available_models:-}" ]; then
+      # Only reachable on OpenCode: _host_valid_models prints nothing when the
+      # opencode binary is absent or returned nothing.
+      _oc_absent=1
+      echo "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list." >&2
+      _available_models="anthropic/claude-haiku-4-5
 anthropic/claude-sonnet-4-6
 anthropic/claude-opus-4-7"
-  fi
+    fi
 
-  # ---- Build per-category model defaults ------------------------------------
-  # research → fast (haiku), review → powerful (opus),
-  # design/workflow/executor → balanced (sonnet)
-  local _fast_model _balanced_model _powerful_model
+    # ---- Build per-category model defaults ----------------------------------
+    # research → fast (haiku), review → powerful (opus),
+    # design/workflow/executor → balanced (sonnet)
+    local _fast_model _balanced_model _powerful_model
 
-  _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
-  [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
+    _fast_model=$(printf '%s\n' "$_available_models" | grep -i "haiku" | head -1)
+    [ -z "$_fast_model" ] && _fast_model=$(printf '%s\n' "$_available_models" | head -1)
 
-  _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
-  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
-  [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
+    _balanced_model=$(printf '%s\n' "$_available_models" | grep -i "sonnet" | head -1)
+    [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | sed -n '2p')
+    [ -z "$_balanced_model" ] && _balanced_model=$(printf '%s\n' "$_available_models" | head -1)
 
-  _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
-  [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
+    _powerful_model=$(printf '%s\n' "$_available_models" | grep -i "opus" | head -1)
+    [ -z "$_powerful_model" ] && _powerful_model=$(printf '%s\n' "$_available_models" | tail -1)
 
-  # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
-  local _default_research="$_fast_model"
-  local _default_review="$_powerful_model"
-  local _default_design="$_balanced_model"
-  local _default_workflow="$_balanced_model"
-  local _default_executor="$_balanced_model"
+    # Per-category defaults: research=fast, review=powerful, design/workflow/executor=balanced
+    local _default_research="$_fast_model"
+    local _default_review="$_powerful_model"
+    local _default_design="$_balanced_model"
+    local _default_workflow="$_balanced_model"
+    local _default_executor="$_balanced_model"
 
-  # ---- Per-category model assignment ----------------------------------------
-  local _model_research="$_default_research"
-  local _model_review="$_default_review"
-  local _model_design="$_default_design"
-  local _model_workflow="$_default_workflow"
-  local _model_executor="$_default_executor"
+    # ---- Per-category model assignment --------------------------------------
+    _model_research="$_default_research"
+    _model_review="$_default_review"
+    _model_design="$_default_design"
+    _model_workflow="$_default_workflow"
+    _model_executor="$_default_executor"
 
-  if [ -t 0 ]; then
-    # stdin is a TTY — prompt once per category for a concrete model id
-    local _prompt_models
-    _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
+    if [ -t 0 ]; then
+      # stdin is a TTY — prompt once per category for a concrete model id
+      local _prompt_models
+      _prompt_models=$(printf '%s\n' "$_available_models" | tr '\n' '|' | sed 's/|$//')
 
-    _prompt_category() {
-      local cat="$1"
-      local default="$2"
-      local answer
-      printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
-      read -r answer </dev/tty
-      # Normalize FIRST, as its own step: trim the ends only. This used to be
-      # `tr -d '[:space:]'`, which deleted INTERNAL whitespace too and so
-      # silently rewrote the typo 'son net' into the valid alias 'sonnet'.
-      # Then ask the shared predicate — no second membership test lives here.
-      # Fall back to the category default on empty or invalid input, unchanged.
-      if ! _normalize_model_id "$answer" >/dev/null; then
-        printf '%s' "$default"
-      elif _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_available_models"; then
-        printf '%s' "$_MODEL_ID_NORMALIZED"
-      else
-        printf '%s' "$default"
-      fi
-    }
+      _prompt_category() {
+        local cat="$1"
+        local default="$2"
+        local answer
+        printf 'Category %s — model [%s] (default: %s): ' "$cat" "$_prompt_models" "$default" >&2
+        read -r answer </dev/tty
+        # Normalize FIRST, as its own step: trim the ends only. This used to be
+        # `tr -d '[:space:]'`, which deleted INTERNAL whitespace too and so
+        # silently rewrote the typo 'son net' into the valid alias 'sonnet'.
+        # Then ask the shared predicate — no second membership test lives here.
+        # Fall back to the category default on empty or invalid input, unchanged.
+        #
+        # EOF at the prompt lands in that same fallback and always did, which is
+        # why no `|| answer=""` was ever needed: bash CLEARS `set -e` inside a
+        # command substitution when not in POSIX mode, so the failing `read`
+        # takes nothing down and this function's status is the printf's. A
+        # pty-driven test says so out loud (test_models.py), because reading it
+        # off the source is exactly how it got recorded as a defect.
+        if ! _normalize_model_id "$answer" >/dev/null; then
+          printf '%s' "$default"
+        elif _model_id_valid_for_host "$_MODEL_ID_NORMALIZED" "$_available_models"; then
+          printf '%s' "$_MODEL_ID_NORMALIZED"
+        else
+          printf '%s' "$default"
+        fi
+      }
 
-    _model_research=$(_prompt_category "research" "$_default_research")
-    _model_review=$(_prompt_category "review"    "$_default_review")
-    _model_design=$(_prompt_category "design"    "$_default_design")
-    _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
-    _model_executor=$(_prompt_category "executor"  "$_default_executor")
+      _model_research=$(_prompt_category "research" "$_default_research")
+      _model_review=$(_prompt_category "review"    "$_default_review")
+      _model_design=$(_prompt_category "design"    "$_default_design")
+      _model_workflow=$(_prompt_category "workflow"  "$_default_workflow")
+      _model_executor=$(_prompt_category "executor"  "$_default_executor")
+    fi
   fi
 
   # ---- Assemble the models.json document (v2.0 schema) ----------------------
-  # Read the existing config FIRST so we preserve the other host's sub-table.
-  # Without this merge, an unflagged detect-models invocation (e.g., the
+  # Read the existing config FIRST so the OTHER host's sub-table survives.
+  # Without that merge, an unflagged detect-models invocation (e.g. the
   # /aimi:plan automatic resolve at the top of every command) overwrites the
   # file with only the current host's block, silently dropping the inactive
-  # host's configured models. This is the same merge pattern the flag-mode
-  # branch above uses (lines 2477-2502).
+  # host's configured models — which is exactly what shipped as 1.97.2 and was
+  # fixed by copying the flag branch's merge over the default branch. That copy
+  # is why this assembly existed twice, verbatim; merge_models_document in
+  # models.py is the one place it lives now, and it takes the existing document
+  # as a PARAMETER so a rebuild cannot be written there by accident.
   local _existing_json
   _existing_json=$(read_aimi_models_config) || _existing_json=""
 
+  # One crossing. The document arrives on stdin and comes back merged on
+  # stdout; nothing in models.py opens or writes a file, so the mktemp + chmod
+  # 0600 + mv discipline stays in write_aimi_models_config, which already owns
+  # it and whose failure text is asserted.
   local _models_json
-  if [ -n "$_existing_json" ] && printf '%s' "$_existing_json" | jq empty 2>/dev/null; then
-    # Merge: preserve other host's categories block, replace current host's block
-    _models_json=$(printf '%s' "$_existing_json" | jq \
-      --arg host_key  "$_host_key" \
-      --arg research  "$_model_research" \
-      --arg review    "$_model_review" \
-      --arg design    "$_model_design" \
-      --arg workflow  "$_model_workflow" \
-      --arg executor  "$_model_executor" \
-      '{
-        schemaVersion: "2.0",
-        categories: ((.categories // {}) + {
-          ($host_key): {
-            research: $research,
-            review:   $review,
-            design:   $design,
-            workflow: $workflow,
-            executor: $executor
-          }
-        })
-      }')
-  else
-    # No existing config or malformed — create fresh
-    _models_json=$(jq -n \
-      --arg host_key  "$_host_key" \
-      --arg research  "$_model_research" \
-      --arg review    "$_model_review" \
-      --arg design    "$_model_design" \
-      --arg workflow  "$_model_workflow" \
-      --arg executor  "$_model_executor" \
-      '{
-        schemaVersion: "2.0",
-        categories: {
-          ($host_key): {
-            research: $research,
-            review:   $review,
-            design:   $design,
-            workflow: $workflow,
-            executor: $executor
-          }
-        }
-      }')
-  fi
+  _models_json=$(printf '%s' "$_existing_json" | python3 "$(_aimi_models_py)" detect \
+    --host-key "$_host_key" \
+    --research "$_model_research" \
+    --review   "$_model_review" \
+    --design   "$_model_design" \
+    --workflow "$_model_workflow" \
+    --executor "$_model_executor")
 
   # ---- Atomic write ---------------------------------------------------------
   write_aimi_models_config "$_models_json"

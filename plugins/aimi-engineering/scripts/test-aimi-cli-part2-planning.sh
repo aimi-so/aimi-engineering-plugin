@@ -3468,14 +3468,19 @@ OC_STUB
 }
 
 # Lift _prompt_category out of cmd_detect_models. It is a nested function, so
-# the extraction keys on its four-space indentation rather than column 0, and
-# the `</dev/tty` redirect is rewritten away so the predicate can be driven
-# without a pty. The lines the predicate actually IS are lifted from
-# aimi-cli.sh untouched -- since story 04 those are the _normalize_model_id
-# call and the _model_id_valid_for_host call, so the two shared helpers are
-# lifted alongside it, by the same means and equally untouched.
+# the extraction cannot key on column 0, and the `</dev/tty` redirect is
+# rewritten away so the predicate can be driven without a pty. The indent is
+# matched rather than counted: it was four spaces until the two assembly
+# branches collapsed into one shared tail, which moved the interactive branch a
+# level deeper, and a test that has to be edited for that is a test that says
+# something about layout instead of about behaviour. Deleting the function
+# still fails everything below, because eval of nothing leaves the calls
+# unresolved. The lines the predicate actually IS are lifted from aimi-cli.sh
+# untouched -- since story 04 those are the _normalize_model_id call and the
+# _model_id_valid_for_host call, so the two shared helpers are lifted alongside
+# it, by the same means and equally untouched.
 source_prompt_category() {
-  eval "$(sed -n '/^    _prompt_category() {$/,/^    }$/p' "$CLI" | sed 's#</dev/tty##')"
+  eval "$(sed -n '/^[[:space:]]*_prompt_category() {$/,/^[[:space:]]*}$/p' "$CLI" | sed 's#</dev/tty##')"
   eval "$(sed -n '/^_normalize_model_id() {$/,/^}$/p' "$CLI")"
   eval "$(sed -n '/^_model_id_valid_for_host() {$/,/^}$/p' "$CLI")"
 }

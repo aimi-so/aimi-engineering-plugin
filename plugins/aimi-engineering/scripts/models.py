@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""models.json document logic for aimi-cli.sh -- the four READER verbs.
+"""models.json document logic for aimi-cli.sh -- its readers and its writer.
 
 WHY THIS FILE EXISTS, AND WHAT IT IS ALLOWED TO DO
 ==================================================
@@ -14,14 +14,46 @@ would blur the one thing that file's name currently tells a reader.
 
 aimi-cli.sh keeps the shell-shaped work: flag parsing, `_aimi_config_dir` and
 `_aimi_models_config_path`, the `opencode` binary probe, the `stat` mtime read
-and the models-oc-cache-<mtime>.txt read/write, the per-host prompt marker, and
-the python3 check itself. This file owns what a verb then computes over the
-document it was handed on stdin. These are readers: one crossing per
-invocation, no lock, nothing here opens models.json and nothing here writes a
-file.
+and the models-oc-cache-<mtime>.txt read/write, the per-host prompt marker, the
+TTY prompt, and the python3 check itself. This file owns what a verb then
+computes over the document it was handed on stdin. One crossing per invocation,
+no lock, and NOTHING HERE OPENS models.json OR WRITES A FILE -- including for
+the writer: `detect-models` hands the existing document in on stdin and gets
+the merged one back on stdout, and aimi-cli.sh's `write_aimi_models_config`
+puts it on disk under the mktemp + chmod 0600 + mv discipline that already owns
+that half.
 
-WHAT THE PORT COLLAPSED
------------------------
+THE WRITER DOES NOT DEGRADE, AND THAT IS THE ONE PLACE IT PARTS FROM THE FOUR
+READERS. Each reader answers what it already promises when python3 is missing
+-- all-inherit, all-null, `prompt`, the built-in list -- because refusing would
+break every command on a python3-less OpenCode host. A writer has no such
+answer available. Writing the current host's five values alone IS the 1.97.2
+regression, and writing nothing while returning 0 tells /aimi:setup-models the
+config was saved when it was not. So `detect-models` calls `check_python3` and
+refuses at exit 1 before it touches anything, which is precisely what its only
+two callers already handle: setup-models.md says "if detect-models exits
+non-zero, report the error verbatim and STOP -- the config file was not
+written."
+
+WHAT THE PORT COLLAPSED -- THE WRITER
+-------------------------------------
+
+`cmd_detect_models` carried the models.json assembly TWICE, verbatim: once in
+its flag branch and once in its default branch, forty-odd lines each. They are
+twins because one was COPIED OVER THE OTHER to repair 1.97.2, where the default
+branch built a fresh `{schemaVersion, categories:{<current host>:{...}}}` with
+`jq -n` and dropped the inactive host's models on every invocation. Collapsing
+that pair into a rebuild is not a simplification of the duplication; it is the
+shipped defect, re-introduced.
+
+`merge_models_document` is what makes the two one, and its SIGNATURE is the
+enforcement: it takes the existing document as a parameter, so a rebuild is not
+expressible in it without visibly ignoring an argument. What it preserves is
+narrower than "the other host's table" and counter-intuitively so, and all
+three halves of that are deliberate -- see the function's own docstring.
+
+WHAT THE PORT COLLAPSED -- THE READERS
+--------------------------------------
 
 The verb it exists for is `cmd_resolve_models`, whose comment claimed a single
 jq pass and whose body then made THREE jq calls over the same in-memory value:
@@ -47,6 +79,15 @@ cannot handle. Each is reproduced deliberately below -- parse_stream,
 read_categories, jq_equal, and JqAbort -- and the two places fidelity costs
 something are recorded case by case in tests/golden_from_jq.json's
 `models_read_cases`, whose `_comment_models_read` names all twelve findings.
+
+The writer has to match jq on the way OUT as well, byte for byte, because what
+it prints is what lands in the file /aimi:setup-models reads back. Two places
+json.dumps and jq disagree, and both are handled where they arise rather than
+papered over: U+007F, which jq escapes as \\u007f and json.dumps emits raw
+(_emit_pretty), and the non-finite double, which jq prints as null and
+json.dumps writes as the bare token NaN (jq_finite). A corpus of quote,
+backslash, newline, tab, non-ASCII and control-character ids in
+`models_write_cases` is what proves the rest of the escaping already agreed.
 
 ONE THING THIS FILE DOES NOT DO: extract jq_numbers. tasks.py's import comment
 says the jq-semantics helpers should follow sanitize.py into a module of their
@@ -92,6 +133,9 @@ SCHEMA_OBSOLETO = "schema 1.0 obsoleto — re-rode aimi-cli detect-models"
 # the candidate. Python's bare .strip() also eats U+00A0 and friends, which
 # neither of them did.
 _SPACE = " \t\n\r\f\v"
+
+# The two doubles jq will not print as numbers. Spelled once, read by jq_finite.
+_INF = float("inf")
 
 
 class JqAbort(Exception):
@@ -278,6 +322,80 @@ def emit_fallback(fallback):
     return 0
 
 
+def jq_finite(value):
+    """jq's rendering of a double it cannot print as a number: null.
+
+    jq PARSES `NaN` -- it is not a parse error, so a config carrying one takes
+    the merge branch like any other -- and then prints it as null
+    (dm-nan-cc). Python's json parses it too and json.dumps writes back the
+    bare token NaN, which is not JSON and which jq itself would refuse to read
+    on the next call. A reader echoing one back is one thing; a WRITER emitting
+    one has corrupted the file it exists to maintain.
+
+    Separate from jq_numbers rather than folded into it: that one is roadmap's,
+    imported by three modules now, and answers the ordinary half (2.0 prints as
+    2, 1e3 as 1000). This is the half only a writer has to care about.
+    """
+    if isinstance(value, float) and (value != value or value in (_INF, -_INF)):
+        return None
+    if isinstance(value, dict):
+        return {key: jq_finite(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [jq_finite(item) for item in value]
+    return value
+
+
+def merge_models_document(existing, host_key, categories):
+    """The ONE assembly, where aimi-cli.sh carried two verbatim copies of it.
+
+    THE EXISTING DOCUMENT IS A PARAMETER, and that is the point of the
+    signature rather than an implementation detail: a rebuild -- the defect
+    that shipped as 1.97.2, where the no-flag branch wrote a fresh
+    `{schemaVersion, categories:{<current host>:{...}}}` and dropped the
+    inactive host's models on every run -- cannot be written here without
+    visibly ignoring an argument.
+
+    WHAT IT PRESERVES IS NARROWER THAN "the other host's sub-table", and the
+    narrowness is deliberate, because today's merge is itself a rebuild that
+    happens to keep one key. The jq was `{schemaVersion: "2.0", categories:
+    ((.categories // {}) + {($host_key): {...}})}`, so:
+
+      - `categories.<other host>` survives. This is the whole point.
+      - `schemaVersion` is force-written to "2.0" even over a document that
+        said "1.0" -- a v1.0 file is silently upgraded in place by any write.
+      - EVERY OTHER TOP-LEVEL KEY IS DISCARDED, because the object is built
+        fresh and only `.categories` is merged into it.
+      - The current host's own sub-table is REPLACED wholesale, not merged, so
+        an extra key inside it does not survive either.
+
+    All four are pinned by cases in `models_write_cases`. Widening any of them
+    to a deep merge would be an unrequested behaviour change; narrowing them is
+    1.97.2 again.
+
+    `existing` is None for the fresh-create branch -- no file, an empty one, or
+    one that does not parse -- which is the same expression with nothing to
+    carry over, and is why aimi-cli.sh's second jq had no reason to exist.
+    """
+    carried = {}
+    if existing is not None:
+        # `.categories` -- null indexes to null, anything that is not an object
+        # aborts, which is where "Cannot index array with string" came from.
+        carried = jq_index(existing, "categories", "")
+        # `//` fires on false as well as null, the same asymmetry every reader
+        # in this file inherits.
+        if carried is None or carried is False:
+            carried = {}
+        if not isinstance(carried, dict):
+            # jq's `string ("nope") and object ({...}) cannot be added`. The
+            # status is reproduced; the message was the engine's.
+            raise MalformedTasks(
+                "categories: cannot add " + type(carried).__name__ + " to an object")
+    return {
+        "schemaVersion": "2.0",
+        "categories": {**carried, host_key: categories},
+    }
+
+
 def read_or_fall_back(verb, host, config_file, fallback):
     """The read both reader verbs make, and the two refusals both of them share.
 
@@ -450,6 +568,84 @@ def _host_configured(doc, host):
     return False
 
 
+def _emit_pretty(value):
+    """One JSON value in jq's default shape: two-space indent, one newline.
+
+    Not `_emit_compact`: the two spellings coexist in this CLI and both are
+    contract. resolve-models and get-current-models print compact objects that
+    part1 matches literally; detect-models prints what jq printed, and it is
+    that text -- not a re-serialization of it -- that write_aimi_models_config
+    puts on disk for /aimi:setup-models to read back.
+
+    The replace is the ONE character where json.dumps and jq disagree. jq
+    escapes U+007F as \\u007f; json.dumps escapes only below U+0020 and emits
+    DEL raw. It is safe as a text substitution because DEL is not a structural
+    JSON character, so every occurrence in the output is inside a string
+    literal. Everything else -- the quote, the backslash, \\n, \\t, the other
+    control characters, non-ASCII -- was checked against jq over the whole
+    range and already agreed; dm-flags-controle-cc is what pins this one.
+    """
+    text = json.dumps(value, indent=2, ensure_ascii=False)
+    sys.stdout.write(text.replace("\x7f", "\\u007f") + "\n")
+
+
+def op_detect(argv):
+    """detect-models: the merged document on stdout, for bash to write.
+
+    The five values arrive already normalized and already validated by
+    aimi-cli.sh -- flag mode routes each through `_normalize_model_id` and
+    `_model_id_valid_for_host`, and default/interactive mode picks them from
+    the host's own list -- so nothing here judges an id. This half is the
+    document rule and only that.
+
+    jq READ A STREAM here too, and the two edges that follow from it are both
+    pinned. A config holding two concatenated documents is merged twice and
+    both results are written (dm-dois-documentos-cc). A whitespace-only config
+    is non-empty, so it takes the merge branch, and jq's stream over it holds
+    ZERO values -- so nothing is printed and what lands on disk is a lone
+    newline (dm-so-espacos-cc). That is data loss, it predates this port, and
+    it is carried across unchanged rather than quietly repaired inside a commit
+    that claims delta zero.
+
+    Nothing is printed until every document has merged, the same rule
+    op_resolve follows: a stream whose second document aborts must take the
+    output of the first with it, because the shell captured jq's whole output
+    in a command substitution before writing anything.
+    """
+    host_key = _flag(argv, "--host-key") or ""
+    categories = {name: (_flag(argv, "--" + name) or "") for name in CATEGORIES}
+
+    text = sys.stdin.read()
+    docs = None
+    if text != "":
+        try:
+            docs = parse_stream(text)
+        except ValueError:
+            docs = None
+    # No file, an empty one, or one that does not parse: bash's `jq -n` branch,
+    # which is this same expression with nothing to carry over.
+    if docs is None:
+        docs = [None]
+
+    try:
+        merged = [merge_models_document(doc, host_key, categories) for doc in docs]
+    except MalformedTasks as exc:
+        # jq aborted here with its own message and its own status 5, and the
+        # shell's bare assignment carried that 5 out as the verb's exit status.
+        # The STATUS is what a caller reads and it is reproduced exactly; the
+        # wording was the engine's, so this one is ours and is named field by
+        # field in test_models.py's KNOWN_DIVERGENCES_WRITE. Four inputs reach
+        # it: a document that is an array or a string, and a `.categories` that
+        # is a string, in either mode. Nothing is written on any of them.
+        warn("Error: detect-models: the existing models config cannot be merged ("
+             + str(exc) + "); nothing was written")
+        return 5
+
+    for document in merged:
+        _emit_pretty(jq_numbers(jq_finite(document)))
+    return 0
+
+
 def op_list(argv):
     """list-models: the host's model list, as a JSON array.
 
@@ -476,6 +672,7 @@ def op_list(argv):
 _OPS = {
     "resolve": op_resolve,
     "current": op_current,
+    "detect": op_detect,
     "prompt-check": op_prompt_check,
     "list": op_list,
 }

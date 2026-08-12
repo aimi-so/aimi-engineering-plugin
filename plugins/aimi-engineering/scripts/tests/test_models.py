@@ -13,17 +13,26 @@ the files left behind in the throwaway config root. That test is the evidence
 the port changed nothing; the rest of this file asserts the properties a reader
 would otherwise have to reconstruct from 114 recordings by eye.
 
-It must never be regenerated from models.py. If a case goes red, either the
-port drifted or a rule genuinely changed; in the second case the golden changes
-in the same commit as the rule, with the reason in the message.
+`models_write_cases` is the same thing for the WRITER, `detect-models`, and it
+carries one field the readers' block does not need: `file`, the whole document
+AFTER the run. A writer's recording that only held stdout would stay green
+while the config was being clobbered, which is precisely what shipped as
+1.97.2 and precisely what this corpus exists to make impossible.
+
+Neither block may ever be regenerated from models.py. If a case goes red,
+either the port drifted or a rule genuinely changed; in the second case the
+golden changes in the same commit as the rule, with the reason in the message.
 """
 
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -41,6 +50,7 @@ with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handl
     GOLDEN = json.load(_handle)
 
 CASES = {c["label"]: c for c in GOLDEN["models_read_cases"]}
+WRITE_CASES = {c["label"]: c for c in GOLDEN["models_write_cases"]}
 
 # ---------------------------------------------------------------------------
 # The three divergences, by corpus label and by FIELD, with what each costs
@@ -128,6 +138,63 @@ KNOWN_DIVERGENCES = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# The WRITER's divergences, same rule: by corpus label, by FIELD, with the cost
+# ---------------------------------------------------------------------------
+#
+# Seven fields across seven of the 60 cases. Every merge case, every escaping
+# case and every D6 case matches byte for byte, which is what "delta zero"
+# meant for this port.
+KNOWN_DIVERGENCES_WRITE = {
+    # jq puts every number through a double and prints the shortest form that
+    # round-trips; Python keeps an int exact and renders -0.0 as 0. This is
+    # jq_numbers' own documented divergence, inherited rather than introduced,
+    # and it is split into its own case precisely so the ORDINARY numbers case
+    # (1e3 -> 1000, 1.0 -> 1) can be compared with nothing excused.
+    # COST: a number too large for a double in the other host's sub-table is
+    # rewritten exact instead of as 1e+22, and a stored -0 becomes 0. Neither
+    # is a model id; both would already be refused at read time.
+    "dm-outro-host-com-numeros-extremos-cc": {
+        "stdout": "jq renders a double, Python keeps the int exact",
+        "file": "jq renders a double, Python keeps the int exact",
+    },
+    # FOUR jq ABORTS. The status is jq's exit 5 and it is reproduced exactly,
+    # because that is what the shell propagated and what a caller reads. The
+    # message was the ENGINE's -- "Cannot index array with string" and "string
+    # and object cannot be added" -- and reproducing an engine's wording from a
+    # different engine would be a fabrication, not fidelity. `exit`, `file` and
+    # `tree` all still match: nothing is written on any of them.
+    # COST: a user who broke their models.json by hand now reads a sentence
+    # naming detect-models instead of one naming jq.
+    "dm-documento-array-cc": {"stderr": "the abort message was jq's"},
+    "dm-documento-string-cc": {"stderr": "the abort message was jq's"},
+    "dm-categories-string-cc": {"stderr": "the abort message was jq's"},
+    "dm-flags-categories-string-cc": {"stderr": "the abort message was jq's"},
+    # THE INTERPRETER IS NOW REQUIRED, and for the writer it is required
+    # LOUDLY. The four readers degrade because refusing would break every
+    # command on a python3-less OpenCode host and because each of them has an
+    # honest fallback to give. A writer has neither: writing the current host's
+    # five values alone IS the 1.97.2 regression, and writing nothing at exit 0
+    # tells /aimi:setup-models the config was saved when it was not. So this
+    # one calls check_python3 and refuses before touching anything --
+    # test_the_writer_refuses_rather_than_degrading asserts the new behaviour
+    # rather than leaving it merely excused.
+    # COST: on a host with no python3 -- only possible under OpenCode, since
+    # Claude Code spawns hooks/*.py on every Bash call -- detect-models stops
+    # working, where it used to be pure bash and jq. `file` and `tree` still
+    # match: the refusal happens before anything is read or written.
+    "dm-python3-ausente-cc": {
+        "exit": "check_python3 refuses; a writer has no honest degrade",
+        "stdout": "nothing is written, so nothing is echoed",
+        "stderr": "the install hint, in place of the two notes",
+    },
+    "dm-flags-python3-ausente-cc": {
+        "exit": "check_python3 refuses; a writer has no honest degrade",
+        "stdout": "nothing is written, so nothing is echoed",
+        "stderr": "the install hint, in place of the two notes",
+    },
+}
+
 # Binaries the four verbs can reach. The shim directory is the WHOLE PATH for
 # every replay, so a python3-absent case differs from its twin by exactly one
 # symlink rather than by a different environment -- which is also how the
@@ -139,6 +206,7 @@ _SHIM = [
 ]
 
 _CACHE_RE = re.compile(r"models-oc-cache-\d+\.txt")
+_TMP_RE = re.compile(r"models\.json\.[A-Za-z0-9]{6}")
 
 
 def _replay(case, tmp_path):
@@ -213,6 +281,89 @@ def _replay(case, tmp_path):
     }
 
 
+def _replay_write(case, tmp_path):
+    """Same rebuild for the WRITER, plus the two things only a writer needs.
+
+    `readonly` chmods the config root to 0500 for the duration of the run, and
+    the result carries `file` -- the whole document left on disk, or None when
+    there is none -- beside the streams. A third normalization joins the
+    other two, because mktemp's six random characters are in stderr on the
+    read-only case.
+    """
+    base = str(tmp_path)
+    root = os.path.join(base, "root")
+    os.makedirs(root)
+    home = os.path.join(base, "home")
+    os.makedirs(home)
+    spec = case["input"]
+
+    config_path = os.path.join(root, "models.json")
+    if spec["config"] is not None:
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write(spec["config"])
+
+    shim = os.path.join(base, "shim")
+    os.makedirs(shim)
+    for name in _SHIM:
+        if name == "jq" and not spec["jq"]:
+            continue
+        found = shutil.which(name)
+        if found:
+            os.symlink(found, os.path.join(shim, name))
+    if spec["python3"]:
+        os.symlink(shutil.which("python3"), os.path.join(shim, "python3"))
+    path = shim
+    if spec["opencode_stub"] is not None:
+        stubdir = os.path.join(base, "stub")
+        os.makedirs(stubdir)
+        stub = os.path.join(stubdir, "opencode")
+        with open(stub, "w", encoding="utf-8") as handle:
+            handle.write(spec["opencode_stub"])
+        os.chmod(stub, 0o755)
+        path = stubdir + ":" + shim
+
+    env = {
+        "PATH": path,
+        "HOME": home,
+        "AIMI_CONFIG_DIR": root,
+        "CLAUDE_CONFIG_DIR": root,
+        "XDG_CONFIG_HOME": os.path.join(base, "xdg"),
+    }
+    if spec["host"] == "claudeCode":
+        env["CLAUDECODE"] = "1"
+
+    if spec["readonly"]:
+        os.chmod(root, 0o500)
+    try:
+        proc = subprocess.run(
+            ["bash", CLI] + case["args"], cwd=base, env=env,
+            capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        )
+    finally:
+        if spec["readonly"]:
+            os.chmod(root, 0o700)
+
+    def norm_name(name):
+        return _TMP_RE.sub("models.json.<RANDOM>",
+                           _CACHE_RE.sub("models-oc-cache-<MTIME>.txt", name))
+
+    def norm(text):
+        return norm_name(text.replace(root, "/TMP"))
+
+    after = None
+    if os.path.exists(config_path):
+        with open(config_path, encoding="utf-8", errors="replace") as handle:
+            after = handle.read()
+
+    return {
+        "exit": proc.returncode,
+        "stdout": norm(proc.stdout),
+        "stderr": norm(proc.stderr),
+        "file": after,
+        "tree": sorted(norm_name(name) for name in os.listdir(root)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # The port is faithful: the whole corpus, replayed
 # ---------------------------------------------------------------------------
@@ -230,11 +381,42 @@ def test_the_port_reproduces_the_jq(label, tmp_path):
         assert actual[field] == case[field], label + " . " + field
 
 
+@pytest.mark.parametrize("label", sorted(WRITE_CASES), ids=sorted(WRITE_CASES))
+def test_the_writer_port_reproduces_the_jq(label, tmp_path):
+    """Every recorded field, for every writer case, except the ones named above.
+
+    `file` is the whole document after the run, so this is also the assertion
+    that no case leaves the config in a state the recording did not have. 53 of
+    the 60 match on all five fields; the other seven are named field by field
+    in KNOWN_DIVERGENCES_WRITE with what each costs.
+    """
+    case = WRITE_CASES[label]
+    actual = _replay_write(case, tmp_path)
+    excused = KNOWN_DIVERGENCES_WRITE.get(label, {})
+    for field in ("exit", "stdout", "stderr", "file", "tree"):
+        if field in excused:
+            continue
+        assert actual[field] == case[field], label + " . " + field
+
+
+@pytest.mark.parametrize("label", sorted(KNOWN_DIVERGENCES_WRITE),
+                         ids=sorted(KNOWN_DIVERGENCES_WRITE))
+def test_each_excused_writer_field_really_diverges(label, tmp_path):
+    """Same rule as the readers': an excuse is only good while it is true."""
+    case = WRITE_CASES[label]
+    actual = _replay_write(case, tmp_path)
+    for field in KNOWN_DIVERGENCES_WRITE[label]:
+        assert actual[field] != case[field], label + " . " + field + " no longer diverges"
+
+
 def test_the_divergence_table_names_only_cases_that_exist():
     """A label that stops existing must not sit here quietly excusing nothing."""
     assert set(KNOWN_DIVERGENCES) <= set(CASES)
     for label, fields in KNOWN_DIVERGENCES.items():
         assert set(fields) <= {"exit", "stdout", "stderr", "files"}, label
+    assert set(KNOWN_DIVERGENCES_WRITE) <= set(WRITE_CASES)
+    for label, fields in KNOWN_DIVERGENCES_WRITE.items():
+        assert set(fields) <= {"exit", "stdout", "stderr", "file", "tree"}, label
 
 
 @pytest.mark.parametrize("label", sorted(KNOWN_DIVERGENCES), ids=sorted(KNOWN_DIVERGENCES))
@@ -376,6 +558,221 @@ def test_each_reader_crosses_at_most_once_per_invocation():
     for name, body in bodies.items():
         assert "check_python3" not in body, name
         assert "_models_python3_or_degrade" in body, name
+
+
+def test_the_writer_crosses_once_and_the_assembly_is_written_once():
+    """The counting half of the invariant, plus the duplication this port removed.
+
+    cmd_detect_models held the assembly TWICE, verbatim -- once in its flag
+    branch and once in its default branch -- because one was copied over the
+    other to repair 1.97.2. Both call merge_models_document now, through one
+    crossing, and the two-line stderr epilogue that was duplicated beside them
+    is written once as well. The writer takes no lock: nothing else writes
+    models.json, and the mktemp-then-mv in write_aimi_models_config is what
+    makes a concurrent reader see one document or the other, never half of one.
+    """
+    cli = _source(CLI)
+    start = cli.index("\ncmd_detect_models() {")
+    body = cli[start:cli.index("\n}\n", start)]
+    assert body.count('python3 "$(_aimi_models_py)"') == 1
+    assert body.count("detect-models: wrote %s table to %s") == 1
+    assert body.count("re-run on the other host") == 1
+    # The jq that built the document is gone from both branches, not moved.
+    assert "schemaVersion: \"2.0\"" not in body
+    assert "jq -n" not in body
+    # check_jq STAYS: deleting it as part of a port to Python would silently
+    # admit a jq-less host to a verb the rest of this file still refuses.
+    assert "check_jq" in body
+
+
+def test_the_writer_refuses_rather_than_degrading(tmp_path):
+    """A writer with no interpreter says so and writes nothing.
+
+    The opposite choice from the four readers beside it, and deliberately: they
+    degrade to all-inherit / all-null / prompt / the built-in list because
+    refusing would break every command on a python3-less OpenCode host and
+    because each of them has an honest answer to give. This one has none.
+    Writing the current host's five values alone IS 1.97.2; writing nothing at
+    exit 0 tells /aimi:setup-models the config was saved when it was not. Its
+    only two callers already handle the refusal -- setup-models.md says to
+    report the error verbatim and stop.
+    """
+    case = WRITE_CASES["dm-python3-ausente-cc"]
+    actual = _replay_write(case, tmp_path)
+    assert actual["exit"] == 1
+    assert actual["stdout"] == ""
+    assert "python3 is required by aimi-cli.sh" in actual["stderr"]
+    # And the pre-existing config is untouched, which is the half that matters.
+    assert actual["file"] == case["input"]["config"]
+    assert actual["tree"] == case["tree"]
+
+
+def test_the_merge_takes_the_existing_document_as_a_parameter():
+    """The signature is the enforcement, so it is asserted like one.
+
+    A rebuild -- the 1.97.2 defect -- is not expressible in a function whose
+    first parameter is the existing document without visibly ignoring it. This
+    test is what makes that structural rather than a comment.
+    """
+    import inspect
+
+    params = list(inspect.signature(M.merge_models_document).parameters)
+    assert params == ["existing", "host_key", "categories"]
+
+
+def test_the_merge_keeps_exactly_what_the_jq_kept_and_nothing_more():
+    """All four halves of `{schemaVersion:"2.0", categories:((.categories // {}) + {...})}`.
+
+    Read them together, because the third and fourth are the counter-intuitive
+    ones: today's merge is itself a rebuild that happens to preserve one key.
+    """
+    five = {"research": "haiku", "review": "opus", "design": "sonnet",
+            "workflow": "sonnet", "executor": "sonnet"}
+    existing = {
+        "schemaVersion": "1.0",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "categories": {
+            "opencode": {"research": "anthropic/claude-haiku-4-5"},
+            "claudeCode": {"research": "opus", "custom": "keep me?"},
+        },
+    }
+    merged = M.merge_models_document(existing, "claudeCode", five)
+    # 1. the other host survives -- the whole point, and the 1.97.2 regression
+    assert merged["categories"]["opencode"] == {"research": "anthropic/claude-haiku-4-5"}
+    # 2. schemaVersion is force-written over a v1.0 document
+    assert merged["schemaVersion"] == "2.0"
+    # 3. every other top-level key is discarded
+    assert set(merged) == {"schemaVersion", "categories"}
+    # 4. the current host's sub-table is REPLACED, not merged into
+    assert merged["categories"]["claudeCode"] == five
+    # and the fresh-create branch is the same expression with nothing carried
+    assert M.merge_models_document(None, "claudeCode", five) == {
+        "schemaVersion": "2.0", "categories": {"claudeCode": five}}
+
+
+def test_the_merge_inherits_the_same_two_jq_rules_the_readers_do():
+    """`//` fires on false, and indexing a non-object aborts."""
+    five = {"research": "haiku"}
+    assert M.merge_models_document({"categories": False}, "claudeCode", five) == {
+        "schemaVersion": "2.0", "categories": {"claudeCode": five}}
+    assert M.merge_models_document({"categories": None}, "claudeCode", five) == {
+        "schemaVersion": "2.0", "categories": {"claudeCode": five}}
+    with pytest.raises(T.MalformedTasks):
+        M.merge_models_document(["opus"], "claudeCode", five)
+    with pytest.raises(T.MalformedTasks):
+        M.merge_models_document({"categories": "nope"}, "claudeCode", five)
+
+
+def test_the_writer_matches_jq_byte_for_byte_where_json_dumps_would_not():
+    """The two disagreements, at the rule.
+
+    U+007F is the only character in the whole range where jq's escaping and
+    json.dumps' differ, and a non-finite double is the only value jq prints as
+    something other than itself. Both are handled where they arise rather than
+    left for a reader of the corpus to discover.
+    """
+    assert M.jq_finite(float("nan")) is None
+    assert M.jq_finite({"a": [float("inf"), float("-inf"), 1.5]}) == {"a": [None, None, 1.5]}
+    assert M.jq_finite("nan") == "nan"
+    case = WRITE_CASES["dm-flags-controle-cc"]
+    assert "\\u007f" in case["file"]
+    assert "\x7f" not in case["file"]
+    assert json.dumps({"a": "\x7f"}, ensure_ascii=False) == '{"a": "\x7f"}'
+
+
+# ---------------------------------------------------------------------------
+# D7, driven through a real pty instead of read off the source
+# ---------------------------------------------------------------------------
+
+
+def _drive_prompt(tmp_path, keystroke):
+    """Run detect-models with a controlling terminal and answer its prompts.
+
+    NO CASE IN THE CORPUS CAN REACH THIS PATH: every one runs with stdin on
+    /dev/null, so `[ -t 0 ]` is false and the prompt block never executes. That
+    is stated in _comment_models_write rather than papered over with a case
+    that pretends -- and this is the coverage it points at instead.
+    """
+    base = str(tmp_path)
+    root = os.path.join(base, "root")
+    os.makedirs(root)
+    home = os.path.join(base, "home")
+    os.makedirs(home)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": home,
+        "AIMI_CONFIG_DIR": root,
+        "CLAUDE_CONFIG_DIR": root,
+        "XDG_CONFIG_HOME": os.path.join(base, "xdg"),
+        "CLAUDECODE": "1",
+        "TERM": "dumb",
+    }
+    pid, fd = pty.fork()
+    if pid == 0:  # pragma: no cover - the child execs immediately
+        os.execve("/bin/bash", ["bash", CLI, "detect-models"], env)
+
+    out = b""
+    answered = 0
+    deadline = time.time() + 60
+    status = None
+    while time.time() < deadline:
+        ready, _, _ = select.select([fd], [], [], 0.5)
+        if ready:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+            if b"Category" in out and answered < len(M.CATEGORIES) + 1:
+                os.write(fd, keystroke)
+                answered += 1
+        else:
+            done, raw = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = raw
+                break
+    if status is None:
+        _, status = os.waitpid(pid, 0)
+    os.close(fd)
+    config = os.path.join(root, "models.json")
+    written = None
+    if os.path.exists(config):
+        with open(config, encoding="utf-8") as handle:
+            written = handle.read()
+    return os.waitstatus_to_exitcode(status), out.decode(errors="replace"), written
+
+
+def test_eof_at_the_prompt_takes_the_default_and_always_did(tmp_path):
+    """D7, REFUTED by driving it rather than by reading the source.
+
+    The claim was that Ctrl-D makes `read -r answer </dev/tty` return 1 and
+    take the verb down through the same set -e chain that kills it when the
+    model list has no haiku. It does not, and the difference is where the
+    failing command sits: bash CLEARS -e inside a command substitution when not
+    in POSIX mode, so the `read` inside _prompt_category aborts nothing and the
+    substitution's status is its last command's -- the printf. D6's bare
+    assignment is at the function's own level, where -e is live, which is why
+    that one really does abort. Nothing was repaired here because nothing was
+    broken; this test is what says so.
+    """
+    exit_code, transcript, written = _drive_prompt(tmp_path, b"\x04")
+    assert exit_code == 0
+    assert transcript.count("Category ") == len(M.CATEGORIES)
+    assert written is not None
+    assert json.loads(written)["categories"]["claudeCode"] == {
+        "research": "haiku", "review": "opus", "design": "sonnet",
+        "workflow": "sonnet", "executor": "sonnet"}
+
+
+def test_a_typed_answer_at_the_prompt_is_honoured(tmp_path):
+    """The other half, so the EOF result cannot be read as "the pty did nothing"."""
+    exit_code, _, written = _drive_prompt(tmp_path, b"opus\n")
+    assert exit_code == 0
+    assert json.loads(written)["categories"]["claudeCode"] == {
+        "research": "opus", "review": "opus", "design": "opus",
+        "workflow": "opus", "executor": "opus"}
 
 
 def test_the_jq_semantics_helpers_are_imported_and_not_recopied():
