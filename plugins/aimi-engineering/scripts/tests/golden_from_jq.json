@@ -43246,5 +43246,757 @@
       "state_cli_path": null
     }
   ],
-  "_comment_version_cache": "THE FOUR VERSION/CACHE VERBS -- version, check-version, cleanup-versions, prime-cache -- captured at 112d72f before a line of aimi-cli.sh moved. THIS BLOCK IS NOT A PORT'S BEFORE-PICTURE, AND IT IS THE ONLY ONE HERE THAT IS NOT. All four verbs STAY Bash + jq; the decision and its reasons are written out in cmd_prime_cache's header comment, which is their normative home. What the corpus records is the before-picture of a FIX: the empty-glob abort (D2) and the `ls`-pipeline glob that carried it. THE FIELD SHAPE RECORDS A FILESYSTEM, not a stream, because cleanup-versions runs `rm -rf`: `tree_before` and `tree` are the whole throwaway root either side of the run, so no case can go green while a directory it never mentioned was deleted. `global_cli_path` and `state_cli_path` are the two files these verbs write, recorded as content rather than as presence -- null when absent, which is a different fact from empty. `input` is the whole rebuild recipe and test_version_cache.py's _build_root is the only thing that reads it, so capture and replay cannot drift apart. EVERY CASE BUILDS A THROWAWAY ROOT with CLAUDE_CONFIG_DIR, AIMI_CONFIG_DIR, HOME and XDG_CONFIG_HOME pointed at it -- non-negotiable here in the way it was for models_write_cases and more so: a case that leaked the developer's real CLAUDE_CONFIG_DIR would have cleanup-versions delete the plugin install running the suite. The capture host exports CLAUDECODE=1 and AIMI_PLUGIN_DIR for real, so the recipe sets both explicitly per case instead of inheriting either. Two consecutive full captures are byte-identical. NINE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D2, VERIFIED AND THEN FIXED -- the reason this block exists. cmd_check_version documents a {status: \"unknown\", message: \"No installed version found\"} branch and cmd_cleanup_versions a {removed: 0, kept: null} branch, and NEITHER HAD EVER BEEN EMITTED. `set -euo pipefail` at aimi-cli.sh:2, plus a helper that returned 1 on an empty glob, plus a bare `var=$(helper)` assignment that carries that status, aborted both verbs above their own handlers. Observable behaviour was exit 1, EMPTY stdout, EMPTY stderr and no cli-path written. Recorded that way in nine cases -- an empty plugins/cache (cv-cache-vazio-cc, clv-cache-vazio-cc), an absent one (cv-sem-diretorio-cache-cc, clv-sem-diretorio-cache-cc), an unreadable one (cv-cache-ilegivel-cc, clv-cache-ilegivel-cc), the same under --quiet (cv-quiet-cache-vazio-cc) and the two metacharacter cases whose caches are also empty -- and every one of them now answers its documented JSON at exit 0. They are named in test_version_cache.py's KNOWN_DIVERGENCES and nowhere else, which is what makes 'the fix touched only these' checkable rather than claimed. The exit status was 1 and not 2: an earlier note said 2, from before the glob moved behind a helper that swallows ls's own exit 2 and returns 1 instead. (2) D2 AND D12 WERE ONE DEFECT WHEN THIS STORY WAS PLANNED AND ARE NOT ONE ANY MORE, which is worth recording because the planning note says otherwise. prime-cache was said to survive the same empty glob ONLY because its nested `bash -c` inherited neither -e nor pipefail. That stopped being true at 7133927: it survives because of an explicit `|| resolved_path=\"\"`, and the nested shell was already reduced to a fork. So the two verbs' aborts and prime-cache's survival were independent by capture time, and pc-cache-vazio-cc records prime-cache answering not_found at exit 0 on the very root where its two siblings died. (3) D12'S INJECTION WAS ALREADY CLOSED, measured rather than assumed. A CLAUDE_CONFIG_DIR of `cfg\";touch MARKER;ls \"` was expanded by the outer shell into the inner `bash -c`'s program text and DID run the touch on the parent of 7133927 -- reproduced here, marker created, prime-cache still reporting not_found at exit 0. On the captured code it does not: that commit passed the directory as a POSITIONAL ARGUMENT to a single-quoted program. The three metacharacter cases stay as the permanent regression, and the array glob removed the nested shell entirely, so there is no longer a program text for a config dir to be interpolated into. (4) D11, VERIFIED. write_global_cli_cache refuses to persist a path under a `.worktrees/` segment because such a path vanishes on worktree cleanup and every later session then exits 127. The refusal is a match on the path STRING. A cache entry that is a SYMLINK into a worktree has no such segment in its own name, so it passes: cv-fix-simlink-worktrees-cc, clv-simlink-worktrees-cc and pc-simlink-worktrees-cc each record a global cli-path written to a path whose target is under .worktrees/ -- exactly the outcome the guard exists to prevent. (5) D8, VERIFIED. cmd_prime_cache's OpenCode branch compares `candidate` against the expression it was assigned from seven lines earlier, so the comparison is tautologically false and its error branch cannot execute. No case here reaches it and none can; pc-opencode-ok, pc-opencode-nao-executavel and pc-opencode-sem-script are the whole reachable surface of that branch. (6) D13, VERIFIED, and it is three behaviours rather than one. cmd_version's only guard is that plugin.json EXISTS, so `jq -r '.version'` then prints the literal string `null` at exit 0 for a document with no version key (ver-chave-ausente), pretty-prints a JSON object across four lines at exit 0 when the key is not a string (ver-nao-string), and exits 4 with jq's own parse error for malformed JSON (ver-json-malformado). Only the absent-file case answers in the CLI's own voice (ver-sem-plugin-json). (7) cleanup-versions KEEPS A MALFORMED VERSION DIRECTORY OVER A REAL ONE, and this is a finding the corpus produced rather than one it was asked to confirm. `sort -V` orders `nao-e-uma-versao` ABOVE `1.2.3`, so clv-versao-malformada-cc rm -rf's the genuine 1.2.3 install, keeps the junk directory and writes ITS path into the global cli-path -- the same class of data loss 7133927 fixed, reached by a different route. It is recorded and deliberately NOT repaired here: deciding what counts as a version directory is a policy with its own blast radius (a prerelease like 1.2.3-beta.1 is legitimately not N.N.N), and this slice's scope is the abort. The recording is what a later slice should act on. (8) THE TWO JSON SPELLINGS COEXIST AND MUST. `current` is printf-built and compact ({\"status\":\"current\"}), every other check-version answer is jq-built and pretty ({\\n  \"status\": \"missing\"}), and test-aimi-cli-part1-core.sh asserts both spellings LITERALLY. Uniform JSON would be a test-breaking change, so cv-uma-versao-atual-cc and cv-uma-versao-sem-state-cc pin one spelling each. The same care applies to cv-uma-versao-obsoleta-cc, which exits 1 while emitting valid JSON: non-zero-with-valid-output is load-bearing and callers read the body anyway. (9) TWO FAILURES THAT LOOK LIKE SUCCESS, both pre-existing and both preserved. A version directory that cannot be removed produces a stderr warning and a `removed` count that does not include it, while the verb still exits 0 (clv-nao-removivel-cc). And write_global_cli_cache returns 0 when it REFUSES to write, which is why prime-cache reports an error only when the write genuinely fails (pc-aimi-config-somente-leitura-cc, carrying mktemp's message inside the JSON)."
+  "_comment_version_cache": "THE FOUR VERSION/CACHE VERBS -- version, check-version, cleanup-versions, prime-cache -- captured at 112d72f before a line of aimi-cli.sh moved. THIS BLOCK IS NOT A PORT'S BEFORE-PICTURE, AND IT IS THE ONLY ONE HERE THAT IS NOT. All four verbs STAY Bash + jq; the decision and its reasons are written out in cmd_prime_cache's header comment, which is their normative home. What the corpus records is the before-picture of a FIX: the empty-glob abort (D2) and the `ls`-pipeline glob that carried it. THE FIELD SHAPE RECORDS A FILESYSTEM, not a stream, because cleanup-versions runs `rm -rf`: `tree_before` and `tree` are the whole throwaway root either side of the run, so no case can go green while a directory it never mentioned was deleted. `global_cli_path` and `state_cli_path` are the two files these verbs write, recorded as content rather than as presence -- null when absent, which is a different fact from empty. `input` is the whole rebuild recipe and test_version_cache.py's _build_root is the only thing that reads it, so capture and replay cannot drift apart. EVERY CASE BUILDS A THROWAWAY ROOT with CLAUDE_CONFIG_DIR, AIMI_CONFIG_DIR, HOME and XDG_CONFIG_HOME pointed at it -- non-negotiable here in the way it was for models_write_cases and more so: a case that leaked the developer's real CLAUDE_CONFIG_DIR would have cleanup-versions delete the plugin install running the suite. The capture host exports CLAUDECODE=1 and AIMI_PLUGIN_DIR for real, so the recipe sets both explicitly per case instead of inheriting either. Two consecutive full captures are byte-identical. NINE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D2, VERIFIED AND THEN FIXED -- the reason this block exists. cmd_check_version documents a {status: \"unknown\", message: \"No installed version found\"} branch and cmd_cleanup_versions a {removed: 0, kept: null} branch, and NEITHER HAD EVER BEEN EMITTED. `set -euo pipefail` at aimi-cli.sh:2, plus a helper that returned 1 on an empty glob, plus a bare `var=$(helper)` assignment that carries that status, aborted both verbs above their own handlers. Observable behaviour was exit 1, EMPTY stdout, EMPTY stderr and no cli-path written. Recorded that way in nine cases -- an empty plugins/cache (cv-cache-vazio-cc, clv-cache-vazio-cc), an absent one (cv-sem-diretorio-cache-cc, clv-sem-diretorio-cache-cc), an unreadable one (cv-cache-ilegivel-cc, clv-cache-ilegivel-cc), the same under --quiet (cv-quiet-cache-vazio-cc) and the two metacharacter cases whose caches are also empty -- and every one of them now answers its documented JSON at exit 0. They are named in test_version_cache.py's KNOWN_DIVERGENCES and nowhere else, which is what makes 'the fix touched only these' checkable rather than claimed. The exit status was 1 and not 2: an earlier note said 2, from before the glob moved behind a helper that swallows ls's own exit 2 and returns 1 instead. (2) D2 AND D12 WERE ONE DEFECT WHEN THIS STORY WAS PLANNED AND ARE NOT ONE ANY MORE, which is worth recording because the planning note says otherwise. prime-cache was said to survive the same empty glob ONLY because its nested `bash -c` inherited neither -e nor pipefail. That stopped being true at 7133927: it survives because of an explicit `|| resolved_path=\"\"`, and the nested shell was already reduced to a fork. So the two verbs' aborts and prime-cache's survival were independent by capture time, and pc-cache-vazio-cc records prime-cache answering not_found at exit 0 on the very root where its two siblings died. (3) D12'S INJECTION WAS ALREADY CLOSED, measured rather than assumed. A CLAUDE_CONFIG_DIR of `cfg\";touch MARKER;ls \"` was expanded by the outer shell into the inner `bash -c`'s program text and DID run the touch on the parent of 7133927 -- reproduced here, marker created, prime-cache still reporting not_found at exit 0. On the captured code it does not: that commit passed the directory as a POSITIONAL ARGUMENT to a single-quoted program. The three metacharacter cases stay as the permanent regression, and the array glob removed the nested shell entirely, so there is no longer a program text for a config dir to be interpolated into. (4) D11, VERIFIED. write_global_cli_cache refuses to persist a path under a `.worktrees/` segment because such a path vanishes on worktree cleanup and every later session then exits 127. The refusal is a match on the path STRING. A cache entry that is a SYMLINK into a worktree has no such segment in its own name, so it passes: cv-fix-simlink-worktrees-cc, clv-simlink-worktrees-cc and pc-simlink-worktrees-cc each record a global cli-path written to a path whose target is under .worktrees/ -- exactly the outcome the guard exists to prevent. (5) D8, VERIFIED. cmd_prime_cache's OpenCode branch compares `candidate` against the expression it was assigned from seven lines earlier, so the comparison is tautologically false and its error branch cannot execute. No case here reaches it and none can; pc-opencode-ok, pc-opencode-nao-executavel and pc-opencode-sem-script are the whole reachable surface of that branch. (6) D13, VERIFIED, and it is three behaviours rather than one. cmd_version's only guard is that plugin.json EXISTS, so `jq -r '.version'` then prints the literal string `null` at exit 0 for a document with no version key (ver-chave-ausente), pretty-prints a JSON object across four lines at exit 0 when the key is not a string (ver-nao-string), and exits 4 with jq's own parse error for malformed JSON (ver-json-malformado). Only the absent-file case answers in the CLI's own voice (ver-sem-plugin-json). (7) cleanup-versions KEEPS A MALFORMED VERSION DIRECTORY OVER A REAL ONE, and this is a finding the corpus produced rather than one it was asked to confirm. `sort -V` orders `nao-e-uma-versao` ABOVE `1.2.3`, so clv-versao-malformada-cc rm -rf's the genuine 1.2.3 install, keeps the junk directory and writes ITS path into the global cli-path -- the same class of data loss 7133927 fixed, reached by a different route. It is recorded and deliberately NOT repaired here: deciding what counts as a version directory is a policy with its own blast radius (a prerelease like 1.2.3-beta.1 is legitimately not N.N.N), and this slice's scope is the abort. The recording is what a later slice should act on. (8) THE TWO JSON SPELLINGS COEXIST AND MUST. `current` is printf-built and compact ({\"status\":\"current\"}), every other check-version answer is jq-built and pretty ({\\n  \"status\": \"missing\"}), and test-aimi-cli-part1-core.sh asserts both spellings LITERALLY. Uniform JSON would be a test-breaking change, so cv-uma-versao-atual-cc and cv-uma-versao-sem-state-cc pin one spelling each. The same care applies to cv-uma-versao-obsoleta-cc, which exits 1 while emitting valid JSON: non-zero-with-valid-output is load-bearing and callers read the body anyway. (9) TWO FAILURES THAT LOOK LIKE SUCCESS, both pre-existing and both preserved. A version directory that cannot be removed produces a stderr warning and a `removed` count that does not include it, while the verb still exits 0 (clv-nao-removivel-cc). And write_global_cli_cache returns 0 when it REFUSES to write, which is why prime-cache reports an error only when the write genuinely fails (pc-aimi-config-somente-leitura-cc, carrying mktemp's message inside the JSON).",
+  "list_archivable_roadmap_cases": [
+    {
+      "label": "la-rm-sem-roadmap",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\",\"/TMP/.aimi/tasks/f/phase-2/f-phase-2-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-malformado",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "NOT JSON AT ALL\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-vazio",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": ""
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-null",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "null\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-false",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "false\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-true",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "true\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-numero",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "0\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-array",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "[{\"id\": 1, \"status\": \"completed\"}]\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-doc-string",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "\"nao um roadmap\"\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-dois-documentos",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": "/CLI/aimi-cli.sh: line <N>: [: 0\n1: integer expression expected\n"
+    },
+    {
+      "label": "la-rm-phases-ausente",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\"\n}\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-null",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": null\n}\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-vazio",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": []\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-string",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": \"duas\"\n}\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-numero",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": 5\n}\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-objeto",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": {\n    \"a\": {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    }\n  }\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-phases-objeto-pendente",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": {\n    \"a\": {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"pending\"\n    }\n  }\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-fase-nao-objeto",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    1,\n    2\n  ]\n}\n"
+        }
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-fase-null",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    null\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-todas-completed",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\",\"/TMP/.aimi/tasks/f/phase-2/f-phase-2-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-uma-pending",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"pending\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-uma-in-progress",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"in_progress\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-uma-planned",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"planned\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-fase-sem-status",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-status-null",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": null\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-status-maiuscula",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"Completed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-status-numero",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": 0\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-um-verification-failed",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 2 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-varios-verification-failed",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-3/f-phase-3-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"verification_failed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"verification_failed\"\n    },\n    {\n      \"id\": 3,\n      \"name\": \"P3\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-3\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 1, 2, 3 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-ordem-do-documento",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-3/f-phase-3-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 3,\n      \"name\": \"P3\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-3\",\n      \"status\": \"verification_failed\"\n    },\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"verification_failed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 3, 1 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-decimal-e-inteiro",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 2.1,\n      \"name\": \"P2.1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2.1\",\n      \"status\": \"verification_failed\"\n    },\n    {\n      \"id\": 3,\n      \"name\": \"P3\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-3\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 2.1, 3 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-ausente",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) null stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-null",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": null,\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) null stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-string",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": \"dois\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) dois stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-array",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": [\n        1,\n        2\n      ],\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) [1,2] stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-objeto",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": {\n        \"n\": 1\n      },\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) {\"n\":1} stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-id-com-newline",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": \"a\\nb\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) a\nb stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-verification-failed-e-pending",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"pending\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 2 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-pre-2-0-completed",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"1.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\",\n      \"creates\": [\n        \"services/Foo (does a thing)\"\n      ],\n      \"needs\": []\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-pre-2-0-verification-failed",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"1.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"verification_failed\",\n      \"creates\": [\n        \"services/Foo (does a thing)\"\n      ],\n      \"needs\": []\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/f not archivable -- phase(s) 1 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-sem-roadmap-version",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-fase-nao-terminal-nunca-le-o-roadmap",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"pending\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/phase-2/f-phase-2-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"pending\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-plano-flat-e-feature",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/f/phase-1/f-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/f/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"feat\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n",
+          ".aimi/tasks/2020-01-01-plano-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-plano-tasks.json\",\"/TMP/.aimi/tasks/f/phase-1/f-phase-1-tasks.json\"]\n",
+      "stderr": ""
+    },
+    {
+      "label": "la-rm-duas-features-uma-bloqueada",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/a/phase-1/a-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/a/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"a\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"completed\"\n    }\n  ]\n}\n",
+          ".aimi/tasks/b/phase-1/b-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/b/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"b\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[\"/TMP/.aimi/tasks/a/phase-1/a-phase-1-tasks.json\"]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/b not archivable -- phase(s) 1 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-duas-features-ambas-travadas",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {
+          ".aimi/tasks/a/phase-1/a-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/a/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"a\",\n  \"phases\": [\n    {\n      \"id\": 1,\n      \"name\": \"P1\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-1\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n",
+          ".aimi/tasks/b/phase-1/b-phase-1-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"type\": \"ref\",\n    \"branchName\": \"ref/corpus\"\n  },\n  \"userStories\": [\n    {\n      \"id\": \"US-001\",\n      \"title\": \"S\",\n      \"status\": \"completed\",\n      \"dependsOn\": []\n    }\n  ]\n}\n",
+          ".aimi/tasks/b/roadmap.json": "{\n  \"roadmapVersion\": \"2.0\",\n  \"feature\": \"b\",\n  \"phases\": [\n    {\n      \"id\": 2,\n      \"name\": \"P2\",\n      \"slug\": \"p\",\n      \"dir\": \"phase-2\",\n      \"status\": \"verification_failed\"\n    }\n  ]\n}\n"
+        }
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": "Warning: list-archivable: /TMP/.aimi/tasks/a not archivable -- phase(s) 1 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\nWarning: list-archivable: /TMP/.aimi/tasks/b not archivable -- phase(s) 2 stuck in verification_failed (re-verify via roadmap-set-status, or resolve manually)\n"
+    },
+    {
+      "label": "la-rm-sem-arquivos",
+      "verb": "list-archivable",
+      "args": [
+        "list-archivable"
+      ],
+      "input": {
+        "files": {}
+      },
+      "exit": 0,
+      "stdout": "[]\n",
+      "stderr": ""
+    }
+  ],
+  "_comment_list_archivable_roadmap": "list-archivable's ROADMAP half -- the three jq sites inside cmd_list_archivable that read <feature>/roadmap.json, captured the way every block before this one was, by running the bash and jq still in aimi-cli.sh BEFORE any of it was deleted: 46 cases at commit d11f33a. THE SEAM IS THE FIRST THING TO KNOW. cmd_list_archivable is two things at once -- the read side of the archivable predicate over tasks.json, which is _archivable_file_is_terminal and is recorded in session_doc_cases under the la-* labels, and a reader of roadmap.json, which is this block's la-rm-* labels. The two halves never read each other's document, and the ORDER between them is recorded rather than asserted: la-rm-fase-nao-terminal-nunca-le-o-roadmap holds a feature whose phase file has a pending story and a roadmap saying every phase is completed, and it answers [] -- the predicate refused first and roadmap.json was never opened. The shape here is exit/stdout/stderr and nothing else, because this verb writes nothing, moves nothing and deletes nothing; args/input make every case replayable; each ran in its own throwaway base holding proj/ as the project root, with HOME, AIMI_CONFIG_DIR, XDG_CONFIG_HOME and CLAUDE_CONFIG_DIR pointed into it and AIMI_PLUGIN_DIR/CLAUDECODE unset, so no case could reach the developer's own ~/.config/aimi/cli-path or the repository's own .aimi/tasks; the project root normalizes to /TMP, its parent to /OUTSIDE, the CLI's own path to /CLI/aimi-cli.sh and a bash line number to <N>. Every fixture file is written with a distinct mtime on purpose: _find_tasks_files_all pipes through `ls -t`, so discovery order is a property of the fixture and not of the clock, and two consecutive captures are byte-identical. TEN THINGS THE CAPTURE ITSELF EXPOSED, recorded here so nobody has to rediscover them from 46 recordings by eye. (1) THE `[ -z \"$non_terminal_phases\" ] && continue` ARM IS REACHED BY EXACTLY ONE INPUT, and it is not the one the code reads as if it guards. aimi-cli.sh runs under `set -euo pipefail` and that assignment sits on its own line after a bare `local`, so a jq that FAILS takes the whole verb down before the test is ever evaluated: nine inputs exit 5 with EMPTY stderr and NOTHING on stdout -- not even the `[` the array would have started with -- because jq's message was swallowed by the 2>/dev/null on the assignment that ran it (la-rm-doc-true, la-rm-doc-numero, la-rm-doc-array, la-rm-doc-string, la-rm-phases-ausente, la-rm-phases-null, la-rm-phases-string, la-rm-phases-numero, la-rm-fase-nao-objeto). The arm fires only for a roadmap.json jq read successfully while printing no count at all, which is an EMPTY file: la-rm-vazio EXCLUDES the feature and says nothing. Same class as _comment_archive finding (5), reached through the other document. (2) `jq -e .` PASSES ON AN EMPTY FILE. jq-1.6 exits 0 over zero documents, so \"the probe refused this document\" and \"this document is empty\" are different states with OPPOSITE verdicts: a malformed roadmap.json INCLUDES the feature (la-rm-malformado) and an empty one EXCLUDES it (la-rm-vazio). A port that collapsed the two would flip one of them. (3) null AND false ARE NOT MALFORMED, THEY ARE FALSY. `jq -e` exits 1 when the last output is null or false, so la-rm-doc-null and la-rm-doc-false take the same include-anyway path a parse error takes, while la-rm-doc-true and la-rm-doc-numero are TRUTHY, enter the `if` and then die at `.phases`. jq counts 0 as truthy and Python counts it as falsy, which is why the port tests `is None` and `is False` rather than truthiness. (4) THE JOIN IS DOCUMENT ORDER, NEVER SORTED, and its separator is exactly \", \": la-rm-ordem-do-documento stores phase 3 before phase 1 and the warning reads \"3, 1\". (5) `(.id|tostring)` IS COMPACT. la-rm-id-array records `[1,2]` and la-rm-id-objeto `{\"n\":1}` -- no space after the comma, none after the colon. Python's default json.dumps writes `[1, 2]`, and _jq_raw, the helper any port here would reuse, carries that default: nothing had ever handed it an array or an object until this corpus did, and this recording is what names the difference. (6) AN ABSENT OR null id PRINTS THE WORD null (la-rm-id-ausente, la-rm-id-null), a string id prints as itself (la-rm-id-string), and a string id holding a NEWLINE puts a real newline in the warning (la-rm-id-com-newline). That last one is why the port hands the joined ids to bash as the last RAW field with the compact payload behind them: a value that can span lines cannot be read off a fixed line number. (7) A PHASE WITH NO status IS NON-TERMINAL AND NOT STUCK, so the feature is excluded with NOTHING on stderr (la-rm-fase-sem-status, la-rm-status-null) -- a silent exclusion the warning was written to prevent, and it only prevents it for verification_failed. \"Completed\" with a capital C is non-terminal too (la-rm-status-maiuscula): the comparison is exact equality and nothing normalizes it. (8) `.phases` MAY BE AN OBJECT AND AN ENTRY MAY BE null. `.[]` over an object yields its VALUES, so la-rm-phases-objeto is a genuine completed phase and la-rm-phases-objeto-pendente a genuine pending one; and `null | .status` is null in jq, so la-rm-fase-null counts as non-terminal and excludes the feature, where a NUMBER in the same position aborts the verb (la-rm-fase-nao-objeto). (9) THE CONTRACT GATE IS NOT ON THIS SIDE, AND THIS IS WHAT KEEPS IT THAT WAY. _roadmap_require_contracts refuses a pre-2.0 roadmap by name for every contract-READING verb; list-archivable reads only .phases[].status and never a creates/needs entry, so it is ungated -- the same rationale roadmap-eligible's own exemption records. la-rm-pre-2-0-completed and la-rm-pre-2-0-verification-failed are roadmapVersion 1.0 documents carrying the old single-string creates entry and are read normally, and la-rm-sem-roadmap-version has no roadmapVersion key at all. A verb that starts refusing them is a behaviour change, not a port. (10) A TWO-DOCUMENT roadmap.json IS INCLUDED, WITH BASH'S COMPLAINT THE ONLY TRACE. jq reads a stream and `-e` judges the LAST value, so the probe passes; the count then printed one line per document, `[` was handed \"0\\n1\", reported \"integer expression expected\" and returned 2, which an `if` reads as FALSE. la-rm-dois-documentos is included although its second document holds a pending phase. Same class as archive-dois-documentos-um-aberto and la-dois-documentos, reached through the third implementation."
 }
