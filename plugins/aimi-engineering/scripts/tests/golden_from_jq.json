@@ -34303,6 +34303,2513 @@
     }
   ],
   "_comment_archive": "archive-task -- cmd_archive_task, captured the way the six tasks.json blocks before it were, by running the bash and jq that used to live in aimi-cli.sh BEFORE any of it was deleted: 38 cases at commit 30053d7. THIS IS THE ONLY VERB IN THE FILE THAT DELETES A USER'S FILES, so the record is of the FILESYSTEM and not only of stdout: `tree` is the whole project root listed relative to itself (directories with a trailing slash, symlinks shown as `path -> target`), `file` is the tasks document still sitting at its ORIGINAL path (null once it has been moved), and `outside_after` is every fixture written one directory ABOVE the project root, with its contents, so \"the escape target survived untouched\" is a comparison rather than a claim. A golden that recorded stdout alone would pass while the file was being deleted instead of moved. args/input make every case replayable; each ran in its own throwaway base holding proj/ (the project root, so PROJECT_ROOT resolves to it) beside fora/ (outside it), and two normalizations fire -- the project root to /TMP and its parent to /OUTSIDE, in that order -- applied to the inputs on the way in and to every recorded string on the way out. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Archived: a plain success (archive-sucesso), an absolute CLI argument (archive-caminho- absoluto), a document whose only other story is skipped (archive-skipped- tambem-e-terminal), and one where .aimi/archive does not exist at all so mkdir -p has to make it (archive-sem-diretorio-archive). Refused with nothing touched: a non-terminal story (archive-nao-terminal, and -com-lock), a missing file (archive-arquivo-inexistente), no argument at all (archive-sem- argumento), and a CLI argument that leaves the project root (archive- argumento-fora-do-projeto). Destination already occupied: archive-colisao, archive-colisao-multipla (two slots taken, lands on -3), archive-colisao-com- lock, archive-ja-no-archive (a file already IN the archive, archived again) and archive-brainstorm-colide. Deleting: archive-research-e-prototype, archive-research-ausente (a named path that does not exist is skipped silently and counts for nothing), archive-research-lista-vazia, archive- research-nao-lista, archive-research-absoluto-dentro and archive-sem-metadata. Escaping: an absolute path outside the root (archive-research-absoluto-fora), a ../ traversal (archive-research-traversal), a symlink inside the project whose target resolves outside it (archive-research-symlink-fora), the same through prototypePaths after the research delete has already run (archive- prototype-fora-depois-do-research), and the brainstorm equivalent (archive- brainstorm-fora-existente). Every deleting and escaping case carries the same three decoys -- an unlisted sibling research file, a file already in .aimi/archive/, and a file outside .aimi/ entirely -- so a survivor set can be compared rather than spot-checked. NINE THINGS THE CAPTURE ITSELF EXPOSED, recorded here so no one has to rediscover them from 38 recordings by eye. (1) THE LOCK IS MOVED INTO THE ARCHIVE. archive-lock-acompanha's tree shows .aimi/archive/<name>.json.lock where .aimi/tasks/<name>.json.lock used to be, and cmd_archive_task takes no lock of its own at any point: a writer holding flock on the moved inode has no mutual exclusion against a writer that arrives afterwards and creates a fresh lock at the original path. (2) A .lock THAT IS A DIRECTORY IS LEFT BEHIND instead, because the move is guarded by `[ -f ]` -- archive-lock-e-diretorio ends with the task in the archive and the lock directory still in .aimi/tasks/. (3) THE -N COLLISION SUFFIX SPLITS THE BASENAME ON THE FIRST DOT, not the last: archive-colisao-ponto-precoce sends corpus.v2-tasks.json to corpus-2.v2-tasks.json. The lock's own suffix is computed independently of the task's, so the two only stay paired by coincidence. (4) userStories: [] ARCHIVES HERE AND IS NOT LISTED BY list-archivable. archive-userstories-vazio records the success; _archivable_file_is_terminal, which list-archivable uses, additionally requires the array to be non-empty, and cmd_archive_task's inline copy of that check does not. One rule, two implementations, already disagreeing before any port -- ranked, not fixed here. (5) THE `[ -z \"$non_terminal\" ]` BRANCH IS REACHED BY EXACTLY ONE INPUT, and it is not the one it reads as if it guards. Under `set -euo pipefail` a jq that FAILS takes the assignment down with it before the test is ever reached, so a document with no userStories (archive-sem-userstories), one whose userStories is a string (archive-userstories-nao-lista) and a malformed one (archive-json-malformado) exit 5, 5 and 4 with EMPTY stderr -- jq's own status, its message swallowed by the 2>/dev/null on the assignment that ran it, and no diagnostic anywhere. The arm fires only for an EMPTY tasks file, where jq exits 0 having printed nothing: archive-arquivo-vazio is refused with the non-terminal message, which is the wrong sentence for the input but is the behaviour. (10) A TWO-DOCUMENT TASKS FILE IS ARCHIVED WHATEVER ITS SECOND DOCUMENT SAYS. jq reads a stream and printed one count per document, so `[ \"$non_terminal\" -ne 0 ]` was handed \"0 1\"; `[` reported \"integer expression expected\" and returned 2, which an `if` reads as FALSE. archive-dois-documentos-um-aberto has an in_progress story in its second document and is archived anyway, with bash's complaint the only trace. (6) validate_path_in_project LETS A NON-EXISTENT TRAVERSAL THROUGH when the parent directory does not exist either: it falls back to the unresolved string, which still starts with PROJECT_ROOT. archive-research-traversal (refused) and archive-research-fora-inexistente (allowed, then skipped as missing) are the same ../fora/... path and differ only in whether fora/ exists. (7) THE TWO CALL-SITE ORDERINGS DIFFER AND BOTH MATTER: researchPaths and prototypePaths are confined BEFORE their existence check, brainstormPath only INSIDE it -- so archive-brainstorm-fora-inexistente is silently skipped where archive-research-fora-inexistente would have been refused had its parent existed. (8) EVERY ESCAPE REFUSAL LANDS AFTER THE TASK FILE AND ITS LOCK HAVE ALREADY MOVED, and after any earlier delete has already happened -- archive-prototype-fora-depois-do-research exits 1 with the task in the archive and .aimi/research/r1.md already gone. A refusal with a side effect is visible in these records because `tree` is compared, and that is the field's whole reason for being here. (9) A DIRECTORY NAMED IN researchPaths ENDS THE RUN MID-ARCHIVE: `rm -f` refuses it, `set -e` does the rest, and archive-research-diretorio exits 1 with the task already archived and the directory and both files under it untouched. Nothing recurses, and nothing in the port may start. AFTER THE PORT: 238 of the 246 field comparisons are identical. Every `file`, every `tree` and every `outside_after` matched in all 41 cases -- which is the half that matters here, because those three ARE the verb: nothing moved that did not move before, nothing was deleted that was not deleted before, and no refusal gained or lost a side effect. The 8 that differ fall in 5 cases and in two classes, neither of them a rule anyone wrote. (A) THE ENGINE'S OWN STATUS WITH NO MESSAGE AT ALL, exit and stderr in archive-sem-userstories, archive-userstories-nao-lista and archive-json-malformado: jq aborted and `set -euo pipefail` took the script down at jq's exit 5, 5 and 4, with jq's message swallowed by the 2>/dev/null on the assignment that ran it, so the recording is of a silent death. tasks.py refuses at 1 with a line naming the verb and the file. Recorded rather than reproduced, exactly as the six blocks before this one did with their engine aborts -- synthesizing an engine error on purpose is not a thing to write -- and all three still refuse, still print nothing to stdout, and still leave the tree exactly as bash left it. (B) BASH'S COMPLAINT ABOUT ITS OWN COMPARISON, stderr only, in archive-dois-documentos and archive-dois-documentos-um-aberto: `[` was handed one count per document, reported \"integer expression expected\" and returned 2, which the `if` read as false. The port branches on the count instead, so it archives the same file with nothing on stderr. The archive it produces is identical, which is what the tree comparison says; what is gone is a diagnostic that named no rule. The `archive_cases` array itself is untouched by the port commit -- only this paragraph was appended -- so a reviewer can diff the two commits and see that the record predates the replacement.",
+  "research_gc_cases": [
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-referencia-simples",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"t\"},\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-sem-researchpaths",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": []\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-lista-vazia",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/nunca-existiu.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-caminho-inexistente",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\"../fora/segredo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {
+          "fora/segredo.md": "one directory above the project root\n"
+        }
+      },
+      "label": "rgc-caminho-fora-do-projeto",
+      "outside_after": {
+        "fora/": null,
+        "fora/segredo.md": "one directory above the project root\n"
+      },
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\"./.aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-prefixo-ponto-barra",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\"/TMP/.aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-caminho-absoluto",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [7, \".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-numero",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [{\"path\": \".aimi/research/vivo.md\"}]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-objeto",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [[\".aimi/research/vivo.md\"]]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-array",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [true, \".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-true",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [null, false, \".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-null-e-false",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\"\", \".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-vazia",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\"x\\n.aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-entrada-com-newline",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": \".aimi/research/vivo.md\"\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-researchpaths-nao-lista",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": null\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-researchpaths-null",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-metadata-ausente",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": null\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-metadata-null",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": \"x\"\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-metadata-string",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "[1, 2]\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-doc-array",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "null\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-doc-null",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": ""
+        },
+        "outside": {}
+      },
+      "label": "rgc-tasks-vazio",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-tasks-malformado",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/1-a-tasks.json": "NOT JSON AT ALL\n",
+          ".aimi/tasks/2-b-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-malformado-antes-de-um-bom",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/1-a-tasks.json",
+        ".aimi/tasks/2-b-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/1-a-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n",
+          ".aimi/tasks/2-b-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-malformado-depois-de-um-bom",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/1-a-tasks.json",
+        ".aimi/tasks/2-b-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/orfao-velho.md\"]\n  },\n  \"userStories\": []\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-dois-documentos",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/orfao-velho.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\nNOT JSON AT ALL\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-dois-documentos-segundo-malformado",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/brainstorms/b.md": "---\nresearchPaths:\n  - .aimi/research/vivo.md\n---\n\n# b\n",
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-brainstorm-researchpaths",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/brainstorms/",
+        ".aimi/brainstorms/b.md",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/brainstorms/b.md": "---\nfoundationProposalPath: .aimi/research/vivo.md\n---\n\n# b\n",
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-brainstorm-foundation",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/brainstorms/",
+        ".aimi/brainstorms/b.md",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-sem-diretorio-tasks",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 2 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {},
+        "dirs": [],
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-sem-diretorio-research",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "",
+      "tree": [
+        ".aimi/",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 3,
+          ".aimi/research/vivo.md": 3
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-tudo-recente",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/orfao-velho.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-1.md": 40,
+          ".aimi/research/orfao-2.md": 40,
+          ".aimi/research/orfao-3.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-1.md": "a\n",
+          ".aimi/research/orfao-2.md": "b\n",
+          ".aimi/research/orfao-3.md": "c\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": []\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-varios-orfaos",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 3 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/trinta-e-um.md": 31,
+          ".aimi/research/vinte-e-nove.md": 29
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/trinta-e-um.md": "b\n",
+          ".aimi/research/vinte-e-nove.md": "a\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": []\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-limite-29-e-31-dias",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/vinte-e-nove.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n",
+          ".aimi/tasks/roadmap.json": "{\"phases\": []}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-json-nao-tasks-no-diretorio",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        ".aimi/tasks/roadmap.json"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n",
+          ".aimi/tasks/notas.txt": "not json\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-arquivo-nao-json-no-diretorio",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json",
+        ".aimi/tasks/notas.txt"
+      ],
+      "verb": "research-gc"
+    },
+    {
+      "args": [
+        "research-gc"
+      ],
+      "exit": 0,
+      "input": {
+        "ages": {
+          ".aimi/research/orfao-novo.md": 3,
+          ".aimi/research/orfao-velho.md": 40,
+          ".aimi/research/sub/aninhado.md": 40,
+          ".aimi/research/vivo.md": 40
+        },
+        "dirs": [],
+        "files": {
+          ".aimi/research/orfao-novo.md": "orphan, 3 days old\n",
+          ".aimi/research/orfao-velho.md": "orphan, 40 days old\n",
+          ".aimi/research/sub/aninhado.md": "nested, never globbed\n",
+          ".aimi/research/vivo.md": "referenced by the tasks file\n",
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"ref: corpus\",\n    \"branchName\": \"ref/corpus\",\n    \"researchPaths\": [\".aimi/research/vivo.md\"]\n  },\n  \"userStories\": []\n}\n"
+        },
+        "outside": {}
+      },
+      "label": "rgc-research-em-subdiretorio",
+      "outside_after": {},
+      "stderr": "",
+      "stdout": "Cleaned 1 orphaned research files (>30 days)\n",
+      "tree": [
+        ".aimi/",
+        ".aimi/research/",
+        ".aimi/research/orfao-novo.md",
+        ".aimi/research/sub/",
+        ".aimi/research/sub/aninhado.md",
+        ".aimi/research/vivo.md",
+        ".aimi/tasks/",
+        ".aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "verb": "research-gc"
+    }
+  ],
+  "_comment_research_gc": "research-gc -- the orphan collector, captured from the bash and jq still in aimi-cli.sh BEFORE any of it was deleted: 37 cases at commit b0caf8c. THIS VERB DELETES A USER'S FILES, so the record is of the FILESYSTEM and not only of stdout, exactly as archive_cases is: `tree` is the whole project root listed relative to itself (directories with a trailing slash), and `outside_after` is every fixture written one directory ABOVE the root, with its contents, so \"nothing outside .aimi/research was touched\" is a comparison rather than a claim. A golden that recorded stdout alone would pass while a live research file was being deleted, since the only thing on stdout is a COUNT. args/input make every case replayable; each ran in its own throwaway base holding proj/ (the project root) beside fora/ (outside it), with /TMP and /OUTSIDE standing for the two on the way in and on the way out, and every fixture's mtime set explicitly through `ages` in days so the 30-day threshold is decided by the case and not by the clock. Unless a case says otherwise it carries three research files -- one the document names, one orphan 40 days old, one orphan 3 days old -- so a survivor set can be compared rather than spot-checked. TEN THINGS THE CAPTURE ITSELF EXPOSED. (1) ONE MALFORMED TASKS FILE DELETES THE RESEARCH EVERY LATER FILE NAMES. The referenced-set walk is a `for f in .aimi/tasks/*.json` inside a process substitution, and `set -euo pipefail` is in force there: the first jq that aborts ends the WHOLE loop, not that one file. rgc-malformado-antes-de-um-bom deletes vivo.md, which the very next tasks file references by name; rgc-malformado-depois-de-um-bom is the same two files in the other order and keeps it. Data loss on an unrelated document's syntax error, ranked and recorded here, not fixed. (2) FOUR SHAPES REACH THAT ABORT AND SEVEN DO NOT, and the split is jq's rather than anyone's rule. Aborting: a parse error (rgc-tasks-malformado), a metadata that is a string (rgc-metadata-string), a document that is an array (rgc-doc-array), and -- mid-stream -- a malformed second document. Not aborting, contributing nothing and letting the walk continue: metadata absent or null, a null document, an empty file, a researchPaths that is absent, null or a string. (3) A MALFORMED SECOND DOCUMENT STILL LETS THE FIRST ONE'S PATHS THROUGH, because jq had already printed them when it died: rgc-dois-documentos-segundo-malformado keeps vivo.md. Any port that parses a file whole before emitting anything would delete it. (4) AN ABSOLUTE researchPath PROTECTS NOTHING. Membership is tested against a path made relative to PROJECT_ROOT, so rgc-caminho-absoluto names /TMP/.aimi/research/vivo.md and deletes exactly that file. (5) A NON-STRING ENTRY IS PRINTED THE WAY jq PRETTY-PRINTS IT, and the read loop takes each line as a path. An object or an array therefore becomes three or more useless entries and protects nothing -- rgc-entrada-objeto and rgc-entrada-array both delete the file named inside them -- while a number or a boolean becomes one useless line (rgc-entrada-numero, rgc-entrada-true). null and false are dropped by `// empty` before the loop ever sees them (rgc-entrada-null-e-false). (6) THE NORMALIZATIONS THAT DO WORK: a leading ./ is stripped on both sides (rgc-prefixo-ponto-barra protects), an empty entry is skipped by the loop's own `[ -z ]` (rgc-entrada-vazia), and an entry carrying a newline arrives as TWO paths, the second of which happens to be a real one (rgc-entrada-com-newline protects vivo.md through the second line). (7) RESEARCH FILES ARE GLOBBED ONE LEVEL DEEP ONLY. .aimi/research/sub/aninhado.md is never considered and so is never collected, however old and however orphaned (rgc-research-em-subdiretorio). (8) THE THRESHOLD IS EXACT AND IS PINNED FROM BOTH SIDES: 29 days survives, 31 days goes (rgc-limite-29-e-31-dias). (9) NOTHING OUTSIDE .aimi/research IS EVER DELETED, whatever the document says. rgc-caminho-fora-do-projeto names ../fora/segredo.md and `outside_after` shows the file intact; the verb has no confinement check at all because it never acts on a path that came out of a document -- it only ever compares strings against files it globbed itself. (10) IT IS SILENT WHEN IT REMOVES NOTHING (rgc-tudo-recente, rgc-dois-documentos, rgc-sem-diretorio-research all print nothing at exit 0) and its one message says \"files\" at a count of one (rgc-referencia-simples).",
+  "session_doc_cases": [
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-ok",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"t\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-ausente",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "null\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"null\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"main; rm -rf /\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-hostil",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: main; rm -rf /\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"x$(id)\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-hostil-substituicao",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: x$(id)\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-vazio",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: \n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": 123},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-numero",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "123\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"123\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": [\"a\", \"b\"]},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-array",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: [\n  \"a\",\n  \"b\"\n]\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": {\"a\": 1}},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-objeto",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: {\n  \"a\": 1\n}\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": null},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-null-explicito",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "null\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"null\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"feat/a_b-c/9\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-barra-e-sublinhado",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "feat/a_b-c/9\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"feat/a_b-c/9\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"-x\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-comeca-com-traco",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: -x\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"/x\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-comeca-com-barra",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: /x\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"a b\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-com-espaco",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: a b\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"ok\\nrm -rf /\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-branch-com-newline",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: ok\nrm -rf /\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-schemaversion-ausente",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"null\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": 3.3,\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-schemaversion-numero",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": [\"3.3\"],\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-schemaversion-array",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"[\\n  \\\"3.3\\\"\\n]\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": null,\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-schemaversion-null",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"null\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 5,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"}\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-userstories-ausente",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:4): Cannot iterate over null (null)\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": []\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-userstories-vazio",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 0,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 5,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": \"US-001\"\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-userstories-nao-lista",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:5): Cannot iterate over string (\"US-001\")\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 5,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": null\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-userstories-null",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:5): Cannot iterate over null (null)\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": []\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-metadata-ausente",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "null\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"null\",\n  \"pending\": 0,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": null,\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-metadata-null",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "null\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"null\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 5,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": \"ref/corpus\",\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-metadata-string",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:5): Cannot index string with string \"branchName\"\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 4,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "state": {}
+      },
+      "label": "is-malformado",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "parse error: Invalid numeric literal at line 1, column 4\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": ""
+        },
+        "state": {}
+      },
+      "label": "is-arquivo-vazio",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: \n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"outro\"},\n  \"userStories\": [{\"id\": \"US-009\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-dois-documentos",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "Error: Invalid branch name: ref/corpus\noutro\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"in_progress\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-004\", \"title\": \"S\", \"status\": \"skipped\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-pending-misto",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-historia-sem-status",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 0,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {},
+        "state": {}
+      },
+      "label": "is-sem-arquivo",
+      "state_after": {},
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\n",
+      "stdout": "",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "init-session",
+        "--file",
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "is-com-file-flag",
+      "state_after": {
+        ".state.lock": "",
+        "cli-path": "/CLI/aimi-cli.sh\n",
+        "current-branch": "ref/corpus\n",
+        "current-tasks": "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\n"
+      },
+      "stderr": "",
+      "stdout": "{\n  \"tasks\": \"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\",\n  \"branch\": \"ref/corpus\",\n  \"pending\": 2,\n  \"schemaVersion\": \"3.3\"\n}\n",
+      "verb": "init-session"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"do-documento\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {
+          "current-branch": "do-estado"
+        }
+      },
+      "label": "gb-estado-presente",
+      "state_after": {
+        "current-branch": "do-estado\n"
+      },
+      "stderr": "",
+      "stdout": "do-estado\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"a b; id\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {
+          "current-branch": "do-estado"
+        }
+      },
+      "label": "gb-estado-presente-documento-hostil",
+      "state_after": {
+        "current-branch": "do-estado\n"
+      },
+      "stderr": "",
+      "stdout": "do-estado\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {},
+        "state": {
+          "current-branch": "do-estado"
+        }
+      },
+      "label": "gb-estado-presente-sem-documento",
+      "state_after": {
+        "current-branch": "do-estado\n"
+      },
+      "stderr": "",
+      "stdout": "do-estado\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {
+          "current-branch": ""
+        }
+      },
+      "label": "gb-estado-vazio",
+      "state_after": {
+        "current-branch": "\n"
+      },
+      "stderr": "",
+      "stdout": "ref/corpus\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-sem-estado",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "ref/corpus\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"t\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-branch-ausente",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "null\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": null},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-branch-null",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "null\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": 123},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-branch-numero",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "123\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": [\"a\", \"b\"]},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-branch-array",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[\n  \"a\",\n  \"b\"\n]\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"main; rm -rf /\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-branch-hostil",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "main; rm -rf /\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 5,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": \"x\",\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-metadata-string",
+      "state_after": {},
+      "stderr": "jq: error (at /TMP/.aimi/tasks/2020-01-01-corpus-tasks.json:5): Cannot index string with string \"branchName\"\n",
+      "stdout": "",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": null,\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-metadata-null",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "null\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 4,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "state": {}
+      },
+      "label": "gb-malformado",
+      "state_after": {},
+      "stderr": "parse error: Invalid numeric literal at line 1, column 4\n",
+      "stdout": "",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": ""
+        },
+        "state": {}
+      },
+      "label": "gb-arquivo-vazio",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"um\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"branchName\": \"dois\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "gb-dois-documentos",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "um\ndois\n",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "get-branch"
+      ],
+      "exit": 1,
+      "input": {
+        "files": {},
+        "state": {}
+      },
+      "label": "gb-sem-arquivo",
+      "state_after": {},
+      "stderr": "No tasks file found in /TMP/.aimi/tasks/\n",
+      "stdout": "",
+      "verb": "get-branch"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": []\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-zero-historias",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-todas-completed",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\"]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"skipped\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-todas-skipped",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\"]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"skipped\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-completed-e-skipped",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\"]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-misto",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\"}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-historia-sem-status",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": null, \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-status-null",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"}\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-userstories-ausente",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": null\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-userstories-null",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": \"US-001\"\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-userstories-nao-lista",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "state": {}
+      },
+      "label": "la-malformado",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": ""
+        },
+        "state": {}
+      },
+      "label": "la-arquivo-vazio",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "[1, 2]\n"
+        },
+        "state": {}
+      },
+      "label": "la-doc-array",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "null\n"
+        },
+        "state": {}
+      },
+      "label": "la-doc-null",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-corpus-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}]\n}\n{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-002\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n"
+        },
+        "state": {}
+      },
+      "label": "la-dois-documentos",
+      "state_after": {},
+      "stderr": "/CLI/aimi-cli.sh: line <N>: [: 0\n1: integer expression expected\n/CLI/aimi-cli.sh: line <N>: [: 1\n1: integer expression expected\n",
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json\"]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {
+          ".aimi/tasks/2020-01-01-a-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}]\n}\n",
+          ".aimi/tasks/2020-01-02-b-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": [{\"id\": \"US-001\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}, {\"id\": \"US-002\", \"title\": \"S\", \"status\": \"completed\", \"dependsOn\": []}, {\"id\": \"US-003\", \"title\": \"S\", \"status\": \"pending\", \"dependsOn\": []}]\n}\n",
+          ".aimi/tasks/2020-01-03-c-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\"title\": \"ref: corpus\", \"type\": \"ref\", \"branchName\": \"ref/corpus\"},\n  \"userStories\": []\n}\n",
+          ".aimi/tasks/2020-01-04-d-tasks.json": "NOT JSON AT ALL\n"
+        },
+        "state": {}
+      },
+      "label": "la-varios-arquivos",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[\"/TMP/.aimi/tasks/2020-01-01-a-tasks.json\"]\n",
+      "verb": "list-archivable"
+    },
+    {
+      "args": [
+        "list-archivable"
+      ],
+      "exit": 0,
+      "input": {
+        "files": {},
+        "state": {}
+      },
+      "label": "la-sem-arquivos",
+      "state_after": {},
+      "stderr": "",
+      "stdout": "[]\n",
+      "verb": "list-archivable"
+    }
+  ],
+  "_comment_session_doc": "init-session, get-branch and the archivable predicate -- the tasks.json reads left standing in aimi-cli.sh after the 1.123.0 port, captured the way every block before this one was, by running the bash and jq still in the file BEFORE any of it was deleted: 65 cases at commit b0caf8c. The shape is tasks_read_cases' -- exit, stdout, stderr and `state_after`, the whole of .aimi/ read back file by file -- because none of these three verbs moves or deletes anything; what they write is state, and init-session writes three files. args/input make every case replayable; each ran in its own throwaway base with HOME, AIMI_CONFIG_DIR, XDG_CONFIG_HOME and CLAUDE_CONFIG_DIR pointed at it and AIMI_PLUGIN_DIR/CLAUDECODE unset, so nothing could reach the developer's real ~/.config/aimi/cli-path, and the project root normalizes to /TMP and the CLI's own path to /CLI/aimi-cli.sh. _archivable_file_is_terminal is a shell function with no verb of its own, so it is recorded through list-archivable, its only caller. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. init-session refuses eight branch names (hostile with a semicolon, hostile with a command substitution, empty, leading dash, leading slash, an internal space, an embedded newline, and a pretty-printed array or object) and dies on jq's own status for four documents (userStories absent, null or a string; a metadata that is a string; a parse error). get-branch refuses nothing at all -- it has no charset gate -- and list-archivable answers `[]` rather than failing for every document it cannot read. EIGHT THINGS THE CAPTURE ITSELF EXPOSED, recorded here so nobody has to rediscover them from 65 recordings by eye. (1) A MISSING branchName BECOMES THE STRING \"null\" AND PASSES THE SECURITY GATE. `jq -r` prints the four-letter word for a null, `null` matches ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$, and init-session then writes it into .aimi/current-branch and reports it as the branch: is-branch-ausente, is-branch-null-explicito, is-metadata-ausente and is-metadata-null all exit 0 with \"branch\": \"null\". The gate is doing its job -- `null` is a legal branch name -- and the hole is upstream of it, in a read that cannot tell absent from present. (2) A NUMERIC branchName PASSES TOO, as its digits (is-branch-numero, branch \"123\"), while an array or an object is pretty-printed across several lines and is refused FOR the newline rather than for the type (is-branch-array, is-branch-objeto, whose refusal text carries jq's indentation). So the shapes that survive a non-string branchName are exactly the ones that print as one gate-legal token. (3) THE GATE FIRES BETWEEN THE READ AND THE WRITE, and `state_after` is where that is visible rather than claimed: every refused case has current-tasks and cli-path already written and NO current-branch file at all, so the ordering (read branchName, gate, write_state current-branch, then pending and schemaVersion) is pinned by the recording and not only by the source. (4) AN EMPTY TASKS FILE READS AS AN EMPTY BRANCH. jq over zero documents prints nothing, so is-arquivo-vazio is refused with `Error: Invalid branch name: ` and no name -- the same silent-truncation hole load_docs carries, surfacing here as a refusal rather than as a success. (5) A TWO-DOCUMENT FILE JOINS BOTH DOCUMENTS' ANSWERS WITH A NEWLINE, and the three verbs disagree about what to do with the result. init-session's gate refuses the pair (is-dois-documentos, `ref/corpus\\noutro`). get-branch has no gate and prints both lines (gb-dois-documentos). And the archivable predicate's `[` cannot compare `0\\n1` at all: it reports \"integer expression expected\" TWICE, returns 2 both times, an `if` reads that as false both times, and la-dois-documentos is reported ARCHIVABLE at exit 0 although its second document holds a pending story. Same class as archive-dois-documentos-um-aberto in the block above, reached through the other implementation of the same rule. (6) THE PREDICATE NEVER ABORTS AND NEVER SPEAKS. A malformed document, an empty file, a userStories that is absent, null or a string, a document that is an array or null -- all nine answer `[]` at exit 0 with EMPTY stderr, because the `2>/dev/null` on each jq swallows the message and the `&&` call site suppresses `set -e`. That is the whole contract: echo nothing, return 1, never take the command down. (7) userStories: [] IS REFUSED BY THE LIST (la-zero-historias answers `[]`) while archive_cases' archive-userstories-vazio archives the same document at exit 0. One rule, two implementations, already disagreeing before any port -- recorded from BOTH sides now, and still not fixed here. (8) schemaVersion IS WHATEVER `jq -r` PRINTED, and it is always a string in the output because `--arg` makes it one: absent or null becomes \"null\" (is-schemaversion-ausente, is-schemaversion-null), a number becomes its digits, and an array becomes a multi-line string embedded in the JSON object (is-schemaversion-array). get-branch's fast path is recorded from the other side too: gb-estado-presente-sem-documento answers from .aimi/current-branch with no tasks file on disk at all, and gb-estado-presente-documento-hostil answers from state while the document holds a name the gate would have refused -- so a populated session state provably never opens the document.",
   "models_read_cases": [
     {
       "label": "rm-valido-cc",
