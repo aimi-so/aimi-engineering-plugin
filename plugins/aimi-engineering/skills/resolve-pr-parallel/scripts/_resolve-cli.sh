@@ -61,8 +61,16 @@ fi
 # Clearing it back to empty on failure lets the not-found error below fire
 # with its own clear message instead of the caller dying on a bare
 # "Permission denied" from a path this file already knew was unusable.
+#
+# The pipeline picks the newest VERSION, not the last line `ls` prints: `ls`
+# collates 1.121.3 before 1.9.0 ('1' < '9' at the third character), and a plain
+# `sort -V` over whole paths would order by marketplace-entry directory first
+# because the glob spans two wildcards. Each candidate is therefore prefixed
+# with its own version segment and the sort keys on that. The canonical rule is
+# _resolve_latest_cache_path in aimi-cli.sh; it is inlined rather than called,
+# because it lives inside the very file this block is resolving.
 if [ -z "$AIMI_CLI" ]; then
-  AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1')
+  AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-')
   if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then
     AIMI_CLI=""
   fi

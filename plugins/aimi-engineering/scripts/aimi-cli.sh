@@ -237,6 +237,54 @@ _extract_version_from_path() {
   printf '%s\n' "${no_scripts##*/}"  # strip prefix -> 1.4.0
 }
 
+# Resolve the NEWEST installed path under the Claude Code plugin cache.
+#
+# THE ONE OWNER of "which installed version is latest". Every site in this file
+# that used to spell that question as `ls <cache glob> | tail -1` -- or, at
+# _resolve_skills_base_dir, as `ls -d <cache glob> | head -1` -- calls this
+# instead, so the rule is stated once and the sites cannot disagree.
+#
+# Lexicographic order is not a near-miss here, it is wrong in the direction
+# that destroys data: `ls` collates 1.121.3 BEFORE 1.9.0 because '1' < '9' at
+# the third character, so on a cache holding 1.9.0 next to 1.123.0 `tail -1`
+# answers 1.9.0. cmd_cleanup_versions then rm -rf's 1.123.0, keeps 1.9.0 and
+# writes 1.9.0's path into the global cli-path cache. This plugin's history
+# spans 1.9.0 to 1.123.0, so that pairing is reachable on any long-lived
+# install rather than hypothetical.
+#
+# It is deliberately NOT a plain `sort -V` over the globbed paths, and that
+# distinction is most of why this is a function. The cache glob spans TWO
+# wildcards -- <config>/plugins/cache/<marketplace-entry>/aimi-engineering/<version>/<suffix>
+# -- so sorting whole path strings orders by marketplace-entry directory first
+# and by version only within one entry, which reintroduces the same class of
+# bug the moment a host holds two marketplace entries. Each candidate is
+# therefore prefixed with its own version segment and the sort keys on that.
+#
+# Usage: _resolve_latest_cache_path <config_dir> <suffix>
+#   suffix is the path fragment after the version directory:
+#   "scripts/aimi-cli.sh" for the CLI, "skills" for the skills base directory.
+#
+# Prints the newest path and returns 0; prints nothing and returns 1 when the
+# glob matches nothing. That return value is how each caller keeps the
+# empty-glob behaviour it already had: a bare call aborts under
+# `set -euo pipefail` exactly as the old bare pipeline did, while a caller that
+# must survive (cmd_prime_cache, _resolve_skills_base_dir -- both of them wrap
+# the glob in a nested `bash -c` today for precisely that reason) appends an
+# explicit `|| var=""`.
+_resolve_latest_cache_path() {
+  local config_dir="$1" suffix="$2"
+  local newest=""
+  newest=$(
+    bash -c 'ls -d "$1"/plugins/cache/*/aimi-engineering/*/"$2" 2>/dev/null' _ "$config_dir" "$suffix" \
+      | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+      | sort -V \
+      | tail -1 \
+      | cut -d' ' -f2-
+  ) || newest=""
+  [ -n "$newest" ] || return 1
+  printf '%s\n' "$newest"
+}
+
 # Resolve the Claude config directory.
 # Honors CLAUDE_CONFIG_DIR env var; falls back to ~/.claude.
 # When CLAUDE_CONFIG_DIR is set, validates it is an absolute path.
@@ -957,15 +1005,28 @@ cmd_get_story() {
 
 # Resolve the skills base directory for the current host.
 # Returns the absolute path to the skills/ directory, or empty string when unresolvable.
-# Claude Code (CLAUDECODE=1): glob ~/.claude/plugins/cache/*/aimi-engineering/*/skills, take first.
+# Claude Code (CLAUDECODE=1): the NEWEST installed version under
+#   ~/.claude/plugins/cache/*/aimi-engineering/*/skills.
 # OpenCode (AIMI_PLUGIN_DIR set, CLAUDECODE unset): $AIMI_PLUGIN_DIR/skills.
 # Otherwise: empty string — caller emits skills: [] silently.
+#
+# "Newest" here is a DECISION, not a head-to-tail typo fix, and it changes which
+# SKILL.md every spawned agent reads. This used to take the FIRST glob hit while
+# CLI-path resolution took the LAST, which on a host with two versions
+# co-resident is not a tie-break detail but two different installs answering in
+# one session — measured live: skills resolved to .../1.122.0/skills while the
+# CLI resolved to .../1.123.0/scripts/aimi-cli.sh. A spawned agent must read the
+# SKILL.md belonging to the same install whose CLI is orchestrating it, so both
+# sides now ask _resolve_latest_cache_path the same question.
+#
+# The `|| skills_dir=""` preserves what the nested `bash -c` bought: an empty
+# glob leaves this function alive and answering "", never aborting the caller.
 _resolve_skills_base_dir() {
   if _is_claude_code_host; then
     local config_dir
     config_dir=$(_claude_config_dir)
     local skills_dir
-    skills_dir=$(bash -c "ls -d \"$config_dir\"/plugins/cache/*/aimi-engineering/*/skills 2>/dev/null | head -1")
+    skills_dir=$(_resolve_latest_cache_path "$config_dir" "skills") || skills_dir=""
     printf '%s\n' "${skills_dir:-}"
     return 0
   fi
@@ -9788,8 +9849,10 @@ cmd_check_version() {
     return 0
   fi
 
-  # Resolve the latest installed path via glob
-  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  # Resolve the latest installed path (newest VERSION -- see
+  # _resolve_latest_cache_path). Called bare: an empty glob still aborts under
+  # `set -euo pipefail`, as it always has.
+  latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
   # Case: glob returns empty — no installed version found
   if [ -z "$latest_path" ]; then
@@ -9858,8 +9921,11 @@ cmd_cleanup_versions() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
-  # Resolve the latest installed path via glob
-  latest_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  # Resolve the latest installed path. This verb rm -rf's every version
+  # directory it does NOT pick, so "latest" has to mean newest version rather
+  # than lexicographically last -- see _resolve_latest_cache_path. Called bare:
+  # an empty glob still aborts under `set -euo pipefail`, as it always has.
+  latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
   # No installed versions found
   if [ -z "$latest_path" ]; then
@@ -9948,10 +10014,13 @@ cmd_prime_cache() {
     fi
     resolved_path="$candidate"
   else
-    # Claude Code branch: glob for latest installed path
+    # Claude Code branch: newest installed version (see
+    # _resolve_latest_cache_path). The `|| resolved_path=""` is what the nested
+    # `bash -c` used to buy: an empty glob must leave this verb alive so it can
+    # reach its own not_found branch below, not abort under `set -euo pipefail`.
     local config_dir
     config_dir=$(_claude_config_dir)
-    resolved_path=$(bash -c "ls \"$config_dir\"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1")
+    resolved_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh") || resolved_path=""
 
     if [ -z "$resolved_path" ]; then
       if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then
@@ -13271,9 +13340,12 @@ ENVIRONMENT:
                        bypasses Claude cache resolution.
 
 EXAMPLES:
-    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR)
+    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR).
+    # Sort on the VERSION segment, never on the whole path and never plain `ls`:
+    # `ls` collates 1.121.3 before 1.9.0, and a whole-path sort orders by
+    # marketplace-entry directory first. Canonical rule: _resolve_latest_cache_path.
     CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d' ' -f2-)
 
     # Initialize a new session
     $AIMI_CLI init-session

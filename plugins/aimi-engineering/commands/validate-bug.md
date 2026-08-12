@@ -43,8 +43,15 @@ if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 
 **Layer 2: Glob fallback (zsh-safe)**
 
+Picks the newest **version**, which is not the last line `ls` prints — `ls`
+collates `1.121.3` before `1.9.0`. Sorting whole paths is wrong too, because
+the glob spans two wildcards and would order by marketplace entry first, so
+each candidate carries its own version segment and `sort -V` keys on that.
+Canonical rule: `_resolve_latest_cache_path` in `aimi-cli.sh`, inlined here
+because it lives inside the file this block is still looking for.
+
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 **Layer 2 cache update: save for next time**

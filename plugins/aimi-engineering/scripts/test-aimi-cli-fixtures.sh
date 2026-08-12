@@ -65,6 +65,7 @@ source_cache_functions() {
   eval "$(sed -n '/^_global_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_extract_version_from_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_resolve_latest_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_cli_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_worktree_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"

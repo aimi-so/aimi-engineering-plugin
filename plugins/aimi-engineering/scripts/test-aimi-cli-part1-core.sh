@@ -1687,6 +1687,20 @@ test_version() {
 # Version Staleness Tests
 # ============================================================================
 
+# The test-side twin of aimi-cli.sh's _resolve_latest_cache_path: what the CLI
+# should answer for "newest installed version". Tests below compare the CLI's
+# answer against this, so it must key on the VERSION SEGMENT for the same
+# reason the CLI does -- `ls | tail -1` collates 1.121.3 before 1.9.0, and a
+# whole-path `sort -V` orders by marketplace-entry directory first.
+_test_latest_installed_cli_path() {
+  local config_dir="$1"
+  ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null \
+    | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+    | sort -V \
+    | tail -1 \
+    | cut -d' ' -f2-
+}
+
 test_check_version() {
   echo ""
   echo "=== Testing check-version ==="
@@ -1697,7 +1711,7 @@ test_check_version() {
   # Write cli-path to exactly match what the glob resolves, so check-version sees "current"
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   local output exit_code
 
@@ -1754,7 +1768,7 @@ test_check_version_fix() {
 
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --fix test: no installed version in cache)"
@@ -1790,7 +1804,7 @@ test_check_version_quiet_fix() {
 
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping --quiet --fix test: no installed version in cache)"
@@ -1839,7 +1853,7 @@ test_check_version_backward_compat() {
   # Test 2: No flags, current version => "current" status
   local latest_glob_path config_dir
   config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
 
   if [ -n "$latest_glob_path" ]; then
     "$CLI" init-session > /dev/null
@@ -1887,6 +1901,158 @@ test_cleanup_versions() {
   # Validate JSON output format has both keys
   assert_contains '"removed"' "$output" "cleanup-versions: output contains removed key"
   assert_contains '"kept"' "$output" "cleanup-versions: output contains kept key"
+}
+
+# ----------------------------------------------------------------------------
+# cleanup-versions: which version survives
+#
+# test_cleanup_versions above cannot see this class of bug and never could. It
+# runs the verb twice against the AMBIENT cache and asserts only that the
+# second run removes nothing -- true whichever directory the first run chose.
+# The two tests below build a cache instead, and assert both what is left on
+# disk and what the JSON claims.
+#
+# The fixture versions are chosen so lexicographic and version order DISAGREE.
+# `ls` collates 1.10.0 and 1.123.0 BEFORE 1.9.0, because '1' < '9' at the third
+# character, so the old `ls ... | tail -1` answered 1.9.0 and this verb -- the
+# one site that runs rm -rf -- deleted the newer installs and wrote the older
+# one into the global cli-path cache. A 1.122.0/1.123.0 fixture would pass
+# against that bug, because those two happen to agree.
+#
+# Everything runs under a throwaway CLAUDE_CONFIG_DIR and AIMI_CONFIG_DIR: this
+# verb rm -rf's whatever it does not keep, so pointed at the ambient
+# environment it would delete the plugin install running the suite.
+# ----------------------------------------------------------------------------
+
+# Create one installed-version directory holding an executable stub CLI.
+_make_cached_version() {
+  local cache_root="$1" entry="$2" version="$3"
+  local dir="$cache_root/plugins/cache/$entry/aimi-engineering/$version/scripts"
+  mkdir -p "$dir"
+  printf '#!/usr/bin/env bash\n' > "$dir/aimi-cli.sh"
+  chmod +x "$dir/aimi-cli.sh"
+}
+
+# Run cleanup-versions against a throwaway cache. CLAUDECODE=1 and an unset
+# AIMI_PLUGIN_DIR are explicit rather than inherited: a real session exports
+# both, and inheriting AIMI_PLUGIN_DIR would take the converter short-circuit
+# and assert nothing at all.
+_run_cleanup_versions_isolated() {
+  local cfg="$1" aimi_cfg="$2"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" cleanup-versions 2>/dev/null
+}
+
+test_cleanup_versions_keeps_newest_version() {
+  echo ""
+  echo "=== Testing cleanup-versions keeps the newest VERSION, not the lexicographic last ==="
+
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$cfg" "$aimi_cfg"
+
+  _make_cached_version "$cfg" "abc123" "1.9.0"
+  _make_cached_version "$cfg" "abc123" "1.10.0"
+  _make_cached_version "$cfg" "abc123" "1.123.0"
+
+  local output base
+  output=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg")
+  base="$cfg/plugins/cache/abc123/aimi-engineering"
+
+  assert_eq "1.123.0" "$(echo "$output" | jq -r '.kept')" \
+    "cleanup-versions: reports 1.123.0 as kept, not the lexicographically last 1.9.0"
+  assert_eq "2" "$(echo "$output" | jq -r '.removed')" \
+    "cleanup-versions: removes both older version directories"
+
+  assert_eq "yes" "$([ -d "$base/1.123.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.123.0 directory is still on disk"
+  assert_eq "no" "$([ -d "$base/1.9.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.9.0 directory is gone from disk"
+  assert_eq "no" "$([ -d "$base/1.10.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the 1.10.0 directory is gone from disk"
+
+  assert_eq "$base/1.123.0/scripts/aimi-cli.sh" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "cleanup-versions: writes the 1.123.0 path into the global cli-path cache"
+
+  rm -rf "$root"
+}
+
+test_cleanup_versions_sorts_on_version_segment() {
+  echo ""
+  echo "=== Testing cleanup-versions sorts on the version segment, not the whole path ==="
+
+  # Two marketplace entries, with the NEWER version under the lexicographically
+  # EARLIER one. A `sort -V` over whole path strings orders by marketplace-entry
+  # directory first and version only second, so it would pick zzz-entry/1.9.0 --
+  # the same bug moved one wildcard to the left. Only a sort keyed on the
+  # version segment answers 1.123.0 here.
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$cfg" "$aimi_cfg"
+
+  _make_cached_version "$cfg" "aaa-entry" "1.123.0"
+  _make_cached_version "$cfg" "zzz-entry" "1.9.0"
+
+  local output
+  output=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg")
+
+  assert_eq "1.123.0" "$(echo "$output" | jq -r '.kept')" \
+    "cleanup-versions: keeps 1.123.0 when it lives under the lexicographically earlier marketplace entry"
+  assert_eq "$cfg/plugins/cache/aaa-entry/aimi-engineering/1.123.0/scripts/aimi-cli.sh" \
+    "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "cleanup-versions: the global cli-path cache gets the newer version's path across entries"
+  assert_eq "no" \
+    "$([ -d "$cfg/plugins/cache/zzz-entry/aimi-engineering/1.9.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the older version under the later entry is removed"
+
+  rm -rf "$root"
+}
+
+test_resolve_skills_base_dir_picks_newest_version() {
+  echo ""
+  echo "=== Testing _resolve_skills_base_dir resolves the newest installed version ==="
+
+  # A deliberate behaviour change, not a head/tail typo fix. This function took
+  # the FIRST glob hit while CLI-path resolution took the LAST, so a host with
+  # two versions co-resident fed every spawned agent the SKILL.md of one install
+  # while the CLI orchestrating it came from the other (measured live: skills at
+  # 1.122.0 against a CLI at 1.123.0 in one session). Both sides now answer
+  # "newest version".
+  #
+  # Three versions, because the two discarded idioms fail in OPPOSITE
+  # directions and a two-version fixture lets one of them pass by luck. `ls`
+  # collates these as 1.122.0, 1.123.0, 1.9.0 -- so the old `head -1` here
+  # answers 1.122.0, the `tail -1` the CLI used answers 1.9.0, and only a
+  # version-aware comparison answers 1.123.0.
+  local root cfg empty_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  empty_cfg="$root/empty-config"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.9.0/skills"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.122.0/skills"
+  mkdir -p "$cfg/plugins/cache/abc123/aimi-engineering/1.123.0/skills"
+  mkdir -p "$empty_cfg"
+
+  source_cache_functions
+  eval "$(sed -n '/^_resolve_skills_base_dir()/,/^}/p' "$CLI")"
+
+  local resolved
+  resolved=$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$cfg" _resolve_skills_base_dir)
+  assert_eq "$cfg/plugins/cache/abc123/aimi-engineering/1.123.0/skills" "$resolved" \
+    "_resolve_skills_base_dir: resolves the newest version, agreeing with CLI-path resolution"
+
+  # Unresolvable still returns an empty string silently rather than aborting --
+  # the caller emits skills: [] and the story executor gets its context anyway.
+  resolved=$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$empty_cfg" _resolve_skills_base_dir)
+  assert_eq "" "$resolved" \
+    "_resolve_skills_base_dir: an empty glob still yields empty rather than aborting"
+
+  rm -rf "$root"
 }
 
 # ============================================================================
@@ -2733,7 +2899,7 @@ test_check_version_fix_updates_global_cache() {
 
   # Resolve the latest path in our mock env
   local latest_glob_path
-  latest_glob_path=$(ls "$CLAUDE_CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1)
+  latest_glob_path=$(_test_latest_installed_cli_path "$CLAUDE_CONFIG_DIR")
 
   if [ -z "$latest_glob_path" ]; then
     echo "  (skipping: no mock CLI in plugin cache)"
@@ -7344,6 +7510,9 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_cleanup_versions
+  test_cleanup_versions_keeps_newest_version
+  test_cleanup_versions_sorts_on_version_segment
+  test_resolve_skills_base_dir_picks_newest_version
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
   fi

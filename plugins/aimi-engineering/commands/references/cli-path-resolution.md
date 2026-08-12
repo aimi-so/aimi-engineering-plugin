@@ -36,8 +36,18 @@ if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 
 Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
 
+The pipeline picks the newest **version**, and that is not the same as the last
+line `ls` prints: `ls` collates `1.121.3` before `1.9.0`, because `1` sorts
+below `9` at the third character. A plain `sort -V` over the whole path is
+wrong too — the glob spans two wildcards, so it would order by
+marketplace-entry directory first and by version only inside one entry. So each
+candidate is prefixed with its own version segment and `sort -V` keys on that.
+This is an inline copy of `_resolve_latest_cache_path` in `aimi-cli.sh`, which
+is the canonical rule; it cannot be called here because it lives inside the
+file this block is still looking for.
+
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time
@@ -86,10 +96,14 @@ if [ -n "$WORKTREE_MGR" ] && [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi
 
 ### Layer 2: Glob fallback (zsh-safe)
 
-Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
+Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors, and
+keys the version comparison on the version path segment for the same reason the
+CLI's own Layer 2 above does — canonical rule: `_resolve_latest_cache_path` in
+`aimi-cli.sh`. The two must agree: resolving the worktree manager from a
+different install than the CLI is the same defect one file over.
 
 ```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | tail -1'); fi
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time
