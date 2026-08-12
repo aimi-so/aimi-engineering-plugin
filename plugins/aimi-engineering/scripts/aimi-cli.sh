@@ -1225,26 +1225,24 @@ cmd_set_execution_mode() {
 
   tasks_file=$(get_tasks_file)
 
-  local has_phase
-  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file")
-  if [ "$has_phase" = "true" ]; then
-    echo "Error: Cannot set metadata.execution on a phase-scoped tasks file (metadata.phase is present): $tasks_file" >&2
-    exit 1
-  fi
-
-  # Atomic update using flock and unique temp file
-  local tmp_file
-  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  # One crossing, inside the lock. The phase guard used to be a jq read taken
+  # OUTSIDE this lock, and the assignment a second jq into a bash mktemp file:
+  # the two-crossing shape, spelled in jq rather than in python3, which is why
+  # the counting test's own filter discarded this wrapper instead of failing
+  # it. Guard, decision, write and echo-back are the single call now, and
+  # tasks.py's write_docs_atomically owns the temp file -- so the mktemp/mv/
+  # `rm -f` dance is DELETED here, not relocated.
+  #
+  # The invalid-mode refusal above stays in bash on the rule this file already
+  # follows: it is reachable without reading the document, so it happens before
+  # the lock. The phase-scoped one needs the document and moves into the
+  # crossing, where tasks.py's die() writes the same line to stderr and exits 1.
+  check_python3
   (
     _lock "${tasks_file}.lock"
-    jq --arg mode "$mode" \
-      '.metadata.execution = $mode' \
-      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+    python3 "$(_aimi_tasks_py)" set-execution-mode \
+      --tasks-file "$tasks_file" --mode "$mode"
   ) 200>"${tasks_file}.lock"
-  # Cleanup temp file on failure
-  rm -f "$tmp_file" 2>/dev/null
-
-  printf '{"execution":"%s"}\n' "$mode"
 }
 
 # Count pending stories

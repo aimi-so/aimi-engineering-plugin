@@ -2606,11 +2606,49 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
 _WRAPPER = re.compile(r"^(cmd_\w+)\(\) \{\n(.*?)^\}$", re.M | re.S)
 _TASKS_CROSSING = 'python3 "$(_aimi_tasks_py)"'
 _ROADMAP_CROSSING = 'python3 "$(_aimi_roadmap_py)"'
+# The lock a tasks.json verb takes, and the ONLY thing the check below selects
+# on. See _locked_tasks_wrappers for why the crossing cannot be part of it.
+_TASKS_LOCK = '_lock "${tasks_file}.lock"'
 
 
 def _wrappers():
     with open(CLI, encoding="utf-8") as handle:
         return _WRAPPER.findall(handle.read())
+
+
+def _locked_tasks_wrappers(wrappers):
+    """Every wrapper that takes the tasks-file lock -- crossing or no crossing.
+
+    The filter used to read `"_lock " in body and _TASKS_CROSSING in body`, and
+    that second conjunct was a hole exactly one verb wide: a locked tasks
+    wrapper making ZERO crossings was discarded HERE, before the exhaustive set
+    comparison below could notice it was missing. cmd_set_execution_mode sat in
+    it for as long as it existed -- reading its phase guard with jq outside the
+    lock, writing with a second jq inside it, and satisfying a check that
+    counted python3 calls by making none.
+
+    Counting crossings only in the wrappers that already call python3 cannot
+    catch the wrapper that calls none, so the selection is the LOCK. Every
+    wrapper that serializes on a tasks file is answerable to the invariant,
+    whatever it happens to serialize.
+    """
+    return {name: body for name, body in wrappers if _TASKS_LOCK in body}
+
+
+def _assert_one_crossing_inside_the_lock(name, body):
+    """The invariant itself, applied to one wrapper.
+
+    Zero and more-than-one get their own message because they are different
+    defects: zero is a verb that reached Python not at all and is doing its own
+    document work in bash, more than one is a verb whose read and its write are
+    separated by the lock. A shared message would report each as the other's
+    diagnosis.
+    """
+    crossings = body.count(_TASKS_CROSSING)
+    assert crossings != 0, name + " takes the tasks lock and never crosses into Python"
+    assert crossings == 1, name + " crosses more than once"
+    assert body.index('_lock "') < body.index(_TASKS_CROSSING), name
+    assert body.index(_TASKS_CROSSING) < body.index('200>"'), name
 
 
 def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
@@ -2634,19 +2672,21 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
     cmd_list_ready names the module in each of two mutually exclusive branches,
     which is one crossing per invocation. The check below is scoped to the
     wrappers that take the lock, where "per invocation" and "per body" agree.
+
+    Selection is by the LOCK alone. It used to require a crossing to be present
+    before it would count crossings, which let cmd_set_execution_mode through
+    for making none -- see _locked_tasks_wrappers, and see the test below it
+    for the demonstration that the widened filter actually bites.
     """
     wrappers = _wrappers()
-    locked = {
-        name: body
-        for name, body in wrappers
-        if "_lock " in body and _TASKS_CROSSING in body
-    }
+    locked = _locked_tasks_wrappers(wrappers)
     assert set(locked) == {
         "cmd_mark_in_progress",
         "cmd_mark_complete",
         "cmd_mark_failed",
         "cmd_mark_skipped",
         "cmd_update_field",
+        "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
         "cmd_cascade_skip",
@@ -2655,9 +2695,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_gate_fail",
     }
     for name, body in sorted(locked.items()):
-        assert body.count(_TASKS_CROSSING) == 1, name + " crosses more than once"
-        assert body.index('_lock "') < body.index(_TASKS_CROSSING), name
-        assert body.index(_TASKS_CROSSING) < body.index('200>"'), name
+        _assert_one_crossing_inside_the_lock(name, body)
 
     two_crossings = [
         name for name, body in wrappers if body.count(_ROADMAP_CROSSING) > 1
@@ -2669,6 +2707,89 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
     branched = [name for name, body in wrappers if body.count(_TASKS_CROSSING) > 1]
     assert branched == ["cmd_list_ready"]
     assert "_lock " not in dict(wrappers)["cmd_list_ready"]
+
+
+# cmd_set_execution_mode exactly as it stood before this check was widened:
+# the jq phase guard read outside the lock, the jq assignment into a bash
+# mktemp file inside it, and not one crossing into Python anywhere. Kept
+# verbatim rather than paraphrased, because the point of the test below is that
+# THIS body used to pass.
+_ZERO_CROSSING_WRAPPER = r"""  local mode="$1"
+  local tasks_file
+
+  if [ "$mode" != "container" ] && [ "$mode" != "inline" ]; then
+    echo "Error: Invalid execution mode: $mode (expected container or inline)" >&2
+    exit 1
+  fi
+
+  tasks_file=$(get_tasks_file)
+
+  local has_phase
+  has_phase=$(jq -r 'if (.metadata.phase // null) != null then "true" else "false" end' "$tasks_file")
+  if [ "$has_phase" = "true" ]; then
+    echo "Error: Cannot set metadata.execution on a phase-scoped tasks file (metadata.phase is present): $tasks_file" >&2
+    exit 1
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${tasks_file}.XXXXXX")
+  (
+    _lock "${tasks_file}.lock"
+    jq --arg mode "$mode" \
+      '.metadata.execution = $mode' \
+      "$tasks_file" > "$tmp_file" && mv "$tmp_file" "$tasks_file"
+  ) 200>"${tasks_file}.lock"
+  rm -f "$tmp_file" 2>/dev/null
+
+  printf '{"execution":"%s"}\n' "$mode"
+"""
+
+
+def test_the_widened_check_rejects_a_locked_tasks_verb_that_never_crosses():
+    """The hole, and the proof that it is shut.
+
+    A test that only passes says nothing about what it was written to catch, so
+    the pre-change wrapper is replayed through the check as a fixture. Three
+    things are asserted about it, in the order they went wrong:
+
+      * the OLD filter dropped it -- `_lock` and a crossing, conjoined, and it
+        had only the first, so the exhaustive set below never got a vote;
+      * the NEW filter keeps it, because the lock alone selects;
+      * and the check then FAILS it, naming zero crossings rather than the
+        more-than-one diagnosis that belongs to a different defect.
+    """
+    pre_change = [("cmd_set_execution_mode", _ZERO_CROSSING_WRAPPER)]
+
+    assert _TASKS_CROSSING not in _ZERO_CROSSING_WRAPPER
+    assert not [
+        name
+        for name, body in pre_change
+        if "_lock " in body and _TASKS_CROSSING in body
+    ], "the old filter discarded it, which is how it hid"
+    assert set(_locked_tasks_wrappers(pre_change)) == {"cmd_set_execution_mode"}
+
+    with pytest.raises(AssertionError) as zero:
+        _assert_one_crossing_inside_the_lock(
+            "cmd_set_execution_mode", _ZERO_CROSSING_WRAPPER
+        )
+    assert "never crosses into Python" in str(zero.value)
+
+    # And the other failure mode still reports itself, so neither one can be
+    # read as the other. This body crosses twice, with the lock around the
+    # second only -- the shape cascade-skip and the two gates each lost a race
+    # to before they were moved.
+    twice = (
+        '  tasks_file=$(get_tasks_file)\n'
+        '  python3 "$(_aimi_tasks_py)" status --tasks-file "$tasks_file"\n'
+        '  (\n'
+        '    _lock "${tasks_file}.lock"\n'
+        '    python3 "$(_aimi_tasks_py)" mark-complete --tasks-file "$tasks_file"\n'
+        '  ) 200>"${tasks_file}.lock"\n'
+    )
+    assert set(_locked_tasks_wrappers([("cmd_twice", twice)])) == {"cmd_twice"}
+    with pytest.raises(AssertionError) as more:
+        _assert_one_crossing_inside_the_lock("cmd_twice", twice)
+    assert "crosses more than once" in str(more.value)
 
 
 def test_every_op_is_named_after_the_verb_that_calls_it():
@@ -2700,6 +2821,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "mark-in-progress",
         "mark-skipped",
         "update-field",
+        "set-execution-mode",
         "normalize-status",
         "normalize-verification",
         "cascade-skip",

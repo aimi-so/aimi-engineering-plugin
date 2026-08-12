@@ -2954,6 +2954,55 @@ def op_update_field(argv):
     return 0
 
 
+def op_set_execution_mode(argv):
+    """The phase guard, the write and the echo-back, in one crossing.
+
+    This verb crossed into Python ZERO times before: the guard was a jq read
+    taken OUTSIDE the lock the write then happened under, and the write was a
+    second jq into a bash mktemp file. That is the two-crossing shape, spelled
+    in jq -- which is exactly why a check that counted crossings into Python
+    never saw it. No race was reachable (nothing writes metadata.phase at
+    runtime; /aimi:plan sets it once, when it generates the whole file), so
+    what moves here is the shape, not a lost update.
+
+    The echo-back goes through _emit_compact and NOT _emit: it was a printf in
+    aimi-cli.sh, never a jq program, so it never had jq's two-space indent, and
+    part1 compares the whole line.
+    """
+    path = _flag(argv, "--tasks-file")
+    mode = _flag(argv, "--mode")
+    if not path or not mode:
+        die("Usage: tasks.py set-execution-mode --tasks-file <path> --mode <container|inline>")
+    # The mode itself is NOT re-checked here. aimi-cli.sh refuses anything but
+    # container/inline before this process starts -- that refusal needs no
+    # document, so it belongs in bash ahead of the lock, and duplicating it
+    # would give one rule two homes.
+    docs = read_docs(path, "set-execution-mode")
+    # The guard, reproduced over the STREAM because that is what it read.
+    # `has_phase=$(jq -r '…' "$f")` captured ONE LINE PER DOCUMENT and compared
+    # the whole capture against "true", so a file holding two concatenated
+    # documents never refused, and an empty one -- yielding no line at all --
+    # did not either. Same comparison, against the same joined text. `// null`
+    # is jq's alternative, so a `phase: false` took the fallback and read as
+    # absent; jq_alternative keeps that.
+    verdicts = [
+        "true"
+        if jq_alternative(jq_index(jq_index(doc, "metadata"), "phase", ".metadata"), None)
+        is not None
+        else "false"
+        for doc in docs
+    ]
+    if "\n".join(verdicts) == "true":
+        die(
+            "Error: Cannot set metadata.execution on a phase-scoped tasks file "
+            "(metadata.phase is present): " + path
+        )
+    docs = [jq_setpath(doc, ["metadata", "execution"], mode, "") for doc in docs]
+    write_docs_atomically(path, docs)
+    _emit_compact({"execution": mode})
+    return 0
+
+
 def _normalize_op(verb, rule):
     """Both normalizers: map, write, and report the count from the SAME call.
 
@@ -3358,6 +3407,7 @@ _OPS = {
     "mark-in-progress": _mark_op("mark-in-progress"),
     "mark-skipped": _mark_op("mark-skipped"),
     "update-field": op_update_field,
+    "set-execution-mode": op_set_execution_mode,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
     "cascade-skip": op_cascade_skip,
