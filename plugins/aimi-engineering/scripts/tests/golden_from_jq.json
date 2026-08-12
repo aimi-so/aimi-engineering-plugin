@@ -36703,5 +36703,1600 @@
       }
     }
   ],
-  "_comment_models_read": "models.json READERS -- cmd_resolve_models, cmd_get_current_models, cmd_models_prompt_check and cmd_list_models -- captured the way every block before them was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 114 cases at commit 9d45ddf. cmd_detect_models is the WRITER of this same file and is NOT here; it is captured with its own block by its own slice. models.json is a GLOBAL file, so every case builds a throwaway config root and points AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR at it, and PATH is a shim directory of symlinks rather than the developer's -- nothing here can reach the real ~/.config/aimi/ or ~/.claude/plugins/cache/. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT, which is a different case again from one that prints nothing), `python3` says whether a python3 symlink was placed in that shim directory, `marker` names the per-host models-prompt-seen-<host> file to pre-create, and `seed_cache` writes models-oc-cache-<mtime>.txt keyed on the CONFIG FILE's own mtime before the run. `files` is every file left in the root afterwards WITH ITS CONTENTS, because _oc_models_cache_path writes a sibling next to models.json and nothing ever collects it -- the same reason archive_cases records a tree. Two normalizations fire, on the way in and on the way out: the root becomes /TMP and the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt. Without them two captures could not be byte-identical; with them, two consecutive full captures are. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Accepted: a valid v2.0 config on both hosts, the literal string `inherit`, an id padded with spaces, a config holding only the OTHER host's table. Rejected with the pt-BR string \"schema 1.0 obsoleto -- re-rode aimi-cli detect-models\", which resolve-models and get-current-models each own a copy of: a real v1.0 document, a v2.0 one carrying a top-level .models key, one with no schemaVersion at all, a bare JSON string, and -- see (3) -- malformed JSON. Warned and degraded to inherit: an unknown id per host, an id with an internal space, an internal tab, a double tab, a backslash, a newline. Silently absent: an empty string, a null, a false, an absent `categories` key. Refused with nothing on either stream: the four non-string values of (1). TWELVE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D1. A non-string category value makes resolve-models exit 5 with EMPTY stdout and EMPTY stderr -- rm-valor-true-cc, rm-valor-numero-cc, rm-valor-objeto-cc, rm-valor-array-cc -- violating its own documented contract that stdout is always valid JSON and every failure path returns the fallback at exit 0. Three things compound: jq's `//` fires only on null and false, so a non-string survives into the \"INVALID\\t\" + value concatenation, which is a type error; that jq call's stderr is discarded with no || fallback, unlike the two before it; and it is a BARE assignment to an already-declared local, so under `set -euo pipefail` jq's status takes the whole shell down. It is host-conditional, which is the tell: with an EMPTY valid set the validation pass never runs and the same config prints {\"research\":true,...} at exit 0 -- rm-valor-true-oc-sem-binario. Captured as-is and ported to as-is; the repair is its own commit, and it has landed: the six entries above -- rm-valor-true-cc, rm-valor-numero-cc, rm-valor-objeto-cc, rm-valor-array-cc, rm-valor-numero-oc-stub and rm-valor-true-oc-stub -- were the ONLY records edited after capture, in the commit that changed the rule, and each now holds exit 0, the all-but-research result, and one warning naming the value in the compact JSON form jq's own string interpolation would have used. What they recorded before is in this file's history and in that commit's diff. Everything else here is still the bash's. (2) `false` and `null` both resolve to inherit while `0` does not -- rm-valor-false-cc and rm-valor-null-cc against rm-valor-numero-cc -- because `//` reads false as absent and 0 as present. models-prompt-check inherits the same asymmetry from its own `//`: mpc-valor-zero-cc answers skip and mpc-valor-false-cc answers prompt. (3) Malformed JSON is reported as \"schema 1.0 obsoleto\" -- rm-json-malformado-cc, gcm-json-malformado-cc -- because jq's parse failure lands in the `|| _schema_ok=\"reject\"` handler on the schema pass. The documented \"malformed JSON or failed to parse\" message is reachable only when the file PARSES and `.categories`, or its host sub-table, is not an object: rm-categories-string-cc, rm-categories-host-string-cc, rm-categories-host-array-oc-stub. Both messages name the config path. (4) D4. One invalid id containing a newline produces TWO warnings, and the second names a category that does not exist while claiming an empty model id -- rm-id-com-newline-cc on Claude Code, rm-id-com-newline-oc-stub on OpenCode, where the fabricated category is a model id. The `while IFS=$'\\t' read -r _cat _val` loop is line-oriented and the value it reads is not. (5) An INTERNAL tab survives the same loop intact, single or doubled -- rm-id-com-tab-cc, rm-id-com-tab-duplo-cc, rm-id-com-tab-oc-stub -- because `read` hands the whole remainder after the FIRST delimiter to the last variable, verbatim. The delimiter's only real casualty is the newline, so changing the delimiter a third time would have fixed nothing. (6) resolve-models emits the NORMALIZED id, not the stored one: a config holding \"  sonnet  \" resolves to \"sonnet\" -- rm-id-espaco-nas-pontas-cc, rm-id-espaco-nas-pontas-oc-stub -- while get-current-models, which does not validate, hands the padded string straight back (gcm-id-espaco-nas-pontas-cc). (7) jq reads a STREAM, not one value. A two-document models.json runs the verb twice and prints two lines of JSON -- rm-dois-documentos-cc, gcm-dois-documentos-cc -- and the same shape makes models-prompt-check answer prompt for a file whose single document would have answered skip (mpc-dois-documentos-cc), because the bash compares jq's whole multi-line output against the literal \"true\". (8) A whitespace-only file lands in resolve-models' \"empty result\" branch WITH a warning (rm-so-espacos-cc) and in get-current-models' equivalent branch with NO warning at all (gcm-so-espacos-cc). The two verbs' last-resort branches differ by exactly one line to stderr, and both are contract. (9) D10, recorded and deliberately carried across unchanged. The OpenCode cache is keyed on the mtime of models.json but its VALUE is the output of `opencode models`: a seeded cache beats the live binary (rm-cache-preexistente-vence-oc, lm-oc-cache-preexistente) and is not consulted at all when the binary is absent, because the `command -v opencode` probe returns first (rm-cache-preexistente-ignorado-sem-binario-oc). No case anywhere deletes one. Fixing the key would change WHEN a shell-out happens, which is a behaviour change and cannot ride inside a delta-zero commit. (10) list-models normalizes what it OFFERS -- padded entries trimmed, empty entries dropped (lm-oc-cache-preexistente) -- and falls back to the built-in Anthropic list whenever the set is empty for either of its two reasons: no binary (lm-oc-sem-binario) or a binary that printed nothing (lm-oc-stub-vazio). Its Claude Code branch reads no config at all and answers the same three aliases with or without one (lm-cc, lm-cc-sem-config). (11) The two JSON output spellings coexist and are both contract: resolve-models and get-current-models print COMPACT single-line objects, list-models prints a PRETTY two-space-indented array. (12) The `python3` cases record what a python3-less host sees TODAY, which is everything -- these four verbs are pure bash and jq at this commit, so hiding the interpreter changes nothing. They are here so the port's degrade path is measured against a real before-state instead of an assumption. The ones the port deliberately changes are named, with what each costs, in test_models.py's KNOWN_DIVERGENCES; the recording itself is never edited to match the port."
+  "_comment_models_read": "models.json READERS -- cmd_resolve_models, cmd_get_current_models, cmd_models_prompt_check and cmd_list_models -- captured the way every block before them was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 114 cases at commit 9d45ddf. cmd_detect_models is the WRITER of this same file and is NOT here; it is captured with its own block by its own slice. models.json is a GLOBAL file, so every case builds a throwaway config root and points AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR at it, and PATH is a shim directory of symlinks rather than the developer's -- nothing here can reach the real ~/.config/aimi/ or ~/.claude/plugins/cache/. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT, which is a different case again from one that prints nothing), `python3` says whether a python3 symlink was placed in that shim directory, `marker` names the per-host models-prompt-seen-<host> file to pre-create, and `seed_cache` writes models-oc-cache-<mtime>.txt keyed on the CONFIG FILE's own mtime before the run. `files` is every file left in the root afterwards WITH ITS CONTENTS, because _oc_models_cache_path writes a sibling next to models.json and nothing ever collects it -- the same reason archive_cases records a tree. Two normalizations fire, on the way in and on the way out: the root becomes /TMP and the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt. Without them two captures could not be byte-identical; with them, two consecutive full captures are. THE CORPUS FAILS ON PURPOSE, and here is the roll-call. Accepted: a valid v2.0 config on both hosts, the literal string `inherit`, an id padded with spaces, a config holding only the OTHER host's table. Rejected with the pt-BR string \"schema 1.0 obsoleto -- re-rode aimi-cli detect-models\", which resolve-models and get-current-models each own a copy of: a real v1.0 document, a v2.0 one carrying a top-level .models key, one with no schemaVersion at all, a bare JSON string, and -- see (3) -- malformed JSON. Warned and degraded to inherit: an unknown id per host, an id with an internal space, an internal tab, a double tab, a backslash, a newline. Silently absent: an empty string, a null, a false, an absent `categories` key. Refused with nothing on either stream: the four non-string values of (1). TWELVE THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) D1. A non-string category value makes resolve-models exit 5 with EMPTY stdout and EMPTY stderr -- rm-valor-true-cc, rm-valor-numero-cc, rm-valor-objeto-cc, rm-valor-array-cc -- violating its own documented contract that stdout is always valid JSON and every failure path returns the fallback at exit 0. Three things compound: jq's `//` fires only on null and false, so a non-string survives into the \"INVALID\\t\" + value concatenation, which is a type error; that jq call's stderr is discarded with no || fallback, unlike the two before it; and it is a BARE assignment to an already-declared local, so under `set -euo pipefail` jq's status takes the whole shell down. It is host-conditional, which is the tell: with an EMPTY valid set the validation pass never runs and the same config prints {\"research\":true,...} at exit 0 -- rm-valor-true-oc-sem-binario. Captured as-is and ported to as-is; the repair is its own commit, and it has landed: the six entries above -- rm-valor-true-cc, rm-valor-numero-cc, rm-valor-objeto-cc, rm-valor-array-cc, rm-valor-numero-oc-stub and rm-valor-true-oc-stub -- were the ONLY records edited after capture, in the commit that changed the rule, and each now holds exit 0, the all-but-research result, and one warning naming the value in the compact JSON form jq's own string interpolation would have used. What they recorded before is in this file's history and in that commit's diff. Everything else here is still the bash's. (2) `false` and `null` both resolve to inherit while `0` does not -- rm-valor-false-cc and rm-valor-null-cc against rm-valor-numero-cc -- because `//` reads false as absent and 0 as present. models-prompt-check inherits the same asymmetry from its own `//`: mpc-valor-zero-cc answers skip and mpc-valor-false-cc answers prompt. (3) Malformed JSON is reported as \"schema 1.0 obsoleto\" -- rm-json-malformado-cc, gcm-json-malformado-cc -- because jq's parse failure lands in the `|| _schema_ok=\"reject\"` handler on the schema pass. The documented \"malformed JSON or failed to parse\" message is reachable only when the file PARSES and `.categories`, or its host sub-table, is not an object: rm-categories-string-cc, rm-categories-host-string-cc, rm-categories-host-array-oc-stub. Both messages name the config path. (4) D4. One invalid id containing a newline produces TWO warnings, and the second names a category that does not exist while claiming an empty model id -- rm-id-com-newline-cc on Claude Code, rm-id-com-newline-oc-stub on OpenCode, where the fabricated category is a model id. The `while IFS=$'\\t' read -r _cat _val` loop is line-oriented and the value it reads is not. (5) An INTERNAL tab survives the same loop intact, single or doubled -- rm-id-com-tab-cc, rm-id-com-tab-duplo-cc, rm-id-com-tab-oc-stub -- because `read` hands the whole remainder after the FIRST delimiter to the last variable, verbatim. The delimiter's only real casualty is the newline, so changing the delimiter a third time would have fixed nothing. (6) resolve-models emits the NORMALIZED id, not the stored one: a config holding \"  sonnet  \" resolves to \"sonnet\" -- rm-id-espaco-nas-pontas-cc, rm-id-espaco-nas-pontas-oc-stub -- while get-current-models, which does not validate, hands the padded string straight back (gcm-id-espaco-nas-pontas-cc). (7) jq reads a STREAM, not one value. A two-document models.json runs the verb twice and prints two lines of JSON -- rm-dois-documentos-cc, gcm-dois-documentos-cc -- and the same shape makes models-prompt-check answer prompt for a file whose single document would have answered skip (mpc-dois-documentos-cc), because the bash compares jq's whole multi-line output against the literal \"true\". (8) A whitespace-only file lands in resolve-models' \"empty result\" branch WITH a warning (rm-so-espacos-cc) and in get-current-models' equivalent branch with NO warning at all (gcm-so-espacos-cc). The two verbs' last-resort branches differ by exactly one line to stderr, and both are contract. (9) D10, recorded and deliberately carried across unchanged. The OpenCode cache is keyed on the mtime of models.json but its VALUE is the output of `opencode models`: a seeded cache beats the live binary (rm-cache-preexistente-vence-oc, lm-oc-cache-preexistente) and is not consulted at all when the binary is absent, because the `command -v opencode` probe returns first (rm-cache-preexistente-ignorado-sem-binario-oc). No case anywhere deletes one. Fixing the key would change WHEN a shell-out happens, which is a behaviour change and cannot ride inside a delta-zero commit. (10) list-models normalizes what it OFFERS -- padded entries trimmed, empty entries dropped (lm-oc-cache-preexistente) -- and falls back to the built-in Anthropic list whenever the set is empty for either of its two reasons: no binary (lm-oc-sem-binario) or a binary that printed nothing (lm-oc-stub-vazio). Its Claude Code branch reads no config at all and answers the same three aliases with or without one (lm-cc, lm-cc-sem-config). (11) The two JSON output spellings coexist and are both contract: resolve-models and get-current-models print COMPACT single-line objects, list-models prints a PRETTY two-space-indented array. (12) The `python3` cases record what a python3-less host sees TODAY, which is everything -- these four verbs are pure bash and jq at this commit, so hiding the interpreter changes nothing. They are here so the port's degrade path is measured against a real before-state instead of an assumption. The ones the port deliberately changes are named, with what each costs, in test_models.py's KNOWN_DIVERGENCES; the recording itself is never edited to match the port.",
+  "models_write_cases": [
+    {
+      "label": "dm-sem-config-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-sem-config-oc-sem-binario",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list.\ndetect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-sem-config-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'anthropic/claude-haiku-4-5' 'anthropic/claude-sonnet-4-6' 'anthropic/claude-opus-4-7'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models-oc-cache-<MTIME>.txt",
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-mesmo-host-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"opus\",\n      \"workflow\": \"opus\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-outro-host-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-outro-host-oc-sem-binario",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"opus\",\n      \"workflow\": \"opus\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"opus\",\n      \"workflow\": \"opus\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: opencode binary not found or returned no models; using built-in Anthropic model list.\ndetect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"opus\",\n      \"workflow\": \"opus\",\n      \"executor\": \"opus\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-ambos-hosts-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-ambos-hosts-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'anthropic/claude-haiku-4-5' 'anthropic/claude-sonnet-4-6' 'anthropic/claude-opus-4-7'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models-oc-cache-<MTIME>.txt",
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-chave-desconhecida-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"updatedAt\": \"2026-01-01T00:00:00Z\",\n  \"notes\": {\n    \"why\": \"a key nothing in the CLI writes\"\n  },\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-schema-v1-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"1.0\",\n  \"models\": {\n    \"research\": \"haiku\",\n    \"review\": \"opus\"\n  },\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-sem-schemaversion-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"categories\": {\"opencode\": {\"research\": \"anthropic/claude-haiku-4-5\"}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-categories-ausente-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\"}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-subtabela-com-chave-extra-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\"research\": \"opus\", \"custom\": \"keep me?\"},\n    \"opencode\": {\"research\": \"anthropic/claude-opus-4-7\"}\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-subtabela-com-chave-extra-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\"research\": \"opus\", \"custom\": \"keep me?\"},\n    \"opencode\": {\"research\": \"anthropic/claude-opus-4-7\"}\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-opus-4-7\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-outro-host-com-numeros-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\"opencode\": {\"research\": 1e3, \"review\": 1.0, \"design\": 7, \"workflow\": 0.1, \"executor\": true}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 1000,\n      \"review\": 1,\n      \"design\": 7,\n      \"workflow\": 0.1,\n      \"executor\": true\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 1000,\n      \"review\": 1,\n      \"design\": 7,\n      \"workflow\": 0.1,\n      \"executor\": true\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-outro-host-com-numeros-extremos-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\"opencode\": {\"research\": 10000000000000000000000, \"review\": -0}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 1e+22,\n      \"review\": -0\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": 1e+22,\n      \"review\": -0\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-nan-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\"opencode\": {\"research\": NaN}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": null\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": null\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-json-malformado-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-arquivo-vazio-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-so-espacos-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "   \n\t\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-documento-array-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "[\"opus\"]\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <stdin>:0): Cannot index array with string \"categories\"\n",
+      "file": "[\"opus\"]\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-documento-string-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "\"nope\"\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <stdin>:0): Cannot index string with string \"categories\"\n",
+      "file": "\"nope\"\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-categories-string-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": \"nope\"}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <stdin>:0): string (\"nope\") and object ({\"claudeCod...) cannot be added\n",
+      "file": "{\"schemaVersion\": \"2.0\", \"categories\": \"nope\"}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-dois-documentos-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"a\"}}}{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"b\"}}}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"a\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"b\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"a\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"b\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-lista-sem-haiku-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'openai/gpt-5' 'google/gemini-3-pro' 'meta/llama-4-405b'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        "models-oc-cache-<MTIME>.txt"
+      ]
+    },
+    {
+      "label": "dm-lista-so-sonnet-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'openai/gpt-5' 'anthropic/claude-sonnet-4-6'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "file": null,
+      "tree": [
+        "models-oc-cache-<MTIME>.txt"
+      ]
+    },
+    {
+      "label": "dm-lista-sem-haiku-config-existente-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'openai/gpt-5' 'google/gemini-3-pro' 'meta/llama-4-405b'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models-oc-cache-<MTIME>.txt",
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-sem-config-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-mesmo-host-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"opus\",\n      \"workflow\": \"opus\",\n      \"executor\": \"opus\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-outro-host-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-ambos-hosts-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-ambos-hosts-oc-sem-binario",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "anthropic/claude-haiku-4-5",
+        "--review",
+        "anthropic/claude-opus-4-7",
+        "--design",
+        "anthropic/claude-sonnet-4-6",
+        "--workflow",
+        "anthropic/claude-sonnet-4-6",
+        "--executor",
+        "anthropic/claude-sonnet-4-6"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-chave-desconhecida-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"updatedAt\": \"2026-01-01T00:00:00Z\",\n  \"notes\": {\n    \"why\": \"a key nothing in the CLI writes\"\n  },\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-schema-v1-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"1.0\",\n  \"models\": {\n    \"research\": \"haiku\",\n    \"review\": \"opus\"\n  },\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-json-malformado-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": {\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-arquivo-vazio-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-categories-string-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\"schemaVersion\": \"2.0\", \"categories\": \"nope\"}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 5,
+      "stdout": "",
+      "stderr": "jq: error (at <stdin>:0): string (\"nope\") and object ({\"claudeCod...) cannot be added\n",
+      "file": "{\"schemaVersion\": \"2.0\", \"categories\": \"nope\"}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-aspas-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "he said \"haiku\"",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"he said \\\"haiku\\\"\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'he said \"haiku\"' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"he said \\\"haiku\\\"\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-barra-invertida-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "back\\slash",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"back\\\\slash\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'back\\slash' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"back\\\\slash\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-newline-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "one\ntwo",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"one\\ntwo\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'one\ntwo' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"one\\ntwo\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-tab-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "one\ttwo",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"one\\ttwo\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'one\ttwo' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"one\\ttwo\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-todos-os-quatro-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "a\"b\\c\nd\te",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"a\\\"b\\\\c\\nd\\te\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'a\"b\\c\nd\te' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"a\\\"b\\\\c\\nd\\te\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-nao-ascii-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "acentuação — 🎯",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"acentuação — 🎯\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'acentuação — 🎯' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"acentuação — 🎯\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-controle-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "bell\u0007delesc\u001b",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"bell\\u0007del\\u007fesc\\u001b\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'bell\u0007delesc\u001b' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"bell\\u0007del\\u007fesc\\u001b\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-outro-host-com-aspas-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "q\"\\ n",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"q\\\"\\\\ n\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'q\"\\ n' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    },\n    \"claudeCode\": {\n      \"research\": \"q\\\"\\\\ n\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-id-com-espaco-nas-pontas-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "  sonnet  ",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"sonnet\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-id-invalido-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "anthropic/claude-sonnet-4-6",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"anthropic/claude-sonnet-4-6\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'anthropic/claude-sonnet-4-6' is not valid for Claude Code host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"anthropic/claude-sonnet-4-6\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-id-invalido-oc-stub",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "opus",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": "#!/bin/sh\nprintf '%s\\n' 'anthropic/claude-haiku-4-5' 'anthropic/claude-sonnet-4-6' 'anthropic/claude-opus-4-7'\n",
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "Warning: detect-models: model 'opus' is not valid for OpenCode host (category: research); writing it anyway — resolve-models will fall back to inherit when it reads this file\nWarning: detect-models: model 'opus' is not valid for OpenCode host (category: review); writing it anyway — resolve-models will fall back to inherit when it reads this file\nWarning: detect-models: model 'sonnet' is not valid for OpenCode host (category: design); writing it anyway — resolve-models will fall back to inherit when it reads this file\nWarning: detect-models: model 'sonnet' is not valid for OpenCode host (category: workflow); writing it anyway — resolve-models will fall back to inherit when it reads this file\nWarning: detect-models: model 'sonnet' is not valid for OpenCode host (category: executor); writing it anyway — resolve-models will fall back to inherit when it reads this file\ndetect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"opus\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models-oc-cache-<MTIME>.txt",
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-id-invalido-oc-sem-binario",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "quem-sabe",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": null,
+        "host": "opencode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"quem-sabe\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote opencode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"opencode\": {\n      \"research\": \"quem-sabe\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-parcial-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus"
+      ],
+      "input": {
+        "config": null,
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor\n",
+      "file": null,
+      "tree": []
+    },
+    {
+      "label": "dm-flags-parcial-com-config-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: detect-models: when using category flags, all five must be provided: --research, --review, --design, --workflow, --executor\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flag-desconhecida-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--bogus",
+        "x"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: detect-models: unknown flag: --bogus\nUsage: aimi-cli.sh detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-so-espacos-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "   ",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: detect-models: --research value is whitespace only, which is not a model id\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-valor-ausente-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-argumento-posicional-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "haiku"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-diretorio-somente-leitura-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": true
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "mktemp: failed to create file via template '/TMP/models.json.<RANDOM>': Permission denied\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-diretorio-somente-leitura-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": true,
+        "readonly": true
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "mktemp: failed to create file via template '/TMP/models.json.<RANDOM>': Permission denied\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-python3-ausente-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-flags-python3-ausente-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models",
+        "--research",
+        "haiku",
+        "--review",
+        "opus",
+        "--design",
+        "sonnet",
+        "--workflow",
+        "sonnet",
+        "--executor",
+        "sonnet"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": false,
+        "jq": true,
+        "readonly": false
+      },
+      "exit": 0,
+      "stdout": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "stderr": "detect-models: wrote claudeCode table to /TMP/models.json\ndetect-models: re-run on the other host to populate both claudeCode and opencode tables\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    },
+    {
+      "label": "dm-jq-ausente-cc",
+      "verb": "detect-models",
+      "args": [
+        "detect-models"
+      ],
+      "input": {
+        "config": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+        "host": "claudeCode",
+        "opencode_stub": null,
+        "python3": true,
+        "jq": false,
+        "readonly": false
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: jq is required but not installed.\nInstall with: brew install jq (macOS) or apt install jq (Linux)\n",
+      "file": "{\n  \"schemaVersion\": \"2.0\",\n  \"categories\": {\n    \"claudeCode\": {\n      \"research\": \"haiku\",\n      \"review\": \"opus\",\n      \"design\": \"sonnet\",\n      \"workflow\": \"sonnet\",\n      \"executor\": \"sonnet\"\n    },\n    \"opencode\": {\n      \"research\": \"anthropic/claude-haiku-4-5\",\n      \"review\": \"anthropic/claude-opus-4-7\",\n      \"design\": \"anthropic/claude-sonnet-4-6\",\n      \"workflow\": \"anthropic/claude-sonnet-4-6\",\n      \"executor\": \"anthropic/claude-sonnet-4-6\"\n    }\n  }\n}\n",
+      "tree": [
+        "models.json"
+      ]
+    }
+  ],
+  "_comment_models_write": "models.json's WRITER -- cmd_detect_models, the one verb that creates the file the four readers in `models_read_cases` only read -- captured the way every block before it was, by running the bash and jq still standing in aimi-cli.sh BEFORE a line of it was deleted: 60 cases at commit ecdb463. THE FIELD SHAPE IS `tasks_write_cases`' AND NOT `models_read_cases`', because this is a writer: `input` is the state BEFORE and `file` is the whole document AFTER, so a recording that went green while the config was being clobbered is not expressible here. `file` is the file's exact BYTES rather than a parsed object -- null when no file was left on disk at all -- because jq's two-space pretty-print with its trailing newline is what /aimi:setup-models reads back, and only bytes pin that. `tree` names every file left in the throwaway root, which is how the OpenCode cache sibling and the absence of a stray mktemp temp file stay visible. `input` is the whole rebuild recipe: `config` is the file's exact bytes (null when there is no file at all, which is a different case from an empty one), `host` is claudeCode (CLAUDECODE=1) or opencode (unset), `opencode_stub` is the script installed on PATH under the name `opencode` (null when the binary is ABSENT), `python3` and `jq` say whether that symlink was placed in the shim directory, and `readonly` chmods the config root to 0500 for the run. EVERY CASE BUILDS A THROWAWAY ROOT with AIMI_CONFIG_DIR and CLAUDE_CONFIG_DIR pointed at it and a shim PATH of symlinks rather than the developer's -- non-negotiable for this verb in a way it was not for the readers, because this one WRITES ~/.config/aimi/models.json and a case that leaked would destroy the developer's own model configuration. Three normalizations fire so two captures can be byte-identical, and they are: the root becomes /TMP, the mtime-derived cache filename becomes models-oc-cache-<MTIME>.txt, and mktemp's six random characters become models.json.<RANDOM>. With them, two consecutive full captures are byte-identical. THIRTEEN THINGS THE CAPTURE ITSELF EXPOSED, each pinned by a case rather than by a sentence. (1) THE MERGE IS ITSELF A REBUILD THAT HAPPENS TO PRESERVE ONE KEY, which is counter-intuitive and is the reason this block exists. The jq is `{schemaVersion: \"2.0\", categories: ((.categories // {}) + {($host_key): {...}})}`, so exactly three things are true at once: `categories.<other host>` SURVIVES (dm-outro-host-cc, dm-ambos-hosts-cc, dm-flags-outro-host-cc -- this is the 1.97.2 regression and the whole point); `schemaVersion` is force-written to \"2.0\" even over a document that said \"1.0\" (dm-schema-v1-cc, dm-flags-schema-v1-cc); and EVERY OTHER TOP-LEVEL KEY IS DISCARDED (dm-chave-desconhecida-cc, dm-flags-chave-desconhecida-cc -- `updatedAt` and `notes` do not come back). The current host's own sub-table is REPLACED wholesale rather than merged, so an extra key inside it does not survive either (dm-subtabela-com-chave-extra-cc). Widening any of this to a deep merge would be an unrequested behaviour change; narrowing it is 1.97.2 again. (2) D6, VERIFIED AND PINNED. `set -euo pipefail` at aimi-cli.sh:2, `pipefail` propagating grep's exit 1, and a bare assignment to an already-declared local together abort the verb the moment the host's model list contains no \"haiku\" -- exit 1, EMPTY stdout, EMPTY stderr, nothing written (dm-lista-sem-haiku-oc-stub, dm-lista-so-sonnet-oc-stub, dm-lista-sem-haiku-config-existente-oc-stub, that last one leaving a perfectly good config untouched and saying nothing). The three documented fallbacks that follow are unreachable dead code. Reachable only on an OpenCode host whose provider set omits haiku; Claude Code's list is the literal opus/sonnet/haiku. Captured as-is and ported as-is; the repair is its own commit. (3) D7 HAS NO CASE HERE, AND THAT IS STATED RATHER THAN FAKED -- and then it was driven anyway, and REFUTED. No case in this block can reach it: every one runs non-interactively with stdin on /dev/null, so `[ -t 0 ]` is false and the prompt block never executes at all. The claim was that Ctrl-D at `read -r answer </dev/tty` returns 1 and takes the verb down through the same set -e chain as (2). test_models.py drives the real prompt through a pty instead, and what happens is the documented behaviour: five prompts, five defaults, exit 0, the config written. The reason is the difference between (2) and this one -- bash CLEARS -e inside a command substitution when not in POSIX mode, so the failing `read` inside `_prompt_category` never aborts anything, and the substitution's status is its last command's, which is the printf. (2) aborts because ITS bare assignment is at the function's own level, where -e is live. Nothing is repaired for D7 because nothing is broken; the pty test is what says so, and it stays. (4) D9 IS REFUTED FOR THIS VERB, and the corpus proves it rather than asserting it. Every value reaches the document through `jq --arg`, which escapes; the only printf here re-emits jq's already-valid output. So a double quote, a backslash, a newline, a tab, all four at once, non-ASCII and three control characters all round-trip correctly through the bash (dm-flags-aspas-cc, dm-flags-barra-invertida-cc, dm-flags-newline-cc, dm-flags-tab-cc, dm-flags-todos-os-quatro-cc, dm-flags-nao-ascii-cc, dm-flags-controle-cc, dm-flags-outro-host-com-aspas-cc). They are here for the port's sake: they are what proves Python's json.dumps matches jq byte for byte, and they found the ONE character where it does not -- U+007F, which jq escapes as \\u007f and json.dumps emits raw. The two genuinely unescaped printf-built JSON sites in this file are aimi-cli.sh:9892 and :9929, BOTH inside cmd_check_version (the story that named them predates a shift in line numbers and attributed one to cmd_prime_cache, which builds all of its output with `jq -n --arg`). They are the next slice's, not this one's, and no escaping repair was made here. (5) FOUR INPUTS ABORT AT jq's OWN EXIT 5 with jq's own message on stderr and the config untouched: a document that is an array (dm-documento-array-cc) or a string (dm-documento-string-cc), where `.categories` cannot be indexed, and a `.categories` that is a string, in both modes (dm-categories-string-cc, dm-flags-categories-string-cc), where a string and an object cannot be added. The status is reproduced; the message was the engine's and is named in test_models.py's KNOWN_DIVERGENCES_WRITE. (6) A WHITESPACE-ONLY CONFIG IS CLOBBERED TO A LONE NEWLINE (dm-so-espacos-cc). It is non-empty, so the merge branch is taken; `jq empty` accepts it; and jq's stream over it holds ZERO values, so the merge emits nothing and the file that gets written is \"\\n\". Data loss that predates this port and is carried across it unchanged. (7) jq READS A STREAM, NOT ONE VALUE, here as everywhere else: a two-document config is merged TWICE and both results are written into models.json, leaving a file that is still two documents (dm-dois-documentos-cc). (8) TWO ARGUMENT SHAPES ANSWER NOTHING AT ALL. `--research` with no value exits 1 with BOTH STREAMS EMPTY (dm-flags-valor-ausente-cc), because the parser shifts twice on a flag whose value is missing and the second `shift` fails under set -e. A bare positional argument is silently ignored and the verb runs in default mode (dm-argumento-posicional-cc). Neither is repaired by this story. (9) THE WRITE FAILING LEAVES THE OLD CONFIG INTACT, which is what the mktemp-then-mv discipline is for: a read-only config directory exits 1 with mktemp's message and the pre-existing document byte-for-byte unchanged, in both modes (dm-diretorio-somente-leitura-cc, dm-flags-diretorio-somente-leitura-cc). No stray temp file is left behind -- `tree` says so. (10) check_jq STAYS. A host without jq gets \"Error: jq is required but not installed.\" and exit 1 before anything is read (dm-jq-ausente-cc). Deleting the check as part of a port to Python would silently admit a jq-less host to a verb the rest of the file still refuses to serve. (11) THE python3 CASES RECORD WHAT A python3-LESS HOST SAW AT CAPTURE TIME, which is everything: this verb was pure bash and jq here, so hiding the interpreter changed nothing (dm-python3-ausente-cc, dm-flags-python3-ausente-cc). They are here so the port's crossing is measured against a real before-state instead of an assumption. Unlike the four readers, the writer does NOT degrade -- see KNOWN_DIVERGENCES_WRITE for what it does instead and why silence is the one answer a writer must not give. (12) NUMBERS CARRIED ACROSS FROM THE OTHER HOST'S TABLE ARE RENDERED BY jq, not echoed: 1e3 comes back as 1000 and 1.0 as 1 (dm-outro-host-com-numeros-cc). Two extremes are split into their own case because jq's double cannot hold them the way Python's int can (dm-outro-host-com-numeros-extremos-cc: 1e+22 and -0). (13) jq PARSES `NaN` AND PRINTS IT AS null (dm-nan-cc). Python's json parses it too and would write the bare token NaN, which is not JSON and which jq itself would then refuse to read -- so the port renders a non-finite double as null the way jq does, and this case is what says so."
 }
