@@ -968,6 +968,46 @@ cmd_metadata() {
   python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
 }
 
+# Which stories carry a visual verification strategy (each with its own
+# project and url already normalized -- see verification_report's docstring),
+# and how a malformed (non-object) verification partitions into what
+# normalize-verification repairs and what it does not.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file, unlike
+# cmd_status/cmd_metadata above -- the command layer's ten call sites this
+# replaces mostly name a PHASE, SPLIT or MAIN tasks file, never the
+# session-bound one, so this is the one reader that takes the override
+# normalize-verification already established the shape of.)
+cmd_verification_report() {
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh verification-report [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- the same rule get_tasks_file applies to its
+    # own resolved path below, applied here because this flag bypasses it.
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" verification-report --tasks-file "$tasks_file"
+}
+
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
 # Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
@@ -12728,6 +12768,9 @@ COMMANDS:
     status [--counts-only]    Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
     metadata                  Get metadata only
+    verification-report [--tasks-file <path>]
+                              Visual stories (id/project/url) plus the malformed-verification
+                              partition (repairable/unrepairable). Defaults to get_tasks_file.
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
     list-ready [--brief]      List stories ready to execute (dependency-aware)
@@ -13615,6 +13658,7 @@ main() {
     find-tasks-all)    cmd_find_tasks_all ;;
     status)            shift; cmd_status "$@" ;;
     metadata)          cmd_metadata ;;
+    verification-report) shift; cmd_verification_report "$@" ;;
     next-story)        cmd_next_story ;;
     current-story)     cmd_current_story ;;
     list-ready)        shift; cmd_list_ready "$@" ;;

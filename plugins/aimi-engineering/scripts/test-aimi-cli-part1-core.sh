@@ -4382,6 +4382,105 @@ EOF
   rm -f "$fixture_file"
 }
 
+test_verification_report_visual_and_malformed_shape() {
+  echo ""
+  echo "=== Testing verification-report: --tasks-file answers visual + malformed partition from one read ==="
+
+  local fixture_file
+  fixture_file="$TASKS_DIR/9999-99-95-verification-report.json"
+  cat > "$fixture_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Verification report test",
+    "type": "feat",
+    "branchName": "feat/verification-report-test",
+    "createdAt": "2026-05-12",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Visual story",
+      "description": "Carries a well-formed visual verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "project": "apps/web",
+      "verification": {"strategy": "visual", "status": "pending", "url": "http://localhost:4000/y"}
+    },
+    {
+      "id": "US-002",
+      "title": "Bare-string story",
+      "description": "Repairable by normalize-verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": "manual"
+    },
+    {
+      "id": "US-003",
+      "title": "Number-typed story",
+      "description": "NOT repairable by normalize-verification",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 3,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "verification": 42
+    }
+  ]
+}
+EOF
+
+  local output exit_code
+  output=$("$CLI" verification-report --tasks-file "$fixture_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "verification-report: exits 0 on a well-formed file"
+
+  assert_eq "1" "$(printf '%s' "$output" | jq '.visual | length')" "verification-report: one visual story"
+  assert_eq "US-001" "$(printf '%s' "$output" | jq -r '.visual[0].id')" "verification-report: visual story id"
+  assert_eq "apps/web" "$(printf '%s' "$output" | jq -r '.visual[0].project')" "verification-report: visual story project passed through"
+  assert_eq "http://localhost:4000/y" "$(printf '%s' "$output" | jq -r '.visual[0].url')" "verification-report: visual story url"
+  assert_eq "US-002" "$(printf '%s' "$output" | jq -r '.malformed.repairable[0]')" "verification-report: bare string is repairable"
+  assert_eq "US-003" "$(printf '%s' "$output" | jq -r '.malformed.unrepairable[0]')" "verification-report: a number is NOT repairable"
+
+  rm -f "$fixture_file"
+}
+
+test_verification_report_defaults_to_get_tasks_file() {
+  echo ""
+  echo "=== Testing verification-report: omitting --tasks-file falls back to get_tasks_file ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local output exit_code
+  output=$("$CLI" verification-report 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "verification-report: exits 0 with no --tasks-file"
+  assert_eq "0" "$(printf '%s' "$output" | jq '.visual | length')" "verification-report: session tasks file has no visual stories"
+}
+
+test_verification_report_rejects_a_path_outside_the_project() {
+  echo ""
+  echo "=== Testing verification-report: --tasks-file is a CLI argument, so validate_path_in_project refuses an escape ==="
+
+  local outside_file
+  outside_file=$(mktemp /tmp/test-verification-report-escape-XXXXXX.json)
+  echo '{"userStories": []}' > "$outside_file"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" verification-report --tasks-file "$outside_file" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "verification-report: refuses a --tasks-file outside PROJECT_ROOT"
+  assert_stderr_contains "Path escapes project root" "$stderr_output" "verification-report: names the escape the same way every other CLI-argument path does"
+
+  rm -f "$outside_file"
+}
+
 test_validate_stories_rejects_string_verification() {
   echo ""
   echo "=== Testing validate-stories rejects bare-string verification ==="
@@ -7956,6 +8055,9 @@ main() {
   echo "--- normalize-verification Tests ---"
   test_normalize_verification_string_input
   test_normalize_verification_object_input_unchanged
+  test_verification_report_visual_and_malformed_shape
+  test_verification_report_defaults_to_get_tasks_file
+  test_verification_report_rejects_a_path_outside_the_project
   test_validate_stories_rejects_string_verification
   test_validate_stories_accepts_object_verification
 

@@ -44009,7 +44009,8 @@
       "line": 254,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": "[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\")] | length",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq '[.userStories[] | select(.verification != null and (.verification | type != \"object\"))] | length' \"$AIMI_ROOT/$TASKS_PATH\" 2>/dev/null",
@@ -44020,7 +44021,8 @@
       "line": 255,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": "[.userStories[] | select(.verification != null and (.verification | type != \"object\"))] | length",
-      "question": "which stories carry a malformed (non-object) verification block"
+      "question": "which stories carry a malformed (non-object) verification block",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '[.userStories[] | select(.verification != null and (.verification | type != \"object\")) | .id] | join(\", \")' \"$AIMI_ROOT/$TASKS_PATH\" 2>/dev/null",
@@ -44031,7 +44033,8 @@
       "line": 261,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": "[.userStories[] | select(.verification != null and (.verification | type != \"object\")) | .id] | join(\", \")",
-      "question": "which stories carry a malformed (non-object) verification block"
+      "question": "which stories carry a malformed (non-object) verification block",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.metadata.execution // \"inline\"' \\\n  \"$(printf '%s\\n' \"$SPLIT_PLAN\" | head -1 | jq -r '.file')\"",
@@ -44157,7 +44160,8 @@
       "line": 1479,
       "operand": "$PHASE_TASKS_PATH",
       "program": "[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\")] | length",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.userStories[] | (.project // \".\")' \"$PHASE_MAIN_TASKS\"",
@@ -44179,7 +44183,8 @@
       "line": 1499,
       "operand": "$PHASE_MAIN_TASKS",
       "program": "[.userStories[] | select((.project // \".\") == $p) | select(.verification | type == \"object\" and .strategy == \"visual\")] | length",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.metadata.splitGroup.project // \"\"' \"$split_file\"",
@@ -44202,7 +44207,8 @@
       "line": 1683,
       "operand": "$split_file",
       "program": "[.userStories[]? | select(.verification | type == \"object\" and .strategy == \"visual\")] | length",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",
@@ -44237,7 +44243,8 @@
       "line": 2344,
       "operand": "$AIMI_ROOT/$TASKS_PATH",
       "program": "[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\") | (.project // \"DEFAULT\")] | unique | .[]",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",
@@ -44260,7 +44267,8 @@
       "line": 2400,
       "operand": "$VISUAL_SOURCE",
       "program": "[.userStories[] | select(.verification | type == \"object\" and .strategy == \"visual\")][0]",
-      "question": "how many (or which) stories in this tasks file are visual-verification stories"
+      "question": "how many (or which) stories in this tasks file are visual-verification stories",
+      "retiredIn": "US-003"
     },
     {
       "expression": "jq -r '.metadata.branchName' \"$AIMI_ROOT/$TASKS_PATH\"",

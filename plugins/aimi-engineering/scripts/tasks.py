@@ -2378,6 +2378,88 @@ def normalize_verification(doc):
     )
 
 
+def _report_project(story):
+    """The `project` a visual story reports through verification-report --
+    a STRING passes through unchanged, everything else -- absent, null, or any
+    other JSON type -- collapses to `None`.
+
+    This is a deliberate divergence from raw `.project`, closing the
+    array-valued-project hazard at its one source rather than at each of the
+    sites that used to read it. jq's `// "DEFAULT"` (or `// "."`) only
+    substitutes on null and false, so a `.project` that arrived as an ARRAY
+    sailed through the alternative unchanged, and `jq -r` printed it across
+    several lines -- turning one story into several bogus group keys in a
+    caller's read loop. Collapsing every non-string here means each caller's
+    own default still fires on exactly the shapes that used to explode, and on
+    nothing else -- string projects are untouched, an absent or null one still
+    reports as no-project.
+    """
+    project = jq_index(story, "project", STORY)
+    return project if isinstance(project, str) else None
+
+
+def _report_url(verification):
+    """The `url` a visual story reports through verification-report -- the
+    same divergence as `_report_project`, applied to `.verification.url`.
+
+    jq's `// empty` (the guard every per-story url site used) only fires on
+    null and false, so a non-string url -- an array, say -- sailed through
+    unrewritten and reached `$WORKTREE_MGR serve url` as `jq -r`'s multi-line
+    pretty-print of it. A STRING passes through unchanged; everything else --
+    absent, null, false, or any other type -- reports as the empty string,
+    which is what every caller already treats as "no url" today.
+    """
+    url = jq_index(verification, "url", STORY + ".verification")
+    return url if isinstance(url, str) else ""
+
+
+def verification_report(doc):
+    """One document read answering the three questions ten separate jq
+    programs used to open the tasks file for: which stories carry a visual
+    verification strategy (each with its own already-normalized `project` and
+    `url`, see `_report_project`/`_report_url` above), and how the old
+    `type != "object"` malformed scan partitions into the shapes
+    normalize-verification actually repairs and the shapes it does not.
+
+    The `visual` list is exactly the old `select(.verification | type ==
+    "object" and .strategy == "visual")` scan, order preserved -- a caller
+    filtering it by `project`, taking its length, or reading its first entry
+    is projecting from ONE read rather than opening a second one.
+
+    The malformed partition reuses `_verification_migrated`'s own predicate
+    (`isinstance(verification, str)`) rather than restating it, so the two
+    cannot drift apart again: `repairable` is exactly the set
+    normalize-verification rewrites (a bare string, the empty string
+    included), `unrepairable` is everything else the old scan flagged -- a
+    number, an array, a boolean. The UNION of the two, in document order, is
+    exactly the id list the old `type != "object"` scan produced; only the
+    split is new.
+    """
+    visual = []
+    repairable = []
+    unrepairable = []
+    for story in _stories(doc):
+        story_id = jq_index(story, "id", STORY)
+        verification = jq_index(story, "verification", STORY)
+        vtype = jq_type(verification)
+        if vtype == "object":
+            strategy = jq_index(verification, "strategy", STORY + ".verification")
+            if jq_equal(strategy, "visual"):
+                visual.append(
+                    {
+                        "id": story_id,
+                        "project": _report_project(story),
+                        "url": _report_url(verification),
+                    }
+                )
+        elif vtype != "null":
+            (repairable if vtype == "string" else unrepairable).append(story_id)
+    return {
+        "visual": visual,
+        "malformed": {"repairable": repairable, "unrepairable": unrepairable},
+    }
+
+
 # ---------------------------------------------------------------------------
 # The four rules that used to be evaluated before the lock
 # ---------------------------------------------------------------------------
@@ -2571,6 +2653,21 @@ def op_metadata(argv):
         die("Usage: tasks.py metadata --tasks-file <path>")
     for doc in read_docs(path, "metadata"):
         _emit(metadata_view(doc))
+    return 0
+
+
+def op_verification_report(argv):
+    """The verb ten command-layer jq programs replace. Unlike `status`, the
+    caller names a tasks file explicitly rather than the session-bound one --
+    the phase, split and main-tasks files this answers for are never the file
+    `get_tasks_file` would resolve. aimi-cli.sh's wrapper is what falls back
+    to `get_tasks_file` when the caller omits `--tasks-file`; this op always
+    receives an explicit path, same as `status` and `metadata` above."""
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py verification-report --tasks-file <path>")
+    for doc in read_docs(path, "verification-report"):
+        _emit(verification_report(doc))
     return 0
 
 
@@ -3644,6 +3741,7 @@ def op_research_paths(argv):
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
+    "verification-report": op_verification_report,
     "get-story": op_get_story,
     "get-story-context": op_get_story_context,
     "current-story": op_current_story,

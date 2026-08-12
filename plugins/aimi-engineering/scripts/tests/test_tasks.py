@@ -2795,6 +2795,188 @@ def test_the_widened_check_rejects_a_locked_tasks_verb_that_never_crosses():
     assert "crosses more than once" in str(more.value)
 
 
+# ---------------------------------------------------------------------------
+# verification-report -- one read answering ten command-layer jq programs
+# ---------------------------------------------------------------------------
+#
+# There is no dedicated golden block for this verb: it never existed as a jq
+# program of its own inside aimi-cli.sh, so there is no "port reproduces jq"
+# corpus to replay. What IS recorded, in command_block_jq_cases (story 01),
+# is what the TEN command-layer sites this verb replaces answered before the
+# replacement -- captured by running their own jq programs against a
+# 26-fixture corpus. The tests below are proven against THAT recording,
+# per this story's own AC: never against a fresh reading of execute.md or of
+# this file.
+
+_CB_SITES = {s["id"]: s for s in GOLDEN["command_block_jq_sites"]}
+_CB_CASES = {}
+for _case in GOLDEN["command_block_jq_cases"]:
+    _CB_CASES.setdefault(_case["site"], {})[_case["fixture"]] = _case
+
+# site-001 (VISUAL_STORIES, Step 0.7) and site-002 (MALFORMED_VERIF, Step 0.7)
+# both run over every one of the 26 fixtures, so either one names the full set.
+_CB_FIXTURES = sorted(_CB_CASES["site-001"])
+
+
+@pytest.mark.parametrize("fixture", _CB_FIXTURES)
+def test_verification_report_matches_story_01s_visual_and_malformed_counts(fixture):
+    """`len(.visual)` and the malformed partition's total, against every one
+    of the 26 fixtures site-001 (`[.userStories[] | select(.verification |
+    type == "object" and .strategy == "visual")] | length`) and site-002
+    (`[.userStories[] | select(.verification != null and (.verification |
+    type != "object"))] | length`) were recorded against.
+
+    `malformed-document` is excluded: it is unparseable JSON, refused before
+    `verification_report` is even reached (read_docs' own job, same as every
+    other verb) -- there is no doc to build. `userstories-absent` is the one
+    fixture where jq itself aborted (`.userStories[]` cannot iterate over a
+    missing key, recorded as exit 5); this verb raises the same MalformedTasks
+    every other reader already raises for it, checked separately below.
+    """
+    if fixture == "malformed-document":
+        pytest.skip("unparseable JSON -- read_docs' refusal, not this verb's")
+    visual_case = _CB_CASES["site-001"][fixture]
+    malformed_case = _CB_CASES["site-002"][fixture]
+    doc = json.loads(visual_case["input"])
+    if fixture == "userstories-absent":
+        with pytest.raises(T.MalformedTasks):
+            T.verification_report(doc)
+        assert visual_case["exit"] != 0 and malformed_case["exit"] != 0
+        return
+    report = T.verification_report(doc)
+    assert str(len(report["visual"])) == visual_case["stdout"].strip()
+    total_malformed = len(report["malformed"]["repairable"]) + len(
+        report["malformed"]["unrepairable"]
+    )
+    assert str(total_malformed) == malformed_case["stdout"].strip()
+
+
+def test_verification_report_url_matches_story_01s_object_fixtures():
+    """site-023's FIRST_VISUAL, narrowed to the one field every per-story url
+    site actually reads off it. The two object fixtures are the ones with a
+    visual story at all; every other fixture's `.visual` is empty."""
+    with_url = json.loads(_CB_CASES["site-023"]["verification-object-with-url"]["input"])
+    no_url = json.loads(_CB_CASES["site-023"]["verification-object-no-url"]["input"])
+    assert T.verification_report(with_url)["visual"] == [
+        {"id": "US-001", "project": None, "url": "http://localhost:4000/y"}
+    ]
+    assert T.verification_report(no_url)["visual"] == [
+        {"id": "US-001", "project": None, "url": ""}
+    ]
+
+
+def test_verification_report_partitions_malformed_by_repairability():
+    """`normalize-verification-formas` (tasks_write_cases) already carries
+    every shape the malformed scan cares about: a bare string, an absent
+    field, null, a well-formed object, the EMPTY string, a number and an
+    array. Reused rather than re-authored, per this story's own instruction
+    to prove against what story 01 (and, for this one shape, the
+    normalize-verification corpus already landed) recorded.
+
+    `_verification_migrated` migrates US-001 (string) and US-005 (empty
+    string) and leaves the rest untouched (WRITE["normalize-verification-
+    -formas"] proves that above) -- this partition has to agree BY
+    CONSTRUCTION, because it reuses the same `isinstance(..., str)` test.
+    """
+    doc = json.loads(WRITE["normalize-verification-formas"]["input"]["tasks"])
+    report = T.verification_report(doc)
+    assert report["malformed"]["repairable"] == ["US-001", "US-005"]
+    assert report["malformed"]["unrepairable"] == ["US-006", "US-007"]
+    # US-002 (absent), US-003 (null) and US-004 (a well-formed object) are
+    # malformed under NEITHER half -- the union is exactly today's four ids,
+    # not all seven stories in the file.
+    union = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
+    assert union == {"US-001", "US-005", "US-006", "US-007"}
+    assert report["visual"] == [], "none of these seven declare strategy: visual"
+
+
+def test_verification_report_treats_a_boolean_verification_as_unrepairable():
+    """The malformed scan's own set is `verification != null and (type !=
+    "object")` -- string, number, array OR boolean. The write corpus has no
+    boolean case (normalize-verification-formas' seven shapes do not include
+    one), so this is asserted directly rather than reused."""
+    doc = {"userStories": [{"id": "US-001", "verification": True}]}
+    report = T.verification_report(doc)
+    assert report["malformed"] == {"repairable": [], "unrepairable": ["US-001"]}
+
+
+def test_verification_report_closes_the_array_valued_project_hazard():
+    """VISUAL_GROUP_KEYS (site-021) fed `.project` straight to `jq -r`: an
+    ARRAY-valued project pretty-printed across several lines and turned one
+    story into several bogus group keys downstream -- the defect this story's
+    notes name as already measured elsewhere as four errors from one story.
+
+    Deliberate divergence, not a preserved hazard: this verb collapses any
+    non-string `.project` to `None` at its one source, so every caller's own
+    `// "DEFAULT"` (or `// "."`) fires on exactly the shapes that used to
+    explode, and a downstream `unique` sees ONE value, not several.
+    """
+    doc = {
+        "userStories": [
+            {
+                "id": "US-001",
+                "project": ["apps/web", "apps/api"],
+                "verification": {"strategy": "visual", "status": "pending"},
+            }
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+
+
+def test_verification_report_closes_the_non_string_url_hazard():
+    """The three per-story url sites guarded with `// empty`, which jq fires
+    on null and false alone -- an ARRAY-valued `.verification.url` sailed
+    through unrewritten and would have reached `$WORKTREE_MGR serve url` as
+    `jq -r`'s multi-line pretty-print of it. Same divergence as the project
+    hazard above, applied to url: any non-string collapses to the empty
+    string every caller already treats as "no url"."""
+    doc = {
+        "userStories": [
+            {
+                "id": "US-001",
+                "verification": {
+                    "strategy": "visual",
+                    "status": "pending",
+                    "url": ["http://a", "http://b"],
+                },
+            }
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+
+
+def test_verification_report_passes_a_string_project_through_unchanged():
+    """The divergence above is scoped to non-string shapes only -- a real
+    project string is exactly what the per-group filter sites match on, and
+    has to survive untouched."""
+    doc = {
+        "userStories": [
+            {
+                "id": "US-001",
+                "project": "apps/web",
+                "verification": {"strategy": "visual", "status": "pending", "url": "http://x/y"},
+            }
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["visual"] == [{"id": "US-001", "project": "apps/web", "url": "http://x/y"}]
+
+
+def test_verification_report_ignores_a_well_formed_non_visual_object():
+    """`.strategy != "visual"` on an otherwise well-formed verification object
+    is neither visual NOR malformed -- the object-typed branch of the old
+    scan's `type == "object"` guard, which this partition never reaches."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report == {"visual": [], "malformed": {"repairable": [], "unrepairable": []}}
+
+
 def test_every_op_is_named_after_the_verb_that_calls_it():
     """roadmap.py needed a _VERB_FOR_OP table because its op names drifted from
     its verb names, and a diagnostic then quoted a command nobody could run.
@@ -2810,6 +2992,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
     assert set(T._OPS) == {
         "status",
         "metadata",
+        "verification-report",
         "get-story",
         "get-story-context",
         "current-story",

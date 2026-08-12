@@ -283,7 +283,7 @@ Automatically invoke the design-implementation reviewer when the tasks file sign
 **Trigger gate** — both conditions must be true:
 
 1. `jq -r '.metadata.prototypePaths // empty' $TASKS_FILE` returns a non-empty value
-2. `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE` returns a value greater than 0
+2. `$AIMI_CLI verification-report --tasks-file $TASKS_FILE | jq '.visual | length'` returns a value greater than 0 — the same verb `/aimi:execute` Step 0.7 answers this from, folded in here rather than left as its own third reading of the rule. It also closes a gap the old `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE'` had and Step 0.7's own scan never did: with no `type == "object"` guard on `.verification`, a string-typed `verification` made jq abort ("Cannot index string with strategy") where Step 0.7's guarded copy counted zero. `verification-report` type-checks before it reads `.strategy`, so a malformed `verification` answers zero visual stories here too, never an abort.
 
 If either condition fails (e.g., pre-1.73.0 tasks files that lack `metadata.prototypePaths`, or no story uses `verification.strategy: "visual"`), skip this section entirely — no agent is spawned.
 
