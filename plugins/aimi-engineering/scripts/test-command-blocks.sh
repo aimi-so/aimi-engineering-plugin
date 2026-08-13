@@ -171,49 +171,14 @@ filter_baseline() {
 # ---------------------------------------------------------------------------
 # Extraction
 #
-# A closing fence must carry no info string (CommonMark) and must not be
-# indented deeper than its opener. Both rules are load-bearing here: execute.md
-# nests ```bash fences inside a plain pseudo-code fence, and a naive open/close
-# toggle desynchronises there and starts extracting pseudo-code as bash.
+# extract_blocks() itself lives in lib/extract-command-blocks.sh, shared with
+# capture-command-block-jq.sh so the two never carry independently-drifting
+# copies of the same awk. See that file for the addressing rule (blocks are
+# keyed by enclosing markdown heading, never by an in-file marker) and the
+# closing-fence rule the nested-fence files in commands/ depend on.
 # ---------------------------------------------------------------------------
-extract_blocks() {
-  mkdir -p "$BLOCKS_DIR"
-  cat > "$WORK_DIR/extract.awk" <<'AWK'
-function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-BEGIN { nblk = 0 }
-FNR == 1 {
-  infence = 0; isbash = 0; heading = "(preamble)"; delete hseen
-  rel = FILENAME; sub(ROOT "/", "", rel)
-}
-{
-  probe = $0; sub(/^[ \t]+/, "", probe)
-  if (probe ~ /^```/) {
-    ind = match($0, /[^ \t]/) - 1
-    info = probe; sub(/^`+/, "", info); info = trim(info)
-    if (infence == 0) {
-      infence = 1; openind = ind; isbash = (info == "bash")
-      if (isbash) {
-        nblk++; id = sprintf("%04d", nblk); hseen[heading]++
-        outf = OUTDIR "/" id ".sh"
-        printf "%s\t%s\t%d\t%s (block %d)\n", id, rel, FNR + 1, heading, hseen[heading]
-        printf "" > outf
-      }
-      next
-    }
-    if (info == "" && ind <= openind) {
-      infence = 0; if (isbash) close(outf); isbash = 0; next
-    }
-  }
-  if (infence == 1) { if (isbash) print $0 >> outf; next }
-  if (probe ~ /^#{1,6}[ \t]/) { h = probe; sub(/^#+[ \t]*/, "", h); heading = trim(h) }
-}
-END { if (infence == 1) printf "warning: unclosed fence in %s\n", rel > "/dev/stderr" }
-AWK
-
-  # shellcheck disable=SC2046
-  awk -v OUTDIR="$BLOCKS_DIR" -v ROOT="$COMMANDS_DIR" -f "$WORK_DIR/extract.awk" \
-    $(find "$COMMANDS_DIR" -name '*.md' | sort) > "$INDEX"
-}
+# shellcheck source=lib/extract-command-blocks.sh
+source "$SCRIPT_DIR/lib/extract-command-blocks.sh"
 
 
 # ---------------------------------------------------------------------------

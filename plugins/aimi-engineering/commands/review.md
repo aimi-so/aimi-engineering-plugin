@@ -135,19 +135,13 @@ REVIEW_BRANCH="$CURRENT_BRANCH"
 **Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** Resolve the target from the active tasks file's `metadata.branchName` instead of diffing against `HEAD`:
 
 1. Resolve `$AIMI_CLI` by following the **Resolve CLI Path** and **Version Check** sections of `commands/references/cli-path-resolution.md`.
-2. Discover the active tasks file with the **read-only** lookup only — never `$AIMI_CLI init-session`, which writes `.aimi/state/current-tasks` and `.aimi/state/current-branch` as a side effect and could repoint a concurrently running `/aimi:execute` session's tracked tasks file:
+2. Read the active tasks file's branch name with the single guarded `$AIMI_CLI metadata` call `commands/open-pr.md`'s own Case B already establishes for this identical situation, rather than a separate `find-tasks` lookup plus a raw `jq -r '.metadata.branchName'` read. It is **read-only** in the same sense that lookup was: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it cannot repoint a live `/aimi:execute` session's tracked tasks file — its only state write is the narrow self-heal path that fires solely when the recorded state pointer already points to a deleted file.
 
    ```bash
-   TASKS_FILE=$($AIMI_CLI find-tasks 2>/dev/null)
+   CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
    ```
 
-3. When `$TASKS_FILE` is non-empty, read its branch name:
-
-   ```bash
-   CANDIDATE_BRANCH=$(jq -r '.metadata.branchName // empty' "$TASKS_FILE" 2>/dev/null)
-   ```
-
-4. Validate `$CANDIDATE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command:
+3. Validate `$CANDIDATE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command:
 
    ```bash
    if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
@@ -155,7 +149,7 @@ REVIEW_BRANCH="$CURRENT_BRANCH"
    fi
    ```
 
-5. **Fallback.** When `$TASKS_FILE` is empty (no tasks file discoverable), `$CANDIDATE_BRANCH` is empty, or validation fails, do not proceed with an unvalidated value — fall back to the checked-out branch and warn:
+4. **Fallback.** When `$CANDIDATE_BRANCH` is empty (no tasks file discoverable, or its `branchName` is missing) or validation fails, do not proceed with an unvalidated value — fall back to the checked-out branch and warn:
 
    ```bash
    REVIEW_BRANCH="$CURRENT_BRANCH"
@@ -289,7 +283,7 @@ Automatically invoke the design-implementation reviewer when the tasks file sign
 **Trigger gate** — both conditions must be true:
 
 1. `jq -r '.metadata.prototypePaths // empty' $TASKS_FILE` returns a non-empty value
-2. `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE` returns a value greater than 0
+2. `$AIMI_CLI verification-report --tasks-file $TASKS_FILE | jq '.visual | length'` returns a value greater than 0 — the same verb `/aimi:execute` Step 0.7 answers this from, folded in here rather than left as its own third reading of the rule. It also closes a gap the old `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE'` had and Step 0.7's own scan never did: with no `type == "object"` guard on `.verification`, a string-typed `verification` made jq abort ("Cannot index string with strategy") where Step 0.7's guarded copy counted zero. `verification-report` type-checks before it reads `.strategy`, so a malformed `verification` answers zero visual stories here too, never an abort.
 
 If either condition fails (e.g., pre-1.73.0 tasks files that lack `metadata.prototypePaths`, or no story uses `verification.strategy: "visual"`), skip this section entirely — no agent is spawned.
 
