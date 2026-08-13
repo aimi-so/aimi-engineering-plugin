@@ -2522,7 +2522,12 @@ test_forge_writes_active_account_answer_needs_no_branch() {
   # every routed site, so there is no empty-override special case to drift.
   local routed_sites
   routed_sites=$(grep -c 'GH_TOKEN="\$gh_token_override" GH_ENTERPRISE_TOKEN="\$ghe_token_override"' "$CLI") || routed_sites=0
-  assert_eq "8" "$routed_sites" "identical shape: exactly 8 prefix-assignment sites -- 4 writes, 3 in-operation reads, 1 in-write failure classifier"
+  # 10 rather than 8 because `gh pr edit` is now emitted three times -- one
+  # branch per --title/--body combination, since each flag is sent only when
+  # the caller supplied it. Counting the branches individually is the point:
+  # losing the prefix from exactly one of them is the regression this
+  # assertion has to catch, and a total that folded them into one would not.
+  assert_eq "10" "$routed_sites" "identical shape: exactly 10 prefix-assignment sites -- 6 writes (gh pr edit branching three ways), 3 in-operation reads, 1 in-write failure classifier"
 
   # And no process-wide export of either variable anywhere in the file, not
   # merely inside the override helper.
@@ -3765,9 +3770,17 @@ FAKE_GH
 # Omitting --body used to be indistinguishable from passing an empty one:
 # both left $body as "", and `gh pr edit N --body ""` BLANKS the description.
 # A caller that simply forgot the flag silently destroyed the PR body.
+#
+# SINCE --title WAS ADDED, THIS IS THE "NEITHER FLAG SUPPLIED" CASE. --body
+# is no longer mandatory on its own -- the guard refuses only a call that
+# names neither flag -- so this invocation (--number and nothing else) is
+# still a caller bug and still refused, for the same reason it always was.
+# The usage text it prints now offers both ways to satisfy the guard, which
+# the last assertion pins: a widened rule that kept advertising --body as
+# the only option would be right by accident.
 test_forge_pr_edit_omitted_body_is_rejected() {
   echo ""
-  echo "=== forge-pr-edit: --body omitted entirely -- rejected before gh runs, so a description is never blanked by omission ==="
+  echo "=== forge-pr-edit: neither --title nor --body supplied -- rejected before gh runs, so a description is never blanked by omission ==="
 
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
@@ -3798,6 +3811,8 @@ FAKE_GH
   assert_exit_code "1" "$exit_code" "forge-pr-edit omitted --body: exit 1"
   assert_stderr_contains "Usage: aimi-cli.sh forge-pr-edit" "$(cat "$stderr_file")" \
     "forge-pr-edit omitted --body: reuses the existing Usage message rather than inventing a second one"
+  assert_stderr_contains "at least one of --title / --body" "$(cat "$stderr_file")" \
+    "forge-pr-edit neither flag: the usage text states the widened rule -- --body alone is no longer the only way to satisfy it"
 
   local gh_calls=""
   [ -f "$gh_log" ] && gh_calls=$(cat "$gh_log")
@@ -3848,6 +3863,234 @@ FAKE_GH
     "forge-pr-edit explicit empty --body: reports the normal unchanged write envelope"
   assert_contains "pr edit 303 --body" "$(cat "$gh_log")" \
     "forge-pr-edit explicit empty --body: gh IS invoked -- the clear actually reaches the forge"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# ============================================================================
+# forge-pr-edit --title (GitHub issue #110)
+# ============================================================================
+# forge-pr-create has always accepted --title; forge-pr-edit accepted only
+# --body, so a pull request title was writable exactly once, at creation. The
+# tests below cover the flag being added, and -- more importantly -- the
+# consequence of the guard widening from "--body is mandatory" to "at least
+# one of --title/--body".
+#
+# THE CONSEQUENCE IS WHERE THE DATA LOSS LIVES. While --body was mandatory,
+# `gh pr edit "$number" --body "$body"` could send it unconditionally and
+# always be safe. The moment a title-only call became legal, an
+# unconditional --body would send `--body ""` alongside it -- and this
+# file's own comment above the flag loop records what that does: it blanks a
+# description. So every adapter emits each flag only when its own flag was
+# supplied, and the assertions that matter most below are NEGATIVE ones:
+# what does NOT reach the forge CLI.
+#
+# A title-only call is also why "--title alone" is a meaningful test rather
+# than a symmetry exercise -- it is the only case in which no --body reaches
+# the fake CLI at all.
+
+test_forge_pr_edit_title_only_sends_no_body() {
+  echo ""
+  echo "=== forge-pr-edit: --title alone -- gh receives --title and NO --body, so an untouched description cannot be blanked ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit --title alone: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit --title alone: the identical write envelope a body-only edit returns -- retitling is the same verb, not a new one"
+  assert_eq 'pr edit 303 --title New Title' "$(grep -E '^pr edit' "$gh_log" | head -1)" \
+    "forge-pr-edit --title alone: exact argv -- the number, then --title, and nothing after it"
+  assert_eq "0" "$(grep -c -- '--body' "$gh_log" || true)" \
+    "forge-pr-edit --title alone: --body reaches gh ZERO times -- an empty one would blank the description the caller never asked to touch"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_edit_title_and_body_together() {
+  echo ""
+  echo "=== forge-pr-edit: --title and --body together -- both reach gh in one invocation ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title" --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit --title + --body: exit 0"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit --title + --body: status unchanged"
+  assert_eq 'pr edit 303 --title New Title --body updated body' "$(grep -E '^pr edit' "$gh_log" | head -1)" \
+    "forge-pr-edit --title + --body: exact argv -- ONE gh invocation carrying both, not two edits"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The other direction of the same independence, and the regression pin that
+# matters most to the verb's only in-tree caller: open-pr.md Step 5c passes
+# --body alone, and its argv must be byte-identical to what it was before
+# --title existed.
+test_forge_pr_edit_body_only_sends_no_title() {
+  echo ""
+  echo "=== forge-pr-edit: --body alone -- argv unchanged from before --title existed, and no --title is invented ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit --body alone: exit 0, exactly as before"
+  assert_eq 'pr edit 303 --body updated body' "$(grep -E '^pr edit' "$gh_log" | head -1)" \
+    "forge-pr-edit --body alone: exact argv is byte-identical to the pre---title invocation -- Step 5c's call is untouched"
+  assert_eq "0" "$(grep -c -- '--title' "$gh_log" || true)" \
+    "forge-pr-edit --body alone: no empty --title is invented -- gh would reject one, and the stored title must survive a body edit"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# DELIBERATELY THE OPPOSITE VERDICT TO --body "". An empty description is a
+# real value every forge stores, so `--body ""` is honoured as a clear (see
+# test_forge_pr_edit_explicit_empty_body_still_clears, which must keep
+# passing beside this one). An empty TITLE is not a legal value on gh, glab
+# or tea, so --title gets no such escape hatch and is refused at parse time
+# -- with its own message, because "you asked for something no forge will
+# store" is a different caller mistake from "you did not say what to change".
+test_forge_pr_edit_empty_title_is_rejected() {
+  echo ""
+  echo "=== forge-pr-edit: --title \"\" is refused before any forge CLI runs, with a message distinct from the usage error ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+exit 0
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_edit_empty_title_stderr.$$"
+  local exit_code stderr_text
+  PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "" >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit --title \"\": exit 1"
+  assert_stderr_contains "--title must not be empty" "$stderr_text" \
+    "forge-pr-edit --title \"\": stderr names the refusal in its own words"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'Usage:' || true)" \
+    "forge-pr-edit --title \"\": it is NOT the usage error -- the two caller mistakes stay distinguishable"
+
+  local gh_calls=""
+  [ -f "$gh_log" ] && gh_calls=$(cat "$gh_log")
+  assert_eq "" "$gh_calls" \
+    "forge-pr-edit --title \"\": gh is never invoked at all -- the refusal is at parse time, before anything can be mutated"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The HUMAN-FACING half of the conditional emission. When the automatic edit
+# cannot run, the manual command printed to stderr is the one a person will
+# copy-paste -- so a title-only edit must not print `--body ...` there
+# either. Printing it would move the exact data loss the adapter avoids onto
+# the reader, one paste later.
+test_forge_pr_edit_title_only_manual_fallback_omits_body() {
+  echo ""
+  echo "=== forge-pr-edit: gh absent on a title-only edit -- the printed manual command carries --title and no --body ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- the MANDATORY-PRINT degrade path.
+
+  local stderr_file="/tmp/forge_pr_edit_title_manual_stderr.$$"
+  local out exit_code stderr_text
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_text=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "1" "$exit_code" "forge-pr-edit title-only gh-absent: exits non-zero, same contract as a body-only degrade"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not edited automatically."}' \
+    "$out" "forge-pr-edit title-only gh-absent: the unchanged degraded envelope"
+  assert_stderr_contains 'gh pr edit 303 --title "New Title"' "$stderr_text" \
+    "forge-pr-edit title-only gh-absent: the printed command names --title and quotes the value"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c -- '--body' || true)" \
+    "forge-pr-edit title-only gh-absent: --body appears nowhere -- a pasted one would blank the description"
+  assert_eq "0" "$(printf '%s' "$stderr_text" | grep -c 'Body:' || true)" \
+    "forge-pr-edit title-only gh-absent: and no empty Body block, which reads as 'the body was cleared'"
 
   popd >/dev/null
   teardown_detect_forge_fixture
@@ -4006,7 +4249,9 @@ test_forge_pr_create_and_edit_registered_in_help_and_dispatcher() {
   local help_out
   help_out=$("$CLI" help 2>&1)
   assert_contains "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-create with its flags"
-  assert_contains "forge-pr-edit --number <n> --body <text> [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags"
+  assert_contains "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags, --title and --body both shown as optional"
+  assert_contains "at least one is" "$help_out" "help: states the at-least-one-of rule, so the two optional brackets are not read as 'both may be omitted'"
+  assert_contains "a title-only edit passes no --body" "$help_out" "help: names the conditional emission, which is the part a caller cannot infer from the flag list"
 
   setup_detect_forge_fixture origin https://github.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
@@ -4586,6 +4831,58 @@ test_glw_forge_pr_edit_gitlab_update_failure_degrades() {
   teardown_detect_forge_fixture
 }
 
+# The gitlab half of the --title work (GitHub issue #110). glab's own
+# spelling is -t/--title -- this section's header cites it off
+# docs/source/mr/update.md -- and the body flag stays -d, never gh's --body.
+# Both runs live in one test so the SAME fake glab, with the log cleared
+# between them, produces both argv lines: two fixtures could drift apart and
+# then agree for the wrong reason.
+test_glw_forge_pr_edit_gitlab_title_reaches_glab_as_dash_t() {
+  echo ""
+  echo "=== forge-pr-edit (gitlab): --title reaches glab as -t -- alone it sends no -d, and with --body both ride one mr update ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  rm -f "$sandbox/glw_mr_created.flag"
+
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":303,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/303"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitlab --title alone: exit 0"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gitlab --title alone: the unchanged write envelope"
+  assert_eq 'mr update 303 -y -t New Title' "$(glw_argv_line "$log" "mr update")" \
+    "forge-pr-edit gitlab --title alone: exact argv -- positional id, -y first as always, then -t"
+  assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr update")" \
+    "forge-pr-edit gitlab --title alone: -y survives on the title-only branch too -- without it glab prompts and the run hangs"
+  assert_eq "0" "$(grep -cE -- '(^| )-d( |$)' "$log" || true)" \
+    "forge-pr-edit gitlab --title alone: -d reaches glab ZERO times -- an empty description would clear the MR's own"
+
+  # Same fake, same repository, log cleared: now both flags.
+  : > "$log"
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":303,"state":"opened","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/303"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title" --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitlab --title + --body: exit 0"
+  assert_eq 'mr update 303 -y -t New Title -d updated body' "$(glw_argv_line "$log" "mr update")" \
+    "forge-pr-edit gitlab --title + --body: exact argv -- one mr update carrying -y, -t and -d"
+  assert_eq "0" "$(grep -c -- '--title' "$log" || true)" \
+    "forge-pr-edit gitlab: gh's --title spelling never reaches glab, any more than gh's --body does"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
 test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes() {
   echo ""
   echo "=== forge-issue-create (gitlab): glab issue create -y -- and the always-exit-0 soft-fail contract survives on the gitlab branch ==="
@@ -4667,7 +4964,14 @@ test_glw_every_glab_write_invocation_carries_yes_in_source() {
     fi
   done <<< "$write_lines"
 
-  assert_eq "3" "$total"   "source guard: all three glab write invocations are present (mr create, mr update, issue create)"
+  # FIVE lines, THREE subcommands. `mr update` is spelled out three times --
+  # title+body, title alone, body alone -- because forge-pr-edit's --title
+  # and --body are each optional and each is emitted only when supplied, so
+  # a title-only edit cannot send `-d ""` and blank the description. The
+  # count is a per-LINE count on purpose: -y has to survive on each of the
+  # three branches, and a single expected total is what makes losing it from
+  # one of them fail here.
+  assert_eq "5" "$total"   "source guard: all five glab write invocation lines are present (mr create, mr update x3, issue create)"
   assert_eq "0" "$missing" "source guard: every glab write invocation carries -y -- without it the run hangs on a confirmation prompt"
 
   # Each verb named individually, so a red result says WHICH one regressed.
@@ -4726,9 +5030,12 @@ test_glw_gitlab_write_call_sites_are_prefix_assignment_ready() {
   done
 
   assert_eq "0" "$unshaped" "landing site: every glab call in the three gitlab write adapters is a plain _forge_capture statement"
-  # 2 in pr-create (idempotency check + re-read) + 1 create, 1 update + 1
-  # re-read in pr-edit, 1 in issue-create.
-  assert_eq "6" "$shaped" "landing site: all six glab calls across the three adapters are shaped for a prefix assignment"
+  # 2 in pr-create (idempotency check + re-read) + 1 create, 3 update (one
+  # per --title/--body combination) + 1 re-read in pr-edit, 1 in
+  # issue-create. The update branches count separately by design: the prefix
+  # assignment a later story adds has to sit above each of them, and a total
+  # that absorbed them would not say so.
+  assert_eq "8" "$shaped" "landing site: all eight glab calls across the three adapters are shaped for a prefix assignment"
 
   # `export` is forbidden on this path for the same reason it is on the gh
   # side: a process-wide token changes what every later identity probe in the
@@ -6227,6 +6534,71 @@ gtw_test_forge_pr_edit_gitea_failure_degrades() {
   teardown_detect_forge_fixture
 }
 
+# The gitea half of the --title work (GitHub issue #110).
+#
+# WHAT THIS PROVES IS NARROWER THAN IT LOOKS, exactly as narrow as every
+# other tea assertion in this file, and this section's VERIFICATION CEILING
+# is why: tea is not installed here, the binary below is a fake that records
+# its argv, so what is proven is WHICH ARGUMENTS aimi-cli.sh EMITS -- never
+# that real tea accepts -t on `pulls edit`. That claim rests on a source
+# reading instead, cited beside the code in _forge_pr_edit_gitea and
+# re-confirmed on 2026-08-13.
+#
+# The flag-count assertions carry a second load here. On the title-only run
+# there is exactly one flag, which is the minimum the section header's
+# always-pass-a-flag invariant needs -- and this is the run that would have
+# lost it, since it is the first tea write whose flags sit behind a
+# conditional.
+gtw_test_forge_pr_edit_gitea_title_reaches_tea_as_dash_t() {
+  echo ""
+  echo "=== forge-pr-edit (gitea): --title reaches tea as -t -- alone it sends no -d and still carries a flag, with --body both ride one pulls edit ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  rm -f "$sandbox/gtw_pull_created.flag"
+
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_EDIT_STDOUT='# #303 Add the Gitea adapter (open)' \
+    GTW_PULLS_DETAIL_JSON='{"id":11111,"index":303,"state":"open","url":"https://gitea.com/acme/widgets/pulls/303","head":"feat-x","base":"main"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitea --title alone: exit 0"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-edit gitea --title alone: the unchanged write envelope"
+  assert_eq 'pulls edit 303 -t New Title' "$(gtw_argv_line "$log" "pulls edit")" \
+    "forge-pr-edit gitea --title alone: exact argv -- positional index, then -t"
+  assert_eq "1" "$(gtw_argv_flag_count "$log" "pulls edit")" \
+    "forge-pr-edit gitea --title alone: still one flag -- the branch that drops -d must not drop the NumFlags() invariant with it"
+  assert_eq "0" "$(grep -cE -- '(^| )-d( |$)' "$log" || true)" \
+    "forge-pr-edit gitea --title alone: -d reaches tea ZERO times -- an empty description would clear the PR's own"
+
+  # Same fake, same repository, log cleared: now both flags.
+  : > "$log"
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_EDIT_STDOUT='# #303 Add the Gitea adapter (open)' \
+    GTW_PULLS_DETAIL_JSON='{"id":11111,"index":303,"state":"open","url":"https://gitea.com/acme/widgets/pulls/303","head":"feat-x","base":"main"}' \
+    PATH="$sandbox" "$CLI" forge-pr-edit --number 303 --title "New Title" --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit gitea --title + --body: exit 0"
+  assert_eq 'pulls edit 303 -t New Title -d updated body' "$(gtw_argv_line "$log" "pulls edit")" \
+    "forge-pr-edit gitea --title + --body: exact argv -- one pulls edit carrying -t and -d"
+  assert_eq "2" "$(gtw_argv_flag_count "$log" "pulls edit")" \
+    "forge-pr-edit gitea --title + --body: two flags"
+  assert_eq "0" "$(grep -c -- '--title' "$log" || true)" \
+    "forge-pr-edit gitea: gh's --title spelling never reaches tea, any more than gh's --body does"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
 gtw_test_forge_issue_create_gitea_creates_issue() {
   echo ""
   echo "=== forge-issue-create (gitea): tea issues create -t/-d, number from the bare HTMLURL line ==="
@@ -6627,7 +6999,14 @@ gtw_test_gitea_write_header_states_its_invariants() {
     fi
   done <<< "$write_lines"
 
-  assert_eq "3" "$total"    "source guard: all three tea write invocations are present (pulls create, pulls edit, issues create)"
+  # FIVE lines, THREE subcommands -- `pulls edit` is spelled out three times
+  # (title+body, title alone, body alone) because forge-pr-edit emits each
+  # flag only when its own flag was supplied. That is exactly the "flag
+  # behind a conditional" shape the header warns about, which is why the
+  # branches are literal invocations rather than one array expansion: this
+  # guard reads the emitted line, and an array would hide every flag from it
+  # while the runtime invariant still held.
+  assert_eq "5" "$total"    "source guard: all five tea write invocation lines are present (pulls create, pulls edit x3, issues create)"
   assert_eq "0" "$flagless" "source guard: every tea write invocation carries at least one flag -- with zero, tea opens an interactive survey and the run hangs"
 
   # gh's and glab's flag vocabularies must never appear inside a tea call.
@@ -6685,7 +7064,7 @@ gtw_test_gitea_write_verbs_mutation_matrix() {
   # --- 2/3: forge-pr-edit --------------------------------------------------
   # Named assertion under test:
   #   "forge-pr-edit gitea: status unchanged with {url, number} from the re-read"
-  assert_eq "changed" "$(gtw_mutate_unroute '      _forge_pr_edit_gitea "$number" "$body" || gt_rc=$?' "$mut")" \
+  assert_eq "changed" "$(gtw_mutate_unroute '      _forge_pr_edit_gitea "$number" "$body" "$title" "$body_provided" "$title_provided" || gt_rc=$?' "$mut")" \
     "MUTATION 2/3 forge-pr-edit: the unroute patch landed"
   live=$(GTW_PULLS_EDIT_STDOUT='# #303 edited' \
     GTW_PULLS_DETAIL_JSON='{"index":303,"url":"https://gitea.com/acme/widgets/pulls/303"}' \
@@ -12028,6 +12407,11 @@ main() {
   test_forge_pr_edit_invalid_number_guard
   test_forge_pr_edit_omitted_body_is_rejected
   test_forge_pr_edit_explicit_empty_body_still_clears
+  test_forge_pr_edit_title_only_sends_no_body
+  test_forge_pr_edit_title_and_body_together
+  test_forge_pr_edit_body_only_sends_no_title
+  test_forge_pr_edit_empty_title_is_rejected
+  test_forge_pr_edit_title_only_manual_fallback_omits_body
   test_forge_write_verbs_share_one_data_shape
   test_forge_write_verbs_degraded_exit_code_split
   test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
@@ -12048,6 +12432,7 @@ main() {
   test_glw_forge_pr_edit_gitlab_updates_with_yes_flag
   test_glw_forge_pr_edit_gitlab_missing_glab_prints_mr_url
   test_glw_forge_pr_edit_gitlab_update_failure_degrades
+  test_glw_forge_pr_edit_gitlab_title_reaches_glab_as_dash_t
   test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes
   test_glw_every_glab_write_invocation_carries_yes_in_source
   test_glw_gitlab_write_call_sites_are_prefix_assignment_ready
@@ -12085,6 +12470,7 @@ main() {
   gtw_test_forge_pr_edit_gitea_updates
   gtw_test_forge_pr_edit_gitea_missing_tea_prints_manual
   gtw_test_forge_pr_edit_gitea_failure_degrades
+  gtw_test_forge_pr_edit_gitea_title_reaches_tea_as_dash_t
   gtw_test_forge_issue_create_gitea_creates_issue
   gtw_test_forge_issue_create_gitea_always_exits_zero
   gtw_test_manual_fallback_gitea_host_default

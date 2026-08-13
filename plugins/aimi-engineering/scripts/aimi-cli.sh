@@ -5489,8 +5489,32 @@ cmd_forge_pr_view() {
 # subprocess) and is itself best-effort here: when it cannot resolve
 # owner/repo (no adapter, gh absent, no origin), the URL line is simply
 # omitted rather than guessing a wrong one.
+#
+# THE EDIT ARMS PRINT ONLY THE FLAGS THE CALLER ACTUALLY SUPPLIED, and that
+# is a correctness matter rather than tidiness. forge-pr-edit's --title and
+# --body are each independently optional, and each adapter emits only the
+# one it was given -- so a printed command that named both would talk a
+# human into running `--body ""` on a title-only edit and blanking the very
+# description the automatic path was careful not to touch. The two
+# provided-ness signals are read differently for the same reason they are
+# tracked differently upstream: $title is trusted as its own signal because
+# cmd_forge_pr_edit refuses `--title ""` outright, so a non-empty $title and
+# "the caller passed --title" are the same fact; $body needs the explicit
+# $body_provided, because `--body ""` is a legitimate deliberate clear that
+# must still print. CREATE mode always carries a body, which is why
+# $body_provided defaults to 1 -- every create call site passes six
+# arguments and is unaffected by this parameter existing.
+#
+# THE DEFAULT IS `${7-1}` AND NOT `${7:-1}`, WHICH IS THE WHOLE MECHANISM.
+# The edit call sites forward $body_provided positionally, and its "no
+# --body was passed" value IS the empty string -- so a `:-` default would
+# read every title-only edit as "body provided" and print the `--body ...`
+# line this parameter exists to suppress. Only the colon-less form
+# distinguishes "the caller passed nothing" (create, six arguments) from
+# "the caller passed empty" (a title-only edit, seven).
 _forge_pr_write_print_manual() {
-  local mode="$1" forge="$2" base="$3" head_or_number="$4" body="$5" title="${6:-}"
+  local mode="$1" forge="$2" base="$3" head_or_number="$4" body="$5" title="${6:-}" body_provided="${7-1}"
+  local edit_cmd=""
 
   local repo_info="" owner="" repo="" host=""
   repo_info=$(_forge_repo_info 2>/dev/null) || repo_info=""
@@ -5534,7 +5558,10 @@ _forge_pr_write_print_manual() {
         fi
       else
         echo "Warning: could not edit this gitlab merge request automatically -- edit it yourself with:"
-        echo "  glab mr update $head_or_number -y --description ..."
+        edit_cmd="  glab mr update $head_or_number -y"
+        if [ -n "$title" ]; then edit_cmd="$edit_cmd -t \"$title\""; fi
+        if [ -n "$body_provided" ]; then edit_cmd="$edit_cmd --description ..."; fi
+        echo "$edit_cmd"
         if [ -n "$owner" ] && [ -n "$repo" ]; then
           echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$head_or_number"
         fi
@@ -5562,7 +5589,10 @@ _forge_pr_write_print_manual() {
         fi
       else
         echo "Warning: could not edit this gitea pull request automatically -- edit it yourself with:"
-        echo "  tea pulls edit $head_or_number -d ..."
+        edit_cmd="  tea pulls edit $head_or_number"
+        if [ -n "$title" ]; then edit_cmd="$edit_cmd -t \"$title\""; fi
+        if [ -n "$body_provided" ]; then edit_cmd="$edit_cmd -d ..."; fi
+        echo "$edit_cmd"
         if [ -n "$owner" ] && [ -n "$repo" ]; then
           echo "  Or open: https://$host/$owner/$repo/pulls/$head_or_number"
         fi
@@ -5576,13 +5606,22 @@ _forge_pr_write_print_manual() {
       fi
     else
       echo "Warning: could not edit this $forge pull request automatically -- edit it yourself with:"
-      echo "  gh pr edit $head_or_number --body ..."
+      edit_cmd="  gh pr edit $head_or_number"
+      if [ -n "$title" ]; then edit_cmd="$edit_cmd --title \"$title\""; fi
+      if [ -n "$body_provided" ]; then edit_cmd="$edit_cmd --body ..."; fi
+      echo "$edit_cmd"
       if [ -n "$owner" ] && [ -n "$repo" ]; then
         echo "  Or open: https://$host/$owner/$repo/pull/$head_or_number"
       fi
     fi
-    echo "  Body:"
-    printf '%s\n' "$body" | sed 's/^/    /'
+    # Withheld on a title-only edit for the same reason the --body flag is:
+    # there is no body to reproduce, and printing an empty block under a
+    # "Body:" heading reads as "the body was blanked" to the one reader this
+    # output exists for.
+    if [ -n "$body_provided" ]; then
+      echo "  Body:"
+      printf '%s\n' "$body" | sed 's/^/    /'
+    fi
   } >&2
 }
 
@@ -5815,21 +5854,34 @@ _forge_pr_create_gitlab() {
 # "unchanged", never "created", because editing mints no new identifier.
 # The merge request is a POSITIONAL argument to `glab mr update`, unlike
 # `gh pr edit <number>`'s otherwise similar shape.
+#
+# -t/--title is glab's own spelling, already cited in this section's header
+# off glab's published command reference (docs/source/mr/update.md). It is
+# emitted ONLY when the caller passed --title, and -d ONLY when the caller
+# passed --body -- see the three-branch note in _forge_pr_edit.
 _forge_pr_edit_gitlab() {
-  local number="$1" body="$2"
+  local number="$1" body="$2" title="${3:-}" body_provided="${4:-}" title_provided="${5:-}"
 
   if ! _forge_bin_check glab mandatory gitlab; then
-    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body" "$title" "$body_provided"
     _forge_emit_write_status degraded "" "glab not found -- this merge request was not edited automatically."
     return 1
   fi
 
-  # WRITE 2 (gitlab). -y FIRST, same rule, same landing site.
+  # WRITE 2 (gitlab). -y FIRST, same rule, same landing site -- on every one
+  # of the three branches, which is why they are spelled out rather than
+  # assembled into an array (see _forge_pr_edit's note on the same shape).
   local stdout="" stderr_out="" rc=0
-  _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -d "$body" || true
+  if [ -n "$title_provided" ] && [ -n "$body_provided" ]; then
+    _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -t "$title" -d "$body" || true
+  elif [ -n "$title_provided" ]; then
+    _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -t "$title" || true
+  else
+    _forge_capture stdout stderr_out rc -- glab mr update "$number" -y -d "$body" || true
+  fi
 
   if [ "$rc" -ne 0 ]; then
-    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: glab mr update exited $rc: ${stderr_out:-unknown error}" >&2
     _forge_emit_write_status degraded "" "glab mr update exited $rc: ${stderr_out:-unknown error}"
     return 1
@@ -5844,7 +5896,7 @@ _forge_pr_edit_gitlab() {
   fi
 
   if [ -z "$mr_number" ]; then
-    _forge_pr_write_print_manual edit gitlab "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitlab "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: glab mr update succeeded but the merge request could not be re-read afterward." >&2
     _forge_emit_write_status degraded "" "glab mr update succeeded but the merge request could not be re-read afterward."
     return 1
@@ -5925,6 +5977,19 @@ _forge_issue_create_gitlab() {
 # nothing; it is written down because the cheapest way to break it is an
 # innocent-looking refactor that moves a flag behind a conditional.
 #
+# ONE WRITE NOW DOES MOVE ITS FLAGS BEHIND A CONDITIONAL, AND STILL HOLDS.
+# `tea pulls edit` emits -t only when the caller passed --title and -d only
+# when it passed --body, because sending `-d ""` on a title-only edit would
+# blank an existing description. What keeps NumFlags() non-zero is not the
+# adapter but its wrapper: cmd_forge_pr_edit refuses a call supplying
+# NEITHER flag, so every invocation that reaches the adapter carries at
+# least one. The three combinations are spelled out as three literal
+# invocations rather than assembled from an array precisely so the
+# source-level guard below can still read a flag off every emitted line --
+# an array expansion would satisfy the runtime invariant while making it
+# unverifiable, which is the refactor the paragraph above warns about
+# wearing a different hat.
+#
 # The invariant is asserted from RECORDED ARGV, never from an exit status: a
 # fake tea never prompts, so it exits 0 whether or not a flag was passed and
 # an exit-status assertion would pass vacuously.
@@ -5941,7 +6006,12 @@ _forge_issue_create_gitlab() {
 #                        its OWN -b as --target-branch while tea's -b is
 #                        --base -- the short letters agree by coincidence.
 # `tea pulls edit` takes the pull request as a POSITIONAL argument and reuses
-# IssuePREditFlags (cmd/flags/issue_pr.go:179-202), so -d again.
+# IssuePREditFlags (cmd/flags/issue_pr.go:179-202), so -d again -- and -t
+# too, since IssuePREditFlags ends in `}, issuePRFlags...)` and it is that
+# shared base, not IssuePREditFlags's own edit-only fields, that carries the
+# title flag. Re-read on 2026-08-13 and unmoved; _forge_pr_edit_gitea's own
+# header carries the three-line citation and what tea does with an omitted
+# -t.
 #
 # ⚠️ GH_TOKEN HAZARD -- WHY NO tea CALL BELOW CARRIES A TOKEN PREFIX, AND WHY
 # NONE BLANKS ONE EITHER. tea honours GH_TOKEN, not only GITEA_TOKEN
@@ -6151,22 +6221,50 @@ _forge_pr_create_gitea() {
 # "unchanged", never "created", because editing mints no new identifier.
 # The pull request is a POSITIONAL argument to `tea pulls edit`, like
 # `glab mr update <id>` and unlike `gh pr edit <number>`'s flag-shaped body.
+#
+# -t IS A REAL `tea pulls edit` FLAG, AND HERE IS THE READ IT COMES FROM.
+# Re-confirmed against `gitea/tea` `main` on 2026-08-13, inside this
+# section's declared VERIFICATION CEILING -- tea is still not installed
+# here, so this is a source reading and not an observation:
+#   cmd/pulls/edit.go:66      Flags: append(flags.IssuePREditFlags, ...)
+#   cmd/flags/issue_pr.go:202 IssuePREditFlags = append([]cli.Flag{...}, issuePRFlags...)
+#   cmd/flags/issue_pr.go:95-98   issuePRFlags carries {Name: "title", Aliases: []string{"t"}}
+# So title arrives through the SHARED create/edit base, not through
+# IssuePREditFlags's own edit-only fields (set-assignees, add-labels and the
+# rest) -- which is the part worth writing down, because reading only
+# IssuePREditFlags's literal body would conclude there is no title flag.
+# tea's own parser then gates the field on `ctx.IsSet("title")`
+# (cmd/flags/issue_pr.go:207-210), so an omitted -t leaves the stored title
+# alone -- exactly the semantics the conditional emission below relies on.
 _forge_pr_edit_gitea() {
-  local number="$1" body="$2"
+  local number="$1" body="$2" title="${3:-}" body_provided="${4:-}" title_provided="${5:-}"
 
   if ! _forge_bin_check tea mandatory gitea; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
     _forge_emit_write_status degraded "" "tea not found -- this pull request was not edited automatically."
     return 1
   fi
 
-  # WRITE 2 (gitea). -d keeps NumFlags() non-zero here; same invariant, same
-  # header. No token prefix assignment, same GH_TOKEN hazard.
+  # WRITE 2 (gitea). Every branch below carries -t, -d, or both, so
+  # NumFlags() is never zero and the interactive-survey hang this section's
+  # header describes stays unreachable; the wrapper refusing a call that
+  # supplies neither flag is what makes that true for all three. Spelling
+  # the branches out rather than assembling an array is deliberate -- the
+  # header names "an innocent-looking refactor that moves a flag behind a
+  # conditional" as the cheapest way to break the invariant, and a literal
+  # flag on every emitted line is what keeps the source-level guard able to
+  # see it. No token prefix assignment, same GH_TOKEN hazard.
   local stdout="" stderr_out="" rc=0
-  _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -d "$body" || true
+  if [ -n "$title_provided" ] && [ -n "$body_provided" ]; then
+    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -t "$title" -d "$body" || true
+  elif [ -n "$title_provided" ]; then
+    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -t "$title" || true
+  else
+    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -d "$body" || true
+  fi
 
   if [ "$rc" -ne 0 ]; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: tea pulls edit exited $rc: ${stderr_out:-unknown error}" >&2
     _forge_emit_write_status degraded "" "tea pulls edit exited $rc: ${stderr_out:-unknown error}"
     return 1
@@ -6183,7 +6281,7 @@ _forge_pr_edit_gitea() {
   fi
 
   if [ -z "$pr_number" ]; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body"
+    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: tea pulls edit succeeded but the pull request could not be re-read afterward." >&2
     _forge_emit_write_status degraded "" "tea pulls edit succeeded but the pull request could not be re-read afterward."
     return 1
@@ -6509,7 +6607,7 @@ cmd_forge_pr_create() {
   _forge_pr_create "$title" "$base" "$head" "$body"
 }
 
-# Shells `gh pr edit <number> --body <b>`, then re-reads the edited PR via
+# Shells `gh pr edit <number> [--title <t>] [--body <b>]`, then re-reads the edited PR via
 # story 04's forge-pr-view lookup (in-process, keyed on the same numeric
 # identifier the caller supplied) to confirm and report {url, number} under
 # the write envelope's `data` key -- the same structured-field discipline
@@ -6530,8 +6628,25 @@ cmd_forge_pr_create() {
 # status "degraded" envelope on stdout carrying the same reason its stderr
 # text states. Never retries, never prompts interactively, exits non-zero
 # on every failure path.
+#
+# EACH FLAG IS EMITTED ONLY WHEN THE CALLER SUPPLIED IT, AND THAT IS THE
+# WHOLE REASON THE PROVIDED-NESS SIGNALS ARE THREADED DOWN HERE. --title and
+# --body are each independently optional (cmd_forge_pr_edit refuses only a
+# call that supplies NEITHER), so an invocation that always named both would
+# send `--body ""` alongside a title-only edit -- and `gh pr edit N --body ""`
+# blanks a description, which is silent data loss on a pull request the
+# caller only wanted to retitle. $body cannot answer this question on its
+# own for exactly the reason cmd_forge_pr_edit tracks the flag rather than
+# the value: an empty body is a legitimate deliberate clear.
+#
+# All three adapters therefore spell out the same three branches instead of
+# building an argv array. That is not a style choice: the gitea section
+# header's always-pass-a-flag invariant, and the two source-level guards
+# that enforce it and glab's -y over the whole file, both work by reading
+# the emitted line -- an array expansion would hide every flag from them
+# while the runtime behaviour looked unchanged.
 _forge_pr_edit() {
-  local number="$1" body="$2"
+  local number="$1" body="$2" title="${3:-}" body_provided="${4:-}" title_provided="${5:-}"
   local forge=""
   _detect_forge_type forge
 
@@ -6541,23 +6656,23 @@ _forge_pr_edit() {
     github) ;;
     gitlab)
       local gl_rc=0
-      _forge_pr_edit_gitlab "$number" "$body" || gl_rc=$?
+      _forge_pr_edit_gitlab "$number" "$body" "$title" "$body_provided" "$title_provided" || gl_rc=$?
       return "$gl_rc"
       ;;
     gitea)
       local gt_rc=0
-      _forge_pr_edit_gitea "$number" "$body" || gt_rc=$?
+      _forge_pr_edit_gitea "$number" "$body" "$title" "$body_provided" "$title_provided" || gt_rc=$?
       return "$gt_rc"
       ;;
     *)
-      _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+      _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
       _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
       return 1
       ;;
   esac
 
   if ! _forge_bin_check gh mandatory "$forge"; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
     _forge_emit_write_status degraded "" "gh not found -- this pull request was not edited automatically."
     return 1
   fi
@@ -6573,13 +6688,23 @@ _forge_pr_edit() {
   # identical -- neither form ever printed or inspected it.
   #
   # WRITE 2. Identical prefix-assignment shape to WRITE 1: on the
-  # _forge_capture call, never inside its argv, never via `env`.
+  # _forge_capture call, never inside its argv, never via `env` -- and now
+  # on each of the three branches, so the prefix cannot be lost from one of
+  # them while the other two keep the assertion green.
   local stdout rc=0 stderr_out
-  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
-    _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
+  if [ -n "$title_provided" ] && [ -n "$body_provided" ]; then
+    GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+      _forge_capture stdout stderr_out rc -- gh pr edit "$number" --title "$title" --body "$body" || true
+  elif [ -n "$title_provided" ]; then
+    GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+      _forge_capture stdout stderr_out rc -- gh pr edit "$number" --title "$title" || true
+  else
+    GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+      _forge_capture stdout stderr_out rc -- gh pr edit "$number" --body "$body" || true
+  fi
 
   if [ "$rc" -ne 0 ]; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: gh pr edit exited $rc: ${stderr_out:-unknown error}" >&2
     _forge_emit_write_status degraded "" "gh pr edit exited $rc: ${stderr_out:-unknown error}"
     return 1
@@ -6591,14 +6716,14 @@ _forge_pr_edit() {
   reread=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
     cmd_forge_pr_view --pr "$number" --include url,number) || reread_rc=$?
   if [ "$reread_rc" -ne 0 ]; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)." >&2
     _forge_emit_write_status degraded "" "gh pr edit succeeded but the post-edit forge-pr-view re-read failed (exit $reread_rc)."
     return 1
   fi
   reread_status=$(printf '%s' "$reread" | jq -r '.status')
   if [ "$reread_status" != "found" ]; then
-    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body"
+    _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
     echo "Error: forge-pr-edit: gh pr edit succeeded but the PR could not be re-read afterward." >&2
     _forge_emit_write_status degraded "" "gh pr edit succeeded but the PR could not be re-read afterward."
     return 1
@@ -6609,17 +6734,25 @@ _forge_pr_edit() {
   _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
 }
 
-# Public wrapper: parses --number/--body/--project (no --token or similarly
-# credential-shaped flag -- see this section's header comment), applies the
-# same three standard guards as cmd_forge_pr_create (project cd, git-
-# repository check, identifier validation before shelling out) -- --number
-# is validated as numeric-only (^[0-9]+$) rather than the branch-name
-# pattern, matching cmd_forge_issue_view's own numeric-identifier guard --
-# then delegates exactly once to _forge_pr_edit.
+# Public wrapper: parses --number/--title/--body/--project (no --token or
+# similarly credential-shaped flag -- see this section's header comment),
+# applies the same three standard guards as cmd_forge_pr_create (project cd,
+# git-repository check, identifier validation before shelling out) --
+# --number is validated as numeric-only (^[0-9]+$) rather than the branch-
+# name pattern, matching cmd_forge_issue_view's own numeric-identifier guard
+# -- then delegates exactly once to _forge_pr_edit.
+#
+# --title is OPTIONAL, and so is --body: the guard below refuses only a call
+# that supplies neither. Making --title mandatory the way --body used to be
+# would have broken this verb's one in-tree caller on the spot --
+# commands/open-pr.md Step 5c appends a "Related issue: #N" line and passes
+# --body alone. Nothing in the plugin passes --title today; forge-pr-create
+# has accepted one since it was written, and this is the symmetric ability
+# forge-pr-edit simply lacked (GitHub issue #110).
 cmd_forge_pr_edit() {
   check_jq
 
-  local number="" body="" project_dir="" body_provided=""
+  local number="" body="" title="" project_dir="" body_provided="" title_provided=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -6631,6 +6764,12 @@ cmd_forge_pr_edit() {
       # must keep working) have to stay distinguishable. Checking $body for
       # emptiness would collapse them back together.
       --body)    shift; body="${1:-}"; body_provided=1 ;;
+      # title_provided follows the SAME flag-seen rule, for a reason that is
+      # only half the same. The shared half: now that both flags are
+      # optional, each adapter has to know which ones to emit, and a value
+      # test cannot answer that. The half that DIVERGES is the verdict on an
+      # empty value -- see the refusal below.
+      --title)   shift; title="${1:-}"; title_provided=1 ;;
       --project) shift; project_dir="${1:-}" ;;
       *)
         echo "Error: forge-pr-edit: unknown flag: $1" >&2
@@ -6642,8 +6781,23 @@ cmd_forge_pr_edit() {
 
   _require_git_repo "$project_dir"
 
-  if [ -z "$number" ] || [ -z "$body_provided" ]; then
-    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> --body <text> [--project <path>]" >&2
+  if [ -z "$number" ] || { [ -z "$body_provided" ] && [ -z "$title_provided" ]; }; then
+    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]" >&2
+    echo "       at least one of --title / --body is required" >&2
+    exit 1
+  fi
+
+  # DELIBERATELY THE OPPOSITE ANSWER TO --body "". An empty description is a
+  # real value on all three forges and clearing one is a thing a caller
+  # legitimately asks for, so --body "" is honoured. An empty TITLE is not a
+  # legal value on gh, glab or tea -- there is nothing it could mean but a
+  # mistake -- so --title gets no "deliberate clear" escape hatch and is
+  # refused here, before any forge CLI runs. Its own message, distinct from
+  # the usage error above, because the two are different caller mistakes:
+  # one forgot to say what to change, the other asked for something no forge
+  # will store.
+  if [ -n "$title_provided" ] && [ -z "$title" ]; then
+    echo "Error: forge-pr-edit: --title must not be empty -- no forge accepts an empty pull/merge request title. Omit --title to leave the title unchanged." >&2
     exit 1
   fi
 
@@ -6652,7 +6806,7 @@ cmd_forge_pr_edit() {
     exit 1
   fi
 
-  _forge_pr_edit "$number" "$body"
+  _forge_pr_edit "$number" "$body" "$title" "$body_provided" "$title_provided"
 }
 
 # ============================================================================
@@ -13005,16 +13159,24 @@ COMMANDS:
                               an adapter. Identity, when needed, is read from
                               an env var (e.g. AIMI_FORGE_IDENTITY /
                               GH_TOKEN), never a flag.
-    forge-pr-edit --number <n> --body <text> [--project <path>]
-                              Write verb -- shells gh pr edit <number>
-                              --body, then re-reads the PR via forge-pr-view
-                              to confirm and report {url, number} under the
-                              same write envelope forge-pr-create emits. A
-                              successful edit reports status "unchanged": it
-                              mutates an existing number and mints no new
-                              identifier. Same guards, degrade contract, and
+    forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]
+                              Write verb -- shells gh pr edit <number> with
+                              --title and/or --body, then re-reads the PR via
+                              forge-pr-view to confirm and report
+                              {url, number} under the same write envelope
+                              forge-pr-create emits. A successful edit reports
+                              status "unchanged": it mutates an existing
+                              number and mints no new identifier. --title and
+                              --body are each optional but at least one is
+                              required, and each is sent ONLY when supplied --
+                              a title-only edit passes no --body, because an
+                              empty one would blank the description. --body ""
+                              is honoured as a deliberate clear; --title "" is
+                              refused, since no forge stores an empty title.
+                              Same guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create.
-                              github, gitlab and gitea each have an adapter.
+                              github, gitlab and gitea each have an adapter
+                              (glab mr update -t/-d, tea pulls edit -t/-d).
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
