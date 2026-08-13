@@ -139,6 +139,66 @@ EOF
   rm -f "$second_file"
 }
 
+# The xargs empty-input defect (_find_tasks_files_all, aimi-cli.sh): `find
+# ... -print0 | xargs -0 ls -t` runs `ls -t` with zero arguments when find
+# matches nothing, and `ls -t` with no arguments lists the CURRENT directory
+# -- which find_aimi_root has already cd'd to (PROJECT_ROOT) -- instead of
+# nothing. A bare mktemp -d root with no other visible top-level entry would
+# not exercise this: `ls -t` finds nothing to list either way and the case
+# passes vacuously. The decoy file at the project root is what makes it
+# observable. Builds its own isolated mktemp -d project root -- the shared
+# TEST_DIR fixture always ships a real tasks file and can never represent
+# this empty case.
+test_find_tasks_empty_dir_with_decoy() {
+  echo ""
+  echo "=== Testing find-tasks: empty tasks dir with a project-root decoy ==="
+
+  local d; d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks"
+  echo "not a tasks file" > "$d/DECOY.md"
+
+  local err exit_code out
+  err=$(cd "$d" && "$CLI" find-tasks 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  out=$(cd "$d" && "$CLI" find-tasks 2>/dev/null)
+
+  assert_exit_code "1" "$exit_code" "find-tasks: empty dir with decoy exits 1"
+  assert_stderr_contains "No tasks file found in" "$err" \
+    "find-tasks: empty dir with decoy reports the existing error message"
+
+  if [[ "$out" == *"DECOY.md"* ]]; then
+    echo -e "${RED}✗${NC} find-tasks: empty dir with decoy — stdout never contains the decoy"
+    echo "  Actual stdout: $out"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} find-tasks: empty dir with decoy — stdout never contains the decoy"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf "$d"
+}
+
+# find-tasks-all's identical defect: same empty-dir-plus-decoy setup, the
+# nested candidate loop that _find_tasks_files_all feeds.
+test_find_tasks_all_empty_dir_with_decoy() {
+  echo ""
+  echo "=== Testing find-tasks-all: empty tasks dir with a project-root decoy ==="
+
+  local d; d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks"
+  echo "not a tasks file" > "$d/DECOY.md"
+
+  local err exit_code out
+  err=$(cd "$d" && "$CLI" find-tasks-all 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  out=$(cd "$d" && "$CLI" find-tasks-all 2>/dev/null)
+
+  assert_exit_code "1" "$exit_code" "find-tasks-all: empty dir with decoy exits 1"
+  assert_stderr_contains "No tasks files found" "$err" \
+    "find-tasks-all: empty dir with decoy reports the existing error message"
+  assert_eq "" "$out" "find-tasks-all: empty dir with decoy — stdout is empty"
+
+  rm -rf "$d"
+}
+
 test_init_session_file_flag() {
   echo ""
   echo "=== Testing init-session --file flag ==="
@@ -8242,6 +8302,8 @@ main() {
   echo "--- Multi-File Discovery Tests ---"
   reset_fixture
   test_find_tasks_all
+  test_find_tasks_empty_dir_with_decoy
+  test_find_tasks_all_empty_dir_with_decoy
   test_init_session_file_flag
   test_init_session_file_flag_validation
 

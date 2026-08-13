@@ -28,7 +28,7 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
-#   - split-detect Tests (TC36-TC46, TC50-TC52)
+#   - split-detect Tests (TC36-TC46, TC50-TC53)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -1565,6 +1565,35 @@ TERMEOF
     "list-archivable: the predicate says nothing about a document it cannot read"
 
   rm -rf "$pred_dir" "$stderr_file"
+}
+
+# The list-archivable half of the xargs empty-input defect
+# (_find_tasks_files_all, aimi-cli.sh). An empty .aimi/tasks/ plus a decoy
+# file in the project root makes _find_tasks_files_all return the decoy
+# instead of nothing. Today that bogus path lands in cmd_list_archivable's
+# nested_files branch (its dirname is not TASKS_DIR), _archivable_file_is_terminal
+# fails to parse it as JSON, the failure is swallowed by the predicate's own
+# silent contract (case (c) above), and the file is excluded -- so
+# list-archivable already answers [] here, by accident rather than by
+# design. This test pins that externally observed [] answer so the fix
+# (which removes the underlying bogus candidate) does not change it.
+test_list_archivable_empty_dir_with_decoy() {
+  echo ""
+  echo "=== Testing list-archivable: empty tasks dir with a project-root decoy ==="
+
+  local d; d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks"
+  echo "not a tasks file" > "$d/DECOY.md"
+
+  local stderr_file exit_code=0 output
+  stderr_file=$(mktemp)
+  output=$(cd "$d" && "$CLI" list-archivable 2>"$stderr_file") || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "list-archivable: empty dir with decoy does not take the command down"
+  assert_eq "[]" "$output" "list-archivable: empty dir with decoy still answers []"
+  assert_eq "" "$(cat "$stderr_file")" "list-archivable: empty dir with decoy — empty stderr"
+
+  rm -rf "$d" "$stderr_file"
 }
 
 test_research_gc() {
@@ -6801,7 +6830,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46, TC50-TC52)
+# split-detect Tests (TC36-TC46, TC50-TC53)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -7380,6 +7409,76 @@ test_split_detect_dir_scope_refusal_matches_flat_scope() {
   rm -rf "$d"
 }
 
+# TC53: the split-detect half of the xargs empty-input defect
+# (_find_tasks_files_all / _split_detect_list_dir, aimi-cli.sh). TC46's own
+# empty-tasks-dir case above never plants a decoy, so it never actually
+# exercises xargs running `ls -t` with no arguments -- `ls -t` with no
+# arguments lists PROJECT_ROOT (find_aimi_root has already cd'd there), so
+# the decoy that matters is a visible top-level file in the project root,
+# regardless of which subdirectory a --dir query targets.
+#
+# Flat scope filters its candidate pool to direct children of TASKS_DIR
+# before ever printing an answer (cmd_split_detect's dirname check), so a
+# project-root decoy is excluded on its own merit -- flat scope already
+# answers none/empty today, before the fix. This case pins that answer
+# rather than discriminating on it, the same accidental-correctness shape as
+# list-archivable's decoy case above.
+#
+# --dir scope has no such filter: _split_detect_list_dir hands its raw
+# answer straight into the candidate pool, and today that "raw answer" is
+# whatever `ls -t` finds in PROJECT_ROOT -- not the --dir target directory --
+# because xargs ran it with zero arguments. Placing the decoy INSIDE the
+# --dir target directory does NOT reproduce the defect (ls -t never looks
+# there); it must sit in the project root, same as the flat case. That is
+# the case that actually goes red before the fix (mode "single", a bogus
+# DECOY.md member) and green after (mode "none") -- proving the --dir code
+# path is fixed independently of the flat one.
+test_split_detect_empty_dir_with_decoy() {
+  echo ""
+  echo "=== TC53: split-detect — empty tasks dir with a project-root decoy ==="
+
+  local d; d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  echo "not a tasks file" > "$d/DECOY.md"
+
+  # --- flat scope ---
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC53: flat scope, empty dir with decoy exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC53: flat scope mode is none"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC53: flat scope anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC53: flat scope members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC53: flat scope activeCount is 0"
+  if [[ "$out" == *"DECOY.md"* ]]; then
+    echo -e "${RED}✗${NC} TC53: flat scope — the decoy never appears as a candidate"
+    echo "  Actual: $out"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC53: flat scope — the decoy never appears as a candidate"
+    ((TESTS_PASSED++))
+  fi
+
+  # --- --dir scope, targeting an otherwise-empty phase directory ---
+  out=$(_sd_run "$d" --dir "$d/.aimi/tasks/myfeat/phase-2-auth") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC53: --dir scope, empty phase dir with decoy exits 0"
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" "TC53: --dir scope mode is none"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.anchor')" "TC53: --dir scope anchor is null"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" "TC53: --dir scope members is empty"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.activeCount')" "TC53: --dir scope activeCount is 0"
+  if [[ "$out" == *"DECOY.md"* ]]; then
+    echo -e "${RED}✗${NC} TC53: --dir scope — the decoy never appears as a candidate"
+    echo "  Actual: $out"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC53: --dir scope — the decoy never appears as a candidate"
+    ((TESTS_PASSED++))
+  fi
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -7446,6 +7545,7 @@ main() {
   echo ""
   echo "--- Research GC Tests ---"
   test_archivable_predicate_and_research_walk_crossed
+  test_list_archivable_empty_dir_with_decoy
   test_research_gc
 
   # Interactivity mode detection tests
@@ -7577,11 +7677,11 @@ main() {
   test_story_merge_project_split_phase_aware
   test_story_merge_project_split_partial_write_failure
 
-  # split-detect tests (TC36-TC46, TC50-TC52) — each builds its own isolated
+  # split-detect tests (TC36-TC46, TC50-TC53) — each builds its own isolated
   # project dir. TC47-TC49 are used by the story-merge project-axis tests
   # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46, TC50-TC52) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC53) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -7596,6 +7696,7 @@ main() {
   test_split_detect_refuses_unrooted_pair_in_non_git_aimi_root
   test_split_detect_marked_group_unaffected_by_non_git_aimi_root
   test_split_detect_dir_scope_refusal_matches_flat_scope
+  test_split_detect_empty_dir_with_decoy
 
   cleanup
 

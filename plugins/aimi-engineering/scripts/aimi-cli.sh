@@ -786,14 +786,22 @@ validate_story_exists() {
 # get_tasks_file's stale-state fallback so all three see the same combined
 # view instead of a flat-only glob. Prints nothing (not an error) when
 # TASKS_DIR is missing or empty.
-# NUL-delimited find -> xargs -0 keeps paths containing spaces intact. A
-# newline-delimited `xargs ls -t` word-splits them, which silently emptied
-# discovery for any project whose path contains a space (regression vs the
-# pre-phase-layer quoted glob).
+# NUL-delimited find keeps paths containing spaces intact. A newline-delimited
+# `xargs ls -t` word-splits them, which silently emptied discovery for any
+# project whose path contains a space (regression vs the pre-phase-layer
+# quoted glob). The find output is captured into an array first and ls -t is
+# only invoked when that array is non-empty -- xargs runs its command once
+# even on empty input, and `ls -t` with no arguments lists the current
+# directory rather than nothing (xargs -r is a GNU extension BSD/macOS xargs
+# does not support, so this is a structural fix, not a flag).
 _find_tasks_files_all() {
   [ -d "$TASKS_DIR" ] || return 0
-  find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' -print0 2>/dev/null \
-    | xargs -0 ls -t 2>/dev/null || true
+  local files=()
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(find "$TASKS_DIR" -mindepth 1 -maxdepth 3 -type f -name '*-tasks.json' -print0 2>/dev/null)
+  [ ${#files[@]} -gt 0 ] || return 0
+  ls -t "${files[@]}" 2>/dev/null || true
 }
 
 # Get the tasks file (from state or discover)
@@ -11315,14 +11323,22 @@ _split_detect_describe() {
 }
 
 # List *-tasks.json files directly inside <dir> (depth 1 only), newest mtime
-# first. NUL-delimited find -> xargs -0 keeps paths containing spaces intact,
-# the same hardening _find_tasks_files_all carries; a newline-delimited
-# `xargs ls -t` word-splits them and silently returns nothing.
+# first. NUL-delimited find keeps paths containing spaces intact, the same
+# hardening _find_tasks_files_all carries; a newline-delimited `xargs ls -t`
+# word-splits them and silently returns nothing. The find output is captured
+# into an array first and ls -t is only invoked when that array is
+# non-empty -- xargs runs its command once even on empty input, and `ls -t`
+# with no arguments lists the current directory (PROJECT_ROOT, not <dir>)
+# rather than nothing. Same restructuring as _find_tasks_files_all.
 _split_detect_list_dir() {
   local dir="$1"
   [ -d "$dir" ] || return 0
-  find "$dir" -mindepth 1 -maxdepth 1 -type f -name '*-tasks.json' -print0 2>/dev/null \
-    | xargs -0 ls -t 2>/dev/null || true
+  local files=()
+  while IFS= read -r -d '' f; do
+    files+=("$f")
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type f -name '*-tasks.json' -print0 2>/dev/null)
+  [ ${#files[@]} -gt 0 ] || return 0
+  ls -t "${files[@]}" 2>/dev/null || true
 }
 
 # Derive the phase's own governing tasks file from a phase directory, so it can
