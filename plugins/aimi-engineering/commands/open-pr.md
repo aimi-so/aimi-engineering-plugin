@@ -202,33 +202,40 @@ Build the PR from git state directly — commits and diff against the base branc
 
 **Skip this step entirely when `$CURRENT_BRANCH` is already set (from `--branch`)** — reuse that value instead of resolving HEAD.
 
-A bare HEAD read is not reliable here: after a container-mode `/aimi:execute` run, the **Main Working Tree Untouched Invariant** (`commands/references/container-execution.md:57`) means the main working tree was never checked out onto the feature branch, and Step 5's teardown (`container-execution.md:198`) removes the container with `--keep-branch`, leaving the feature branch checked out nowhere. HEAD stays parked on the base branch for the whole run — trusting it as-is would open a PR of the base branch against its own grandparent. Resolve both HEAD and the repository's default branch up front, then decide which one is actually the feature branch:
+A bare HEAD read is not reliable here: after a container-mode `/aimi:execute` run, the **Main Working Tree Untouched Invariant** (`commands/references/container-execution.md:57`) means the main working tree was never checked out onto the feature branch, and Step 5's teardown (`container-execution.md:198`) removes the container with `--keep-branch`, leaving the feature branch checked out nowhere. HEAD stays parked on **the base branch** for the whole run — trusting it as-is would open a PR of the base branch against its own grandparent. "The base branch" is not always `$DEFAULT_BRANCH`: a container-mode run stacked on top of another feature branch (its own base was never the default branch to begin with) leaves HEAD parked on that other feature branch instead, so the discriminator below asks the one question that actually matters — does HEAD differ from the branch the active tasks file names — rather than the narrower "does HEAD differ from `$DEFAULT_BRANCH`". Resolve HEAD, the repository's default branch, and the active tasks file's candidate branch up front, then decide which one is actually the feature branch:
 
 ```bash
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch 2>/dev/null)
-```
-
-**Case A — HEAD is already on a real feature branch.** When `$CURRENT_BRANCH` is non-empty, is not the literal string `HEAD` (detached), and differs from `$DEFAULT_BRANCH`, reuse it unchanged — no behavior change from before:
-
-```bash
-: # CURRENT_BRANCH already holds the right value; nothing to do
-```
-
-**Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** This is the normal container-mode end state. Resolve the feature branch from the active tasks file's `metadata.branchName` instead of trusting HEAD:
-
-```bash
 CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
-if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
-  CURRENT_BRANCH="$CANDIDATE_BRANCH"
-else
-  echo "Warning: No active tasks file found (or its branchName is missing/invalid) and HEAD is on $DEFAULT_BRANCH — proceeding with the checked-out branch, which may be the base branch itself." >&2
+```
+
+`$DEFAULT_BRANCH` is kept here even though the discriminator below no longer reads it — Step 2c's own independent `detect-default-branch` call still needs the concept documented, and the cross-reference paragraph at the end of this step depends on it being computed in this preamble.
+
+This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
+
+**Case A — nothing to correct.** Either the active tasks file's `branchName` is unusable (no tasks file discoverable, or `branchName` empty or invalid), or it is usable but already equals `$CURRENT_BRANCH` — HEAD is already on the branch the tasks file names, whether or not that happens to be `$DEFAULT_BRANCH`:
+
+```bash
+if [ -z "$CANDIDATE_BRANCH" ] || ! echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  echo "Warning: No active tasks file found (or its branchName is missing/invalid) — proceeding with the checked-out branch ($CURRENT_BRANCH), which may not be the feature branch." >&2
 fi
 ```
 
-This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
+No message is printed for the "already correct" half of Case A — `$CURRENT_BRANCH` needs no announcement to keep using itself.
+
+**Case B — HEAD is not the branch the tasks file names.** Fires whenever a valid `$CANDIDATE_BRANCH` differs from `$CURRENT_BRANCH`. This covers both the pre-existing scenario (HEAD parked on `$DEFAULT_BRANCH`, the ordinary container-mode end state) and the stacked-base scenario the widened trigger fixes (HEAD parked on a *different* feature branch because the run was stacked on top of it) — one rule for both, since neither case is special beyond "HEAD is not the tasks file's branch":
+
+```bash
+if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$' && [ "$CANDIDATE_BRANCH" != "$CURRENT_BRANCH" ]; then
+  echo "Resolved feature branch from the active tasks file: $CANDIDATE_BRANCH (HEAD was on $CURRENT_BRANCH)" >&2
+  CURRENT_BRANCH="$CANDIDATE_BRANCH"
+fi
+```
+
+The correction is reported (to stderr, matching the Case A warning's own `>&2` convention) rather than applied silently: once the trigger also covers the stacked-base case, `$CURRENT_BRANCH` being swapped is no longer obviously "HEAD was on the default branch" — the swapped-from value is itself a plausible-looking feature branch, and a silent substitution there would be a surprise rather than a correction. Naming both branches makes it auditable in the transcript instead.
 
 Store the resolved value as `$CURRENT_BRANCH`.
 
