@@ -318,9 +318,11 @@ below):
 **`unchanged` covers two outcomes that look different but are the same
 fact.** `forge-pr-create` finding an already-open PR on `--head` reports it,
 and so does every successful `forge-pr-edit` call — an edit mutates a number
-that already existed. `forge-pr-edit`'s PR *body* really did change; the word
-is about the **resource identifier**, not the content. `forge-issue-create`
-never reports `unchanged` at all: it only ever mints a new issue.
+that already existed. The PR's *title*, *body*, or both really did change
+(`forge-pr-edit` takes `--title` and `--body`, each optional, at least one
+required); the word is about the **resource identifier**, not the content.
+`forge-issue-create` never reports `unchanged` at all: it only ever mints a
+new issue.
 
 **The exit-code contract is unchanged by this envelope, and is not replaced
 by it.** The hard-fail versus soft-fail split stated in `aimi-cli.sh`'s own
