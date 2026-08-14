@@ -2519,6 +2519,37 @@ test_resolve_skills_base_dir_picks_newest_version() {
   assert_eq "" "$resolved" \
     "_resolve_skills_base_dir: an empty glob still yields empty rather than aborting"
 
+  # Directory-source case: no versioned cache entry anywhere under config_dir,
+  # but a directory-source install IS registered. The Claude Code branch's
+  # fallback (added by this story) must ask _resolve_directory_source_path the
+  # same "skills" question _resolve_latest_cache_path just answered empty --
+  # this is the invariant the header comment states ("both sides now ask
+  # _resolve_latest_cache_path the same question"), extended to the
+  # directory-source case rather than restated.
+  local ds_root ds_config_dir ds_install_dir
+  ds_root=$(mktemp -d)
+  ds_config_dir="$ds_root/claude-config"
+  ds_install_dir="$ds_root/repo"
+  mkdir -p "$ds_config_dir/plugins" \
+    "$ds_install_dir/.claude-plugin" \
+    "$ds_install_dir/plugins/aimi-engineering/skills"
+  cat > "$ds_config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$ds_install_dir"},
+    "installLocation": "$ds_install_dir"
+  }
+}
+EOF
+  cat > "$ds_install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  resolved=$(CLAUDECODE=1 CLAUDE_CONFIG_DIR="$ds_config_dir" _resolve_skills_base_dir)
+  assert_eq "$ds_install_dir/plugins/aimi-engineering/skills" "$resolved" \
+    "_resolve_skills_base_dir: falls back to the directory-source resolver when no versioned cache entry exists"
+
+  rm -rf "$ds_root"
   rm -rf "$root"
 }
 
@@ -6496,6 +6527,104 @@ EOF
   rm -rf "$root"
 }
 
+# End-to-end: a spawned story-executor agent on a directory-source Claude Code
+# host must not silently lose its skills. _resolve_skills_base_dir's Claude
+# Code branch answering correctly in isolation is not sufficient proof of
+# this -- cmd_get_story_context's two --skills-base-dir call sites could still
+# be wired wrong and this assertion would not know it. This drives the whole
+# CLI verb instead, exactly the way a spawned agent's first action does (see
+# get-story-context's own header comment: "the SKILL.md belonging to the same
+# install whose CLI is orchestrating it").
+test_get_story_context_skills_directory_source_host() {
+  echo ""
+  echo "=== Testing get-story-context resolves skills[] via the directory-source fallback (Claude Code host, no cache) ==="
+
+  local root config_dir install_dir aimi_root
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  aimi_root="$root/project"
+
+  mkdir -p "$config_dir/plugins" \
+    "$install_dir/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/skills/dir-source-skill" \
+    "$aimi_root/.aimi/tasks"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  printf 'Directory-source skill content.\n' \
+    > "$install_dir/plugins/aimi-engineering/skills/dir-source-skill/SKILL.md"
+
+  cat > "$aimi_root/.aimi/tasks/9999-99-99-dir-source-skills-tasks.json" << 'TASKSEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: directory-source skills test",
+    "type": "feat",
+    "branchName": "feat/dir-source-skills-test",
+    "createdAt": "2026-08-14",
+    "planPath": null,
+    "brainstormPath": null,
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Story with skills on a directory-source host",
+      "description": "Test story",
+      "acceptanceCriteria": ["Skills present in context"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "skills": ["dir-source-skill"],
+      "notes": ""
+    }
+  ]
+}
+TASKSEOF
+
+  # CLAUDECODE=1, and config_dir carries no plugins/cache/*/aimi-engineering/*/skills
+  # anywhere -- _resolve_latest_cache_path's glob is empty, so this exercises
+  # exactly the fallback branch this story adds. CLAUDE_CONFIG_DIR and
+  # AIMI_CONFIG_DIR are both pinned at this fresh mktemp -d root: this repo IS
+  # a registered directory-source marketplace on this machine, so an unpinned
+  # run would read (or write into) real ~/.config/aimi state.
+  local output exit_code
+  output=$(cd "$aimi_root" && CLAUDECODE=1 CLAUDE_CONFIG_DIR="$config_dir" AIMI_CONFIG_DIR="$config_dir/aimi" "$CLI" get-story-context US-001 2>&1)
+  exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "dir_source_skills: get-story-context exits 0"
+
+  local skills_len
+  skills_len=$(echo "$output" | jq '.skills | length')
+  assert_eq "1" "$skills_len" \
+    "dir_source_skills: skills array is non-empty on a directory-source host with no matching cache"
+
+  local sk_name sk_path sk_content
+  sk_name=$(echo "$output" | jq -r '.skills[0].name')
+  sk_path=$(echo "$output" | jq -r '.skills[0].path')
+  sk_content=$(echo "$output" | jq -r '.skills[0].content')
+  assert_eq "dir-source-skill" "$sk_name" "dir_source_skills: skills[0].name is the declared skill"
+  assert_eq "skills/dir-source-skill/SKILL.md" "$sk_path" "dir_source_skills: skills[0].path is plugin-relative"
+  assert_contains "Directory-source skill content" "$sk_content" \
+    "dir_source_skills: skills[0].content came from the directory-source install's SKILL.md"
+
+  rm -rf "$root"
+}
+
 # ============================================================================
 # Directory-Source Identity Widening Tests (US-007)
 # ============================================================================
@@ -9711,6 +9840,7 @@ main() {
   test_directory_source_plugin_dir_source_traversal
   test_directory_source_plugin_dir_joined_dir_missing
   test_directory_source_functions_defined_via_source_cache_functions
+  test_get_story_context_skills_directory_source_host
 
   # Directory-source identity widening tests (US-007) — the two validators'
   # third admission route. test_prime_cache_directory_source_already_current
