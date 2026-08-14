@@ -679,6 +679,55 @@ def test_cleanup_with_empty_cache_leaves_a_directory_source_install_untouched(tm
     assert actual["tree"] == actual["tree_before"]
 
 
+def test_cleanup_refuses_a_version_dir_that_resolves_outside_the_cache(tmp_path):
+    """The containment guard's REFUSAL branch, which nothing else reaches.
+
+    The two cases above prove today's behaviour is safe; they do not prove the
+    guard works, and reverting it leaves them both green -- the story that added
+    it measured exactly that and said so. The gap is structural: version_dir's
+    only source is a glob rooted at <config_dir>/plugins/cache, so no ordinary
+    fixture can hand the guard a path to refuse.
+
+    A SYMLINK can. resolve_path follows it, so a version directory that is a
+    symlink out of the cache resolves outside the cache root and must be
+    refused. The recipe already knows how to build one (`worktree_symlink`,
+    added for D11), and its target sits at <root>/.worktrees/... -- outside
+    plugins/cache by construction.
+
+    The second, REAL version matters as much as the symlink: it has to be the
+    newer of the two so that it, not the symlink, becomes latest_version_dir.
+    The existing clv-simlink-worktrees-cc case seeds the symlink alone, which
+    makes it the latest and sends it down the skip `continue` several lines
+    ABOVE the guard -- which is precisely why that case never exercised this
+    branch either.
+    """
+    spec = {
+        "args": ["cleanup-versions"],
+        "cache": [
+            {"entry": "mk1", "version": "1.0.0", "worktree_symlink": True},
+            {"entry": "mk1", "version": "2.0.0"},
+        ],
+    }
+    actual = replay(spec, str(tmp_path))
+
+    # 2.0.0 is newest and is kept. 1.0.0 is the only removal candidate, and it
+    # is refused -- so nothing is removed at all.
+    assert json.loads(actual["stdout"]) == {"removed": 0, "kept": "2.0.0"}
+
+    # The refusal is announced rather than silent, and names the path.
+    assert "refusing to remove" in actual["stderr"], actual["stderr"]
+
+    # The symlink's TARGET -- the thing an unguarded rm -rf would have deleted,
+    # since rm -rf follows the directory symlink's contents -- is intact.
+    target_before = [p for p in actual["tree_before"] if p.startswith(".worktrees/")]
+    target_after = [p for p in actual["tree"] if p.startswith(".worktrees/")]
+    assert target_before, "fixture did not seed the out-of-cache symlink target"
+    assert target_after == target_before, "the out-of-cache target was modified"
+
+    # And the symlink entry itself still stands: refusing is not deleting.
+    assert any("/1.0.0" in p for p in actual["tree"]), actual["tree"]
+
+
 def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):
     """The permanent regression case for the nested-shell interpolation.
 
