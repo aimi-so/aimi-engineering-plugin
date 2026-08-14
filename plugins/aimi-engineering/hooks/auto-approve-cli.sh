@@ -210,8 +210,8 @@ if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$AIMI_CLI\" \\]; then AIMI_CLI=\\
 fi
 
 # --- Pattern 8: WORKTREE_MGR Layer 2 glob fallback (bash -c wrapper) ---
-# Approves: if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null<version tail>'); fi
-if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/scripts/worktree-manager\\.sh 2>/dev/null${GLOB_VERSION_TAIL_RE}'\\); fi\$"; then
+# Approves: if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null<version tail>'); fi
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/skills/git-worktree/scripts/worktree-manager\\.sh 2>/dev/null${GLOB_VERSION_TAIL_RE}'\\); fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
@@ -259,8 +259,8 @@ if echo "$COMMAND" | grep -qE '^if \[ -z "\$AIMI_CLI" \] && \[ -f \.aimi/cli-pat
 fi
 
 # --- Pattern 12: WORKTREE_MGR Layer 3 per-project fallback ---
-# Approves: if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(cat .aimi/cli-path)")/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
-if echo "$COMMAND" | grep -qE '^if \[ -z "\$WORKTREE_MGR" \] && \[ -f \.aimi/cli-path \]; then WORKTREE_MGR=\$\(dirname "\$\(cat \.aimi/cli-path\)"\)/worktree-manager\.sh; if \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi; fi$'; then
+# Approves: if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(dirname "$(cat .aimi/cli-path)")")/skills/git-worktree/scripts/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
+if echo "$COMMAND" | grep -qE '^if \[ -z "\$WORKTREE_MGR" \] && \[ -f \.aimi/cli-path \]; then WORKTREE_MGR=\$\(dirname "\$\(dirname "\$\(cat \.aimi/cli-path\)"\)"\)/skills/git-worktree/scripts/worktree-manager\.sh; if \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi; fi$'; then
   echo "$ALLOW"
   exit 0
 fi

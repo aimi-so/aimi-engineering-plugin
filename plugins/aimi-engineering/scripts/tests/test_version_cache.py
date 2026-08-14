@@ -104,7 +104,17 @@ D11_AND_D13 = {
         "write_state is a different writer and the guard was never its rule."
     ),
     "clv-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via cleanup-versions.",
-    "pc-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via prime-cache.",
+    "pc-simlink-worktrees-cc": (
+        "D11 FIXED: same symlinked entry, via prime-cache. US-006 goes one step "
+        "further for THIS verb only: prime-cache's own answer for this case now "
+        "changes too, from the false {status:\"ok\"} this recording still shows "
+        "to {status:\"error\"} at exit 1 -- see "
+        "test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink "
+        "below. check-version and cleanup-versions keep the no-op-success answer "
+        "asserted by test_a_symlink_into_a_worktree_is_no_longer_persisted_globally "
+        "unchanged; only their shared write refusal is D11's fix, and "
+        "cmd_check_version/cmd_cleanup_versions are out of scope for US-006."
+    ),
     "ver-chave-ausente": (
         "D13 FIXED: was the literal string `null` at exit 0, which reads as a "
         "version; now exit 1 naming the file."
@@ -445,7 +455,7 @@ def test_an_empty_glob_answers_not_found_even_when_aimi_plugin_dir_is_set(label,
 
 @pytest.mark.parametrize(
     "label",
-    ["cv-fix-simlink-worktrees-cc", "clv-simlink-worktrees-cc", "pc-simlink-worktrees-cc"],
+    ["cv-fix-simlink-worktrees-cc", "clv-simlink-worktrees-cc"],
 )
 def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_path):
     """D11: the refusal has to survive the indirection that defeated it.
@@ -455,6 +465,12 @@ def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_pa
     exit 127 on every later session once the worktree is cleaned up, so the
     before-state is asserted too -- a case that stopped exercising the symlink
     would otherwise pass this quietly.
+
+    pc-simlink-worktrees-cc used to run through this same assertion -- it no
+    longer does, because US-006 changed what prime-cache (and only
+    prime-cache) answers for it. See
+    test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink
+    directly below for that verb's own version of this check.
     """
     assert CASES[label]["global_cli_path"] is not None, label + ": the recording refused already"
     actual = replay(CASES[label]["input"], str(tmp_path))
@@ -462,6 +478,40 @@ def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_pa
     # The refusal is a no-op success, not an error: the verb's own answer stands.
     assert actual["exit"] == CASES[label]["exit"], label + ": the refusal changed the exit status"
     assert actual["stdout"] == CASES[label]["stdout"], label + ": the refusal changed the answer"
+
+
+def test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink(tmp_path):
+    """US-006: prime-cache's blind spot on the SAME refusal D11 already fixed.
+
+    write_global_cli_cache's refusal (D11, above) is a no-op success at its own
+    level -- it returns 0 and writes nothing, which is the right contract for a
+    helper whose caller might have other reasons to keep going. cmd_prime_cache
+    used to trust that return status alone (`if ! write_error=$(...)`), so a
+    refused write and a real one were indistinguishable at its own call site:
+    both an empty write_error and an exit 0. Unlike check-version or
+    cleanup-versions -- whose own jobs do not stop at "write the cache" and
+    whose no-op-success answer for this exact recording is pinned unchanged by
+    test_a_symlink_into_a_worktree_is_no_longer_persisted_globally, above --
+    prime-cache's entire documented job IS writing that cache, so reporting
+    {status:"ok"} while leaving the file exactly as it was is the worse
+    failure. prime-cache now reads the cache file back after every write and
+    compares it against resolved_path; a mismatch answers {status:"error"} at
+    exit 1 instead. This is the pc-simlink-worktrees-cc recording replayed
+    directly (its recorded stdout/exit are the FALSE ok this test asserts is
+    gone; pc-simlink-worktrees-cc's own KNOWN_DIVERGENCES entry is the reading
+    guide for both directions).
+    """
+    label = "pc-simlink-worktrees-cc"
+    assert CASES[label]["global_cli_path"] is not None, label + ": the recording refused already"
+    assert CASES[label]["exit"] == 0, label + ": the recording is not the false-ok case anymore"
+    actual = replay(CASES[label]["input"], str(tmp_path))
+    assert actual["global_cli_path"] is None, label + ": still persisted a worktree path"
+    assert actual["exit"] == 1, label + ": a refused write must not exit 0"
+    parsed = json.loads(actual["stdout"])
+    assert parsed["status"] == "error", label + ": a refused write must not answer ok"
+    assert parsed["path"] is None
+    assert parsed["version"] is None
+    assert "/.worktrees/" in parsed["message"]
 
 
 @pytest.mark.parametrize("label", ["ver-chave-ausente", "ver-nao-string", "ver-json-malformado"])
@@ -544,6 +594,138 @@ def test_cleanup_keeps_the_newest_and_deletes_the_rest(tmp_path):
     survivors = [p for p in actual["tree"] if "aimi-engineering/" in p and p.endswith("/")]
     assert any("/1.123.0/" in p or p.endswith("/1.123.0/") for p in survivors)
     assert not any("/1.9.0" in p or "/1.10.0" in p for p in survivors)
+
+
+# ---------------------------------------------------------------------------
+# US-011: cleanup-versions' rm -rf, confined explicitly rather than
+# incidentally
+#
+# Today version_dir's only source is the loop glob under
+# <config_dir>/plugins/cache/, so a directory-source install elsewhere on
+# disk (the known_marketplaces.json/installLocation shape _directory_source_
+# plugin_dir resolves) can never reach the rm -rf -- these two cases seed one
+# alongside the cache anyway and prove it via a FULL tree_before/tree set
+# diff, not the filtered "survivors" glob check the case above uses. A set
+# diff catches a change ANYWHERE in the throwaway root, so the
+# directory-source install's subtree is proven untouched by never appearing
+# in the diff at all, rather than by a handful of hand-picked paths that
+# happen to still be there.
+# ---------------------------------------------------------------------------
+
+
+def _directory_source_install_spec(cache):
+    """A host that also carries a directory-source install alongside its cache.
+
+    `plugin_dir: {}` reuses _build_root's existing support to materialize
+    <root>/opencode-plugin/scripts/aimi-cli.sh -- the same directory tree
+    shape a directory-source installLocation takes -- entirely outside
+    <config_dir>/plugins/cache/. `host: "both"` sets AIMI_PLUGIN_DIR alongside
+    CLAUDECODE=1, matching a real host where both are resolvable at once;
+    cleanup-versions' own converter-lifecycle early return does not fire
+    here because CLAUDECODE=1 makes _is_claude_code_host true, so the run
+    reaches the ordinary cache-sweeping path this story's guard sits in.
+    """
+    return {"args": ["cleanup-versions"], "host": "both", "plugin_dir": {}, "cache": cache}
+
+
+def test_cleanup_removes_stale_cache_versions_and_leaves_a_directory_source_install_untouched(
+    tmp_path,
+):
+    """AC1/AC4 case 1: three cached versions plus the install, populated cache."""
+    spec = _directory_source_install_spec(
+        [
+            {"entry": "mk1", "version": "1.9.0"},
+            {"entry": "mk1", "version": "1.10.0"},
+            {"entry": "mk1", "version": "1.123.0"},
+        ]
+    )
+    actual = replay(spec, str(tmp_path))
+    assert json.loads(actual["stdout"]) == {"removed": 2, "kept": "1.123.0"}
+
+    install_before = [p for p in actual["tree_before"] if p.startswith("opencode-plugin/")]
+    install_after = [p for p in actual["tree"] if p.startswith("opencode-plugin/")]
+    assert install_before, "fixture did not seed the directory-source install"
+    assert install_after == install_before, "directory-source install subtree changed"
+
+    # Full-tree diff: the only entries that may differ are the two removed
+    # stale-version subtrees (all under 1.9.0/1.10.0) and the cli-path/state
+    # files this run is expected to write -- nothing else, anywhere.
+    before = set(actual["tree_before"])
+    after = set(actual["tree"])
+    removed_paths = before - after
+    added_paths = after - before
+    assert removed_paths, "expected the two stale version subtrees to disappear"
+    assert all("/1.9.0" in p or "/1.10.0" in p for p in removed_paths), removed_paths
+    assert added_paths == {
+        "aimi-config/cli-path",
+        "project/.aimi/cli-path",
+        "project/.aimi/.state.lock",
+    }, added_paths
+
+
+def test_cleanup_with_empty_cache_leaves_a_directory_source_install_untouched(tmp_path):
+    """AC1/AC4 case 2: same install, empty cache -- {removed: 0, kept: null}."""
+    spec = _directory_source_install_spec([])
+    actual = replay(spec, str(tmp_path))
+    assert json.loads(actual["stdout"]) == {"removed": 0, "kept": None}
+
+    install_before = [p for p in actual["tree_before"] if p.startswith("opencode-plugin/")]
+    install_after = [p for p in actual["tree"] if p.startswith("opencode-plugin/")]
+    assert install_before, "fixture did not seed the directory-source install"
+    assert install_after == install_before, "directory-source install subtree changed"
+
+    # Empty-cache branch returns before any write, so the whole tree is
+    # untouched -- a full-tree diff, not just the install subtree.
+    assert actual["tree"] == actual["tree_before"]
+
+
+def test_cleanup_refuses_a_version_dir_that_resolves_outside_the_cache(tmp_path):
+    """The containment guard's REFUSAL branch, which nothing else reaches.
+
+    The two cases above prove today's behaviour is safe; they do not prove the
+    guard works, and reverting it leaves them both green -- the story that added
+    it measured exactly that and said so. The gap is structural: version_dir's
+    only source is a glob rooted at <config_dir>/plugins/cache, so no ordinary
+    fixture can hand the guard a path to refuse.
+
+    A SYMLINK can. resolve_path follows it, so a version directory that is a
+    symlink out of the cache resolves outside the cache root and must be
+    refused. The recipe already knows how to build one (`worktree_symlink`,
+    added for D11), and its target sits at <root>/.worktrees/... -- outside
+    plugins/cache by construction.
+
+    The second, REAL version matters as much as the symlink: it has to be the
+    newer of the two so that it, not the symlink, becomes latest_version_dir.
+    The existing clv-simlink-worktrees-cc case seeds the symlink alone, which
+    makes it the latest and sends it down the skip `continue` several lines
+    ABOVE the guard -- which is precisely why that case never exercised this
+    branch either.
+    """
+    spec = {
+        "args": ["cleanup-versions"],
+        "cache": [
+            {"entry": "mk1", "version": "1.0.0", "worktree_symlink": True},
+            {"entry": "mk1", "version": "2.0.0"},
+        ],
+    }
+    actual = replay(spec, str(tmp_path))
+
+    # 2.0.0 is newest and is kept. 1.0.0 is the only removal candidate, and it
+    # is refused -- so nothing is removed at all.
+    assert json.loads(actual["stdout"]) == {"removed": 0, "kept": "2.0.0"}
+
+    # The refusal is announced rather than silent, and names the path.
+    assert "refusing to remove" in actual["stderr"], actual["stderr"]
+
+    # The symlink's TARGET -- the thing an unguarded rm -rf would have deleted,
+    # since rm -rf follows the directory symlink's contents -- is intact.
+    target_before = [p for p in actual["tree_before"] if p.startswith(".worktrees/")]
+    target_after = [p for p in actual["tree"] if p.startswith(".worktrees/")]
+    assert target_before, "fixture did not seed the out-of-cache symlink target"
+    assert target_after == target_before, "the out-of-cache target was modified"
+
+    # And the symlink entry itself still stands: refusing is not deleting.
+    assert any("/1.0.0" in p for p in actual["tree"]), actual["tree"]
 
 
 def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):

@@ -1030,7 +1030,15 @@ install_opencode() {
   else
     chmod +x "$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh"
     local prime_out
-    prime_out=$("$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh" prime-cache 2>&1) || {
+    # State the host intent explicitly rather than relying on whatever
+    # CLAUDECODE happens to be in this process: set_env_var only appends
+    # AIMI_PLUGIN_DIR to a shell profile, it does not export into this
+    # running shell, and running this installer from inside a Claude Code
+    # session inherits CLAUDECODE=1 here. Without the override, cmd_prime_cache
+    # falls to host_label="claude_code" and primes the shared cli-path cache
+    # with the Claude Code checkout instead of this OpenCode install.
+    prime_out=$(env -u CLAUDECODE AIMI_PLUGIN_DIR="$plugin_dir" \
+      "$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh" prime-cache 2>&1) || {
       warn "Cache priming failed (non-fatal): $prime_out"
       prime_out=""
     }
