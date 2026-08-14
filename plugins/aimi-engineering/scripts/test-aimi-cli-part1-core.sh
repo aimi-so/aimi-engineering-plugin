@@ -1943,14 +1943,17 @@ test_check_version_fix() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local latest_glob_path config_dir
-  config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
-
-  if [ -z "$latest_glob_path" ]; then
-    echo "  (skipping --fix test: no installed version in cache)"
-    return
-  fi
+  # The cache is BUILT, not borrowed -- same rationale as test_check_version's
+  # own Test 1 (~:1855-1871): a throwaway cache holding exactly one version
+  # answers the --fix question identically on every host, instead of silently
+  # skipping when the ambient plugin cache is empty.
+  local cvf_root cvf_cfg cvf_aimi_cfg cvf_latest
+  cvf_root=$(mktemp -d)
+  cvf_cfg="$cvf_root/claude-config"
+  cvf_aimi_cfg="$cvf_root/aimi-config"
+  mkdir -p "$cvf_aimi_cfg"
+  _make_cached_version "$cvf_cfg" "abc123" "1.2.3"
+  cvf_latest="$cvf_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
 
   # Write a fake stale cli-path pointing to a non-existent old version
   echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
@@ -1961,7 +1964,9 @@ test_check_version_fix() {
   assert_eq "/fake/old/1.0.0/scripts/aimi-cli.sh" "$pre_check" "check-version --fix: cli-path is stale before fix"
 
   local output exit_code
-  output=$("$CLI" check-version --fix 2>/dev/null) && exit_code=0 || exit_code=$?
+  output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cvf_cfg" AIMI_CONFIG_DIR="$cvf_aimi_cfg" \
+    bash "$CLI" check-version --fix 2>/dev/null) && exit_code=0 || exit_code=$?
 
   assert_exit_code "0" "$exit_code" "check-version --fix: exits 0 after fix"
   assert_contains '"status": "fixed"' "$output" "check-version --fix: returns fixed status"
@@ -1969,7 +1974,9 @@ test_check_version_fix() {
   # Verify cli-path was updated to the latest
   local updated_path
   updated_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
-  assert_eq "$latest_glob_path" "$updated_path" "check-version --fix: cli-path updated to latest"
+  assert_eq "$cvf_latest" "$updated_path" "check-version --fix: cli-path updated to latest"
+
+  rm -rf "$cvf_root"
 }
 
 test_check_version_quiet_fix() {
@@ -1979,21 +1986,23 @@ test_check_version_quiet_fix() {
   "$CLI" clear-state > /dev/null
   "$CLI" init-session > /dev/null
 
-  local latest_glob_path config_dir
-  config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
-
-  if [ -z "$latest_glob_path" ]; then
-    echo "  (skipping --quiet --fix test: no installed version in cache)"
-    return
-  fi
+  # Same throwaway-cache-is-BUILT rationale as test_check_version_fix above.
+  local cvqf_root cvqf_cfg cvqf_aimi_cfg cvqf_latest
+  cvqf_root=$(mktemp -d)
+  cvqf_cfg="$cvqf_root/claude-config"
+  cvqf_aimi_cfg="$cvqf_root/aimi-config"
+  mkdir -p "$cvqf_aimi_cfg"
+  _make_cached_version "$cvqf_cfg" "abc123" "1.2.3"
+  cvqf_latest="$cvqf_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
 
   # Write a fake stale cli-path again
   echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
 
   local stderr_output_file stdout_output exit_code
   stderr_output_file=$(mktemp)
-  stdout_output=$("$CLI" check-version --quiet --fix 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+  stdout_output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cvqf_cfg" AIMI_CONFIG_DIR="$cvqf_aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
   local stderr_content
   stderr_content=$(cat "$stderr_output_file")
   rm -f "$stderr_output_file"
@@ -2005,7 +2014,9 @@ test_check_version_quiet_fix() {
   # Verify cli-path was updated
   local updated_path
   updated_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
-  assert_eq "$latest_glob_path" "$updated_path" "check-version --quiet --fix: cli-path updated to latest"
+  assert_eq "$cvqf_latest" "$updated_path" "check-version --quiet --fix: cli-path updated to latest"
+
+  rm -rf "$cvqf_root"
 }
 
 test_check_version_backward_compat() {
@@ -2042,32 +2053,49 @@ test_check_version_backward_compat() {
   rm -rf "$bc_root"
 
   # Test 2: No flags, current version => "current" status
-  local latest_glob_path config_dir
-  config_dir=$(_test_claude_config_dir)
-  latest_glob_path=$(_test_latest_installed_cli_path "$config_dir")
+  # Same throwaway-cache-is-BUILT rationale as Test 1 above: a cache holding
+  # exactly one version answers the "current" question identically everywhere.
+  local bc2_root bc2_cfg bc2_aimi_cfg bc2_latest
+  bc2_root=$(mktemp -d)
+  bc2_cfg="$bc2_root/claude-config"
+  bc2_aimi_cfg="$bc2_root/aimi-config"
+  mkdir -p "$bc2_aimi_cfg"
+  _make_cached_version "$bc2_cfg" "abc123" "1.2.3"
+  bc2_latest="$bc2_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
 
-  if [ -n "$latest_glob_path" ]; then
-    "$CLI" init-session > /dev/null
-    echo "$latest_glob_path" > "$AIMI_DIR/cli-path"
+  "$CLI" init-session > /dev/null
+  echo "$bc2_latest" > "$AIMI_DIR/cli-path"
 
-    stdout_output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
-    assert_contains '"status":"current"' "$stdout_output" "check-version (no flags): current version returns status current"
-    assert_exit_code "0" "$exit_code" "check-version (no flags): current version exits 0"
-  fi
+  stdout_output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$bc2_cfg" AIMI_CONFIG_DIR="$bc2_aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_contains '"status":"current"' "$stdout_output" "check-version (no flags): current version returns status current"
+  assert_exit_code "0" "$exit_code" "check-version (no flags): current version exits 0"
+
+  rm -rf "$bc2_root"
 
   # Test 3: No flags, stale version => "stale" status with exit code 1
-  if [ -n "$latest_glob_path" ]; then
-    echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  local bc3_root bc3_cfg bc3_aimi_cfg
+  bc3_root=$(mktemp -d)
+  bc3_cfg="$bc3_root/claude-config"
+  bc3_aimi_cfg="$bc3_root/aimi-config"
+  mkdir -p "$bc3_aimi_cfg"
+  _make_cached_version "$bc3_cfg" "abc123" "1.2.3"
 
-    stderr_output_file=$(mktemp)
-    stdout_output=$("$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
-    stderr_content=$(cat "$stderr_output_file")
-    rm -f "$stderr_output_file"
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
 
-    assert_contains '"status": "stale"' "$stdout_output" "check-version (no flags): stale returns stale status"
-    assert_exit_code "1" "$exit_code" "check-version (no flags): stale exits 1"
-    assert_contains "CLI version is stale" "$stderr_content" "check-version (no flags): stale emits warning"
-  fi
+  stderr_output_file=$(mktemp)
+  stdout_output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$bc3_cfg" AIMI_CONFIG_DIR="$bc3_aimi_cfg" \
+    bash "$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+  stderr_content=$(cat "$stderr_output_file")
+  rm -f "$stderr_output_file"
+
+  assert_contains '"status": "stale"' "$stdout_output" "check-version (no flags): stale returns stale status"
+  assert_exit_code "1" "$exit_code" "check-version (no flags): stale exits 1"
+  assert_contains "CLI version is stale" "$stderr_content" "check-version (no flags): stale emits warning"
+
+  rm -rf "$bc3_root"
 }
 
 # ----------------------------------------------------------------------------
@@ -3218,15 +3246,12 @@ test_check_version_fix_updates_global_cache() {
   "$CLI" clear-state > /dev/null 2>&1 || true
   "$CLI" init-session > /dev/null
 
-  # Resolve the latest path in our mock env
+  # Resolve the latest path in our mock env. setup_global_cache_env
+  # unconditionally seeds a mock 1.99.0 CLI under $CLAUDE_CONFIG_DIR above, so
+  # this glob can never be empty -- no skip gate here (see test_check_version_fix
+  # above for the ambient-cache pattern this function never needed).
   local latest_glob_path
   latest_glob_path=$(_test_latest_installed_cli_path "$CLAUDE_CONFIG_DIR")
-
-  if [ -z "$latest_glob_path" ]; then
-    echo "  (skipping: no mock CLI in plugin cache)"
-    teardown_global_cache_env
-    return
-  fi
 
   # Write a stale cli-path to force check-version to detect staleness
   echo "/fake/old/plugins/cache/abc/aimi-engineering/0.0.1/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
