@@ -10339,6 +10339,110 @@ cmd_version() {
   printf '%s\n' "$version"
 }
 
+# Resolve a directory-source install's OWN version from the same two
+# documents _directory_source_plugin_dir reads -- <config_dir>/plugins/
+# known_marketplaces.json for the marketplace's installLocation, then that
+# install's own .claude-plugin/marketplace.json for the aimi-engineering
+# entry's version.
+#
+# Usage: _directory_source_installed_version <config_dir>
+#
+# cmd_check_version is the only caller. A directory-source path carries no
+# version-numbered path segment for _extract_version_from_path to read -- it
+# is measured to return the literal string "aimi-engineering" for one -- so
+# this is check-version's own guarded lookup, following the same discipline
+# _directory_source_plugin_dir documents: existence/type-checked before every
+# jq call, degrading to empty on a missing or malformed document rather than
+# letting `set -euo pipefail` abort the script. It duplicates
+# _directory_source_plugin_dir's own installLocation selection (same
+# directory-source filter, same ascending-key tie-break) rather than reusing
+# it, because that function returns the joined PLUGIN directory, not the
+# marketplace root the version lives under, and there is no general way to
+# strip an arbitrary `.source` subpath back off of it.
+#
+# ALWAYS RETURNS 0, printing one version string or nothing -- the same
+# contract _directory_source_plugin_dir and _resolve_latest_cache_path
+# document.
+_directory_source_installed_version() {
+  local config_dir="$1"
+  local km_file="$config_dir/plugins/known_marketplaces.json"
+
+  local install_location=""
+  install_location=$(jq -r '
+      if type != "object" then empty else
+        to_entries
+        | map(select(.value.source.source == "directory"
+                      and (.value.installLocation | type) == "string"))
+        | sort_by(.key)
+        | .[0].value.installLocation // empty
+      end
+    ' "$km_file" 2>/dev/null) || install_location=""
+  [ -z "$install_location" ] && return 0
+
+  [ "${install_location#/}" = "$install_location" ] && return 0
+  [ -d "$install_location" ] || return 0
+  install_location="${install_location%/}"
+
+  local mp_file="$install_location/.claude-plugin/marketplace.json"
+  local mp_type=""
+  mp_type=$(jq -r 'type' "$mp_file" 2>/dev/null) || mp_type=""
+  [ "$mp_type" = "object" ] || return 0
+
+  local version=""
+  version=$(jq -r '
+      (.plugins // [])
+      | map(select(.name == "aimi-engineering" and (.version | type) == "string"))
+      | .[0].version // empty
+    ' "$mp_file" 2>/dev/null) || version=""
+  [ -z "$version" ] && return 0
+
+  printf '%s\n' "$version"
+}
+
+# Resolve the version string for a cli-path that may be either shape
+# cmd_check_version now handles: a versioned plugin-cache copy (the shape
+# _extract_version_from_path was written for) or a directory-source install
+# (no version segment in the path at all).
+#
+# Usage: _check_version_resolve_version <config_dir> <path>
+#
+# <path> is trusted as directory-source only when it EQUALS the path
+# _resolve_directory_source_path itself resolves right now for <config_dir> --
+# not merely for failing to match the cache-glob pattern. That equality check
+# is what keeps this safe for an unrelated stale path (a leftover fake or
+# pre-cache-era value that happens not to look like a cache-glob path either):
+# without it, ANY non-glob-shaped stored path would borrow the CURRENT
+# directory-source install's version by nothing more than config_dir
+# proximity, which is wrong whenever the stored path names something else
+# entirely. With it, the `current`, `stale` and `fixed` branches report a
+# directory-source install's real semver instead of the literal string
+# "aimi-engineering" exactly when the path in hand IS that install, and fall
+# through to _extract_version_from_path's own (unchanged) answer otherwise --
+# which is what every case that never seeds known_marketplaces.json already
+# exercises today.
+_check_version_resolve_version() {
+  local config_dir="$1" path="$2"
+  case "$path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
+      _extract_version_from_path "$path"
+      return 0
+      ;;
+  esac
+
+  local ds_path=""
+  ds_path=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh")
+  if [ -n "$ds_path" ] && [ "$path" = "$ds_path" ]; then
+    local ds_version=""
+    ds_version=$(_directory_source_installed_version "$config_dir")
+    if [ -n "$ds_version" ]; then
+      printf '%s\n' "$ds_version"
+      return 0
+    fi
+  fi
+
+  _extract_version_from_path "$path"
+}
+
 # Check CLI version staleness
 # Compares stored cli-path against the glob-resolved latest path
 # Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
@@ -10369,12 +10473,23 @@ cmd_check_version() {
   # _resolve_latest_cache_path). An empty glob now answers with the empty string
   # instead of aborting the script, which is what makes the branch below
   # reachable for the first time.
+  #
+  # A host running from a directory-source (locally-added marketplace) install
+  # never has a versioned entry under the cache glob, so an empty result here
+  # falls back to _resolve_directory_source_path before this verb gives up --
+  # same shape as the glob-then-fallback order every other caller of that
+  # helper follows. Only when BOTH come up empty does the documented `unknown`
+  # branch below fire.
   latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
+  if [ -z "$latest_path" ]; then
+    latest_path=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh")
+  fi
 
-  # Case: glob returns empty — no installed version found.
-  # CALLER-VISIBLE: this branch is documented but was dead code until the helper
-  # above stopped returning non-zero. A caller that read "check-version aborts"
-  # as its no-plugin signal now gets this JSON at exit 0 instead.
+  # Case: glob AND directory-source fallback both returned empty — no
+  # installed version found.
+  # CALLER-VISIBLE: this branch is documented but was dead code until the
+  # glob helper stopped returning non-zero. A caller that read "check-version
+  # aborts" as its no-plugin signal now gets this JSON at exit 0 instead.
   if [ -z "$latest_path" ]; then
     if [ "$quiet" = false ]; then
       echo "Warning: No installed aimi-cli.sh found via glob." >&2
@@ -10383,7 +10498,7 @@ cmd_check_version() {
     return 0
   fi
 
-  latest_version=$(_extract_version_from_path "$latest_path")
+  latest_version=$(_check_version_resolve_version "$config_dir" "$latest_path")
 
   # Read stored path from state
   stored_path=$(read_state "cli-path")
@@ -10398,11 +10513,11 @@ cmd_check_version() {
     return 0
   fi
 
-  stored_version=$(_extract_version_from_path "$stored_path")
+  stored_version=$(_check_version_resolve_version "$config_dir" "$stored_path")
 
   # Case: stored path matches latest — current
   if [ "$stored_path" = "$latest_path" ]; then
-    printf '{"status":"current","version":"%s"}\n' "$stored_version"
+    jq -nc --arg v "$stored_version" '{status:"current",version:$v}'
     return 0
   fi
 
