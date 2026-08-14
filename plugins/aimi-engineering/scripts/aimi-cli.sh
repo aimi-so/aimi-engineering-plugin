@@ -758,8 +758,62 @@ write_global_cli_cache() {
   mv "$tmp_file" "$cache_file"
 }
 
+# _validate_directory_source_identity: admit a cached path only when it is
+# BYTE-EQUAL to what _resolve_directory_source_path re-derives for <suffix>
+# RIGHT NOW -- never by a shape/pattern match. Shared by
+# _validate_cached_cli_path and _validate_cached_worktree_path so a
+# directory-source install's cached path can be read back the same way a
+# versioned-cache entry already is.
+#
+# HARD CONSTRAINT: this is not a third case-arm shape pattern (e.g.
+# `*/plugins/aimi-engineering/scripts/aimi-cli.sh`) -- a pattern that loose
+# would match almost anything a caller cared to name, and this function
+# gates a path a later session execs. The only admission path is exact
+# string equality against a live re-derivation of TODAY's directory-source
+# install.
+#
+# GATED ON _is_claude_code_host HERE, NOT INSIDE THE RESOLVER: directory-
+# source resolution reads known_marketplaces.json, which lives under
+# _claude_config_dir and is a Claude Code marketplace concept with no
+# OpenCode analogue. Checked against the current source rather than assumed:
+# neither _directory_source_plugin_dir nor _resolve_directory_source_path
+# gates on the host internally -- on any host, including OpenCode, they just
+# answer "no candidate" once they find no known_marketplaces.json under the
+# given config_dir. Gating here keeps an OpenCode caller from paying for a
+# known_marketplaces.json read (and its jq call) that can never resolve for
+# it, and keeps the two validators' intent legible without reading the
+# resolver.
+#
+# ALWAYS RETURNS 0, printing the path or nothing -- the same contract every
+# other helper in this family documents. The trailing `return 0` is not
+# decorative: under this script's `set -euo pipefail`, a bare failing
+# `[ "$cached_path" = "$resolved" ]` as the function's LAST statement would
+# otherwise become this function's own exit status, which would corrupt the
+# `||` fallback chains read_global_cli_cache and read_global_worktree_cache
+# both rely on.
+_validate_directory_source_identity() {
+  local cached_path="$1" suffix="$2"
+  _is_claude_code_host || return 0
+  local config_dir
+  config_dir=$(_claude_config_dir)
+  local resolved=""
+  resolved=$(_resolve_directory_source_path "$config_dir" "$suffix") || resolved=""
+  if [ -n "$resolved" ] && [ "$cached_path" = "$resolved" ]; then
+    printf '%s\n' "$cached_path"
+  fi
+  return 0
+}
+
 # _validate_cached_cli_path: run a path through the whitelist case statement
 # Returns the path unchanged if valid, empty string if rejected
+#
+# THREE admission routes, tried in this order so the common (versioned-cache)
+# case costs nothing extra: the OpenCode plugin-dir arm, the versioned-cache
+# glob arm, and -- only once neither of those matched, an explicit `return 0`
+# in each of their own success paths having already exited otherwise -- a
+# fall-through to _validate_directory_source_identity's exact-equality check
+# against outline:05's directory-source resolver. See that helper's own
+# header for why this is a re-derivation and not a fourth case-arm pattern.
 _validate_cached_cli_path() {
   local cached_path="$1"
   local plugin_dir
@@ -768,12 +822,15 @@ _validate_cached_cli_path() {
     "${plugin_dir}"/scripts/aimi-cli.sh)
       if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
+        return 0
       fi
       ;;
     */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
       printf '%s\n' "$cached_path"
+      return 0
       ;;
   esac
+  _validate_directory_source_identity "$cached_path" "scripts/aimi-cli.sh"
 }
 
 # Read and validate the cached CLI path from the global cache file
@@ -820,6 +877,16 @@ write_global_worktree_cache() {
 
 # _validate_cached_worktree_path: run a worktree path through the whitelist case statement
 # Returns the path unchanged if valid, empty string if rejected
+#
+# Exact twin of _validate_cached_cli_path immediately above -- same three
+# admission routes in the same order, same reason the versioned-cache arm's
+# own `return 0` must run before _validate_directory_source_identity's
+# equality check (and its jq call) ever does. NOTE, per this story's notes:
+# nothing in this CLI calls write_global_worktree_cache or
+# read_global_worktree_cache in production today (grep confirms it -- only
+# their own definitions, test-aimi-cli-fixtures.sh, and tests call them), so
+# this widening is symmetry for a reader with no writer yet, not an
+# end-to-end round trip.
 _validate_cached_worktree_path() {
   local cached_path="$1"
   local plugin_dir
@@ -828,12 +895,15 @@ _validate_cached_worktree_path() {
     "${plugin_dir}"/skills/git-worktree/scripts/worktree-manager.sh)
       if [ -n "$plugin_dir" ] && ! _is_claude_code_host; then
         printf '%s\n' "$cached_path"
+        return 0
       fi
       ;;
     */plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh)
       printf '%s\n' "$cached_path"
+      return 0
       ;;
   esac
+  _validate_directory_source_identity "$cached_path" "skills/git-worktree/scripts/worktree-manager.sh"
 }
 
 # Read and validate the cached worktree manager path from the global cache file
