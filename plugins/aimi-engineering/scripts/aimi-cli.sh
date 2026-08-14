@@ -1333,6 +1333,13 @@ _resolve_skills_base_dir() {
     config_dir=$(_claude_config_dir)
     local skills_dir
     skills_dir=$(_resolve_latest_cache_path "$config_dir" "skills")
+    if [ -z "$skills_dir" ]; then
+      # No versioned cache entry -- a directory-source install has none to
+      # find. Fall back to the same resolver the CLI path itself falls back
+      # to, so "both sides now ask ... the same question" (see above) holds
+      # for a directory-source host too, not only for the versioned-cache one.
+      skills_dir=$(_resolve_directory_source_path "$config_dir" "skills")
+    fi
     printf '%s\n' "${skills_dir:-}"
     return 0
   fi
