@@ -5207,30 +5207,51 @@ test_prime_cache_unwritable_cache_dir() {
 }
 
 # ----------------------------------------------------------------------------
-# prime-cache: the two validation gates, and what they refuse.
+# prime-cache: what it refuses, and what it answers when there is nothing there.
 #
 # This verb writes ~/.config/aimi/cli-path, and every later command execs
-# whatever that file names -- so the paths prime-cache REFUSES are the
+# whatever that file names -- so the paths prime-cache REFUSES are still the
 # highest-consequence thing about it. The six tests above assert acceptance and
-# one environment failure (an unwritable config dir); not one of them reaches
-# either validation gate in cmd_prime_cache, and the test that reads as though
-# it did -- test_prime_cache_rejects_bad_path -- ends up asserting `ok` on a
-# path that is in fact valid.
+# one environment failure (an unwritable config dir); not one of them reaches a
+# refusal, and the test that reads as though it did --
+# test_prime_cache_rejects_bad_path -- ends up asserting `ok` on a path that is
+# in fact valid. That misnomer is left as it is: it covers a real acceptance,
+# and renaming it would cost a diff without buying a check.
+#
+# THERE USED TO BE A THIRD GATE HERE, AND THIS BLOCK USED TO TEST IT. A `case`
+# refused any resolved path outside */plugins/cache/*/aimi-engineering/*/
+# scripts/aimi-cli.sh, and the only input that ever reached it was the EMPTY
+# STRING -- an unmatched glob, on a host that happened to also export
+# AIMI_PLUGIN_DIR, because the not_found early return was nested inside a second
+# `[ -z "${AIMI_PLUGIN_DIR:-}" ]` test that had nothing to do with the Claude
+# Code branch it stood in. So the gate's entire observable behaviour was to
+# answer a missing install with a refusal naming a path that had never been
+# resolved. Both the inner test and the gate are gone, and NOTHING REGRESSED IN
+# REACH: every non-empty value _resolve_latest_cache_path can return is one of
+# its own glob's matches, and that glob is the same shape as the pattern, so the
+# case could not have refused one. The test below is what that scenario answers
+# now.
+#
+# The gates that remain are both executability checks, one per host branch, and
+# both are covered below. The whitelist deciding what may be ACCEPTED back off
+# disk is _validate_cached_cli_path's, and it is tested with the other cache
+# helpers rather than here.
 #
 # The rejection channel here is stdout JSON (`.status` and `.message`) plus the
 # exit status. These verbs never write to stderr, which is why the assertions
 # below pair assert_eq on the exact `.message` with assert_exit_code rather
 # than using assert_stderr_contains.
 #
-# All three run the CLI as its own process rather than calling the sed-eval'd
-# cmd_prime_cache in this shell: the gates sit downstream of a glob whose
-# empty-match behaviour depends on `set -euo pipefail`, which this test script
-# does not set.
+# Every test below runs the CLI as its own process rather than calling the
+# sed-eval'd cmd_prime_cache in this shell: the paths under test sit downstream
+# of a glob whose empty-match behaviour depends on `set -euo pipefail`, which
+# this test script does not set. (No count is stated here on purpose -- the
+# sentence used to say "all three" and had already gone stale once.)
 # ----------------------------------------------------------------------------
 
-test_prime_cache_rejects_path_outside_cache_pattern() {
+test_prime_cache_empty_glob_answers_not_found_with_plugin_dir_set() {
   echo ""
-  echo "=== Testing prime-cache: rejects a resolved path failing the cache case-pattern ==="
+  echo "=== Testing prime-cache: an empty glob answers not_found even with AIMI_PLUGIN_DIR set ==="
 
   local root cfg aimi_cfg plug
   root=$(mktemp -d)
@@ -5241,25 +5262,33 @@ test_prime_cache_rejects_path_outside_cache_pattern() {
   printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
   chmod +x "$plug/scripts/aimi-cli.sh"
 
-  # CLAUDECODE=1 pins the Claude Code branch even though AIMI_PLUGIN_DIR is set,
-  # and AIMI_PLUGIN_DIR being set is precisely what keeps an empty glob out of
-  # the not_found early return -- so an empty resolved_path falls into the
-  # case-pattern gate, which is the only way to reach it.
+  # The fixture is unchanged from when this test pinned the deleted gate, and it
+  # is still the only way to reach the scenario: CLAUDECODE=1 pins the Claude
+  # Code branch while AIMI_PLUGIN_DIR is also set, over an empty cache. $plug
+  # holds a real executable so _validate_plugin_dir accepts it and we reach the
+  # JSON path rather than its exit 1; the OpenCode branch is never taken.
   local out ec
   out=$(env AIMI_PLUGIN_DIR="$plug" CLAUDECODE=1 \
     CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
     bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
 
-  assert_exit_code "1" "$ec" "prime-cache (pattern reject): exits 1"
-  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
-    "prime-cache (pattern reject): status=error"
-  assert_eq "Resolved path rejected: does not match expected cache pattern" \
+  assert_exit_code "0" "$ec" "prime-cache (empty glob, plugin dir set): exits 0 -- nothing installed is not an error"
+  assert_eq "not_found" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (empty glob, plugin dir set): status=not_found"
+  assert_eq "Plugin not installed. Run /plugin install aimi-engineering first." \
     "$(printf '%s' "$out" | jq -r '.message')" \
-    "prime-cache (pattern reject): exact message field"
+    "prime-cache (empty glob, plugin dir set): exact message field"
+  # The assertion this test exists for. Without it this is very nearly a
+  # duplicate of test_prime_cache_not_found; with it, it pins the one property
+  # specific to this fixture -- that a set AIMI_PLUGIN_DIR under CLAUDECODE=1
+  # does NOT quietly reroute the answer to the OpenCode branch. That confusion
+  # is exactly what the deleted guard institutionalised.
+  assert_eq "claude_code" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (empty glob, plugin dir set): host stays claude_code, AIMI_PLUGIN_DIR does not reroute it"
   assert_eq "null" "$(printf '%s' "$out" | jq -r '.path')" \
-    "prime-cache (pattern reject): path is null, so nothing is handed to a later exec"
+    "prime-cache (empty glob, plugin dir set): path is null, so nothing is handed to a later exec"
   assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
-    "prime-cache (pattern reject): the global cli-path cache is left unwritten"
+    "prime-cache (empty glob, plugin dir set): the global cli-path cache is left unwritten"
 
   rm -rf "$root"
 }
@@ -8207,7 +8236,7 @@ main() {
   test_prime_cache_not_found
   test_prime_cache_rejects_bad_path
   test_prime_cache_unwritable_cache_dir
-  test_prime_cache_rejects_path_outside_cache_pattern
+  test_prime_cache_empty_glob_answers_not_found_with_plugin_dir_set
   test_prime_cache_rejects_non_executable_path
   test_prime_cache_rejects_non_executable_opencode_path
 

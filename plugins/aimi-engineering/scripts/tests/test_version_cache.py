@@ -5,9 +5,11 @@ THIS IS THE ONE GOLDEN BLOCK WHOSE VERBS NEVER CROSSED INTO PYTHON.
 `version`, `check-version`, `cleanup-versions` and `prime-cache` stay Bash + jq
 -- the decision, and why, is in cmd_prime_cache's header comment in
 aimi-cli.sh. So `version_cache_cases` is not a port's before-picture. It is the
-before-picture of a FIX: the empty-cache abort (D2) and the `ls`-pipeline glob
-that carried it. Everything the fix did not mean to touch has to come back
-byte-identical, and everything it did mean to touch is named in
+before-picture of three FIXES: the empty-cache abort (D2), the `ls`-pipeline glob
+that carried it, and -- newest, and captured long before it was found --
+prime-cache answering an empty glob with a path-rejection message whenever
+AIMI_PLUGIN_DIR was also set. Everything the fixes did not mean to touch has to
+come back byte-identical, and everything they did mean to touch is named in
 KNOWN_DIVERGENCES below with what changed.
 
 The capture ran against 112d72f, before a line of aimi-cli.sh moved.
@@ -117,7 +119,39 @@ D11_AND_D13 = {
     ),
 }
 
-KNOWN_DIVERGENCES = {**D2_ABORTS, **D11_AND_D13}
+# The third fix, and the newest: an empty plugin-cache glob that answered like a
+# refusal because a second variable happened to be set.
+#
+# A table of its own rather than an entry in either above, and the reason is
+# MECHANICAL rather than taxonomic. test_each_d2_case_recorded_the_abort_it_is_
+# excused_for asserts that every D2_ABORTS recording is exit 1 with BOTH STREAMS
+# EMPTY; this recording is exit 1 with a JSON error object on stdout, so putting
+# the label there would fail that test rather than be excused by it. And
+# D11_AND_D13 is closed history of two named commits.
+PC_EMPTY_GLOB = {
+    "pc-cache-vazio-com-plugin-dir-both": (
+        "FIXED: an empty plugin-cache glob answered {status:\"error\"} at exit 1 "
+        "with \"Resolved path rejected: does not match expected cache pattern\" "
+        "whenever AIMI_PLUGIN_DIR happened to be set alongside CLAUDECODE=1. The "
+        "not_found early return was nested inside a second "
+        "`[ -z \"${AIMI_PLUGIN_DIR:-}\" ]` test -- a variable the Claude Code "
+        "branch has already decided not to honour -- so on a host carrying both "
+        "an empty resolved_path fell past it into the cache-pattern case and was "
+        "refused for not matching a pattern the empty string could never match. "
+        "The message named a path that had never been resolved, while reporting "
+        "path:null in the same object. Both the inner test and the case are "
+        "deleted; the case could never have refused a real value anyway, because "
+        "_resolve_latest_cache_path returns only its own glob's matches. The "
+        "answer is now the same {status:\"not_found\"} at exit 0 that "
+        "pc-cache-vazio-cc already records for the same empty cache WITHOUT "
+        "AIMI_PLUGIN_DIR -- asserted as an identity between the two below. "
+        "EXACTLY TWO FIELDS MOVE, `exit` and `stdout`; stderr, both trees and "
+        "both cli-path files are byte-identical and are asserted rather than "
+        "bought by this skip."
+    ),
+}
+
+KNOWN_DIVERGENCES = {**D2_ABORTS, **D11_AND_D13, **PC_EMPTY_GLOB}
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +397,50 @@ def test_each_d2_case_now_answers_at_exit_zero(label, tmp_path):
     # The abort used to precede write_global_cli_cache. Reaching the handler must
     # not start writing a cli-path that names nothing.
     assert actual["global_cli_path"] is None, label + ": wrote a cli-path for an empty cache"
+
+
+@pytest.mark.parametrize("label", sorted(PC_EMPTY_GLOB), ids=sorted(PC_EMPTY_GLOB))
+def test_each_empty_glob_case_recorded_the_refusal_it_is_excused_for(label):
+    """The excuse is only good while the RECORDING still shows the refusal.
+
+    The same guard D2_ABORTS carries, with the shape this table's entries
+    actually share: exit 1, and the pattern rejection on stdout. Repairing the
+    recording to match the fix would destroy the only evidence the defect ever
+    existed and leave the skip above excusing nothing.
+    """
+    case = CASES[label]
+    assert case["exit"] == 1, label + ": the recording is not a refusal"
+    assert "does not match expected cache pattern" in case["stdout"], (
+        label + ": the recording is not the pattern rejection"
+    )
+    assert case["global_cli_path"] is None, label + ": the recording wrote a cli-path"
+
+
+@pytest.mark.parametrize("label", sorted(PC_EMPTY_GLOB), ids=sorted(PC_EMPTY_GLOB))
+def test_an_empty_glob_answers_not_found_even_when_aimi_plugin_dir_is_set(label, tmp_path):
+    """And the inversion is asserted, not merely skipped past.
+
+    The whole divergence is two fields. Everything else is compared here exactly
+    as test_the_fix_changed_only_what_it_named would have compared it, so the
+    skip buys `exit` and `stdout` and nothing else.
+    """
+    case = CASES[label]
+    actual = replay(case["input"], str(tmp_path))
+    assert actual["exit"] == 0, label + ": still refusing"
+    assert json.loads(actual["stdout"]) == {
+        "status": "not_found",
+        "path": None,
+        "host": "claude_code",
+        "version": None,
+        "message": "Plugin not installed. Run /plugin install aimi-engineering first.",
+    }, label
+    # The point of the fix, stated as an identity rather than as a value: one
+    # empty cache, one answer, whether or not AIMI_PLUGIN_DIR is in the room.
+    assert actual["stdout"] == CASES["pc-cache-vazio-cc"]["stdout"], (
+        label + ": answers differently from the same empty cache without AIMI_PLUGIN_DIR"
+    )
+    for field in ("stderr", "tree_before", "tree", "global_cli_path", "state_cli_path"):
+        assert actual[field] == case[field], label + " . " + field
 
 
 @pytest.mark.parametrize(

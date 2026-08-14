@@ -10388,29 +10388,41 @@ cmd_prime_cache() {
     config_dir=$(_claude_config_dir)
     resolved_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
 
+    # An empty glob means nothing is installed, and that is the whole test. It
+    # used to be nested inside a second `[ -z "${AIMI_PLUGIN_DIR:-}" ]`, which
+    # is a variable this branch has already decided not to honour -- Layer 0 is
+    # skipped whenever CLAUDECODE is set (commands/references/
+    # cli-path-resolution.md), and _is_claude_code_host above has already won
+    # the host decision by the time we are here. Its only effect was to divert a
+    # host carrying BOTH variables away from this return and into the pattern
+    # check below, which refused the empty string for not matching a pattern the
+    # empty string could never match -- a refusal whose message named a path
+    # that had never been resolved. cmd_check_version and cmd_cleanup_versions
+    # consult AIMI_PLUGIN_DIR once each, at the top, as part of host selection;
+    # this was the one place in the file that re-consulted it inside the branch
+    # CLAUDECODE had already decided.
     if [ -z "$resolved_path" ]; then
-      if [ -z "${AIMI_PLUGIN_DIR:-}" ]; then
-        jq -n '{status:"not_found",path:null,host:"claude_code",version:null,message:"Plugin not installed. Run /plugin install aimi-engineering first."}'
-        return 0
-      fi
+      jq -n '{status:"not_found",path:null,host:"claude_code",version:null,message:"Plugin not installed. Run /plugin install aimi-engineering first."}'
+      return 0
     fi
 
-    # Validate path matches expected pattern
-    case "$resolved_path" in
-      */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
-        : # valid
-        ;;
-      *)
-        jq -n --arg path "$resolved_path" \
-          '{status:"error",path:null,host:"claude_code",version:null,message:"Resolved path rejected: does not match expected cache pattern"}'
-        return 1
-        ;;
-    esac
+    # There is no cache-pattern check here, and its absence is deliberate. One
+    # used to stand between the return above and the executable test below,
+    # refusing any resolved_path outside */plugins/cache/*/aimi-engineering/*/
+    # scripts/aimi-cli.sh. Deleted rather than kept, because nothing it could
+    # reach was ever able to fail it: _resolve_latest_cache_path returns either
+    # the empty string -- answered above, and the only input that gate ever
+    # actually saw -- or one of its OWN glob's matches, and that glob
+    # ("$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh) is
+    # the same shape as the pattern, so a match satisfies it by construction.
+    # What the cache must not later ACCEPT is _validate_cached_cli_path's job,
+    # and it re-checks on read. An unreachable branch left standing is worse
+    # than no branch, because it reads like an assurance that shape is verified
+    # at this point.
 
     # Verify executable
     if [ ! -x "$resolved_path" ]; then
-      jq -n --arg path "$resolved_path" \
-        '{status:"error",path:null,host:"claude_code",version:null,message:"Resolved path is not executable"}'
+      jq -n '{status:"error",path:null,host:"claude_code",version:null,message:"Resolved path is not executable"}'
       return 1
     fi
   fi
