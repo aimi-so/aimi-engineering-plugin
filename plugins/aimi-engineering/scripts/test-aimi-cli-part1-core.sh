@@ -6097,6 +6097,298 @@ EOF
 }
 
 # ============================================================================
+# Directory-Source Identity Widening Tests (US-007)
+# ============================================================================
+#
+# _validate_cached_cli_path and _validate_cached_worktree_path each grew a
+# third admission route: after their two pre-existing whitelist arms
+# (OpenCode plugin-dir, versioned cache) both fail to match, they fall
+# through to _validate_directory_source_identity, which re-derives TODAY's
+# directory-source install path via _resolve_directory_source_path and
+# admits the cached path only when it is byte-EQUAL to that re-derivation --
+# never by a new shape/pattern arm. See _validate_cached_cli_path's own
+# header in aimi-cli.sh for the full ordering rationale.
+#
+# Every test below pins CLAUDE_CONFIG_DIR and AIMI_CONFIG_DIR to a fresh
+# mktemp -d root, same as the Directory-Source Resolver Tests above: this
+# repository is itself a registered directory-source marketplace on a
+# developer machine, and an unpinned test would read (or, worse, write to)
+# that real state.
+
+# (a) Counterweight: a path SHAPED exactly like a directory-source install,
+# but whose marketplace entry known_marketplaces.json does NOT carry, is
+# still REJECTED by both validators. This is what proves the widening stayed
+# an identity re-derivation against a REGISTERED install rather than
+# becoming a third loose shape pattern. Passes today: it exercises only the
+# two validators and outline:05's already-landed resolver, never
+# cmd_prime_cache.
+test_validate_cached_path_directory_source_lookalike_rejected() {
+  echo ""
+  echo "=== Testing _validate_cached_cli_path / _validate_cached_worktree_path: unregistered directory-source lookalike is rejected ==="
+
+  local root config_dir aimi_cfg lookalike_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  lookalike_dir="$root/not-a-registered-repo"
+  mkdir -p "$config_dir/plugins" "$aimi_cfg" \
+    "$lookalike_dir/plugins/aimi-engineering/scripts" \
+    "$lookalike_dir/plugins/aimi-engineering/skills/git-worktree/scripts"
+  printf '#!/usr/bin/env bash\n' > "$lookalike_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  printf '#!/usr/bin/env bash\n' > "$lookalike_dir/plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh"
+
+  # known_marketplaces.json exists but registers a DIFFERENT install --
+  # $lookalike_dir is never named in it, so it cannot resolve by identity.
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "some-other-marketplace": {
+    "source": {"source": "directory", "path": "$root/some-other-repo"},
+    "installLocation": "$root/some-other-repo",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+
+  export CLAUDE_CONFIG_DIR="$config_dir"
+  export AIMI_CONFIG_DIR="$aimi_cfg"
+  export CLAUDECODE=1
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
+  source_cache_functions
+
+  local cli_result wt_result
+  cli_result=$(_validate_cached_cli_path "$lookalike_dir/plugins/aimi-engineering/scripts/aimi-cli.sh")
+  wt_result=$(_validate_cached_worktree_path "$lookalike_dir/plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh")
+
+  assert_eq "" "$cli_result" \
+    "_validate_cached_cli_path: rejects a directory-source-shaped path whose marketplace is not registered"
+  assert_eq "" "$wt_result" \
+    "_validate_cached_worktree_path: rejects a directory-source-shaped path whose marketplace is not registered"
+
+  unset CLAUDECODE
+  unset CLAUDE_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
+  rm -rf "$root"
+}
+
+# (b) AC3's direct-call proof: when the SAME directory-source install IS
+# registered, both validators admit the cached path by identity. Exercised
+# directly through source_cache_functions, per AC3, rather than through
+# cmd_prime_cache -- cmd_prime_cache's own directory-source fallback is
+# outline:06's addition and is not what this assertion is about. Per this
+# story's notes: this proves the whitelist logic is correct for the worktree
+# half too; it is not an end-to-end round-trip claim, since nothing calls
+# write_global_worktree_cache/read_global_worktree_cache in production today.
+test_validate_cached_path_directory_source_identity_accepted() {
+  echo ""
+  echo "=== Testing _validate_cached_cli_path / _validate_cached_worktree_path: registered directory-source install accepted by identity ==="
+
+  local root config_dir aimi_cfg install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/repo"
+  mkdir -p "$config_dir/plugins" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/scripts" \
+    "$install_dir/plugins/aimi-engineering/skills/git-worktree/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  export CLAUDE_CONFIG_DIR="$config_dir"
+  export AIMI_CONFIG_DIR="$aimi_cfg"
+  export CLAUDECODE=1
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
+  source_cache_functions
+
+  local cli_registered wt_registered cli_result wt_result
+  cli_registered="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  wt_registered="$install_dir/plugins/aimi-engineering/skills/git-worktree/scripts/worktree-manager.sh"
+  cli_result=$(_validate_cached_cli_path "$cli_registered")
+  wt_result=$(_validate_cached_worktree_path "$wt_registered")
+
+  assert_eq "$cli_registered" "$cli_result" \
+    "_validate_cached_cli_path: accepts a registered directory-source install's path by identity"
+  assert_eq "$wt_registered" "$wt_result" \
+    "_validate_cached_worktree_path: accepts a registered directory-source install's path by identity"
+
+  # Equality, not existence, is the admission test: a real file elsewhere is
+  # still rejected because it is not what today's registered install
+  # re-derives to.
+  local wrong_dir cli_wrong_result
+  wrong_dir="$root/wrong-suffix"
+  mkdir -p "$wrong_dir"
+  printf '#!/usr/bin/env bash\n' > "$wrong_dir/aimi-cli.sh"
+  cli_wrong_result=$(_validate_cached_cli_path "$wrong_dir/aimi-cli.sh")
+  assert_eq "" "$cli_wrong_result" \
+    "_validate_cached_cli_path: a real file that is not today's re-derived path is still rejected"
+
+  unset CLAUDECODE
+  unset CLAUDE_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
+  rm -rf "$root"
+}
+
+# (c) Ordering proof for the HARD CONSTRAINT documented on
+# _validate_cached_cli_path: the versioned-cache arm must return BEFORE the
+# directory-source identity check (and therefore before
+# _resolve_directory_source_path's own jq call) ever runs for a
+# versioned-cache path. Proven mechanically, not by inspection:
+# _directory_source_plugin_dir is overridden, after source_cache_functions,
+# to append to a marker file every time it is entered -- so "was the
+# resolver reached at all" becomes directly observable instead of inferred
+# from its (silent, always-empty-on-no-match) return value.
+test_validate_cached_cli_path_versioned_cache_short_circuits_before_identity_check() {
+  echo ""
+  echo "=== Testing _validate_cached_cli_path: the versioned-cache arm returns before the directory-source identity check runs ==="
+
+  local root config_dir aimi_cfg marker
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  marker="$root/directory-source-resolver-was-called"
+  mkdir -p "$config_dir/plugins" "$aimi_cfg"
+
+  export CLAUDE_CONFIG_DIR="$config_dir"
+  export AIMI_CONFIG_DIR="$aimi_cfg"
+  export CLAUDECODE=1
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
+  source_cache_functions
+
+  # Overriding AFTER sourcing: the stub replaces the real resolver, so its
+  # entry is recorded regardless of what it would otherwise have answered.
+  _directory_source_plugin_dir() {
+    printf 'called\n' >> "$marker"
+    return 0
+  }
+
+  local versioned_path versioned_result
+  versioned_path="$config_dir/plugins/cache/abc123/aimi-engineering/1.99.0/scripts/aimi-cli.sh"
+  versioned_result=$(_validate_cached_cli_path "$versioned_path")
+
+  assert_eq "$versioned_path" "$versioned_result" \
+    "_validate_cached_cli_path: versioned-cache path is still accepted"
+  assert_eq "no" "$([ -e "$marker" ] && echo yes || echo no)" \
+    "_validate_cached_cli_path: the directory-source resolver (and its jq call) is never entered for a versioned-cache path"
+
+  # Sanity check that the stub is actually reachable: a path matching
+  # NEITHER whitelist shape falls through to the identity check, which DOES
+  # call the (now-stubbed) resolver -- proving the marker's absence above
+  # means what it claims, rather than the stub simply never being wired in.
+  local unmatched_result
+  unmatched_result=$(_validate_cached_cli_path "/tmp/unrelated/aimi-cli.sh")
+  assert_eq "" "$unmatched_result" \
+    "_validate_cached_cli_path: an unmatched-shape path is still rejected once it reaches the identity check"
+  assert_eq "yes" "$([ -e "$marker" ] && echo yes || echo no)" \
+    "_validate_cached_cli_path: the stub proves the identity check IS reached for a non-whitelisted-shape path"
+
+  unset CLAUDECODE
+  unset CLAUDE_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
+  rm -rf "$root"
+}
+
+# (d) BLOCKED ON outline:06 -- NOT called from main() below. See the comment
+# at its call site.
+#
+# The load-bearing AC for this story: seed a directory-source marketplace
+# with NO versioned plugin cache present, run cmd_prime_cache twice, and
+# assert the second run reports already_current at exit 0. That is the only
+# path that exercises read_global_cli_cache (and therefore
+# _validate_cached_cli_path's new identity arm) from PRODUCTION code -- every
+# other test in this section calls _validate_cached_cli_path or
+# read_global_cli_cache directly.
+#
+# cmd_prime_cache's Claude Code branch (aimi-cli.sh, cmd_prime_cache) resolves
+# ONLY through _resolve_latest_cache_path today -- it has no directory-source
+# fallback branch yet. That fallback is outline:06's addition ("Teach
+# prime-cache to fall back to a directory-source install"), which is NOT in
+# this story's base -- confirmed by reading cmd_prime_cache in this worktree
+# before writing this test. With no versioned cache present, its Claude Code
+# branch answers not_found on the very first run and never calls
+# write_global_cli_cache or read_global_cli_cache at all, so today the
+# second run would also answer not_found, never already_current, and this
+# test would fail for a reason outside this story's own scope.
+#
+# Written and left here on purpose, deliberately NOT invoked from main()
+# below, so it cannot turn a green run into a false failure while
+# outline:06 is still in flight. Wire the call into main() once outline:06's
+# fallback branch lands -- do not delete this test and do not weaken its
+# assertions to make it pass early.
+test_prime_cache_directory_source_already_current() {
+  echo ""
+  echo "=== Testing prime-cache: directory-source install reaches already_current on the second run (BLOCKED on outline:06) ==="
+
+  local root config_dir aimi_cfg install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/repo"
+  mkdir -p "$config_dir/plugins" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  export CLAUDE_CONFIG_DIR="$config_dir"
+  export AIMI_CONFIG_DIR="$aimi_cfg"
+  export CLAUDECODE=1
+  unset AIMI_PLUGIN_DIR 2>/dev/null || true
+  source_cache_functions
+
+  local first second expected_path
+  expected_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  first=$(cmd_prime_cache 2>/dev/null)
+  second=$(cmd_prime_cache 2>/dev/null)
+
+  assert_eq "ok" "$(printf '%s' "$first" | jq -r '.status')" \
+    "prime-cache (directory-source): first run status=ok"
+  assert_eq "$expected_path" "$(printf '%s' "$first" | jq -r '.path')" \
+    "prime-cache (directory-source): first run resolves the directory-source path"
+  assert_eq "already_current" "$(printf '%s' "$second" | jq -r '.status')" \
+    "prime-cache (directory-source): second run status=already_current"
+  assert_eq "$expected_path" "$(printf '%s' "$second" | jq -r '.path')" \
+    "prime-cache (directory-source): second run path unchanged"
+
+  unset CLAUDECODE
+  unset CLAUDE_CONFIG_DIR
+  # Restore, never unset — see test-aimi-cli-common.sh's AIMI_CONFIG_DIR_DEFAULT.
+  export AIMI_CONFIG_DIR="$AIMI_CONFIG_DIR_DEFAULT"
+  rm -rf "$root"
+}
+
+# ============================================================================
 # V3.2 Schema Tests — Gates, Waves & Field Preservation
 # ============================================================================
 
@@ -9012,6 +9304,17 @@ main() {
   test_directory_source_plugin_dir_source_traversal
   test_directory_source_plugin_dir_joined_dir_missing
   test_directory_source_functions_defined_via_source_cache_functions
+
+  # Directory-source identity widening tests (US-007) — the two validators'
+  # third admission route. test_prime_cache_directory_source_already_current
+  # is deliberately NOT called here: it is BLOCKED on outline:06's
+  # cmd_prime_cache directory-source fallback landing first. See its own
+  # header comment above for why, and do not wire it in until that lands.
+  echo ""
+  echo "--- Directory-Source Identity Widening Tests (US-007) ---"
+  test_validate_cached_path_directory_source_lookalike_rejected
+  test_validate_cached_path_directory_source_identity_accepted
+  test_validate_cached_cli_path_versioned_cache_short_circuits_before_identity_check
 
   # Project field validation tests — run with fresh state
   echo ""

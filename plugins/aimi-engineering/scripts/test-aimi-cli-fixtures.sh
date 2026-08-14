@@ -61,6 +61,7 @@ source_cache_functions() {
   eval "$(sed -n '/^_validate_plugin_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_directory_source_plugin_dir()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_resolve_directory_source_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_validate_directory_source_identity()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_is_claude_code_host()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_cache_path_legacy()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_global_worktree_cache_path_legacy()/,/^}/p' "$CLI")"
