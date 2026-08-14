@@ -32,6 +32,18 @@ if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME
 if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 ```
 
+> **A directory-source install (marketplace source: `directory`) legitimately writes a path here too, not only a versioned cache copy.** Layer 1's cache file just holds whatever `prime-cache` last wrote — for a directory-source Claude Code host that is the checkout's own `scripts/aimi-cli.sh`, not a copy under `plugins/cache/`. Nothing bootstraps it automatically: Layer 0 is gated off whenever `CLAUDECODE` is set (every Claude Code session), Layer 2's glob below only ever matches `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` and a directory source has no copy there, and Layer 3's `.aimi/cli-path` is created by nobody. So on a fresh directory-source host every layer legitimately fails and `$AIMI_CLI` resolves to empty — which means `/aimi:init` itself cannot self-heal, since its own Step 0 needs `$AIMI_CLI` resolved before it can call `prime-cache` at all. The one escape is running the CLI once by its absolute path:
+>
+> ```bash
+> bash /abs/path/to/plugins/aimi-engineering/scripts/aimi-cli.sh prime-cache
+> ```
+>
+> That single invocation writes Layer 1 directly (bypassing the four-layer search entirely, since the CLI is being run by a path the operator already knows), and every later `/aimi:*` command in the session resolves normally from there. It is a manual, once-per-host step, not something a command can trigger on its own behalf.
+>
+> **Automating this into a new Layer 2b is out of scope on purpose.** The resolution snippets in this file are matched *literally* by `hooks/auto-approve-cli.sh`'s Patterns 7 and 8, built from `GLOB_VERSION_TAIL` around line 58 of that file — so a new layer's command text would need a byte-identical mirror in this file, `hooks/auto-approve-cli.sh`, the `--help` EXAMPLES block in `aimi-cli.sh`, `skills/resolve-pr-parallel/scripts/_resolve-cli.sh`, `commands/review.md`, `commands/validate-bug.md`, the top-level `CLAUDE.md`, and three test suites. One character of drift between any two of those turns every Layer 2 call into a permission prompt instead of an auto-approval. The manual `prime-cache` bootstrap above exists because paying that mirror cost is not justified for a one-time, once-per-host step.
+>
+> **Refuted alternative, recorded so it is not re-derived:** `CLAUDE_PLUGIN_ROOT` is NOT usable as a Layer 0b. It was measured unset in the Bash-tool environment — exactly where these resolution snippets execute — so a Layer 0b keyed on it would never fire for the host it would need to help.
+
 ### Layer 2: Glob fallback (zsh-safe)
 
 Only runs if Layer 1 failed. Uses `bash -c` to avoid zsh `NOMATCH` errors.
