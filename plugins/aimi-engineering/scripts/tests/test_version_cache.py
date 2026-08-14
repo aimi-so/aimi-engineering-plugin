@@ -546,6 +546,89 @@ def test_cleanup_keeps_the_newest_and_deletes_the_rest(tmp_path):
     assert not any("/1.9.0" in p or "/1.10.0" in p for p in survivors)
 
 
+# ---------------------------------------------------------------------------
+# US-011: cleanup-versions' rm -rf, confined explicitly rather than
+# incidentally
+#
+# Today version_dir's only source is the loop glob under
+# <config_dir>/plugins/cache/, so a directory-source install elsewhere on
+# disk (the known_marketplaces.json/installLocation shape _directory_source_
+# plugin_dir resolves) can never reach the rm -rf -- these two cases seed one
+# alongside the cache anyway and prove it via a FULL tree_before/tree set
+# diff, not the filtered "survivors" glob check the case above uses. A set
+# diff catches a change ANYWHERE in the throwaway root, so the
+# directory-source install's subtree is proven untouched by never appearing
+# in the diff at all, rather than by a handful of hand-picked paths that
+# happen to still be there.
+# ---------------------------------------------------------------------------
+
+
+def _directory_source_install_spec(cache):
+    """A host that also carries a directory-source install alongside its cache.
+
+    `plugin_dir: {}` reuses _build_root's existing support to materialize
+    <root>/opencode-plugin/scripts/aimi-cli.sh -- the same directory tree
+    shape a directory-source installLocation takes -- entirely outside
+    <config_dir>/plugins/cache/. `host: "both"` sets AIMI_PLUGIN_DIR alongside
+    CLAUDECODE=1, matching a real host where both are resolvable at once;
+    cleanup-versions' own converter-lifecycle early return does not fire
+    here because CLAUDECODE=1 makes _is_claude_code_host true, so the run
+    reaches the ordinary cache-sweeping path this story's guard sits in.
+    """
+    return {"args": ["cleanup-versions"], "host": "both", "plugin_dir": {}, "cache": cache}
+
+
+def test_cleanup_removes_stale_cache_versions_and_leaves_a_directory_source_install_untouched(
+    tmp_path,
+):
+    """AC1/AC4 case 1: three cached versions plus the install, populated cache."""
+    spec = _directory_source_install_spec(
+        [
+            {"entry": "mk1", "version": "1.9.0"},
+            {"entry": "mk1", "version": "1.10.0"},
+            {"entry": "mk1", "version": "1.123.0"},
+        ]
+    )
+    actual = replay(spec, str(tmp_path))
+    assert json.loads(actual["stdout"]) == {"removed": 2, "kept": "1.123.0"}
+
+    install_before = [p for p in actual["tree_before"] if p.startswith("opencode-plugin/")]
+    install_after = [p for p in actual["tree"] if p.startswith("opencode-plugin/")]
+    assert install_before, "fixture did not seed the directory-source install"
+    assert install_after == install_before, "directory-source install subtree changed"
+
+    # Full-tree diff: the only entries that may differ are the two removed
+    # stale-version subtrees (all under 1.9.0/1.10.0) and the cli-path/state
+    # files this run is expected to write -- nothing else, anywhere.
+    before = set(actual["tree_before"])
+    after = set(actual["tree"])
+    removed_paths = before - after
+    added_paths = after - before
+    assert removed_paths, "expected the two stale version subtrees to disappear"
+    assert all("/1.9.0" in p or "/1.10.0" in p for p in removed_paths), removed_paths
+    assert added_paths == {
+        "aimi-config/cli-path",
+        "project/.aimi/cli-path",
+        "project/.aimi/.state.lock",
+    }, added_paths
+
+
+def test_cleanup_with_empty_cache_leaves_a_directory_source_install_untouched(tmp_path):
+    """AC1/AC4 case 2: same install, empty cache -- {removed: 0, kept: null}."""
+    spec = _directory_source_install_spec([])
+    actual = replay(spec, str(tmp_path))
+    assert json.loads(actual["stdout"]) == {"removed": 0, "kept": None}
+
+    install_before = [p for p in actual["tree_before"] if p.startswith("opencode-plugin/")]
+    install_after = [p for p in actual["tree"] if p.startswith("opencode-plugin/")]
+    assert install_before, "fixture did not seed the directory-source install"
+    assert install_after == install_before, "directory-source install subtree changed"
+
+    # Empty-cache branch returns before any write, so the whole tree is
+    # untouched -- a full-tree diff, not just the install subtree.
+    assert actual["tree"] == actual["tree_before"]
+
+
 def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):
     """The permanent regression case for the nested-shell interpolation.
 

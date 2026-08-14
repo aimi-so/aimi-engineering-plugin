@@ -10388,6 +10388,20 @@ cmd_cleanup_versions() {
   # .../aimi-engineering/1.4.0/scripts/aimi-cli.sh -> .../aimi-engineering/1.4.0
   latest_version_dir=$(dirname "$(dirname "$latest_path")")
 
+  # STANDING INVARIANT: no resolver may ever hand latest_version_dir (built
+  # above; used only as the skip comparison below and the two writes after
+  # this loop) a path outside <config_dir>/plugins/cache/. Today the loop
+  # immediately below is version_dir's ONLY source, so that invariant holds by
+  # construction and this rm -rf cannot reach anything outside the cache.
+  # That is an accident of the glob, not a property this function asserts --
+  # if a future edit ever widens where version_dir comes from (e.g. giving
+  # this verb the same directory-source fallback prime-cache uses), the
+  # confinement check immediately before the rm -rf below is what makes
+  # REFUSING that safe, rather than silently deleting every directory this
+  # loop walks.
+  local resolved_cache_root
+  resolved_cache_root=$(resolve_path "$config_dir/plugins/cache" 2>/dev/null) || resolved_cache_root=""
+
   # Iterate all version directories under all marketplace cache entries
   local version_dir
   for version_dir in "$config_dir"/plugins/cache/*/aimi-engineering/*/; do
@@ -10403,6 +10417,22 @@ cmd_cleanup_versions() {
     if [ ! -d "$version_dir" ]; then
       continue
     fi
+
+    # Confinement check: refuse to delete anything whose resolved path is not
+    # inside the resolved cache root, regardless of how version_dir got here.
+    local resolved_target
+    resolved_target=$(resolve_path "$version_dir" 2>/dev/null) || resolved_target=""
+    if [ -z "$resolved_cache_root" ] || [ -z "$resolved_target" ]; then
+      echo "Warning: refusing to remove $version_dir (could not resolve cache root)" >&2
+      continue
+    fi
+    case "$resolved_target" in
+      "$resolved_cache_root"/*) ;;
+      *)
+        echo "Warning: refusing to remove $version_dir (outside $resolved_cache_root)" >&2
+        continue
+        ;;
+    esac
 
     # Attempt removal; log warning and continue on failure
     if rm -rf "$version_dir" 2>/dev/null; then
