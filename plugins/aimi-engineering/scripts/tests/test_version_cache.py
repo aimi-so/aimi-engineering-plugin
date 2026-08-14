@@ -104,7 +104,17 @@ D11_AND_D13 = {
         "write_state is a different writer and the guard was never its rule."
     ),
     "clv-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via cleanup-versions.",
-    "pc-simlink-worktrees-cc": "D11 FIXED: same symlinked entry, via prime-cache.",
+    "pc-simlink-worktrees-cc": (
+        "D11 FIXED: same symlinked entry, via prime-cache. US-006 goes one step "
+        "further for THIS verb only: prime-cache's own answer for this case now "
+        "changes too, from the false {status:\"ok\"} this recording still shows "
+        "to {status:\"error\"} at exit 1 -- see "
+        "test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink "
+        "below. check-version and cleanup-versions keep the no-op-success answer "
+        "asserted by test_a_symlink_into_a_worktree_is_no_longer_persisted_globally "
+        "unchanged; only their shared write refusal is D11's fix, and "
+        "cmd_check_version/cmd_cleanup_versions are out of scope for US-006."
+    ),
     "ver-chave-ausente": (
         "D13 FIXED: was the literal string `null` at exit 0, which reads as a "
         "version; now exit 1 naming the file."
@@ -445,7 +455,7 @@ def test_an_empty_glob_answers_not_found_even_when_aimi_plugin_dir_is_set(label,
 
 @pytest.mark.parametrize(
     "label",
-    ["cv-fix-simlink-worktrees-cc", "clv-simlink-worktrees-cc", "pc-simlink-worktrees-cc"],
+    ["cv-fix-simlink-worktrees-cc", "clv-simlink-worktrees-cc"],
 )
 def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_path):
     """D11: the refusal has to survive the indirection that defeated it.
@@ -455,6 +465,12 @@ def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_pa
     exit 127 on every later session once the worktree is cleaned up, so the
     before-state is asserted too -- a case that stopped exercising the symlink
     would otherwise pass this quietly.
+
+    pc-simlink-worktrees-cc used to run through this same assertion -- it no
+    longer does, because US-006 changed what prime-cache (and only
+    prime-cache) answers for it. See
+    test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink
+    directly below for that verb's own version of this check.
     """
     assert CASES[label]["global_cli_path"] is not None, label + ": the recording refused already"
     actual = replay(CASES[label]["input"], str(tmp_path))
@@ -462,6 +478,40 @@ def test_a_symlink_into_a_worktree_is_no_longer_persisted_globally(label, tmp_pa
     # The refusal is a no-op success, not an error: the verb's own answer stands.
     assert actual["exit"] == CASES[label]["exit"], label + ": the refusal changed the exit status"
     assert actual["stdout"] == CASES[label]["stdout"], label + ": the refusal changed the answer"
+
+
+def test_prime_cache_reports_error_rather_than_a_false_ok_for_the_same_symlink(tmp_path):
+    """US-006: prime-cache's blind spot on the SAME refusal D11 already fixed.
+
+    write_global_cli_cache's refusal (D11, above) is a no-op success at its own
+    level -- it returns 0 and writes nothing, which is the right contract for a
+    helper whose caller might have other reasons to keep going. cmd_prime_cache
+    used to trust that return status alone (`if ! write_error=$(...)`), so a
+    refused write and a real one were indistinguishable at its own call site:
+    both an empty write_error and an exit 0. Unlike check-version or
+    cleanup-versions -- whose own jobs do not stop at "write the cache" and
+    whose no-op-success answer for this exact recording is pinned unchanged by
+    test_a_symlink_into_a_worktree_is_no_longer_persisted_globally, above --
+    prime-cache's entire documented job IS writing that cache, so reporting
+    {status:"ok"} while leaving the file exactly as it was is the worse
+    failure. prime-cache now reads the cache file back after every write and
+    compares it against resolved_path; a mismatch answers {status:"error"} at
+    exit 1 instead. This is the pc-simlink-worktrees-cc recording replayed
+    directly (its recorded stdout/exit are the FALSE ok this test asserts is
+    gone; pc-simlink-worktrees-cc's own KNOWN_DIVERGENCES entry is the reading
+    guide for both directions).
+    """
+    label = "pc-simlink-worktrees-cc"
+    assert CASES[label]["global_cli_path"] is not None, label + ": the recording refused already"
+    assert CASES[label]["exit"] == 0, label + ": the recording is not the false-ok case anymore"
+    actual = replay(CASES[label]["input"], str(tmp_path))
+    assert actual["global_cli_path"] is None, label + ": still persisted a worktree path"
+    assert actual["exit"] == 1, label + ": a refused write must not exit 0"
+    parsed = json.loads(actual["stdout"])
+    assert parsed["status"] == "error", label + ": a refused write must not answer ok"
+    assert parsed["path"] is None
+    assert parsed["version"] is None
+    assert "/.worktrees/" in parsed["message"]
 
 
 @pytest.mark.parametrize("label", ["ver-chave-ausente", "ver-nao-string", "ver-json-malformado"])

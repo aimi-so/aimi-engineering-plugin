@@ -5559,6 +5559,289 @@ test_prime_cache_rejects_non_executable_opencode_path() {
   rm -rf "$root"
 }
 
+# ----------------------------------------------------------------------------
+# prime-cache: directory-source fallback (US-006).
+#
+# The versioned cache glob (Layer 2, tested by the nine functions above) is
+# empty on a directory-source (dev-mode) Claude Code install -- the plugin
+# runs straight out of a checkout a marketplace was added FROM, not out of a
+# versioned cache entry, so _resolve_latest_cache_path's glob can never match
+# it. These six tests exercise cmd_prime_cache's fallback onto
+# _resolve_directory_source_path for that case: ordering against the glob,
+# the two-source version lookup (marketplace.json plugins[].version, else
+# plugin.json .version, else JSON null -- NEVER _extract_version_from_path,
+# which returns the literal string "aimi-engineering" on this path shape),
+# the directory-source note on `message`, the post-write read-back that turns
+# write_global_cli_cache's silent /.worktrees/ no-op into status:error instead
+# of a false ok, and the one documented KNOWN GAP this story leaves in place
+# (see cmd_prime_cache's own "Already-current check" comment): a directory-
+# source path never satisfies _validate_cached_cli_path's whitelist, so a
+# second consecutive run answers "ok" again rather than "already_current".
+#
+# Every fixture runs the CLI as its own subprocess against a fresh mktemp -d
+# root, the same reason test_prime_cache_empty_glob_answers_not_found_with_plugin_dir_set
+# does above: the paths under test sit downstream of set -euo pipefail, which
+# this test script does not itself set. This machine has a real
+# directory-source marketplace registered (this very repo), so every fixture
+# below passes its own throwaway CLAUDE_CONFIG_DIR/AIMI_CONFIG_DIR rather than
+# an ambient one -- the same discipline the resolver's own tests use.
+# ----------------------------------------------------------------------------
+
+test_prime_cache_directory_source_fallback_when_glob_empty() {
+  echo ""
+  echo "=== Testing prime-cache: directory-source fallback when the versioned glob is empty ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local expected_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  local out ec
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" "prime-cache (directory-source fallback): exits 0"
+  assert_eq "ok" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (directory-source fallback): status=ok"
+  assert_eq "$expected_path" "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (directory-source fallback): path is the directory-source install's own aimi-cli.sh"
+  assert_eq "claude_code" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (directory-source fallback): host=claude_code"
+  assert_eq "1.120.0" "$(printf '%s' "$out" | jq -r '.version')" \
+    "prime-cache (directory-source fallback): version comes from marketplace.json plugins[].version"
+  local msg matched
+  msg=$(printf '%s' "$out" | jq -r '.message')
+  case "$msg" in
+    *directory-source*) matched="yes" ;;
+    *) matched="no" ;;
+  esac
+  assert_eq "yes" "$matched" \
+    "prime-cache (directory-source fallback): message names the directory-source origin"
+  assert_eq "$expected_path" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "prime-cache (directory-source fallback): global cli-path cache is written to the directory-source path"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_directory_source_version_falls_back_to_plugin_json() {
+  echo ""
+  echo "=== Testing prime-cache: directory-source version falls back to plugin.json ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  # marketplace.json's own plugins[] entry carries no "version" key at all.
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","source":"./plugins/aimi-engineering"}]}
+EOF
+  cat > "$install_dir/plugins/aimi-engineering/.claude-plugin/plugin.json" << 'EOF'
+{"name":"aimi-engineering","version":"1.119.3"}
+EOF
+
+  local out
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null)
+
+  assert_eq "ok" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (directory-source, plugin.json fallback): status=ok"
+  assert_eq "1.119.3" "$(printf '%s' "$out" | jq -r '.version')" \
+    "prime-cache (directory-source, plugin.json fallback): version comes from plugin.json when marketplace.json has none"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_directory_source_version_null_when_neither_source_has_one() {
+  echo ""
+  echo "=== Testing prime-cache: directory-source version is JSON null when neither source has one ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  # Neither marketplace.json's entry nor a plugin.json carries a version.
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","source":"./plugins/aimi-engineering"}]}
+EOF
+  # No plugins/aimi-engineering/.claude-plugin/plugin.json at all.
+
+  local out
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null)
+
+  assert_eq "ok" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (directory-source, no version anywhere): status=ok"
+  assert_eq "null" "$(printf '%s' "$out" | jq -c '.version')" \
+    "prime-cache (directory-source, no version anywhere): version is JSON null, never the empty string"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_glob_wins_over_directory_source_when_both_present() {
+  echo ""
+  echo "=== Testing prime-cache: a non-empty versioned glob wins over a directory-source install ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache/mk1/aimi-engineering/1.5.0/scripts" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$cfg/plugins/cache/mk1/aimi-engineering/1.5.0/scripts/aimi-cli.sh"
+  chmod +x "$cfg/plugins/cache/mk1/aimi-engineering/1.5.0/scripts/aimi-cli.sh"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local out
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null)
+
+  assert_eq "ok" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (glob wins): status=ok"
+  assert_eq "$cfg/plugins/cache/mk1/aimi-engineering/1.5.0/scripts/aimi-cli.sh" \
+    "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (glob wins): path is the versioned cache entry, not the directory-source install"
+  assert_eq "Cache primed successfully" "$(printf '%s' "$out" | jq -r '.message')" \
+    "prime-cache (glob wins): message carries no directory-source note when the glob resolved"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_directory_source_worktrees_hazard_reports_error() {
+  echo ""
+  echo "=== Testing prime-cache: a directory-source install under .worktrees/ reports error, not a false ok ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  # The directory-source install itself sits under a .worktrees/ segment --
+  # e.g. a maintainer running this CLI straight out of a worktree checkout of
+  # this repo. write_global_cli_cache refuses to persist it; before this
+  # story, cmd_prime_cache could not see that refusal and reported a false ok.
+  install_dir="$root/.worktrees/wt-dev/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local out ec
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "1" "$ec" "prime-cache (directory-source under .worktrees/): exits 1, not 0"
+  assert_eq "error" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (directory-source under .worktrees/): status=error, not a false ok"
+  local msg matched
+  msg=$(printf '%s' "$out" | jq -r '.message')
+  case "$msg" in
+    */.worktrees/*) matched="yes" ;;
+    *) matched="no" ;;
+  esac
+  assert_eq "yes" "$matched" \
+    "prime-cache (directory-source under .worktrees/): message names the /.worktrees/ segment"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "prime-cache (directory-source under .worktrees/): the global cli-path cache is left unwritten"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_directory_source_second_run_known_gap_stays_ok() {
+  echo ""
+  echo "=== Testing prime-cache: a second consecutive directory-source run stays ok (documented known gap) ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local expected_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  local out1 out2
+  out1=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null)
+  out2=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null)
+
+  assert_eq "ok" "$(printf '%s' "$out1" | jq -r '.status')" \
+    "prime-cache (directory-source, second run): first run status=ok"
+  # KNOWN GAP (documented in cmd_prime_cache's own "Already-current check"
+  # comment, and out of scope for this story): _validate_cached_cli_path's
+  # whitelist never recognizes a directory-source shape, so read_global_cli_cache
+  # always answers empty for one and this branch never reaches "already_current".
+  assert_eq "ok" "$(printf '%s' "$out2" | jq -r '.status')" \
+    "prime-cache (directory-source, second run): second run still answers ok, not already_current"
+  assert_eq "$expected_path" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "prime-cache (directory-source, second run): the cache still names the directory-source path after the second write"
+
+  rm -rf "$root"
+}
+
 # ============================================================================
 # Directory-Source Resolver Tests
 # ============================================================================
@@ -8986,6 +9269,12 @@ main() {
   test_prime_cache_empty_glob_answers_not_found_with_plugin_dir_set
   test_prime_cache_rejects_non_executable_path
   test_prime_cache_rejects_non_executable_opencode_path
+  test_prime_cache_directory_source_fallback_when_glob_empty
+  test_prime_cache_directory_source_version_falls_back_to_plugin_json
+  test_prime_cache_directory_source_version_null_when_neither_source_has_one
+  test_prime_cache_glob_wins_over_directory_source_when_both_present
+  test_prime_cache_directory_source_worktrees_hazard_reports_error
+  test_prime_cache_directory_source_second_run_known_gap_stays_ok
 
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"

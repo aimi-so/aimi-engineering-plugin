@@ -10465,6 +10465,15 @@ cmd_cleanup_versions() {
 cmd_prime_cache() {
   local host_label
   local resolved_path=""
+  # Which of the two Claude Code sources answered resolved_path: "cache" (the
+  # versioned plugin-cache glob, the pre-existing behaviour) or "directory" (a
+  # directory-source install found only when that glob was empty). Nothing
+  # downstream keys behaviour off _is_claude_code_host for this choice — see
+  # the fallback site below for why not — so this is the one flag that decides
+  # both which version-resolution path runs and whether the message field
+  # gets a directory-source note. Stays "cache" on the OpenCode branch, which
+  # this story does not touch.
+  local resolved_source="cache"
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
 
@@ -10524,6 +10533,29 @@ cmd_prime_cache() {
     # consult AIMI_PLUGIN_DIR once each, at the top, as part of host selection;
     # this was the one place in the file that re-consulted it inside the branch
     # CLAUDECODE had already decided.
+    # Directory-source fallback. The versioned cache glob above is empty, but
+    # this host may still be running the plugin straight out of a
+    # directory-source (dev-mode) Claude Code install -- a marketplace added
+    # FROM a checkout rather than installed as a versioned cache entry, so
+    # _resolve_latest_cache_path's glob can never match it (see
+    # _directory_source_plugin_dir's own header). Deliberately NOT gated on
+    # _is_claude_code_host: this branch is already entered whenever
+    # CLAUDECODE=1 OR neither discriminator is set ("try Claude Code glob
+    # anyway" above), and the one flow a directory-source user actually has is
+    # running this CLI by absolute path from a bare terminal with CLAUDECODE
+    # unset. _resolve_directory_source_path ALWAYS returns 0 and prints one
+    # candidate path or nothing, so this cannot abort the empty-glob case
+    # under set -euo pipefail and cannot introduce a not_found regression: the
+    # answer below is reached, unchanged, only when BOTH sources miss.
+    if [ -z "$resolved_path" ]; then
+      local dir_source_path=""
+      dir_source_path=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh") || dir_source_path=""
+      if [ -n "$dir_source_path" ]; then
+        resolved_path="$dir_source_path"
+        resolved_source="directory"
+      fi
+    fi
+
     if [ -z "$resolved_path" ]; then
       jq -n '{status:"not_found",path:null,host:"claude_code",version:null,message:"Plugin not installed. Run /plugin install aimi-engineering first."}'
       return 0
@@ -10550,14 +10582,90 @@ cmd_prime_cache() {
     fi
   fi
 
+  # ---- Resolve version ----
+  # _extract_version_from_path assumes a version-numbered path segment
+  # (.../aimi-engineering/<version>/scripts/aimi-cli.sh) -- on a
+  # directory-source path (.../<plugin_dir>/scripts/aimi-cli.sh, no such
+  # segment) it returns the literal string "aimi-engineering" (measured),
+  # which reads as a plausible version and is not one. resolved_source ==
+  # "directory" routes here instead: re-derive plugin_dir from resolved_path
+  # and read version the same way `version` does -- prefer the resolved
+  # marketplace entry's own plugins[].version, else plugin_dir's own
+  # plugin.json .version, else leave it empty (encoded as JSON null below).
+  # This duplicates part of _directory_source_plugin_dir's own source-subpath
+  # validation rather than calling it, because that helper answers "where is
+  # THE directory-source plugin" and this needs "which known_marketplaces.json
+  # ENTRY produced THIS resolved_path" -- a different question, and
+  # known_marketplaces.json can hold more than one directory-source entry (see
+  # that helper's own TIE-BREAK comment). Every jq call here is guarded the
+  # same way that helper's are: `2>/dev/null` plus `|| var=""`, so a missing or
+  # malformed marketplace.json degrades to silence under set -euo pipefail
+  # rather than aborting -- this is what keeps the four named golden cases
+  # (which carry no known_marketplaces.json at all) byte-identical, since none
+  # of them ever reach this block with resolved_source == "directory".
+  local resolved_version=""
+  if [ "$resolved_source" = "directory" ]; then
+    local dsv_plugin_dir="${resolved_path%/scripts/aimi-cli.sh}"
+    local dsv_km_file="$config_dir/plugins/known_marketplaces.json"
+    local dsv_mp_version=""
+    if [ -f "$dsv_km_file" ]; then
+      local dsv_install_loc dsv_mp_file dsv_src dsv_candidate_dir
+      while IFS= read -r dsv_install_loc; do
+        [ -z "$dsv_install_loc" ] && continue
+        case "$dsv_install_loc" in
+          /*) ;;
+          *) continue ;;
+        esac
+        dsv_install_loc="${dsv_install_loc%/}"
+        dsv_mp_file="$dsv_install_loc/.claude-plugin/marketplace.json"
+        [ -f "$dsv_mp_file" ] || continue
+        dsv_src=$(jq -r '(.plugins // []) | map(select(.name == "aimi-engineering" and (.source | type) == "string")) | .[0].source // empty' "$dsv_mp_file" 2>/dev/null) || dsv_src=""
+        [ -z "$dsv_src" ] && continue
+        case "$dsv_src" in
+          /*) continue ;;
+        esac
+        case "$dsv_src" in
+          *..*) continue ;;
+        esac
+        dsv_candidate_dir="${dsv_install_loc}/${dsv_src#./}"
+        if [ "$dsv_candidate_dir" = "$dsv_plugin_dir" ]; then
+          dsv_mp_version=$(jq -r '(.plugins // []) | map(select(.name == "aimi-engineering" and (.version | type) == "string")) | .[0].version // empty' "$dsv_mp_file" 2>/dev/null) || dsv_mp_version=""
+          break
+        fi
+      done < <(jq -r 'if type != "object" then empty else to_entries[] | select(.value.source.source == "directory" and (.value.installLocation | type) == "string") | .value.installLocation end' "$dsv_km_file" 2>/dev/null)
+    fi
+    if [ -n "$dsv_mp_version" ]; then
+      resolved_version="$dsv_mp_version"
+    else
+      local dsv_pj_file="$dsv_plugin_dir/.claude-plugin/plugin.json"
+      if [ -f "$dsv_pj_file" ]; then
+        resolved_version=$(jq -r 'if (.version | type) == "string" then .version else empty end' "$dsv_pj_file" 2>/dev/null) || resolved_version=""
+      fi
+    fi
+  else
+    resolved_version=$(_extract_version_from_path "$resolved_path")
+  fi
+
+  # message note for the directory-source origin -- the ONLY place that origin
+  # is communicated (no fifth status, no new top-level key).
+  local origin_note=""
+  [ "$resolved_source" = "directory" ] && origin_note=" (directory-source install)"
+
   # ---- Already-current check ----
+  #
+  # KNOWN GAP, declared rather than fixed: read_global_cli_cache runs every
+  # candidate through _validate_cached_cli_path's whitelist, which recognizes
+  # only the AIMI_PLUGIN_DIR shape and the versioned-cache-glob shape -- never
+  # a directory-source path. So existing_cache is always empty for one, this
+  # branch never fires for resolved_source == "directory", and a second
+  # consecutive run re-answers "ok" rather than "already_current". Both are
+  # documented outcomes of this verb's contract; widening that whitelist
+  # reaches outside cmd_prime_cache, which is this story's declared scope.
   local existing_cache
   existing_cache=$(read_global_cli_cache)
   if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
-    local ver
-    ver=$(_extract_version_from_path "$resolved_path")
-    jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$ver" \
-      '{status:"already_current",path:$path,host:$host,version:$ver,message:"Cache already points to this path"}'
+    jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
+      '{status:"already_current",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache already points to this path" + $note)}'
     return 0
   fi
 
@@ -10569,10 +10677,32 @@ cmd_prime_cache() {
     return 1
   fi
 
-  local ver
-  ver=$(_extract_version_from_path "$resolved_path")
-  jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$ver" \
-    '{status:"ok",path:$path,host:$host,version:$ver,message:"Cache primed successfully"}'
+  # write_global_cli_cache (~line 730) silently no-ops -- returns 0, writes
+  # nothing -- when resolved_path, or its symlink-resolved target, carries a
+  # `/.worktrees/` segment. That refusal is indistinguishable from a
+  # successful write at the call above: both return 0 with empty stdout. A
+  # directory-source resolution can legitimately land here (a maintainer
+  # running this CLI straight out of a worktree checkout of THIS repo), so
+  # read the cache file back and compare its RAW content against resolved_path
+  # before answering ok. This reads _global_cache_path's file directly rather
+  # than through read_global_cli_cache/_validate_cached_cli_path, whose
+  # whitelist (see the Already-current comment above) would reject a
+  # directory-source path outright and turn every successful directory-source
+  # write into a false "error" here too.
+  local cache_file_after persisted_path=""
+  cache_file_after=$(_global_cache_path)
+  if [ -f "$cache_file_after" ] && [ -r "$cache_file_after" ]; then
+    persisted_path=$(cat "$cache_file_after" 2>/dev/null) || persisted_path=""
+  fi
+  if [ "$persisted_path" != "$resolved_path" ]; then
+    jq -n --arg host "$host_label" --arg path "$resolved_path" \
+      --arg msg "write_global_cli_cache did not persist $resolved_path (likely refused a /.worktrees/ segment); global cache not updated" \
+      '{status:"error",path:null,host:$host,version:null,message:$msg}'
+    return 1
+  fi
+
+  jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
+    '{status:"ok",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache primed successfully" + $note)}'
   return 0
 }
 
