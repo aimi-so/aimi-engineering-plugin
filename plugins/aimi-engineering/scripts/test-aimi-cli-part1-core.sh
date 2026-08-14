@@ -2187,6 +2187,123 @@ test_version_verbs_empty_plugin_cache_glob() {
 }
 
 # ----------------------------------------------------------------------------
+# check-version against a directory-source (locally-added marketplace) host
+# whose versioned plugin-cache glob is EMPTY.
+#
+# This is US-008's own regression net: before it, an empty glob meant
+# check-version answered {"status":"unknown"} forever on a directory-source
+# host, even though the plugin is installed and working -- see cmd_check_version's
+# own header comment for the fallback order. The fixture below is the same
+# known_marketplaces.json + <installLocation>/.claude-plugin/marketplace.json
+# shape the Directory-Source Resolver Tests further down already exercise
+# against _directory_source_plugin_dir / _resolve_directory_source_path
+# directly; this test drives the same shape through check-version itself.
+#
+# The sequence asserts against ONE fixture, in order:
+#   (a) no stored cli-path yet -> "missing", carrying the document's real
+#       semver -- never "unknown".
+#   (b) a PRIOR bootstrap already left an unrelated stale cli-path (the same
+#       fake-path idiom test_check_version_fix uses) -> --fix answers "fixed",
+#       reports the fake path's OWN version rather than borrowing the
+#       directory-source install's version by config_dir proximity alone, and
+#       writes .aimi/cli-path to the resolved directory-source path.
+#   (c) a SECOND, subsequent plain check-version call against that now-current
+#       stored path -> "current", with the document's real semver -- this is
+#       the literal proof that stored_version resolution (not just
+#       latest_version) is directory-source-aware: _extract_version_from_path
+#       is measured to return the literal string "aimi-engineering" for a
+#       directory-source path, and this is the exact cycle that would
+#       otherwise hit it.
+# ----------------------------------------------------------------------------
+test_check_version_directory_source_fallback() {
+  echo ""
+  echo "=== Testing check-version against a directory-source host with an empty plugin-cache glob ==="
+
+  "$CLI" clear-state > /dev/null
+
+  local root cfg aimi_cfg install_dir ds_path
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/repo"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  ds_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"7.7.7","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local out ec
+
+  # (a) No stored cli-path yet.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version (directory-source, empty glob): missing cli-path exits 0"
+  assert_contains '"status": "missing"' "$out" \
+    "check-version (directory-source, empty glob): answers missing, not unknown"
+  assert_contains '"latestVersion": "7.7.7"' "$out" \
+    "check-version (directory-source, empty glob): latestVersion is the document's real semver"
+
+  # (b) A prior bootstrap already left an unrelated stale cli-path -- same
+  # fake-path idiom test_check_version_fix uses above. --fix must report
+  # the FAKE path's own version here (1.0.0), not the directory-source
+  # install's version, proving the fallback does not borrow a version by
+  # config_dir proximity alone for a path that is not actually the resolved
+  # directory-source install.
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --fix 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version --fix (directory-source, empty glob): exits 0"
+  assert_contains '"status": "fixed"' "$out" \
+    "check-version --fix (directory-source, empty glob): answers fixed"
+  assert_contains '"storedVersion": "1.0.0"' "$out" \
+    "check-version --fix (directory-source, empty glob): storedVersion is the stale fake path's own version, not borrowed"
+  assert_contains '"latestVersion": "7.7.7"' "$out" \
+    "check-version --fix (directory-source, empty glob): latestVersion is the document's real semver"
+
+  local updated_path
+  updated_path=$(cat "$AIMI_DIR/cli-path" 2>/dev/null)
+  assert_eq "$ds_path" "$updated_path" \
+    "check-version --fix (directory-source, empty glob): cli-path is repointed to the resolved directory-source path"
+
+  # (c) A second, subsequent plain check-version call against that now-current
+  # stored path: the literal proof that stored_version resolution is
+  # directory-source-aware, not only latest_version.
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version (directory-source, now current): exits 0"
+  assert_eq '{"status":"current","version":"7.7.7"}' "$out" \
+    "check-version (directory-source, now current): reports the real semver, never the literal string aimi-engineering"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
 # A CLAUDE_CONFIG_DIR carrying shell metacharacters must have NO side effect.
 #
 # This lives in the suite that is mandatory after any aimi-cli.sh change,
@@ -8892,6 +9009,7 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_version_verbs_empty_plugin_cache_glob
+  test_check_version_directory_source_fallback
   test_version_verbs_config_dir_metacharacters
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
