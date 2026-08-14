@@ -5946,74 +5946,6 @@ EOF
   rm -rf "$root"
 }
 
-test_prime_cache_directory_source_second_run_known_gap_stays_ok() {
-  echo ""
-  echo "=== Testing prime-cache: a second consecutive directory-source run stays ok (documented known gap) ==="
-
-  local root cfg aimi_cfg install_dir
-  root=$(mktemp -d)
-  cfg="$root/claude-config"
-  aimi_cfg="$root/aimi-config"
-  install_dir="$root/devcheckout"
-  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
-    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
-  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
-  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
-
-  cat > "$cfg/plugins/known_marketplaces.json" << EOF
-{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
-EOF
-  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
-{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
-EOF
-
-  local expected_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
-  local out1 out2
-  out1=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
-    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
-    bash "$CLI" prime-cache 2>/dev/null)
-  out2=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
-    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
-    bash "$CLI" prime-cache 2>/dev/null)
-
-  assert_eq "ok" "$(printf '%s' "$out1" | jq -r '.status')" \
-    "prime-cache (directory-source, second run): first run status=ok"
-  # KNOWN GAP (documented in cmd_prime_cache's own "Already-current check"
-  # comment, and out of scope for this story): _validate_cached_cli_path's
-  # whitelist never recognizes a directory-source shape, so read_global_cli_cache
-  # always answers empty for one and this branch never reaches "already_current".
-  assert_eq "ok" "$(printf '%s' "$out2" | jq -r '.status')" \
-    "prime-cache (directory-source, second run): second run still answers ok, not already_current"
-  assert_eq "$expected_path" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
-    "prime-cache (directory-source, second run): the cache still names the directory-source path after the second write"
-
-  rm -rf "$root"
-}
-
-# ============================================================================
-# Directory-Source Resolver Tests
-# ============================================================================
-#
-# _directory_source_plugin_dir / _resolve_directory_source_path locate a
-# directory-source Claude Code install (no versioned cache copy) from
-# <config_dir>/plugins/known_marketplaces.json and the resolved install's own
-# .claude-plugin/marketplace.json. Both always return 0, printing one
-# candidate or nothing -- the same contract _resolve_latest_cache_path
-# documents -- so the degrade-matrix tests below assert exit 0, empty stdout
-# and empty stderr rather than a non-zero exit or a message.
-#
-# Every fixture is built under its own fresh mktemp -d root. This machine has
-# a real directory-source marketplace registered (this very repo), so a test
-# that read ~/.claude/plugins/known_marketplaces.json instead of a throwaway
-# config_dir would silently pass by reading real state -- these tests always
-# pass an explicit config_dir and never rely on an ambient one.
-
-# _ds_assert_silent <description> <config_dir> [suffix]
-#
-# Calls both resolvers against <config_dir> and asserts the shared silent
-# contract: exit 0, empty stdout, empty stderr, for each. suffix defaults to
-# "scripts/aimi-cli.sh" (one of the three suffixes 06/07/09 will actually
-# pass).
 _ds_assert_silent() {
   local desc="$1" config_dir="$2" suffix="${3:-scripts/aimi-cli.sh}"
   local errfile out1 out2 ec1 ec2 err1 err2
@@ -9813,7 +9745,6 @@ main() {
   test_prime_cache_directory_source_version_null_when_neither_source_has_one
   test_prime_cache_glob_wins_over_directory_source_when_both_present
   test_prime_cache_directory_source_worktrees_hazard_reports_error
-  test_prime_cache_directory_source_second_run_known_gap_stays_ok
 
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
@@ -9844,11 +9775,21 @@ main() {
 
   # Directory-source identity widening tests (US-007) — the two validators'
   # third admission route. test_prime_cache_directory_source_already_current
-  # is deliberately NOT called here: it is BLOCKED on outline:06's
-  # cmd_prime_cache directory-source fallback landing first. See its own
-  # header comment above for why, and do not wire it in until that lands.
+  # was written blocked on outline:06's cmd_prime_cache directory-source
+  # fallback; that fallback has since landed, so it is wired in below.
+  #
+  # Two stories reached opposite conclusions about this same behaviour, each
+  # correct from its own base, and the merge is where they were reconciled.
+  # outline:06 could not see the widened whitelist, so it declared the
+  # unreachable `already_current` a known gap and asserted the gap itself in
+  # test_prime_cache_directory_source_second_run_known_gap_stays_ok. outline:07
+  # closed that gap in parallel. Once both landed, that test asserted a
+  # limitation that no longer existed and was the single failing assertion in
+  # the merged tree — it is deleted rather than inverted, because the test
+  # below already covers the same run pair with the correct expectation.
   echo ""
   echo "--- Directory-Source Identity Widening Tests (US-007) ---"
+  test_prime_cache_directory_source_already_current
   test_validate_cached_path_directory_source_lookalike_rejected
   test_validate_cached_path_directory_source_identity_accepted
   test_validate_cached_cli_path_versioned_cache_short_circuits_before_identity_check
