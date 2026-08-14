@@ -3621,6 +3621,138 @@ test_worktree_read_fallback_to_legacy() {
   teardown_xdg_cache_env
 }
 
+# ----------------------------------------------------------------------------
+# Worktree Manager Doc Resolution Tests (Layer 2/Layer 3)
+#
+# Everything above this point tests read_global_worktree_cache and its
+# siblings -- the CLI-SIDE cache functions. Nothing anywhere in the suite ran
+# the two resolution one-liners commands/references/cli-path-resolution.md
+# actually publishes for $WORKTREE_MGR's Layer 2 (glob fallback) and Layer 3
+# (per-project fallback) against a real filesystem fixture. That gap is why a
+# wrong subpath in both one-liners (`.../scripts/worktree-manager.sh` instead
+# of the correct `.../skills/git-worktree/scripts/worktree-manager.sh`)
+# survived in the doc from commit 6bd4f39 until the correction that fixed it:
+# the doc was wrong and every suite still reported green, because nothing
+# ever evaluated its literal text against a filesystem.
+#
+# _extract_doc_code_block reads the LIVE doc at test-run time rather than a
+# hand-copied mirror of "the correct snippet" -- a hardcoded copy would keep
+# passing even if the doc regressed back to the wrong spelling, which is
+# exactly the failure mode this pair of tests exists to catch.
+#
+# Both headings this pulls from ("### Layer 2: Glob fallback (zsh-safe)" and
+# "### Layer 3: Per-project fallback (last resort)") appear TWICE in the doc
+# -- once under "## Resolve CLI Path", once under "## Resolve Worktree
+# Manager Path". The worktree-manager block is always the SECOND (later)
+# occurrence, so the helper deliberately keeps overwriting its capture on
+# every heading match and returns whatever it captured last, instead of
+# stopping at the first hit.
+# ----------------------------------------------------------------------------
+
+# Extract the body of the first fenced ```bash block that follows the LAST
+# line containing `heading` (a literal substring match, not a regex) in
+# `file`. Returns the snippet verbatim, fence markers stripped.
+_extract_doc_code_block() {
+  local heading="$1" file="$2"
+  awk -v heading="$heading" '
+    index($0, heading) > 0 { delete lines; n = 0; found = 1; infence = 0; next }
+    found && !infence && /^```bash/ { infence = 1; next }
+    found && infence && /^```/ { found = 0; infence = 0; next }
+    found && infence { lines[n++] = $0 }
+    END { for (i = 0; i < n; i++) print lines[i] }
+  ' "$file"
+}
+
+test_worktree_manager_layer2_resolution() {
+  echo ""
+  echo "=== Testing worktree-manager Layer 2 (glob fallback) via the live doc snippet ==="
+
+  local doc root claude_cfg aimi_cfg entry version wt_dir expected snippet wrapper result
+  doc="$SCRIPT_DIR/../commands/references/cli-path-resolution.md"
+  root=$(mktemp -d)
+  claude_cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  entry="marketplace-entry"
+  version="1.99.0"
+  wt_dir="$claude_cfg/plugins/cache/$entry/aimi-engineering/$version/skills/git-worktree/scripts"
+  mkdir -p "$wt_dir" "$aimi_cfg"
+  expected="$wt_dir/worktree-manager.sh"
+  printf '#!/usr/bin/env bash\n' > "$expected"
+  chmod +x "$expected"
+
+  snippet=$(_extract_doc_code_block "### Layer 2: Glob fallback (zsh-safe)" "$doc")
+
+  # Written to a wrapper script rather than interpolated into a `bash -c`
+  # argument string: the doc's own snippet contains a nested `bash -c '...'`
+  # with its own single quotes, and re-quoting that safely inline is exactly
+  # the kind of hand-transcription this test exists to avoid.
+  wrapper=$(mktemp)
+  {
+    printf 'WORKTREE_MGR=""\n'
+    printf '%s\n' "$snippet"
+    printf 'printf "%%s" "$WORKTREE_MGR"\n'
+  } > "$wrapper"
+
+  # CLAUDE_CONFIG_DIR must be EXPORTED (via env, not a bare assignment): the
+  # doc snippet's inner `bash -c '...'` spawns a new process that only sees
+  # exported vars. AIMI_CONFIG_DIR is pinned too though this snippet never
+  # reads it, per the blanket isolation rule for this suite.
+  result=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$claude_cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$wrapper")
+
+  assert_eq "$expected" "$result" \
+    "worktree-manager Layer 2: doc's live glob snippet resolves the seeded skills/git-worktree/scripts install"
+
+  rm -f "$wrapper"
+  rm -rf "$root"
+}
+
+test_worktree_manager_layer3_resolution() {
+  echo ""
+  echo "=== Testing worktree-manager Layer 3 (per-project fallback) via the live doc snippet ==="
+
+  local doc proj claude_cfg aimi_cfg install_dir expected snippet wrapper result
+  doc="$SCRIPT_DIR/../commands/references/cli-path-resolution.md"
+  proj=$(mktemp -d)
+  claude_cfg="$proj/claude-config"
+  aimi_cfg="$proj/aimi-config"
+  install_dir="$proj/install/1.99.0"
+  mkdir -p "$install_dir/scripts" "$install_dir/skills/git-worktree/scripts" \
+    "$proj/.aimi" "$claude_cfg" "$aimi_cfg"
+
+  printf '#!/usr/bin/env bash\n' > "$install_dir/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/scripts/aimi-cli.sh"
+  expected="$install_dir/skills/git-worktree/scripts/worktree-manager.sh"
+  printf '#!/usr/bin/env bash\n' > "$expected"
+  chmod +x "$expected"
+  printf '%s\n' "$install_dir/scripts/aimi-cli.sh" > "$proj/.aimi/cli-path"
+
+  snippet=$(_extract_doc_code_block "### Layer 3: Per-project fallback (last resort)" "$doc")
+
+  # The snippet's `[ -f .aimi/cli-path ]` check is CWD-relative, so the
+  # wrapper cd's into the fixture itself rather than relying on the caller's
+  # cwd -- that keeps this test order-independent of whatever else in the
+  # suite runs around it.
+  wrapper=$(mktemp)
+  {
+    printf 'cd %q || exit 1\n' "$proj"
+    printf 'WORKTREE_MGR=""\n'
+    printf '%s\n' "$snippet"
+    printf 'printf "%%s" "$WORKTREE_MGR"\n'
+  } > "$wrapper"
+
+  result=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$claude_cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$wrapper")
+
+  assert_eq "$expected" "$result" \
+    "worktree-manager Layer 3: doc's live per-project snippet resolves the sibling skills/git-worktree/scripts install"
+
+  rm -f "$wrapper"
+  rm -rf "$proj"
+}
+
 # ============================================================================
 # Project Field Validation Tests
 # ============================================================================
@@ -8271,6 +8403,13 @@ main() {
   test_read_prefers_new_over_legacy
   test_worktree_write_creates_xdg_dir
   test_worktree_read_fallback_to_legacy
+
+  # Worktree manager doc resolution tests — Layer 2/Layer 3 executed live
+  # against a seeded filesystem fixture, not just the CLI-side functions above
+  echo ""
+  echo "--- Worktree Manager Doc Resolution Tests (Layer 2/Layer 3) ---"
+  test_worktree_manager_layer2_resolution
+  test_worktree_manager_layer3_resolution
 
   # prime-cache tests
   echo ""
