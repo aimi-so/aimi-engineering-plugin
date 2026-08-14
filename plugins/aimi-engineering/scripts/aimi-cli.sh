@@ -347,6 +347,129 @@ _resolve_latest_cache_path() {
   printf '%s\n' "$newest"
 }
 
+# Locate a directory-source Claude Code install's plugin directory.
+#
+# Usage: _directory_source_plugin_dir <config_dir>
+#
+# A directory-source install has no versioned entry under
+# <config_dir>/plugins/cache/ -- the plugin runs straight out of the checkout
+# a marketplace was added FROM, so _resolve_latest_cache_path's glob never
+# matches it. This is the other way to find that plugin directory: read
+# <config_dir>/plugins/known_marketplaces.json for the marketplace's own
+# installLocation, then read that install's .claude-plugin/marketplace.json
+# for the aimi-engineering entry's own source subpath.
+#
+# ALWAYS RETURNS 0 -- the same contract _resolve_latest_cache_path documents
+# above. It prints one candidate path, or nothing at all, and every caller
+# decides what "nothing" means with the same plain `[ -z "$var" ]` test.
+# Every jq call is therefore assigned through `var=$(jq ...) || var=""`
+# rather than left as a bare command substitution: under `set -euo pipefail`
+# the bare form carries jq's parse-failure exit status into the caller and
+# kills the script, and a malformed or absent document is exactly the shape
+# this helper exists to answer silently rather than propagate. Nothing here
+# ever writes to stderr, for the same reason -- jq's own diagnostics are
+# always redirected away, never surfaced raw.
+#
+# TIE-BREAK: known_marketplaces.json can hold more than one directory-source
+# entry (two checkouts of this repo registered as separate marketplaces, for
+# instance). No field on an entry is a safe ordering signal -- lastUpdated is
+# a plain string with no format contract enforced anywhere it is written --
+# so the entry is chosen by its own marketplace-name KEY, ascending byte
+# order (`to_entries | sort_by(.key)`), which is deterministic and
+# independent of on-disk or insertion order.
+#
+# VALIDATION reuses the "absolute, then exists" idiom _validate_plugin_dir
+# applies to AIMI_PLUGIN_DIR (this file, ~line 490 as of this comment) rather
+# than calling that function: it takes no argument, reads $AIMI_PLUGIN_DIR
+# directly, and exit 1s on a bad value -- three things this always-`return 0`
+# helper must never do. The matched plugin's own `.source` subpath gets one
+# check the cited idiom does not need: a `..` segment is rejected before it
+# is joined onto installLocation, because that idiom validates one whole path
+# with no join step of its own.
+_directory_source_plugin_dir() {
+  local config_dir="$1"
+  local km_file="$config_dir/plugins/known_marketplaces.json"
+
+  # One call folds the top-level type-gate, the directory-source filter and
+  # the key-order tie-break together: a non-object top level (array, scalar,
+  # or a jq parse/open failure) takes the `if type != "object"` branch or
+  # aborts the whole expression, either way landing on the `|| install_location=""`
+  # fallback below with nothing printed.
+  local install_location=""
+  install_location=$(jq -r '
+      if type != "object" then empty else
+        to_entries
+        | map(select(.value.source.source == "directory"
+                      and (.value.installLocation | type) == "string"))
+        | sort_by(.key)
+        | .[0].value.installLocation // empty
+      end
+    ' "$km_file" 2>/dev/null) || install_location=""
+  [ -z "$install_location" ] && return 0
+
+  # Same idiom as _validate_plugin_dir: absolute, then exists -- but return 0
+  # rather than exit 1 on a bad value, because this helper never aborts.
+  [ "${install_location#/}" = "$install_location" ] && return 0
+  [ -d "$install_location" ] || return 0
+  install_location="${install_location%/}"
+
+  local mp_file="$install_location/.claude-plugin/marketplace.json"
+
+  # Shape gate before the extraction call touches marketplace.json at all --
+  # an absent file, an unreadable one or invalid JSON all fall through the
+  # `|| mp_type=""` fallback and fail the "object" comparison below.
+  local mp_type=""
+  mp_type=$(jq -r 'type' "$mp_file" 2>/dev/null) || mp_type=""
+  [ "$mp_type" = "object" ] || return 0
+
+  local plugin_source=""
+  plugin_source=$(jq -r '
+      (.plugins // [])
+      | map(select(.name == "aimi-engineering" and (.source | type) == "string"))
+      | .[0].source // empty
+    ' "$mp_file" 2>/dev/null) || plugin_source=""
+  [ -z "$plugin_source" ] && return 0
+
+  # Reject an absolute or traversing source segment before it is ever joined
+  # onto installLocation.
+  case "$plugin_source" in
+    /*) return 0 ;;
+  esac
+  case "$plugin_source" in
+    *..*) return 0 ;;
+  esac
+
+  local plugin_dir="${install_location}/${plugin_source#./}"
+  [ -d "$plugin_dir" ] || return 0
+
+  printf '%s\n' "$plugin_dir"
+}
+
+# Resolve one file under a directory-source install's plugin directory.
+#
+# Usage: _resolve_directory_source_path <config_dir> <suffix>
+#   suffix is the path fragment under the plugin directory: "scripts/aimi-cli.sh"
+#   for the CLI, "skills/git-worktree/scripts/worktree-manager.sh" for the
+#   worktree manager, "skills" for the skills base directory.
+#
+# Thin wrapper over _directory_source_plugin_dir: joins its result with
+# <suffix> and existence-checks the join, mirroring _resolve_latest_cache_path's
+# own `-e`/`-L` existence-check tail above so a dangling symlink still counts
+# as present. Calls no jq of its own. ALWAYS RETURNS 0, printing one candidate
+# path or nothing.
+_resolve_directory_source_path() {
+  local config_dir="$1" suffix="$2"
+  local plugin_dir=""
+  plugin_dir=$(_directory_source_plugin_dir "$config_dir") || plugin_dir=""
+  [ -z "$plugin_dir" ] && return 0
+
+  local candidate="$plugin_dir/$suffix"
+  if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+    return 0
+  fi
+  printf '%s\n' "$candidate"
+}
+
 # Resolve the Claude config directory.
 # Honors CLAUDE_CONFIG_DIR env var; falls back to ~/.claude.
 # When CLAUDE_CONFIG_DIR is set, validates it is an absolute path.

@@ -29,6 +29,7 @@ set -uo pipefail
 #   - Global Cache Tests
 #   - XDG Cache Location Tests
 #   - prime-cache Tests
+#   - Directory-Source Resolver Tests
 #   - Project Field Validation Tests
 #   - normalize-verification Tests
 #   - V3.2 Schema Tests
@@ -5559,6 +5560,543 @@ test_prime_cache_rejects_non_executable_opencode_path() {
 }
 
 # ============================================================================
+# Directory-Source Resolver Tests
+# ============================================================================
+#
+# _directory_source_plugin_dir / _resolve_directory_source_path locate a
+# directory-source Claude Code install (no versioned cache copy) from
+# <config_dir>/plugins/known_marketplaces.json and the resolved install's own
+# .claude-plugin/marketplace.json. Both always return 0, printing one
+# candidate or nothing -- the same contract _resolve_latest_cache_path
+# documents -- so the degrade-matrix tests below assert exit 0, empty stdout
+# and empty stderr rather than a non-zero exit or a message.
+#
+# Every fixture is built under its own fresh mktemp -d root. This machine has
+# a real directory-source marketplace registered (this very repo), so a test
+# that read ~/.claude/plugins/known_marketplaces.json instead of a throwaway
+# config_dir would silently pass by reading real state -- these tests always
+# pass an explicit config_dir and never rely on an ambient one.
+
+# _ds_assert_silent <description> <config_dir> [suffix]
+#
+# Calls both resolvers against <config_dir> and asserts the shared silent
+# contract: exit 0, empty stdout, empty stderr, for each. suffix defaults to
+# "scripts/aimi-cli.sh" (one of the three suffixes 06/07/09 will actually
+# pass).
+_ds_assert_silent() {
+  local desc="$1" config_dir="$2" suffix="${3:-scripts/aimi-cli.sh}"
+  local errfile out1 out2 ec1 ec2 err1 err2
+
+  errfile=$(mktemp)
+
+  out1=$(_directory_source_plugin_dir "$config_dir" 2>"$errfile")
+  ec1=$?
+  err1=$(cat "$errfile")
+  : > "$errfile"
+
+  out2=$(_resolve_directory_source_path "$config_dir" "$suffix" 2>"$errfile")
+  ec2=$?
+  err2=$(cat "$errfile")
+
+  rm -f "$errfile"
+
+  assert_eq "0" "$ec1" "$desc: _directory_source_plugin_dir exits 0"
+  assert_eq "" "$out1" "$desc: _directory_source_plugin_dir prints nothing"
+  assert_eq "" "$err1" "$desc: _directory_source_plugin_dir writes nothing to stderr"
+  assert_eq "0" "$ec2" "$desc: _resolve_directory_source_path exits 0"
+  assert_eq "" "$out2" "$desc: _resolve_directory_source_path prints nothing"
+  assert_eq "" "$err2" "$desc: _resolve_directory_source_path writes nothing to stderr"
+}
+
+# (a) Happy path: both helpers resolve a well-formed directory-source install.
+test_directory_source_plugin_dir_happy_path() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir / _resolve_directory_source_path: happy path ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  mkdir -p "$config_dir/plugins" \
+    "$install_dir/.claude-plugin" \
+    "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir",
+    "lastUpdated": "2026-08-14T00:00:00Z",
+    "autoUpdate": true
+  }
+}
+EOF
+
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  source_cache_functions
+
+  local out ec
+  out=$(_directory_source_plugin_dir "$config_dir")
+  ec=$?
+  assert_eq "0" "$ec" "_directory_source_plugin_dir: happy path exits 0"
+  assert_eq "$install_dir/plugins/aimi-engineering" "$out" \
+    "_directory_source_plugin_dir: happy path prints the plugin directory"
+
+  out=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh")
+  ec=$?
+  assert_eq "0" "$ec" "_resolve_directory_source_path: happy path exits 0"
+  assert_eq "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh" "$out" \
+    "_resolve_directory_source_path: happy path prints the resolved suffix path"
+
+  rm -rf "$root"
+}
+
+# (b) Tie-break: two directory-source entries -> the ascending-key-order winner.
+test_directory_source_plugin_dir_tie_break() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: tie-break picks the ascending-key entry ==="
+
+  local root config_dir install_a install_z
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_a="$root/repo-a"
+  install_z="$root/repo-z"
+  mkdir -p "$config_dir/plugins" \
+    "$install_a/.claude-plugin" "$install_a/plugins/aimi-engineering" \
+    "$install_z/.claude-plugin" "$install_z/plugins/aimi-engineering"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "zzz-marketplace": {
+    "source": {"source": "directory", "path": "$install_z"},
+    "installLocation": "$install_z"
+  },
+  "aaa-marketplace": {
+    "source": {"source": "directory", "path": "$install_a"},
+    "installLocation": "$install_a"
+  }
+}
+EOF
+
+  cat > "$install_a/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+  cat > "$install_z/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  source_cache_functions
+
+  local out
+  out=$(_directory_source_plugin_dir "$config_dir")
+  assert_eq "$install_a/plugins/aimi-engineering" "$out" \
+    "_directory_source_plugin_dir: tie-break picks aaa-marketplace over zzz-marketplace (key ascending order)"
+
+  rm -rf "$root"
+}
+
+# (c) known_marketplaces.json absent entirely.
+test_directory_source_plugin_dir_km_absent() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: known_marketplaces.json absent ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+
+  source_cache_functions
+  _ds_assert_silent "known_marketplaces.json absent" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (d) known_marketplaces.json present but unreadable. Skipped under uid 0,
+# where chmod 000 does not block a read -- same carve-out the suite's
+# existing *-ilegivel-cc golden cases document (tests/test_version_cache.py).
+test_directory_source_plugin_dir_km_unreadable() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: known_marketplaces.json unreadable ==="
+
+  if [ "$(id -u)" = "0" ]; then
+    echo "  (skipped: running as uid 0, chmod 000 has no effect)"
+    return 0
+  fi
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+  printf '{}' > "$config_dir/plugins/known_marketplaces.json"
+  chmod 000 "$config_dir/plugins/known_marketplaces.json"
+
+  source_cache_functions
+  _ds_assert_silent "known_marketplaces.json unreadable" "$config_dir"
+
+  chmod 644 "$config_dir/plugins/known_marketplaces.json"
+  rm -rf "$root"
+}
+
+# (e) known_marketplaces.json contains invalid JSON.
+test_directory_source_plugin_dir_km_malformed_json() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: known_marketplaces.json malformed JSON ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+  printf '{"aimi-marketplace": {"source": {"sou' > "$config_dir/plugins/known_marketplaces.json"
+
+  source_cache_functions
+  _ds_assert_silent "known_marketplaces.json malformed JSON" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (f) known_marketplaces.json parses but is not an object (array, then scalar).
+test_directory_source_plugin_dir_km_not_object() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: known_marketplaces.json not an object ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+
+  printf '[{"source":{"source":"directory"},"installLocation":"/tmp"}]' \
+    > "$config_dir/plugins/known_marketplaces.json"
+  source_cache_functions
+  _ds_assert_silent "known_marketplaces.json is a JSON array" "$config_dir"
+
+  printf '"just a string"' > "$config_dir/plugins/known_marketplaces.json"
+  _ds_assert_silent "known_marketplaces.json is a JSON scalar" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (g) known_marketplaces.json is a well-formed object with no directory-source
+# entry -- one case where source.source names another kind, one where the
+# source key is absent entirely.
+test_directory_source_plugin_dir_no_directory_entries() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: no directory-source entry ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << 'EOF'
+{
+  "gh-marketplace": {
+    "source": {"source": "github", "repo": "example/repo"},
+    "installLocation": "/tmp/should-not-be-read"
+  }
+}
+EOF
+  source_cache_functions
+  _ds_assert_silent "every entry's source.source is non-directory" "$config_dir"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << 'EOF'
+{
+  "no-source-marketplace": {
+    "installLocation": "/tmp/should-not-be-read"
+  }
+}
+EOF
+  _ds_assert_silent "entry has no source key at all" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (h) The selected directory-source entry has no usable installLocation --
+# key absent, then explicit JSON null.
+test_directory_source_plugin_dir_missing_install_location() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: no usable installLocation ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << 'EOF'
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "/abs/repo"}
+  }
+}
+EOF
+  source_cache_functions
+  _ds_assert_silent "installLocation key absent" "$config_dir"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << 'EOF'
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "/abs/repo"},
+    "installLocation": null
+  }
+}
+EOF
+  _ds_assert_silent "installLocation is JSON null" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (i) installLocation is a relative path -- rejected by the absolute-path half
+# of the _validate_plugin_dir idiom, never exit 1.
+test_directory_source_plugin_dir_relative_install_location() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: relative installLocation rejected ==="
+
+  local root config_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  mkdir -p "$config_dir/plugins"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << 'EOF'
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "relative/repo"},
+    "installLocation": "relative/repo"
+  }
+}
+EOF
+  source_cache_functions
+  _ds_assert_silent "installLocation does not start with /" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (j) installLocation is absolute but does not exist as a directory on disk --
+# rejected by the existence half of the _validate_plugin_dir idiom.
+test_directory_source_plugin_dir_install_location_gone() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: installLocation gone from disk ==="
+
+  local root config_dir missing
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  missing="$root/does-not-exist"
+  mkdir -p "$config_dir/plugins"
+
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$missing"},
+    "installLocation": "$missing"
+  }
+}
+EOF
+  source_cache_functions
+  _ds_assert_silent "installLocation absolute but absent on disk" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# Build a config_dir whose known_marketplaces.json resolves cleanly to
+# install_dir -- the shared setup every marketplace.json-shape case below
+# starts from.
+_ds_setup_valid_km() {
+  local config_dir="$1" install_dir="$2"
+  mkdir -p "$config_dir/plugins" "$install_dir/.claude-plugin"
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir"
+  }
+}
+EOF
+}
+
+# (k) installLocation resolves, but .claude-plugin/marketplace.json is absent.
+test_directory_source_plugin_dir_marketplace_json_absent() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: marketplace.json absent ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+
+  source_cache_functions
+  _ds_assert_silent "installLocation/.claude-plugin/marketplace.json absent" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (l) marketplace.json contains invalid JSON.
+test_directory_source_plugin_dir_marketplace_json_malformed() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: marketplace.json malformed JSON ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  printf '{"plugins": [{"name": "aimi' > "$install_dir/.claude-plugin/marketplace.json"
+
+  source_cache_functions
+  _ds_assert_silent "marketplace.json is malformed JSON" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (m) marketplace.json's .plugins[] has no aimi-engineering entry.
+test_directory_source_plugin_dir_no_aimi_engineering_entry() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: no aimi-engineering entry in marketplace.json ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"some-other-plugin","version":"1.0.0","source":"./plugins/some-other-plugin"}]}
+EOF
+
+  source_cache_functions
+  _ds_assert_silent "marketplace.json has no aimi-engineering plugin entry" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (n) The matched plugin entry's .source is a JSON object (github shape), not
+# a string -- type-guarded before ever being concatenated into a path.
+test_directory_source_plugin_dir_source_object_form() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: plugin .source is an object ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":{"source":"github","repo":"aimi-so/aimi-engineering-plugin"}}]}
+EOF
+
+  source_cache_functions
+  _ds_assert_silent "plugin .source is a github-shape object, not a string" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (o) The matched plugin entry's .source string starts with / -- rejected
+# before joining.
+test_directory_source_plugin_dir_source_absolute() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: plugin .source is absolute ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"/etc/aimi-engineering"}]}
+EOF
+
+  source_cache_functions
+  _ds_assert_silent "plugin .source string starts with /" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (p) The matched plugin entry's .source string contains a `..` segment --
+# rejected before joining (traversal guard).
+test_directory_source_plugin_dir_source_traversal() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: plugin .source contains .. ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"../../../etc/aimi-engineering"}]}
+EOF
+
+  source_cache_functions
+  _ds_assert_silent "plugin .source string contains a .. segment" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (q) installLocation and marketplace.json both resolve cleanly, but the
+# joined installLocation/source directory does not exist on disk.
+test_directory_source_plugin_dir_joined_dir_missing() {
+  echo ""
+  echo "=== Testing _directory_source_plugin_dir: joined plugin directory missing on disk ==="
+
+  local root config_dir install_dir
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  _ds_setup_valid_km "$config_dir" "$install_dir"
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+  # Deliberately never create install_dir/plugins/aimi-engineering.
+
+  source_cache_functions
+  _ds_assert_silent "joined installLocation/source directory does not exist" "$config_dir"
+
+  rm -rf "$root"
+}
+
+# (r) Proves the two eval lines actually landed in source_cache_functions --
+# a subshell that sources ONLY via source_cache_functions and calls
+# _directory_source_plugin_dir directly. Part 1 runs under `set -uo pipefail`
+# with no `-e`, so a missing function would silently produce an empty string
+# here rather than a script error, which is exactly the failure mode this
+# test exists to catch.
+test_directory_source_functions_defined_via_source_cache_functions() {
+  echo ""
+  echo "=== Testing source_cache_functions: defines both directory-source resolvers ==="
+
+  local root config_dir install_dir out
+  root=$(mktemp -d)
+  config_dir="$root/claude-config"
+  install_dir="$root/repo"
+  mkdir -p "$config_dir/plugins" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering"
+  cat > "$config_dir/plugins/known_marketplaces.json" << EOF
+{
+  "aimi-marketplace": {
+    "source": {"source": "directory", "path": "$install_dir"},
+    "installLocation": "$install_dir"
+  }
+}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  out=$(
+    unset -f _directory_source_plugin_dir _resolve_directory_source_path 2>/dev/null
+    . "$SCRIPT_DIR/test-aimi-cli-fixtures.sh"
+    source_cache_functions
+    _directory_source_plugin_dir "$config_dir"
+  )
+
+  assert_eq "$install_dir/plugins/aimi-engineering" "$out" \
+    "source_cache_functions: _directory_source_plugin_dir is defined and callable after sourcing only the fixtures file"
+
+  rm -rf "$root"
+}
+
+# ============================================================================
 # V3.2 Schema Tests — Gates, Waves & Field Preservation
 # ============================================================================
 
@@ -8452,6 +8990,28 @@ main() {
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
   fi
+
+  # Directory-source resolver tests
+  echo ""
+  echo "--- Directory-Source Resolver Tests ---"
+  test_directory_source_plugin_dir_happy_path
+  test_directory_source_plugin_dir_tie_break
+  test_directory_source_plugin_dir_km_absent
+  test_directory_source_plugin_dir_km_unreadable
+  test_directory_source_plugin_dir_km_malformed_json
+  test_directory_source_plugin_dir_km_not_object
+  test_directory_source_plugin_dir_no_directory_entries
+  test_directory_source_plugin_dir_missing_install_location
+  test_directory_source_plugin_dir_relative_install_location
+  test_directory_source_plugin_dir_install_location_gone
+  test_directory_source_plugin_dir_marketplace_json_absent
+  test_directory_source_plugin_dir_marketplace_json_malformed
+  test_directory_source_plugin_dir_no_aimi_engineering_entry
+  test_directory_source_plugin_dir_source_object_form
+  test_directory_source_plugin_dir_source_absolute
+  test_directory_source_plugin_dir_source_traversal
+  test_directory_source_plugin_dir_joined_dir_missing
+  test_directory_source_functions_defined_via_source_cache_functions
 
   # Project field validation tests — run with fresh state
   echo ""
