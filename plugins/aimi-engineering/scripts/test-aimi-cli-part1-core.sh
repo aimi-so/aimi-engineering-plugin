@@ -1876,13 +1876,30 @@ test_check_version() {
   rm -rf "$cv_root"
 
   # --- Test 2: Missing cli-path (no .aimi/cli-path file) ---
+  # Same throwaway-cache-is-BUILT rationale as Test 1 above: "missing" is only
+  # the correct answer once the plugin cache glob resolves to something --
+  # otherwise cmd_check_version falls into its "unknown" branch
+  # (aimi-cli.sh:10185-10190) instead of the "missing" one it documents
+  # (aimi-cli.sh:10199-10206), and the answer would depend on the developer's
+  # ambient ~/.claude plugin cache.
   "$CLI" clear-state > /dev/null
 
+  local cv2_root cv2_cfg cv2_aimi_cfg
+  cv2_root=$(mktemp -d)
+  cv2_cfg="$cv2_root/claude-config"
+  cv2_aimi_cfg="$cv2_root/aimi-config"
+  mkdir -p "$cv2_aimi_cfg"
+  _make_cached_version "$cv2_cfg" "abc123" "1.2.3"
+
   # Do NOT call init-session, so cli-path state file is absent
-  output=$("$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
+  output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cv2_cfg" AIMI_CONFIG_DIR="$cv2_aimi_cfg" \
+    bash "$CLI" check-version 2>/dev/null) && exit_code=0 || exit_code=$?
 
   assert_contains '"status": "missing"' "$output" "check-version: missing cli-path returns status missing"
   assert_exit_code "0" "$exit_code" "check-version: missing cli-path exits 0"
+
+  rm -rf "$cv2_root"
 }
 
 test_check_version_quiet() {
@@ -1891,11 +1908,23 @@ test_check_version_quiet() {
 
   "$CLI" clear-state > /dev/null
 
+  # Same throwaway-cache rationale as test_check_version's Test 2: seed the
+  # glob so cmd_check_version reaches its "missing" branch instead of falling
+  # into "unknown" on a host with an empty ambient plugin cache.
+  local cvq_root cvq_cfg cvq_aimi_cfg
+  cvq_root=$(mktemp -d)
+  cvq_cfg="$cvq_root/claude-config"
+  cvq_aimi_cfg="$cvq_root/aimi-config"
+  mkdir -p "$cvq_aimi_cfg"
+  _make_cached_version "$cvq_cfg" "abc123" "1.2.3"
+
   # With --quiet, stderr should be empty even for the "missing" case
   # (no cli-path state file => "missing" status, which normally emits a warning)
   local stderr_output stdout_output exit_code
   stderr_output=$(mktemp)
-  stdout_output=$("$CLI" check-version --quiet 2>"$stderr_output") && exit_code=0 || exit_code=$?
+  stdout_output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cvq_cfg" AIMI_CONFIG_DIR="$cvq_aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>"$stderr_output") && exit_code=0 || exit_code=$?
   local stderr_content
   stderr_content=$(cat "$stderr_output")
   rm -f "$stderr_output"
@@ -1903,6 +1932,8 @@ test_check_version_quiet() {
   assert_eq "" "$stderr_content" "check-version --quiet: stderr is empty for missing cli-path"
   assert_contains '"status": "missing"' "$stdout_output" "check-version --quiet: still returns missing status on stdout"
   assert_exit_code "0" "$exit_code" "check-version --quiet: exits 0 for missing"
+
+  rm -rf "$cvq_root"
 }
 
 test_check_version_fix() {
@@ -1984,9 +2015,21 @@ test_check_version_backward_compat() {
   "$CLI" clear-state > /dev/null
 
   # Test 1: No flags, missing cli-path => "missing" status with stderr warning
+  # Same throwaway-cache rationale as test_check_version's Test 2: seed the
+  # glob so cmd_check_version reaches its "missing" branch instead of falling
+  # into "unknown" on a host with an empty ambient plugin cache.
+  local bc_root bc_cfg bc_aimi_cfg
+  bc_root=$(mktemp -d)
+  bc_cfg="$bc_root/claude-config"
+  bc_aimi_cfg="$bc_root/aimi-config"
+  mkdir -p "$bc_aimi_cfg"
+  _make_cached_version "$bc_cfg" "abc123" "1.2.3"
+
   local stderr_output_file stdout_output exit_code
   stderr_output_file=$(mktemp)
-  stdout_output=$("$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
+  stdout_output=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$bc_cfg" AIMI_CONFIG_DIR="$bc_aimi_cfg" \
+    bash "$CLI" check-version 2>"$stderr_output_file") && exit_code=0 || exit_code=$?
   local stderr_content
   stderr_content=$(cat "$stderr_output_file")
   rm -f "$stderr_output_file"
@@ -1995,6 +2038,8 @@ test_check_version_backward_compat() {
   assert_exit_code "0" "$exit_code" "check-version (no flags): exits 0 for missing"
   # Without --quiet, stderr should contain a warning
   assert_contains "No stored cli-path" "$stderr_content" "check-version (no flags): stderr contains warning"
+
+  rm -rf "$bc_root"
 
   # Test 2: No flags, current version => "current" status
   local latest_glob_path config_dir
