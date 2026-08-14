@@ -5708,6 +5708,120 @@ test_prime_cache_rejects_non_executable_opencode_path() {
 }
 
 # ----------------------------------------------------------------------------
+# prime-cache: install.sh's post-install call site states its host intent
+# explicitly now (US-010) -- `env -u CLAUDECODE AIMI_PLUGIN_DIR="$plugin_dir"`
+# -- rather than relying on whatever CLAUDECODE happened to be in install.sh's
+# own process. The two tests below pin cmd_prime_cache's existing host
+# detection from both sides of that call site, so a future edit to either the
+# detection order (aimi-cli.sh:10702-10710) or the call site itself
+# (install.sh's install_opencode) cannot silently reintroduce the hazard:
+#
+#   - a bare host (NEITHER var set) still falls through to the "try Claude
+#     Code glob anyway" branch and reaches the directory-source fallback
+#     US-006 taught it -- this is the exact env shape install.sh's call used
+#     to run under, before this story, when it inherited CLAUDECODE=1 from an
+#     ambient Claude Code session and set_env_var's shell-profile write had
+#     not yet reached the running process;
+#   - AIMI_PLUGIN_DIR set with CLAUDECODE explicitly unset -- the exact shape
+#     install.sh's call now produces -- always resolves the OpenCode branch,
+#     even when a directory-source install is ALSO resolvable in the same
+#     config dir, proving the explicit statement of intent cannot be silently
+#     overridden by ambient state.
+#
+# Neither test changes cmd_prime_cache itself -- both pin behaviour that
+# already exists (the bare-host branch has stood since before US-006; the
+# OpenCode branch has always short-circuited ahead of the Claude Code branch's
+# own directory-source read). Both run the CLI as their own subprocess, the
+# same discipline the directory-source tests below use, and each points
+# CLAUDE_CONFIG_DIR/AIMI_CONFIG_DIR at its own mktemp -d root -- this machine
+# has a real directory-source marketplace registered (this very repo), so an
+# unpinned test would read or overwrite real state.
+# ----------------------------------------------------------------------------
+
+test_prime_cache_bare_host_reaches_claude_code_directory_source_fallback() {
+  echo ""
+  echo "=== Testing prime-cache: a bare host (neither CLAUDECODE nor AIMI_PLUGIN_DIR set) still reaches the claude_code branch and its directory-source fallback ==="
+
+  local root cfg aimi_cfg install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  local expected_path="$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  local out ec
+  out=$(env -u CLAUDECODE -u AIMI_PLUGIN_DIR \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" "prime-cache (bare host): exits 0"
+  assert_eq "claude_code" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (bare host): host_label resolves to claude_code -- the 'try Claude Code glob anyway' branch"
+  assert_eq "ok" "$(printf '%s' "$out" | jq -r '.status')" \
+    "prime-cache (bare host): status=ok -- the directory-source fallback is reached and resolves"
+  assert_eq "$expected_path" "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (bare host): path is the directory-source install's own aimi-cli.sh, still reachable and ungated"
+
+  rm -rf "$root"
+}
+
+test_prime_cache_aimi_plugin_dir_wins_over_directory_source_when_claudecode_unset() {
+  echo ""
+  echo "=== Testing prime-cache: AIMI_PLUGIN_DIR set with CLAUDECODE explicitly unset always wins over a resolvable directory-source install ==="
+
+  local root cfg aimi_cfg plug install_dir
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  plug="$root/opencode-plugin"
+  install_dir="$root/devcheckout"
+  mkdir -p "$cfg/plugins/cache" "$aimi_cfg" "$plug/scripts" \
+    "$install_dir/.claude-plugin" "$install_dir/plugins/aimi-engineering/scripts"
+  printf '#!/usr/bin/env bash\n' > "$plug/scripts/aimi-cli.sh"
+  chmod +x "$plug/scripts/aimi-cli.sh"
+  printf '#!/usr/bin/env bash\n' > "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  chmod +x "$install_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  # A directory-source install is ALSO resolvable from this same config dir --
+  # the distractor. If host selection ever regressed to consult it ahead of
+  # AIMI_PLUGIN_DIR, this is what would catch it.
+  cat > "$cfg/plugins/known_marketplaces.json" << EOF
+{"dev-marketplace":{"source":{"source":"directory"},"installLocation":"$install_dir"}}
+EOF
+  cat > "$install_dir/.claude-plugin/marketplace.json" << 'EOF'
+{"plugins":[{"name":"aimi-engineering","version":"1.120.0","source":"./plugins/aimi-engineering"}]}
+EOF
+
+  # The exact shape install.sh's post-install call now produces:
+  # `env -u CLAUDECODE AIMI_PLUGIN_DIR="$plugin_dir" ... prime-cache`.
+  local out ec
+  out=$(env -u CLAUDECODE AIMI_PLUGIN_DIR="$plug" \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" "prime-cache (AIMI_PLUGIN_DIR wins): exits 0"
+  assert_eq "opencode" "$(printf '%s' "$out" | jq -r '.host')" \
+    "prime-cache (AIMI_PLUGIN_DIR wins): host=opencode despite a resolvable directory-source install"
+  assert_eq "$plug/scripts/aimi-cli.sh" "$(printf '%s' "$out" | jq -r '.path')" \
+    "prime-cache (AIMI_PLUGIN_DIR wins): path is AIMI_PLUGIN_DIR's own aimi-cli.sh, not the directory-source checkout"
+  assert_eq "$plug/scripts/aimi-cli.sh" "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "prime-cache (AIMI_PLUGIN_DIR wins): the global cli-path cache is written to the AIMI_PLUGIN_DIR path"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
 # prime-cache: directory-source fallback (US-006).
 #
 # The versioned cache glob (Layer 2, tested by the nine functions above) is
@@ -9740,6 +9854,8 @@ main() {
   test_prime_cache_empty_glob_answers_not_found_with_plugin_dir_set
   test_prime_cache_rejects_non_executable_path
   test_prime_cache_rejects_non_executable_opencode_path
+  test_prime_cache_bare_host_reaches_claude_code_directory_source_fallback
+  test_prime_cache_aimi_plugin_dir_wins_over_directory_source_when_claudecode_unset
   test_prime_cache_directory_source_fallback_when_glob_empty
   test_prime_cache_directory_source_version_falls_back_to_plugin_json
   test_prime_cache_directory_source_version_null_when_neither_source_has_one
