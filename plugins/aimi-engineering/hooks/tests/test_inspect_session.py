@@ -503,6 +503,52 @@ def test_heal_does_not_spawn_when_layer_1_already_resolves(monkeypatch, tmp_path
     assert cache.read_text(encoding="utf-8").strip() == str(_stub_cli(plugin_root))
 
 
+def test_heal_spawns_when_the_cached_path_is_executable_but_the_cli_would_reject_it(
+    monkeypatch, tmp_path
+):
+    """An executable cli-path that is NOT this install's own path is still healed.
+
+    The gate compares by identity rather than merely asking "is it executable",
+    and this is the case that separates the two. Under CLAUDECODE the CLI's own
+    reader accepts exactly two cached paths — the versioned cache glob, or
+    today's directory-source path by exact equality — and for the running
+    install both of those ARE $CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh.
+
+    A `*/.worktrees/*` path is the concrete instance: write_global_cli_cache
+    refuses to write one and the reader refuses to read one, yet it is a real
+    executable file, so an executable-only gate returned early and left the
+    session unable to resolve the CLI at all — the one state this hook exists
+    to repair. Any other stray executable (an install since removed, a
+    hand-edited entry) fails the same way and is covered by the same identity
+    comparison.
+    """
+    aimi_config_dir = _isolate_env(monkeypatch, tmp_path)
+    plugin_root = _make_plugin_root(tmp_path)
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+
+    # A genuinely executable file the CLI's reader would nonetheless refuse.
+    stray = tmp_path / "elsewhere" / ".worktrees" / "wt" / "scripts" / "aimi-cli.sh"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    stray.chmod(0o755)
+    assert stray.stat().st_mode & 0o111, "fixture did not produce an executable"
+
+    aimi_config_dir.mkdir(parents=True, exist_ok=True)
+    cache = aimi_config_dir / "cli-path"
+    cache.write_text(str(stray) + "\n", encoding="utf-8")
+
+    mod = _load_hook()
+    spy = _spy_subprocess(mod, monkeypatch)
+    _drive_hook(mod, monkeypatch, tmp_path)
+
+    assert spy.call_count == 1, (
+        "an executable-but-rejected cli-path was treated as resolved, so the "
+        "hook left the session unable to locate the CLI"
+    )
+    assert spy.call_args.args[0][0] == str(_stub_cli(plugin_root))
+    assert spy.call_args.args[0][1] == "prime-cache"
+
+
 def test_heal_spawns_when_the_cached_path_no_longer_resolves(monkeypatch, tmp_path):
     """A stale cli-path naming a deleted file is not treated as resolved."""
     aimi_config_dir = _isolate_env(monkeypatch, tmp_path)

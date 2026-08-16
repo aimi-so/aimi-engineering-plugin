@@ -82,7 +82,25 @@ def _heal_cli_path_cache() -> None:
             cached = (_aimi_config_dir() / "cli-path").read_text(encoding="utf-8").strip()
         except OSError:
             cached = ""
-        if cached and os.path.isfile(cached) and os.access(cached, os.X_OK):
+
+        # By IDENTITY, not by shape, and not merely "is it executable".
+        #
+        # Under CLAUDECODE — the only condition this hook runs in — the CLI's own
+        # reader accepts exactly two cached paths: one matching the versioned
+        # cache glob, or today's directory-source path by exact equality. For the
+        # install that is actually running, BOTH of those ARE
+        # $CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh: on a versioned install that
+        # variable points into the cache, and on a directory-source install it
+        # points at the checkout. So comparing against `cli` re-derives none of
+        # _validate_cached_cli_path's arms while admitting exactly what they do.
+        #
+        # An executable-only test was strictly weaker: a cli-path naming some
+        # other executable — a hand-written */.worktrees/* path, which
+        # write_global_cli_cache refuses to write and the reader then refuses to
+        # read, or a stale entry from an install no longer present — passed it,
+        # so the hook returned early and left the session unable to resolve the
+        # CLI at all. That is the one state this hook exists to repair.
+        if cached == str(cli):
             return
 
         subprocess.run(
