@@ -1324,6 +1324,105 @@ def test_ground_truth_is_one_rule_reconcile_and_the_work_map_both_read():
     ) == "in_progress"
 
 
+def test_ground_truth_gets_the_two_terminal_branches_it_never_had():
+    """Issue #112 (skipped is terminal alongside completed, including when it is
+    the only status present) and issue #102 (all-pending reads planned). Both
+    are asked before the in_progress fallback, and failed still wins over
+    either one -- not just over the two original branches."""
+    assert R.ground_truth(
+        {"userStories": [{"status": "completed"}, {"status": "skipped"}]}
+    ) == "completed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "skipped"}, {"status": "skipped"}]}
+    ) == "completed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "pending"}, {"status": "pending"}]}
+    ) == "planned"
+    assert R.ground_truth(
+        {"userStories": [{"status": "skipped"}, {"status": "failed"}]}
+    ) == "verification_failed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "pending"}, {"status": "failed"}]}
+    ) == "verification_failed"
+
+
+def _gt_branches_env(base):
+    """Every path the CLI could reach outside the fixture, pointed back into it.
+
+    roadmap-reconcile must never walk up past the fixture and reconcile the
+    repository's own .aimi/tasks/ -- the same isolation _la_env applies for
+    list-archivable, kept local here rather than shared because the two
+    sections read the fixture for different verbs."""
+    env = dict(os.environ)
+    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
+        env.pop(name, None)
+    env["HOME"] = base
+    env["AIMI_CONFIG_DIR"] = os.path.join(base, "cfg")
+    env["XDG_CONFIG_HOME"] = os.path.join(base, ".config")
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(base, ".claude")
+    env["LC_ALL"] = "C"
+    return env
+
+
+def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_uncorrected(
+    tmp_path,
+):
+    """The two new branches reproduced through the real CLI, on a throwaway
+    fixture rather than the repository's own .aimi/ -- AC6 and AC7 together,
+    since both are the same claim: a status ground_truth already agrees with
+    draws no correction from reconcile."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "gt-terminal"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(os.path.join(feature_dir, "phase-1"), exist_ok=True)
+    os.makedirs(os.path.join(feature_dir, "phase-2"), exist_ok=True)
+
+    def _phase_entry(pid, status):
+        return {
+            "id": pid, "name": "P" + str(pid), "goal": "g", "slug": "p" + str(pid),
+            "dir": "phase-" + str(pid), "status": status, "dependsOn": [],
+            "branch": None, "notes": None, "successCriteria": [],
+            "creates": [], "needs": [], "areas": [], "claim": None,
+        }
+
+    roadmap = {
+        "roadmapVersion": "1.0", "feature": feature, "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [_phase_entry(1, "completed"), _phase_entry(2, "planned")],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    with open(
+        os.path.join(feature_dir, "phase-1", feature + "-phase-1-tasks.json"),
+        "w", encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {"userStories": [{"status": "completed"}, {"status": "skipped"}]}, handle
+        )
+    with open(os.path.join(feature_dir, "phase-1", "handoff.md"), "w", encoding="utf-8") as handle:
+        handle.write("# handoff\n")
+    with open(
+        os.path.join(feature_dir, "phase-2", feature + "-phase-2-tasks.json"),
+        "w", encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {"userStories": [{"status": "pending"}, {"status": "pending"}]}, handle
+        )
+
+    proc = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_gt_branches_env(base),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"corrections": [], "blocked": []}
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["status"] == "completed"
+    assert written["phases"][1]["status"] == "planned"
+
+
 def test_the_empty_ground_truth_is_the_jq_capture_and_not_an_invention():
     """A tasks file that parses but whose userStories is absent made jq abort and
     the bash carry on with an empty capture. Reconcile then wrote status: "".

@@ -1632,16 +1632,59 @@ def ground_truth(doc):
     _story_statuses, kept because it is observable: reconcile turns it into a
     correction to "" rather than declining to correct. It is a defect, and
     fixing it is a behaviour change that does not belong in a port.
+
+    failed is checked before either terminal-set branch below, and that order
+    is load-bearing rather than cosmetic: a phase carrying even one failed
+    story is never "completed" and never "planned", no matter what its other
+    stories say. In practice the two conditions never actually compete --
+    "every story is completed-or-skipped" and "any story is failed" cannot
+    both be true of the same list -- but a reader should not have to prove
+    that to trust the precedence, so failed is asked first and answered first.
+
+    completed-or-skipped (issue #112): a story's status stops changing once it
+    is "completed" OR "skipped" -- nothing in this codebase ever un-skips one --
+    so a phase where every story has reached one of those two is exactly as
+    finished, from ground_truth's point of view, as a phase where every story
+    is "completed" outright. This is not a new rule invented for this phase
+    boundary: tasks.py's own _dep_status_done already treats "completed" and
+    "skipped" as the same "done" for a story's own dependents, and count-pending
+    treats them the same for a whole tasks file. ground_truth answers "is there
+    work left for execute to do here", not "did this phase deliver value" -- a
+    deliberately skipped story already made that call, at cascade-skip time,
+    and this function does not re-litigate it. That includes the all-skipped
+    case: a phase whose every story was skipped delivered nothing, and still
+    reads "completed", because every story in it has still reached a status
+    nothing will ever move again. Judging "delivered nothing" is a different
+    question than the one this function exists to answer, and answering it
+    here would make ground_truth read intent instead of state.
+
+    all-pending (issue #102): a phase whose stories are every one still
+    "pending" has not been started -- no story has moved, so the phase itself
+    has not moved, and "in_progress" was never true of it. This can correct an
+    "in_progress" phase back to "planned" on reconcile, when a claim crashed
+    before any story began: that direction is accepted rather than guarded
+    against, because concurrency here is guarded by the claim field, not the
+    status field. A live claim already excludes a phase from
+    roadmap-claim's candidates regardless of status, and a dead one is cleared
+    by roadmap-claim's own PID-liveness check before status is ever consulted
+    -- so demoting the status changes what a human reading roadmap.json sees,
+    not what a concurrent claim can do. reconcile also clears a claim only for
+    a "completed" correction (see op_reconcile), so this demotion leaves
+    whatever claim exists in place; self-reclaim treats "planned" and
+    "in_progress" identically, so the session that owns the claim is
+    unaffected by the demotion either way.
     """
     statuses = _story_statuses(doc)
     if statuses is None:
         return ""
     if not statuses:
         return "unknown"
-    if all(status == "completed" for status in statuses):
-        return "completed"
     if any(status == "failed" for status in statuses):
         return "verification_failed"
+    if all(status in ("completed", "skipped") for status in statuses):
+        return "completed"
+    if all(status == "pending" for status in statuses):
+        return "planned"
     return "in_progress"
 
 
@@ -1668,8 +1711,14 @@ def has_work_map(roadmap_path, doc, feature):
     """{"<phase id>": <has work>} for every phase in a roadmap.
 
     A phase has NO work only when its own tasks file exists, parses, holds at
-    least one story, and every story is "completed" -- i.e. exactly when
-    ground_truth says "completed". Every other case is has-work:
+    least one story, and every story is "completed" or "skipped" -- i.e.
+    exactly when ground_truth says "completed". That now includes a phase
+    every one of whose stories was skipped: it reads has-work false and is
+    demoted the same way a fully-completed phase already was by
+    roadmap-claim's auto ranking (candidates, via _rank) -- a consequence
+    issue #102's own not-affected analysis of this function does not cover,
+    because it predates the skipped branch landing in the same ground_truth
+    this map reads. Every other case is has-work:
       - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
         a phase for being unplanned would rank the whole front of the roadmap
         last, which is the opposite of the intent.
