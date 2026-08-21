@@ -332,12 +332,11 @@ Changes:
 - [W] completed stories preserved
 
 Next steps:
-1. **Run `/aimi:review`** - Get feedback from code reviewers
-2. **Run `/aimi:status`** - View updated task list
-3. **Run `/aimi:execute`** - Begin autonomous execution
+1. **Run `/aimi:status`** - View updated task list
+2. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
-**IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:review`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:review`). Copy the block verbatim.
+**IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:execute`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:execute`). Copy the block verbatim.
 
 ## Error Handling
 
