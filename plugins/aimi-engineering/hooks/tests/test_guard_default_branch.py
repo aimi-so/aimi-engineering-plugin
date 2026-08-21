@@ -79,6 +79,21 @@ def test_blocks_commit_on_develop():
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_deny_message_names_resolved_directory():
+    """Issue #86: the denial must name the directory the branch was resolved from.
+
+    Without this, an agent that lost a `cd` sees only the branch name and
+    concludes the platform is blocking it, rather than that it committed from
+    the wrong directory.
+    """
+    out = _run_handler("git commit -m 'msg'", "main", cwd="/repo/some-other-dir")
+    assert out, "Expected deny output"
+    data = json.loads(out[0])
+    msg = data["hookSpecificOutput"]["userMessage"]
+    assert "/repo/some-other-dir" in msg, f"Expected resolved directory in denial, got: {msg!r}"
+    assert "feature worktree" in msg, "Worktree advice must still be present"
+
+
 def test_allows_commit_on_feature_branch():
     out = _run_handler("git commit -m 'msg'", "feat/my-feature")
     assert not out, "Expected no output (allow)"
