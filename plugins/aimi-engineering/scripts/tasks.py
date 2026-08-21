@@ -1063,6 +1063,33 @@ def _story_errors(story):
         elif not jq_test(project, VALID_PROJECT, owner):
             errors.append(story_id + ": project contains invalid characters")
 
+    # Not from jq -- issue #105's suggested fix 2. plan.md and
+    # aimi-story-expander.md now hand a multi-repo story author exactly one
+    # literal to write: `cd <project> && `. This checks for exactly that
+    # literal, because "begins with cd <project>" is not a rule an author can
+    # comply with -- a trailing slash (`cd be-feats/ && `), a subshell
+    # (`(cd be-feats && ...)`), a quoted path (`cd "be-feats" && `), and a
+    # leading env assignment (`FOO=1 cd be-feats && `) are all readable
+    # commands that a plain `startswith` on the near-miss forms would have to
+    # special-case one by one, and every one of them is still not the string
+    # the author was told to write. Reject all four the same as no prefix at
+    # all, and say the literal in the message so an author never has to guess
+    # which of them this refused. project "." is single-repo and exempt,
+    # same as every other rule in this chain; an absent or empty verify is
+    # untouched, since no rule governs that yet.
+    if project not in (None, "", "."):
+        verify = jq_index(
+            jq_index(story, "implementation", STORY), "verify", STORY + ".implementation"
+        )
+        if jq_type(verify) == "string" and jq_length(verify, STORY + ".implementation.verify") > 0:
+            prefix = "cd " + project + " && "
+            if not verify.startswith(prefix):
+                errors.append(
+                    story_id + ": implementation.verify must begin with the exact literal '"
+                    + prefix + "' -- no trailing slash, no subshell, no quotes, "
+                    "no leading env assignment"
+                )
+
     skills = jq_index(story, "skills", STORY)
     if skills is not None:
         owner = STORY + ".skills"

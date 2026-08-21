@@ -925,6 +925,68 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
         assert VALIDATE["limpo-" + verb]["exit"] == 0
 
 
+def _story(project=None, verify=None):
+    story = {
+        "id": "US-001",
+        "title": "t",
+        "description": "d",
+        "acceptanceCriteria": ["x"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    if project is not None:
+        story["project"] = project
+    if verify is not None:
+        story["implementation"] = {"verify": verify}
+    return story
+
+
+def test_validate_stories_rejects_a_verify_that_does_not_cd_into_its_project():
+    """Issue #105's suggested fix 2, not a jq port -- there is no jq recording
+    for this rule, which is why every golden VALIDATE case with a `project`
+    field also has no `implementation`, and none of them changes here.
+
+    plan.md and aimi-story-expander.md (US-005, same branch) hand a
+    multi-repo story author exactly one literal to write: `cd <project> && `.
+    This pins the matching rule to that literal, EXACTLY, because none of the
+    four near-miss forms below is the string the author was told to write.
+    """
+    # issue #105's own reproduction: today this is valid:true, exit 0.
+    assert T._story_errors(_story(project="web-app", verify="bun run typecheck")) == [
+        "US-001: implementation.verify must begin with the exact literal "
+        "'cd web-app && ' -- no trailing slash, no subshell, no quotes, "
+        "no leading env assignment"
+    ]
+    # the literal the two docs actually tell an author to write: accepted.
+    assert (
+        T._story_errors(_story(project="web-app", verify="cd web-app && bun run typecheck"))
+        == []
+    )
+    # project "." is single-repo and exempt, like every other rule in the chain.
+    assert T._story_errors(_story(project=".", verify="bun run typecheck")) == []
+    # no project at all: single-repo, exempt.
+    assert T._story_errors(_story(verify="bun run typecheck")) == []
+    # project set, verify absent or empty: no rule governs that yet, unchanged.
+    assert T._story_errors(_story(project="web-app")) == []
+    assert T._story_errors(_story(project="web-app", verify="")) == []
+    # four readable near-misses, all refused the same as no prefix at all --
+    # this is the matching rule the story required be pinned before writing.
+    near_misses = {
+        "trailing slash": "cd be-feats/ && bun test",
+        "subshell": "(cd be-feats && bun test)",
+        "quoted path": 'cd "be-feats" && bun test',
+        "leading env assignment": "FOO=1 cd be-feats && bun test",
+    }
+    for label, verify in near_misses.items():
+        assert T._story_errors(_story(project="be-feats", verify=verify)) == [
+            "US-001: implementation.verify must begin with the exact literal "
+            "'cd be-feats && ' -- no trailing slash, no subshell, no quotes, "
+            "no leading env assignment"
+        ], label
+
+
 def test_validate_ids_keeps_its_asymmetric_shape_and_its_accepted_suffix():
     """THE two traps of the verb that had zero assertions before outline:02.
 
