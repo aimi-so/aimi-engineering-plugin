@@ -2855,9 +2855,8 @@ Outline: [N] stories (edits: [M])
 
 Next steps:
 1. **Run `/aimi:deepen`** - Enrich stories with research (optional)
-2. **Run `/aimi:review`** - Get feedback from code reviewers
-3. **Run `/aimi:status`** - View task list
-4. **Run `/aimi:execute`** - Begin autonomous execution
+2. **Run `/aimi:status`** - View task list
+3. **Run `/aimi:execute`** - Begin autonomous execution
 ```
 
 **Tasks line:** render one `Tasks:` line per file in `MERGE_RETURN` (Phase 3e), in the returned order — one line on the legacy path, two on the SIDE axis, N on the PROJECT axis. On the PROJECT axis, suffix each line with its entry's own `project` and `storyCount` (e.g. `Tasks: .aimi/tasks/2026-07-27-checkout-apps-web-tasks.json (apps/web, 4 stories)`) so the reader can tell which repo each file drives. Never print a filename that is not in the returned list.
