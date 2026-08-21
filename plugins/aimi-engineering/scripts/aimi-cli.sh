@@ -560,6 +560,20 @@ _aimi_models_config_path() {
   printf '%s\n' "$aimi_dir/models.json"
 }
 
+_is_codex_host() {
+  [ "${AIMI_HOST:-}" = "codex" ]
+}
+
+_models_host_key() {
+  if _is_claude_code_host; then
+    printf 'claudeCode\n'
+  elif _is_codex_host; then
+    printf 'codex\n'
+  else
+    printf 'opencode\n'
+  fi
+}
+
 # Return the path to the models first-run prompt marker file for the active host.
 # The marker is per-host: `models-prompt-seen-claudeCode` or `models-prompt-seen-opencode`.
 # This lets a user dismiss the prompt independently on each host — picking
@@ -567,11 +581,7 @@ _aimi_models_config_path() {
 # The legacy global `models-prompt-seen` file (no host suffix) is no longer read.
 _aimi_models_prompt_marker_path() {
   local host
-  if _is_claude_code_host; then
-    host="claudeCode"
-  else
-    host="opencode"
-  fi
+  host=$(_models_host_key)
   local aimi_dir
   aimi_dir=$(_aimi_config_dir)
   printf '%s\n' "$aimi_dir/models-prompt-seen-$host"
@@ -9389,6 +9399,11 @@ _host_valid_models() {
     return 0
   fi
 
+  if _is_codex_host; then
+    printf 'gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\ngpt-5.4\n'
+    return 0
+  fi
+
   command -v opencode >/dev/null 2>&1 || return 0
 
   local _config_file _mtime _cache_file _raw="" _line _dir
@@ -9520,11 +9535,7 @@ cmd_resolve_models() {
 
   # Determine host key
   local host
-  if _is_claude_code_host; then
-    host="claudeCode"
-  else
-    host="opencode"
-  fi
+  host=$(_models_host_key)
 
   # The host's valid set — Claude Code's three aliases, or OpenCode's
   # `opencode models` output — plus the two host-shaped literals its warnings
@@ -9541,6 +9552,9 @@ cmd_resolve_models() {
   if _is_claude_code_host; then
     _host_name="Claude Code"
     _host_qualifier="must be exactly opus, sonnet, or haiku; "
+  elif _is_codex_host; then
+    _host_name="Codex"
+    _host_qualifier=""
   else
     _host_name="OpenCode"
     _host_qualifier=""
@@ -9595,11 +9609,7 @@ cmd_get_current_models() {
   fi
 
   local host
-  if _is_claude_code_host; then
-    host="claudeCode"
-  else
-    host="opencode"
-  fi
+  host=$(_models_host_key)
 
   if ! _models_python3_or_degrade get-current-models all-null; then
     printf '%s\n' "$_fallback"
@@ -9641,6 +9651,11 @@ cmd_list_models() {
   # and compares them, so the second spelling cannot drift from the first.
   if _is_claude_code_host; then
     printf '[\n  "opus",\n  "sonnet",\n  "haiku"\n]\n'
+    return 0
+  fi
+
+  if _is_codex_host; then
+    printf '[\n  "gpt-5.6-sol",\n  "gpt-5.6-terra",\n  "gpt-5.6-luna",\n  "gpt-5.5",\n  "gpt-5.4"\n]\n'
     return 0
   fi
 
@@ -9735,11 +9750,7 @@ cmd_detect_models() {
 
   # ---- Determine host key for models table ----------------------------------
   local _host_key
-  if _is_claude_code_host; then
-    _host_key="claudeCode"
-  else
-    _host_key="opencode"
-  fi
+  _host_key=$(_models_host_key)
 
   # The five values the document gets, however they were arrived at. Both modes
   # fill these in and then STOP: the read, the merge, the write and the two
@@ -9769,7 +9780,13 @@ cmd_detect_models() {
     #     path as the "all five must be provided" check directly above.
     local _flag_valid_set _flag_host_name
     _flag_valid_set=$(_host_valid_models)
-    if _is_claude_code_host; then _flag_host_name="Claude Code"; else _flag_host_name="OpenCode"; fi
+    if _is_claude_code_host; then
+      _flag_host_name="Claude Code"
+    elif _is_codex_host; then
+      _flag_host_name="Codex"
+    else
+      _flag_host_name="OpenCode"
+    fi
 
     _check_flag_model() {
       local _cat="$1" _raw="$2"
@@ -9915,7 +9932,11 @@ anthropic/claude-opus-4-7"
   local _config_path
   _config_path=$(_aimi_models_config_path)
   printf 'detect-models: wrote %s table to %s\n' "$_host_key" "$_config_path" >&2
-  printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
+  if _is_codex_host; then
+    printf 'detect-models: re-run on other hosts to populate their model tables\n' >&2
+  else
+    printf 'detect-models: re-run on the other host to populate both claudeCode and opencode tables\n' >&2
+  fi
   printf '%s\n' "$_models_json"
 }
 
@@ -9944,11 +9965,7 @@ cmd_models_prompt_check() {
   fi
 
   local host
-  if _is_claude_code_host; then
-    host="claudeCode"
-  else
-    host="opencode"
-  fi
+  host=$(_models_host_key)
 
   if ! _models_python3_or_degrade models-prompt-check prompt; then
     echo "prompt"

@@ -1,7 +1,6 @@
 ---
 name: aimi-learnings
 description: Triage the pending friction queue captured by aimi hooks. Groups events by scope (project / plugin / inbox), presents top patterns for review, and drafts promotion proposals locally for human review. Never auto-commits, never opens PRs. Triggers on /aimi:learnings, "triage friction", "review friction events", "drain friction queue".
-disable-model-invocation: true
 allowed-tools: Bash, Read, Write, AskUserQuestion
 ---
 

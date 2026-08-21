@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Deepen
+  short_description: Enrich tasks.json stories with research insights
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: Brainstorm Internals
+  short_description: Internal workflow used by Aimi brainstorming.
+policy:
+  allow_implicit_invocation: false

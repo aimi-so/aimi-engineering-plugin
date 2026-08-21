@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Kieran Typescript Reviewer
+  short_description: Reviews TypeScript code with an extremely high quality bar for
+    type safety, modern patterns, and maintainability. Use after implementing features,
+    modifying cod
+policy:
+  allow_implicit_invocation: false

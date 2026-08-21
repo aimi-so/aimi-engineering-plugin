@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Brainstorm
+  short_description: Explore ideas through guided brainstorming with batched questions
+    and codebase research
+policy:
+  allow_implicit_invocation: false

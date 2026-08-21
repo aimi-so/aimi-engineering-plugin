@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.121.0] - 2026-08-21
+
+### Added
+
+- Native Codex plugin and repository marketplace manifests.
+- Generated Codex skills for all 17 command workflows and 32 executable agent definitions, with drift checking through `scripts/build-codex-skills.py --check`.
+- Codex-specific model routing and Context7 MCP configuration.
+- Codex installation, invocation, hooks, and compatibility documentation.
+
+### Changed
+
+- Shared skill frontmatter now validates on Codex without changing the Claude Code or OpenCode workflow bodies.
+- Hook registration now handles Codex `PermissionRequest` events while retaining Claude Code `PreToolUse` approval behavior.
+- Broken relative references in task-planner and story-executor documentation were corrected.
+
 ## [1.120.0] - 2026-08-13
 
 > One release, developed across ten internal version numbers on a single feature

@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Init
+  short_description: Prime the global CLI path cache so all /aimi:* commands resolve
+    instantly without the Layer 2 glob
+policy:
+  allow_implicit_invocation: false

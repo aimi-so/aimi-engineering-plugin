@@ -4,20 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Purpose
 
-This repo **builds** the aimi-engineering plugin — it is not a plugin consumer. It ships two distribution targets from a single source tree:
+This repo **builds** the aimi-engineering plugin — it is not a plugin consumer. It ships three distribution targets from a single source tree:
 
+- **Codex** via `codex plugin add aimi-engineering@aimi-marketplace` (reads generated adapters plus the shared runtime)
 - **Claude Code** via `claude /plugin install aimi-engineering` (reads `plugins/aimi-engineering/` directly)
 - **OpenCode** via `./install.sh --to opencode` (translates the plugin into OpenCode's structure and installs to `~/.config/opencode/`)
 
 The nested **`plugins/aimi-engineering/CLAUDE.md`** is the source of truth for plugin-internal conventions (versioning, command/skill authoring, schema requirements). Read it when editing anything under `plugins/aimi-engineering/`.
 
-## Dual-Host Architecture
+## Multi-Host Architecture
 
-A single source tree serves both hosts. Anything touching CLI path resolution, environment variables, or install mechanics must account for both:
+A single source tree serves all three hosts. Anything touching CLI path resolution, environment variables, model routing, or install mechanics must account for each:
 
 - **`CLAUDECODE=1`** — set by Claude Code in every session. Absent in OpenCode. This is the runtime discriminator used by `aimi-cli.sh` and `commands/references/cli-path-resolution.md` to decide between Claude Code's cache (`~/.claude/plugins/cache/`) and OpenCode's install (`$AIMI_PLUGIN_DIR`).
 - **`AIMI_PLUGIN_DIR`** — set by `install.sh` in shell profiles. Only honored when `CLAUDECODE` is unset. Inside Claude Code, Layer 0 resolution skips this entirely so the Claude Code cache always wins.
+- **`AIMI_HOST=codex`** — set by generated Codex workflow adapters on Aimi CLI calls. It selects Codex model routing without changing the other hosts.
 - **`install.sh`** — performs heavy translation: rewrites command bodies (Task tool mappings, CLI path glob → `OPENCODE_CONFIG_DIR`), handles missing OpenCode features (`disable-model-invocation`, `AskUserQuestion`, custom `subagent_type`), copies/flattens skills and agents. Before changing command syntax or CLI behavior, check whether `install.sh` needs a matching translation.
+- **`scripts/build-codex-skills.py`** — generates Codex skills from `commands/` and `agents/`. Run it after changing either source and verify `--check` is clean.
 
 ## Multi-Repo Execution Layout
 
@@ -90,11 +93,12 @@ There are two Python components: `plugins/aimi-engineering/hooks/` (the hook dis
 
 ### Version bump workflow
 
-Every plugin change requires synchronized bumps in three files (per `plugins/aimi-engineering/CLAUDE.md`):
+Every plugin change requires synchronized bumps in four files (per `plugins/aimi-engineering/CLAUDE.md`):
 
 1. `plugins/aimi-engineering/.claude-plugin/plugin.json` — `"version"`
-2. `.claude-plugin/marketplace.json` — the plugin entry's `"version"`
-3. `CHANGELOG.md` — new entry under the version heading (Keep a Changelog format)
+2. `plugins/aimi-engineering/.codex-plugin/plugin.json` — `"version"`
+3. `.claude-plugin/marketplace.json` — the plugin entry's `"version"`
+4. `CHANGELOG.md` — new entry under the version heading (Keep a Changelog format)
 
 ## CLI Path Resolution (Critical)
 

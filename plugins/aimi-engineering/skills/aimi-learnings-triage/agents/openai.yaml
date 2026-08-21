@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Learnings Triage
+  short_description: Read-only triage agent for friction events captured by aimi hooks.
+    Returns a JSON report of pending friction grouped by scope (project/plugin/inbox)
+    with sample
+policy:
+  allow_implicit_invocation: false

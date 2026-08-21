@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Plan
+  short_description: Generate tasks.json directly from a feature description
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Codebase Researcher
+  short_description: Conducts thorough research on repository structure, documentation,
+    conventions, and implementation patterns. Use when onboarding to a new codebase
+    or understand
+policy:
+  allow_implicit_invocation: false

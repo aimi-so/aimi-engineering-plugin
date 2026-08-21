@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Bundle Researcher
+  short_description: 'Ingests a Claude Design handoff bundle (DesignSpec.md, BusinessSpec.md,
+    chats, prototypes) and emits a structured 16-section research document. Use when
+    Claude '
+policy:
+  allow_implicit_invocation: false

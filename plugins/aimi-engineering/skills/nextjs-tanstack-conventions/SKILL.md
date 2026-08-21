@@ -1,6 +1,5 @@
 ---
 name: nextjs-tanstack-conventions
-version: "1.0.0"
 description: >
   Use when writing, reviewing, or structuring Next.js App Router code or
   TanStack Query data-fetching logic — route segment layout, colocation and
@@ -11,6 +10,8 @@ description: >
   colocation, TanStack Query, React Query, query keys, invalidateQueries,
   staleTime, gcTime, HydrationBoundary, prefetchQuery, server state.
 license: MIT (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # Next.js App Router + TanStack Query Conventions

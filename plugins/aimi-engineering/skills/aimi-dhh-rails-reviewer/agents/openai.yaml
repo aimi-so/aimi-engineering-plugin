@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Dhh Rails Reviewer
+  short_description: Brutally honest Rails code review from DHH's perspective. Use
+    when reviewing Rails code for anti-patterns, JS framework contamination, or violations
+    of Rails co
+policy:
+  allow_implicit_invocation: false

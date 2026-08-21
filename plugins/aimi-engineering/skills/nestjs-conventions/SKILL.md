@@ -1,6 +1,5 @@
 ---
 name: nestjs-conventions
-version: "1.0.0"
 description: >
   Use when writing, reviewing, or scaffolding NestJS server-side code —
   module boundaries, dependency injection, controller/service/repository
@@ -15,6 +14,8 @@ description: >
   ValidationPipe, class-validator, DTO validation, @nestjs/config, Nest
   TestingModule, supertest, fat service, fat controller.
 license: MIT (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # NestJS Conventions

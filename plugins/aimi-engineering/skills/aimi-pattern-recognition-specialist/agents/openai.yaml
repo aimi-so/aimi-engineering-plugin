@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Pattern Recognition Specialist
+  short_description: Analyzes code for design patterns, anti-patterns, naming conventions,
+    and duplication. Use when checking codebase consistency or verifying new code
+    follows esta
+policy:
+  allow_implicit_invocation: false

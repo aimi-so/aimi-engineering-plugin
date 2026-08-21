@@ -276,7 +276,7 @@ STORY_ID: [STORY_ID]
 
 Your first action is to resolve the CLI path, then fetch full story context.
 
-**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy).
+**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy).
 Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited. Re-read from cache at the top of every Bash call that needs it:
 
 ```bash

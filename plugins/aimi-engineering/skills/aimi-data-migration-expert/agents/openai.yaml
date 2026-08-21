@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Data Migration Expert
+  short_description: Validates data migrations, backfills, and production data transformations
+    against reality. Use when PRs involve ID mappings, column renames, enum conversions,
+    o
+policy:
+  allow_implicit_invocation: false

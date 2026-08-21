@@ -5,6 +5,14 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+HOOK_EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty')
+
+# Claude Code asks this hook during PreToolUse. Codex performs approvals through
+# PermissionRequest, whose allow response is the JSON emitted below. Avoid
+# returning a PermissionRequest payload to Codex's earlier PreToolUse phase.
+if [ "$HOOK_EVENT" = "PreToolUse" ] && [ -z "${CLAUDECODE:-}" ]; then
+  exit 0
+fi
 
 if [ -z "$COMMAND" ]; then
   exit 0

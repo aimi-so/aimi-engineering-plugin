@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Kieran Python Reviewer
+  short_description: Reviews Python code with an extremely high quality bar for Pythonic
+    patterns, type safety, and maintainability. Use after implementing features, modifying
+    code,
+policy:
+  allow_implicit_invocation: false

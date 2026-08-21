@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Foundation Architect
+  short_description: Proposes a stack-adaptive, Clean-Architecture/DDD-informed layering,
+    folder layout, and set of conventions as reviewable defaults for a repository.
+    Use when the
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Spec Flow Analyzer
+  short_description: Analyzes specifications and feature descriptions for user flow
+    completeness and gap identification. Use when a spec, plan, or feature description
+    needs flow ana
+policy:
+  allow_implicit_invocation: false

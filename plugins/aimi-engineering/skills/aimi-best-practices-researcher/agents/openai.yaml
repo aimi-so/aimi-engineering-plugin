@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Best Practices Researcher
+  short_description: Researches and synthesizes external best practices, documentation,
+    and examples for any technology or framework. Use when you need industry standards,
+    community
+policy:
+  allow_implicit_invocation: false

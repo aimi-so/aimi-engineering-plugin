@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Agent Native Reviewer
+  short_description: Reviews code to ensure agent-native parity — any action a user
+    can take, an agent can also take. Use after adding UI features, agent tools, or
+    system prompts.
+policy:
+  allow_implicit_invocation: false

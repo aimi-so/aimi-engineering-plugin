@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Shape
+  short_description: Shape the UX and UI for a feature before any code is written.
+    Produces a confirmed design brief. Use when starting a new UI surface, planning
+    a feature's visual
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Bug Reproduction Validator
+  short_description: Systematically reproduces and validates bug reports to confirm
+    whether reported behavior is an actual bug. Use when you receive a bug report
+    or issue that needs
+policy:
+  allow_implicit_invocation: false

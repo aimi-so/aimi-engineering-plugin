@@ -1,6 +1,5 @@
 ---
 name: typescript-node-conventions
-version: "1.0.0"
 description: >
   Use when writing, reviewing, or setting conventions for TypeScript code that
   runs on Node.js or Bun — strict typing discipline (strict mode, unknown over
@@ -14,6 +13,8 @@ description: >
   errors, floating promises, unhandled rejection, exports map, dual package
   hazard, Bun Node interchangeable, runtime adapter.
 license: CC-BY-4.0 AND MIT (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # TypeScript / Node / Bun Conventions

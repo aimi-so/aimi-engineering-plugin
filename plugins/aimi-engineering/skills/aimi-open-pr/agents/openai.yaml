@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Open Pr
+  short_description: Open a pull request with title and description derived from git
+    commits and diff
+policy:
+  allow_implicit_invocation: false

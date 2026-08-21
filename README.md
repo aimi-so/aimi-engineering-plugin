@@ -4,7 +4,7 @@ You describe what you want built. The plugin turns it into a plan, splits it int
 
 At the end you review commits, not steps.
 
-Works with [Claude Code](https://claude.com/claude-code) and [OpenCode](https://opencode.ai).
+Works with [Codex](https://developers.openai.com/codex), [Claude Code](https://claude.com/claude-code), and [OpenCode](https://opencode.ai).
 
 ---
 
@@ -41,6 +41,17 @@ Check it worked:
 claude /plugin list
 /aimi:init
 ```
+
+### Codex
+
+```bash
+codex plugin marketplace add https://github.com/aimi-so/aimi-engineering-plugin
+codex plugin add aimi-engineering@aimi-marketplace
+```
+
+Restart Codex after installation, trust the plugin hooks when prompted, then run `$aimi-init`. Codex exposes the same workflows as skills: for example, `/aimi:plan` becomes `$aimi-plan` and `/aimi:execute` becomes `$aimi-execute`.
+
+The plugin requires Git, Bash, `jq`, and Python 3.10 or newer. See [the Codex guide](docs/codex.md) for model routing, hook behavior, and the full command mapping.
 
 ### OpenCode
 
@@ -271,7 +282,7 @@ There is no flag for publishing. Finishing the work and publishing it are two se
 
 The full catalogue, with what each one is for: [docs/agents-and-skills.md](docs/agents-and-skills.md).
 
-You can route each agent category to a different Claude model — research on one, review on another — with `/aimi:setup-models`.
+You can route each agent category to a different host model — research on one, review on another — with `/aimi:setup-models` or `$aimi-setup-models` in Codex.
 
 ---
 
@@ -284,6 +295,7 @@ You can route each agent category to a different Claude model — research on on
 | [Task schema](docs/task-schema.md) | The tasks file format |
 | [Architecture](docs/architecture.md) | Parallel execution, context handling, security |
 | [Roadmaps](docs/roadmaps.md) | Phasing large features, and the contracts between phases |
+| [Codex](docs/codex.md) | Installing and running on Codex |
 | [OpenCode](docs/opencode.md) | Installing and running on OpenCode |
 | [Troubleshooting](docs/troubleshooting.md) | When something goes wrong |
 

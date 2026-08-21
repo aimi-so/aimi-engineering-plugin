@@ -1,0 +1,5 @@
+interface:
+  display_name: File Todos
+  short_description: Manage the repository file-based todo workflow.
+policy:
+  allow_implicit_invocation: false

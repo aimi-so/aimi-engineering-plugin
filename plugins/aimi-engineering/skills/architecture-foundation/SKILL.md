@@ -1,6 +1,5 @@
 ---
 name: architecture-foundation
-version: "1.0.0"
 description: >
   Use when proposing, reviewing, or laying down the initial architecture for a
   repository — greenfield layering decisions, brownfield convention inference,
@@ -13,6 +12,8 @@ description: >
   layout, module boundaries, dependency rule, bounded context, aggregate root,
   domain model, ubiquitous language, ports and adapters, foundation gate.
 license: MIT (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # Architecture Foundation

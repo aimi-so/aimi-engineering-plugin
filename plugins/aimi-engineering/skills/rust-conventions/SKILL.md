@@ -1,6 +1,5 @@
 ---
 name: rust-conventions
-version: "1.0.0"
 description: >
   Use when writing, reviewing, or refactoring Rust code — ownership and
   borrowing decisions, Result/Option error handling, the ? operator,
@@ -14,6 +13,8 @@ description: >
   organization, crate layout, pub use, RFC 430, clippy, rustfmt, CI gate,
   idiomatic Rust.
 license: MIT OR Apache-2.0 (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # Rust Conventions

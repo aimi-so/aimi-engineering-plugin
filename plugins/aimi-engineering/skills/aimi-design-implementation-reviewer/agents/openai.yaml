@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Implementation Reviewer
+  short_description: Visually compares live UI implementation against Figma designs
+    OR Claude Design prototype HTML and provides detailed feedback on discrepancies.
+    Use after writin
+policy:
+  allow_implicit_invocation: false

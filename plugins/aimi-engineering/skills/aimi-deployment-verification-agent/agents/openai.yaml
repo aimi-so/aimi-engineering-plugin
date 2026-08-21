@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Deployment Verification Agent
+  short_description: Produces Go/No-Go deployment checklists with SQL verification
+    queries, rollback procedures, and monitoring plans. Use when PRs touch production
+    data, migrations
+policy:
+  allow_implicit_invocation: false

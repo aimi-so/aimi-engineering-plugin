@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Craft
+  short_description: 'Build a feature with high-quality UX and UI through a structured
+    process: shape the design, land the visual direction, build real production code,
+    then inspect '
+policy:
+  allow_implicit_invocation: false

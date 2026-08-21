@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Scope Negative Verifier
+  short_description: Independently re-checks a negative existence claim (absent /
+    not-migrated entity) using data-flow analysis and caller tracing — NOT by re-running
+    the same legac
+policy:
+  allow_implicit_invocation: false

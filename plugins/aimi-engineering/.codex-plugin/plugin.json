@@ -1,0 +1,30 @@
+{
+  "name": "aimi-engineering",
+  "version": "1.121.0",
+  "description": "Autonomous engineering workflows for research, planning, parallel execution, review, and pull requests.",
+  "author": {
+    "name": "Aimi — Autonomous Code Companion",
+    "url": "https://github.com/aimi-so"
+  },
+  "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
+  "repository": "https://github.com/aimi-so/aimi-engineering-plugin",
+  "license": "MIT",
+  "keywords": ["autonomous-execution", "task-management", "parallel-agents", "workflow-automation", "code-review"],
+  "mcpServers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  },
+  "interface": {
+    "displayName": "Aimi Engineering",
+    "shortDescription": "Plan and execute engineering work with isolated agents.",
+    "longDescription": "Research, plan, execute, review, and publish complex engineering work through dependency-aware stories and isolated parallel agents.",
+    "developerName": "Aimi",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "websiteURL": "https://github.com/aimi-so/aimi-engineering-plugin",
+    "defaultPrompt": ["Plan this feature with Aimi.", "Execute the next Aimi story.", "Review this branch with Aimi."],
+    "brandColor": "#4F46E5"
+  }
+}

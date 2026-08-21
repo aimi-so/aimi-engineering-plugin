@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Kieran Rails Reviewer
+  short_description: Reviews Rails code with an extremely high quality bar for conventions,
+    clarity, and maintainability. Use after implementing features, modifying code,
+    or creatin
+policy:
+  allow_implicit_invocation: false
