@@ -251,17 +251,29 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 PARENT_RESULT=$($AIMI_CLI detect-parent-branch "$CURRENT_BRANCH")
 BASE_BRANCH=$(printf '%s' "$PARENT_RESULT" | jq -r '.base // empty')
 PARENT_VERIFIED=$(printf '%s' "$PARENT_RESULT" | jq -r '.verified // false')
+PARENT_SOURCE=$(printf '%s' "$PARENT_RESULT" | jq -r '.source // empty')
 ```
 
-Store as `$BASE_BRANCH` and `$PARENT_VERIFIED`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
+Store as `$BASE_BRANCH`, `$PARENT_VERIFIED` and `$PARENT_SOURCE`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
 
-When `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print an explicit warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
+**When `$PARENT_SOURCE` is `ambiguous-decoration`**, two or more candidate branches sit on the exact same commit (e.g. an integration branch and the default branch that have not diverged yet) and the verb could not pick between them — this is not the ordinary "no candidate at all" case, so it gets its own message naming the tied candidates before falling back to `$BASE_BRANCH` (already the repository's default branch in this case):
 
+```bash
+if [ "$PARENT_SOURCE" = "ambiguous-decoration" ]; then
+  PARENT_CANDIDATES=$(printf '%s' "$PARENT_RESULT" | jq -r '(.candidates // []) | join(", ")')
+  echo "Warning: could not determine a single parent branch for \"$CURRENT_BRANCH\" -- these candidates are tied at the same commit: $PARENT_CANDIDATES. Falling back to the default branch (\"$BASE_BRANCH\") as the PR base — double-check it before merging." >&2
+fi
 ```
-Warning: could not verify "$BASE_BRANCH" as the true parent branch of "$CURRENT_BRANCH" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging.
+
+**Otherwise**, when `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print the general warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
+
+```bash
+if [ "$PARENT_SOURCE" != "ambiguous-decoration" ] && [ "$PARENT_VERIFIED" != "true" ]; then
+  echo "Warning: could not verify \"$BASE_BRANCH\" as the true parent branch of \"$CURRENT_BRANCH\" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging." >&2
+fi
 ```
 
-Execution continues regardless of `$PARENT_VERIFIED`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
+Execution continues regardless of `$PARENT_VERIFIED` or `$PARENT_SOURCE`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
 
 ### 2c. Fallback when the CLI call itself failed
 
