@@ -149,7 +149,7 @@ CWD is the same project-root conditional Container Dev Server Bootstrap (Step 3.
 
 ## Container Mode: Push the Branch
 
-**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing, the same interactivity-gated pattern Phase Completion's **Next Phase** (in `commands/execute.md`) uses for its own AskUserQuestion/agent-mode branching. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
+**Runs only when `CONTAINER_MODE=true`, after every dev-server stop above has completed.** Pushing publishes `[branchName]` to `origin` — an outward-facing action, and `CONTAINER_MODE` itself is just a field inside the tasks file, so a tasks file must never be able to trigger a publish on its own. Confirm before pushing. The contract that confirmation satisfies — what counts as publishing, why nothing in a file is consent, what each interactivity mode owes the user, and why a decline is a normal outcome rather than a failure — is defined once in `commands/references/publish-confirmation.md` and is not restated here. Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -157,29 +157,22 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
 ```
 
-- **`INTERACTIVE_MODE=picker`:** use **AskUserQuestion** with exactly two options:
-  ```
-  All stories are complete. Push [branchName] to origin now?
+**When `INTERACTIVE_MODE=picker`:** the calling command asks before this section pushes, and this section pushes only on an explicit approval. The question is raised by `commands/execute.md`'s Step 5 **If all stories complete** branch — after **Container Mode: Stop the Dev Server** above has finished and before the push below — and the picker markup itself lives there, in that command body, never in this file. That placement is mechanical, not stylistic: reference files are delivered to OpenCode by `install.sh`'s verbatim whole-tree copy (`install.sh:481-485`), and both of its command-install loops skip the `references` subdirectory by name (`install.sh:530` and `install.sh:580`), so the interactive-question tool named in a reference file is never translated and would reach that host naming a tool it does not have. `commands/references/forge-contract.md` carries its own account-selection contract in prose for exactly this reason; this section follows it.
 
-  A — Push now
-  B — Skip (push it yourself later, or run /aimi:open-pr)
-  ```
-  **Option A:** proceed to the push below. **Option B:** set `SKIP_PUSH=true` and skip straight to **Container Mode: Remove the Container**.
+An approval proceeds to the push below. A decline — and anything that is not an explicit approval, since silence is not approval — sets `SKIP_PUSH=true`, the same variable the push block below gates on, and skips straight to **Container Mode: Remove the Container**. Declining is a normal outcome, not a failure: nothing is retried, no error is raised, and no story's completed status is rolled back.
 
-- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt. Push only when `--push` was passed on `$ARGUMENTS` (see Parse --push Override in Step 1 of `commands/execute.md`):
+- **`INTERACTIVE_MODE=agent`:** skip AskUserQuestion — an unattended run cannot answer a prompt, and it therefore never publishes. There is no argument that re-enables the push; that absence is the rule, not a gap, per `commands/references/publish-confirmation.md`. Set `SKIP_PUSH=true` unconditionally, and name what was not done alongside the command that does it:
   ```bash
-  if [ "$PUSH_FLAG" = "true" ]; then
-    echo "agent-mode: container-push [branchName]"
-  else
-    echo "agent-mode: container-push skipped (no --push flag)"
-    SKIP_PUSH=true
-  fi
+  SKIP_PUSH=true
+  echo "agent-mode: [branchName] not pushed to origin — publish with /aimi:open-pr --branch [branchName]"
   ```
 
-**When `SKIP_PUSH` is not set:** for each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1):
+**When `SKIP_PUSH` is not set:** for each unique `group_key`, push `[branchName]` to `origin` from inside that group's container. Read and validate `branchName` first — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1). Read it through the same guarded `$AIMI_CLI metadata` call `commands/open-pr.md`'s Case B and `commands/execute.md`'s later branch-name reads already use, rather than a raw `jq` read of `$TASKS_PATH` — safe for the same reason: by this point in the flow `$TASKS_PATH` is already what `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) resolves on its own:
 
 ```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -199,9 +192,11 @@ If the push fails (offline, no remote permission, branch rejected, etc.), `$PUSH
 **Runs only when `CONTAINER_MODE=true`, after the push above completes — regardless of its outcome.** A worktree cannot be removed while CWD sits inside it, so return to `$AIMI_ROOT` first:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -219,4 +214,4 @@ Container mode (flat or phase) never removes the feature/phase container or stop
 1. **Stop the dev server first:** `$WORKTREE_MGR serve stop <branchName>` (or `<PHASE_BRANCH>` in phase mode). This kills the dev server's full process group — not just the pid recorded in `.aimi/state/dev-server.json` — and clears that state entry whether or not a live process was found.
 2. **Then remove the container and its branch:** `$WORKTREE_MGR remove <branchName>`. Omitting `--keep-branch` here is intentional — unlike the completion-path removal above (which preserves the branch for review and a PR), abandonment discards the branch too. This is the container-mode replacement for what used to be a plain branch switch.
 
-Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume based on liveness alone. A `kill -0` / `_is_pid_alive` probe (the same primitive `aimi-cli.sh` uses for stale-claim recovery) only proves *something* is running at that pid right now — pids get recycled by the OS, so a live pid is never by itself proof it is the dev server this tool started. The actual guarantee is `worktree-manager.sh`'s `dev_server_entry_is_ours`: it additionally compares the entry's recorded identity token (the process's `/proc/pid/stat` starttime, or `ps -o lstart=` as a portable fallback) against that pid's identity right now, and only a match counts. `serve start`'s reuse path and `serve stop`'s process-group kill both require that match before ever touching the pid — a live pid with a missing (pre-upgrade entry) or mismatched identity is treated exactly like a dead one: never reused, never signaled. (`$WORKTREE_MGR serve status <branchName>` still reports a dead-pid entry as `running:false` using the plain liveness probe alone, but — unlike a resume's reuse/kill decisions — never removes the stale entry itself: status is a true read-only verb now; only `serve start`'s own reuse path and `serve stop` ever write `dev-server.json`.)
+Never trust or reuse a `.aimi/state/dev-server.json` pid entry on a later resume based on liveness alone. A `kill -0` / `_is_pid_alive` probe (the same primitive `roadmap.py`'s `is_pid_alive` gives `aimi-cli.sh` for stale-claim recovery) only proves *something* is running at that pid right now — pids get recycled by the OS, so a live pid is never by itself proof it is the dev server this tool started. The actual guarantee is `worktree-manager.sh`'s `dev_server_entry_is_ours`: it additionally compares the entry's recorded identity token (the process's `/proc/pid/stat` starttime, or `ps -o lstart=` as a portable fallback) against that pid's identity right now, and only a match counts. `serve start`'s reuse path and `serve stop`'s process-group kill both require that match before ever touching the pid — a live pid with a missing (pre-upgrade entry) or mismatched identity is treated exactly like a dead one: never reused, never signaled. (`$WORKTREE_MGR serve status <branchName>` still reports a dead-pid entry as `running:false` using the plain liveness probe alone, but — unlike a resume's reuse/kill decisions — never removes the stale entry itself: status is a true read-only verb now; only `serve start`'s own reuse path and `serve stop` ever write `dev-server.json`.)

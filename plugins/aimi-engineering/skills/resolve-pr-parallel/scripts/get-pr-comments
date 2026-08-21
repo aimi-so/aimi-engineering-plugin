@@ -11,58 +11,60 @@ fi
 
 PR_NUMBER=$1
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./_resolve-cli.sh
+. "$SCRIPT_DIR/_resolve-cli.sh"
+
 if [ -n "$2" ]; then
     OWNER=$(echo "$2" | cut -d/ -f1)
     REPO=$(echo "$2" | cut -d/ -f2)
 else
-    OWNER=$(gh repo view --json owner -q .owner.login 2>/dev/null)
-    REPO=$(gh repo view --json name -q .name 2>/dev/null)
+    # forge-repo-info always exits 0, including its own degraded and
+    # not-found outcomes -- the failure signal lives in the JSON body's
+    # .status field, never in the process exit code.
+    REPO_INFO=$("$AIMI_CLI" forge-repo-info)
+    REPO_STATUS=$(printf '%s' "$REPO_INFO" | jq -r '.status // empty')
+    if [ "$REPO_STATUS" = "found" ]; then
+        OWNER=$(printf '%s' "$REPO_INFO" | jq -r '.data.owner // empty')
+        REPO=$(printf '%s' "$REPO_INFO" | jq -r '.data.repo // empty')
+    else
+        OWNER=""
+        REPO=""
+    fi
 fi
 
+# Preserved byte-for-byte (including the stdout stream, not stderr) so no
+# existing caller or documentation depending on this exact wording breaks.
 if [ -z "$OWNER" ] || [ -z "$REPO" ]; then
     echo "Error: Could not detect repository. Pass OWNER/REPO as second argument."
     exit 1
 fi
 
-gh api graphql -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f query='
-query FetchUnresolvedComments($owner: String!, $repo: String!, $pr: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $pr) {
-      title
-      url
-      reviewThreads(first: 100) {
-        totalCount
-        edges {
-          node {
-            id
-            isResolved
-            isOutdated
-            isCollapsed
-            path
-            line
-            startLine
-            diffSide
-            comments(first: 100) {
-              totalCount
-              nodes {
-                id
-                author {
-                  login
-                }
-                body
-                createdAt
-                updatedAt
-                url
-                outdated
-              }
-            }
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  }
-}' | jq '.data.repository.pullRequest.reviewThreads.edges | map(select(.node.isResolved == false and .node.isOutdated == false))'
+# forge-pr-review-threads is also always-exit-0 for the found/not_found/
+# error trio it reports (see forge-contract.md's Three-Way Status
+# Convention); it only exits non-zero for a CLI usage error (bad flags, a
+# malformed --pr value), which `if ! ...; then` below still catches without
+# letting the top-of-file `set -e` abort before this branch can print its
+# own "Error:" line.
+if ! RESULT=$("$AIMI_CLI" forge-pr-review-threads --pr "$PR_NUMBER" --owner "$OWNER" --repo "$REPO"); then
+    echo "Error: forge-pr-review-threads did not run (invalid arguments or invocation failure)." >&2
+    exit 1
+fi
+
+THREADS_STATUS=$(printf '%s' "$RESULT" | jq -r '.status // empty')
+
+if [ "$THREADS_STATUS" = "found" ]; then
+    # Unwraps the verb's {status, data, message} envelope down to the plain
+    # JSON array this script has always documented on stdout -- already
+    # filtered to unresolved, non-outdated threads by the verb itself
+    # (--all is never passed). An empty array here is a confirmed
+    # zero-threads outcome, not an error.
+    printf '%s' "$RESULT" | jq -c '.data.threads // []'
+else
+    # Covers both a confirmed not_found (no such PR) and a genuine error
+    # (auth/network/gh-missing) -- both are "a genuine failure to answer
+    # the query" from this script's point of view.
+    MESSAGE=$(printf '%s' "$RESULT" | jq -r '.message // "forge-pr-review-threads could not answer this query"')
+    echo "Error: $MESSAGE" >&2
+    exit 1
+fi

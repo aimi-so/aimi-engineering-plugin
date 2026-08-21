@@ -12,14 +12,20 @@
     {
       "name": "aimi-engineering",
       "description": "Fully standalone autonomous task execution with aimi-native agents. Direct tasks.json generation, guided brainstorming, multi-agent review, iterative execution with parallel story support via dependency graphs and worktree+team orchestration.",
-      "version": "1.119.3",
+      "version": "1.120.0",
       "author": {
         "name": "Aimi — Autonomous Code Companion",
         "url": "https://github.com/aimi-so"
       },
       "homepage": "https://github.com/aimi-so/aimi-engineering-plugin",
       "license": "MIT",
-      "tags": ["autonomous-execution", "task-management", "standalone-agents", "ralph-style", "workflow-automation"],
+      "tags": [
+        "autonomous-execution",
+        "task-management",
+        "standalone-agents",
+        "ralph-style",
+        "workflow-automation"
+      ],
       "source": "./plugins/aimi-engineering"
     }
   ]

@@ -948,7 +948,7 @@ For each identified scope context, draft one phase entry in an in-memory `phases
     "Payment confirmation is shown on success."
   ],
   "dependsOn": [],
-  "creates": ["orders (stores completed purchase records)"],
+  "creates": [{"identity": "orders", "description": "stores completed purchase records"}],
   "needs": [],
   "areas": ["app/checkout/**"]
 }
@@ -965,12 +965,12 @@ For each identified scope context, draft one phase entry in an in-memory `phases
 
 Alongside `id`, assign each phase a transient `idx` equal to its zero-padded 1-based position in the in-memory `phases` array (`"01"`, `"02"`, …). `idx` exists only for gate anchors (Step 3 below), is recomputed after every edit that changes array order or length, and is never written to disk — do not confuse it with the persisted numeric `id` field.
 
-**Shared-foundation detection (run once, before the gate is first presented):** Apply the "Shared-Foundation Detection" rule from `scope-contexts.md`. For any artifact string appearing in more than one phase's `creates`:
+**Shared-foundation detection (run once, before the gate is first presented):** Apply the "Shared-Foundation Detection" rule from `scope-contexts.md`. For any artifact **identity** appearing in more than one phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide):
 
 - If no consuming phase is a clean "first mover" for the artifact, **promote** it: insert a new phase whose sole `creates` entry is that artifact; every originally-consuming phase adds the new phase's `id` to `dependsOn` and moves the artifact from its `creates` to its `needs`.
 - Otherwise, **consolidate**: keep the artifact in the `creates` list of whichever phase comes first in dependency order; remove it from every other phase's `creates` and add it to those phases' `needs` instead.
 
-After this step, no artifact string may appear in `creates` for more than one phase in the proposed cut.
+After this step, no artifact identity may appear in `creates` for more than one phase in the proposed cut.
 
 ### Step 3: Interactive Gate
 
@@ -1319,7 +1319,8 @@ phases:
       - <observable criterion 2>
     dependsOn: []
     creates:
-      - <artifact string>
+      - identity: <artifact name, a single searchable token>
+        description: <one line of prose, or "" when there is none>
     needs: []
     areas:
       - <top-level directory or glob>
@@ -1333,7 +1334,8 @@ phases:
       - 1
     creates: []
     needs:
-      - <artifact string produced by phase 1>
+      - identity: <the identity phase 1 declared, byte-for-byte>
+        description: <one line of prose, or "" when there is none>
     areas:
       - <top-level directory or glob>
 ---
@@ -1438,10 +1440,12 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 - **Fixed key order per entry:** `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas`. Preserve this exact order for every phase.
 - `id` is emitted as a plain YAML number (never a quoted string), so a future decimal insertion (e.g. `2.1`) needs no schema change — see `outline:07` for where that matters.
 - `slug` is derived from the phase's final approved `name` using the five-step algorithm in `commands/references/topic-slug.md`, applied once after all Phase 3.5 gate edits are final.
-- **Sanitize every field** destined for this block — `name`, `goal`, and each `successCriteria`/`creates`/`needs`/`areas` entry — using the base rules in `commands/references/sanitization.md` (strip code fences, HTML/XML tags, instruction-override patterns), plus: strip newlines/carriage-returns, remove `$(` sequences and backtick characters (the shell command-substitution guard applied elsewhere in this command), and truncate each field (`name`: 200 chars, `goal`: 2000 chars, each `successCriteria` entry: 2000 chars, each `creates`/`needs`/`areas` entry: 500 chars — these match the server-side `_ROADMAP_SANITIZE_JQ` caps `aimi-cli.sh` re-applies, which are 2000 for `successCriteria` and 500 for the three contract lists, not one shared cap for all four; authoring-time clipping below the CLI's own cap would be irrecoverable downstream, so this step must never clip tighter than the CLI does).
+- **A `creates`/`needs` `identity` is passed through VERBATIM** — never sanitized, never trimmed, never truncated — while the `description` beside it is ordinary prose taking the full sanitizer and the 500-char cap. `commands/references/sanitization.md` § *Contract Entries* states the carve-out that governs this step, and points in turn at the rule's normative home; do not restate it here.
+- **Sanitize every other field** destined for this block — `name`, `goal`, and each `successCriteria`/`areas` entry — using the base rules in `commands/references/sanitization.md` (strip code fences, HTML/XML tags, instruction-override patterns), plus: strip newlines/carriage-returns, remove `$(` sequences and unwrap backticked spans to their inner text (the shell command-substitution guard applied elsewhere in this command), and truncate each field (`name`: 200 chars, `goal`: 2000 chars, each `successCriteria` entry: 2000 chars, each `creates`/`needs` **description** and each `areas` entry: 500 chars — these match the caps `roadmap.py` re-applies server-side, which are 2000 for `successCriteria` and 500 for descriptions and `areas`, not one shared cap for all four; authoring-time clipping below the CLI's own cap would be irrecoverable downstream, so this step must never clip tighter than the CLI does). An `identity` is not among these fields and is never truncated — the CLI refuses one over 500 characters rather than clipping it.
 - **Tag-breakout sanitization:** after the above, apply the same escape pattern used for `prototype:` path emission above — replace `</phase_data` with `&lt;/phase_data` and `<phase_data` with `&lt;phase_data` in every field value. (In practice these strings will rarely contain such sequences, but the guard is on the rail per security policy, matching the `prototype_html` precedent.)
 - `dependsOn` is a YAML list of the referenced phases' `id` values (plain numbers).
-- `creates` / `needs` / `areas` are YAML lists of strings, each following the naming conventions in the "Creates/Needs Contracts" and "Coarse File-Area Declaration" sections of `commands/references/scope-contexts.md`.
+- `creates` / `needs` are YAML lists of `{identity, description}` mappings and `areas` is a YAML list of strings, each following the naming conventions in the "Creates/Needs Contracts" and "Coarse File-Area Declaration" sections of `commands/references/scope-contexts.md`. Emit `description: ""` when a phase has no prose for an artifact — never omit the key, and never write `null`.
+- **An identity carries only what a search could resolve** — `scope-contexts.md` § *Two rulers: the identity and the description* is the one place that says which characters that excludes, and `roadmap-init` refuses the whole payload over one that breaks the rule. Text the identity may not hold belongs in the `description`, where it is allowed: identity `cmd_clean` with description `does x; then y` is legal. Do **not** "fix" such an entry by deleting the offending character — that silently produces a different identity than the one the phase will actually deliver, which is the failure mode this whole contract exists to prevent. Rename the artifact, or move the text into the description.
 - This story writes only the `phases:` frontmatter block — it never creates `.aimi/tasks/<feature>/roadmap.json` or any file under `.aimi/tasks/`. Materializing a roadmap from this block is owned by `/aimi:plan` (`outline:07`).
 
 ## Open Questions

@@ -233,11 +233,43 @@ translate_command_body() {
   # Coverage re-verified (bug/container-base-branch-resolution US-005):
   # execute.md's Step 0 `--base` extraction (a plain `case " $ARGUMENTS " in`
   # scan + `sed`/`grep` pair, mirroring the pre-existing `--phase`/`--container`/
-  # `--inline`/`--push` extractions) and every `resolve-base-branch`/
+  # `--inline` extractions) and every `resolve-base-branch`/
   # `setup-branch --base "$BASE_BRANCH"` call site it threads into need no new
   # rule — none of the substitutions above rewrite flag parsing or CLI
   # subcommand/flag names, so `--base` and its call sites survive translation
   # byte-identical, same as `--phase` already does.
+  #
+  # Coverage re-verified (forge-abstraction phase 1, US-012): none of the
+  # `detect-forge`/`forge-*` verb call sites migrated into open-pr.md,
+  # review.md, validate-bug.md, execute.md's phase-mode PR-creation loop, and
+  # the resolve-pr-parallel skill scripts need a new rule either — this
+  # function was sourced in isolation, fed a literal `$AIMI_CLI forge-pr-create
+  # --title … --base … --head … --body …` invocation, and returned it
+  # byte-identical, the same technique used for verify-creates and story-merge.
+  # Note the trade-off this migration carries: since every `gh` call these
+  # verbs make now runs inside `aimi-cli.sh` instead of directly in a command
+  # body, it is covered by the blanket `aimi_cli` allow rule below instead of
+  # prompting per call — a real broadening of unattended write consent,
+  # accepted deliberately (see CHANGELOG.md and docs/opencode.md) rather than
+  # narrowed with a `gh *` rule or a confirmation gate, because either would
+  # break unattended `/aimi:execute`.
+  # Coverage re-verified (forge-abstraction phase 2, forge account picker): the
+  # per-repository forge-account pickers added to open-pr.md (Step 1a) and
+  # execute.md (Offer a Pull Request) need no new rule — this function was
+  # sourced in isolation, fed both picker paragraphs literally, and returned
+  # `Use the **question** tool` from the first substitution below with no
+  # AskUserQuestion literal left in either. Their `$AIMI_CLI
+  # forge-account-select --check/--record/--record-active --project …` calls
+  # survive byte-identical for the same reason verify-creates and story-merge
+  # do: no substitution here matches a subcommand or flag name.
+  #
+  # This is also why those pickers live in the command bodies and NOT in
+  # commands/references/forge-contract.md. Reference files never reach this
+  # function: they are delivered by the verbatim whole-tree copy below and both
+  # command-install loops skip the "references" subdirectory by name. A picker
+  # written into a reference file would reach OpenCode untranslated, naming a
+  # tool that host does not have. forge-contract.md therefore carries the
+  # account-selection contract in prose with no AskUserQuestion literal at all.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
   body="${body//Use AskUserQuestion/Use the question tool}"
   body="${body//via AskUserQuestion/via the question tool}"
@@ -998,7 +1030,15 @@ install_opencode() {
   else
     chmod +x "$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh"
     local prime_out
-    prime_out=$("$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh" prime-cache 2>&1) || {
+    # State the host intent explicitly rather than relying on whatever
+    # CLAUDECODE happens to be in this process: set_env_var only appends
+    # AIMI_PLUGIN_DIR to a shell profile, it does not export into this
+    # running shell, and running this installer from inside a Claude Code
+    # session inherits CLAUDECODE=1 here. Without the override, cmd_prime_cache
+    # falls to host_label="claude_code" and primes the shared cli-path cache
+    # with the Claude Code checkout instead of this OpenCode install.
+    prime_out=$(env -u CLAUDECODE AIMI_PLUGIN_DIR="$plugin_dir" \
+      "$target_dir/plugins/$PLUGIN_NAME/scripts/aimi-cli.sh" prime-cache 2>&1) || {
       warn "Cache priming failed (non-fatal): $prime_out"
       prime_out=""
     }

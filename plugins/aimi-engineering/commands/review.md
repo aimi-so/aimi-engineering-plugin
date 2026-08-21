@@ -31,10 +31,85 @@ Use `$DEFAULT_BRANCH` in all subsequent git diff commands instead of a hardcoded
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 ```
 
+### Resolve $AIMI_CLI
+
+Unconditional — every item below (PR number, GitHub URL, and the Setup section's changed-files lookup) needs `$AIMI_CLI` regardless of which target type is detected, not only the empty-argument path. Resolve the CLI path using the four-layer strategy. Each check is a separate Bash call (no compound operators).
+
+**Layer 0: AIMI_PLUGIN_DIR (env var override)**
+
+```bash
+if [ -z "${CLAUDECODE:-}" ] && [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+```
+
+**Layer 1: Global cache (fast path)**
+
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null); fi
+```
+
+**Layer 1 validation: verify cached path exists and is executable**
+
+```bash
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+```
+
+**Layer 2: Glob fallback (zsh-safe)**
+
+Picks the newest **version**, which is not the last line `ls` prints — `ls`
+collates `1.121.3` before `1.9.0`. Sorting whole paths is wrong too, because
+the glob spans two wildcards and would order by marketplace entry first, so
+each candidate carries its own version segment and `sort -V` keys on that.
+Canonical rule: `_resolve_latest_cache_path` in `aimi-cli.sh`, inlined here
+because it lives inside the file this block is still looking for.
+
+```bash
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
+```
+
+**Layer 2 cache update: save for next time**
+
+```bash
+if [ -n "$AIMI_CLI" ]; then _aimi_cfg="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"; mkdir -p "$_aimi_cfg" && printf '%s\n' "$AIMI_CLI" > "$_aimi_cfg/cli-path.tmp" && mv "$_aimi_cfg/cli-path.tmp" "$_aimi_cfg/cli-path" && chmod 600 "$_aimi_cfg/cli-path"; fi
+```
+
+**Layer 3: Per-project fallback (last resort)**
+
+```bash
+if [ -z "$AIMI_CLI" ] && [ -f .aimi/cli-path ] && [ -x "$(cat .aimi/cli-path)" ]; then AIMI_CLI=$(cat .aimi/cli-path); fi
+```
+
+If `$AIMI_CLI` is still empty after all layers, report the error and STOP:
+- If `$AIMI_PLUGIN_DIR` is set: "aimi-cli.sh not found. Check AIMI_PLUGIN_DIR path: $AIMI_PLUGIN_DIR"
+- Otherwise: "aimi-cli.sh not found. Reinstall plugin: `/plugin install aimi-engineering`"
+
+**Run version check:**
+
+```bash
+$AIMI_CLI check-version --quiet --fix
+```
+
 ### Detect Target Type
 
-1. **PR number** (numeric): Fetch PR with `gh pr view $ARGUMENTS --json title,body,files,headRefName,baseRefName`
-2. **GitHub URL**: Extract PR number, then fetch as above
+1. **PR number** (numeric): Fetch PR with `forge-pr-view` (`--include` is a comma-separated field selector — see `commands/references/forge-contract.md`; `files` is dropped here since nothing at this step consumes it). Runs in `forge-pr-view`'s built-in quiet degrade mode, so a missing/unauthenticated `gh` yields `status: "error"` with no stderr banner — the git-diff fallback documented in Error Handling below is what actually surfaces that to the user:
+
+   `$ARGUMENTS` is validated as digits-only **in the same block that interpolates it**, never in a block of its own — each fenced block runs in its own isolated shell, so a gate placed in an earlier block cannot stop this one: its `exit 1` ends only that shell. The `case` form is deliberate rather than the `grep -qE` used for branch names in item 3: `grep` matches line by line, so it would accept a multi-line value whose *first* line is digits, while `case` tests the whole string and rejects any non-digit character, newlines included.
+
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   case "$ARGUMENTS" in
+     ''|*[!0-9]*)
+       echo "Error: Invalid PR number: $ARGUMENTS" >&2
+       exit 1
+       ;;
+   esac
+   PR_JSON=$($AIMI_CLI forge-pr-view --pr "$ARGUMENTS" --include title,body,headRefName,baseRefName)
+   ```
+
+   This gate is defense-in-depth, not the only line of defense — `forge-pr-view` validates its own `--pr` value against a fixed regex before it reaches any `gh` command, which is what covers a value crafted to break out of the quoting in the gate line itself.
+
+   Branch on `PR_JSON`'s `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention): on `found`, read `.pr.title`/`.pr.body`/`.pr.headRefName`/`.pr.baseRefName`; on `not_found` or `error`, fall through to the git-diff comparison the same way a missing `gh` does (see Error Handling below).
+2. **GitHub URL**: Extract the PR number from the URL, assign that extracted number into `$ARGUMENTS`, then run item 1's block **unchanged** — the same validation gate and the same `forge-pr-view` call. Do NOT write a second, parallel `forge-pr-view` invocation for this case: item 1's block is the single gated path to that command, and re-entering it is what makes the URL case inherit the digits-only check instead of skipping it.
 3. **Branch name**: Validate `$ARGUMENTS` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command — the same check Case B step 4 below applies to `$CANDIDATE_BRANCH`:
 
    ```bash
@@ -49,46 +124,38 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 ### Resolve Review Branch (Empty Argument)
 
-Only runs when `$ARGUMENTS` is empty (Detect Target Type item 4). It determines `$REVIEW_BRANCH` without assuming `$CURRENT_BRANCH` is the feature branch — HEAD parked on `$DEFAULT_BRANCH` is the normal end state after a container-mode or phase-mode `/aimi:execute` run, since the main working tree is never checked out onto the feature branch in either mode.
+Only runs when `$ARGUMENTS` is empty (Detect Target Type item 4). It determines `$REVIEW_BRANCH` without assuming `$CURRENT_BRANCH` is the feature branch — HEAD parked on **the base branch** is the normal end state after a container-mode or phase-mode `/aimi:execute` run, since the main working tree is never checked out onto the feature branch in either mode. "The base branch" is not always `$DEFAULT_BRANCH`: a container-mode run stacked on top of another feature branch (its own base was never the default branch to begin with) leaves HEAD parked on that other feature branch instead, so the discriminator below asks the one question that actually matters — does HEAD differ from the branch the active tasks file names — rather than the narrower "does HEAD differ from `$DEFAULT_BRANCH`".
 
-**Case A — HEAD is already on a real feature branch.** When `$CURRENT_BRANCH` is non-empty, is not the literal string `HEAD` (detached), and differs from `$DEFAULT_BRANCH`, reuse it unchanged — no behavior change from before:
+1. Resolve `$AIMI_CLI` by following the **Resolve CLI Path** and **Version Check** sections of `commands/references/cli-path-resolution.md`.
+2. Read the active tasks file's branch name with the single guarded `$AIMI_CLI metadata` call `commands/open-pr.md`'s own Case B already establishes for this identical situation, rather than a separate `find-tasks` lookup plus a raw `jq -r '.metadata.branchName'` read. It is **read-only** in the same sense that lookup was: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it cannot repoint a live `/aimi:execute` session's tracked tasks file — its only state write is the narrow self-heal path that fires solely when the recorded state pointer already points to a deleted file.
+
+   ```bash
+   CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+   ```
+
+3. Validate `$CANDIDATE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command.
+
+**Case A — nothing to correct.** Either `$CANDIDATE_BRANCH` is unusable (no tasks file discoverable, or `branchName` empty or invalid), or it is usable but already equals `$CURRENT_BRANCH` — HEAD is already on the branch the tasks file names, whether or not that happens to be `$DEFAULT_BRANCH`. Either way, reuse `$CURRENT_BRANCH` unchanged:
 
 ```bash
 REVIEW_BRANCH="$CURRENT_BRANCH"
+if [ -z "$CANDIDATE_BRANCH" ] || ! echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
+  echo "Warning: No active tasks file found (or its branchName is missing/invalid) — proceeding with the checked-out branch ($CURRENT_BRANCH), which may not be the feature branch." >&2
+fi
 ```
 
-**Case B — HEAD is on `$DEFAULT_BRANCH` (or detached).** Resolve the target from the active tasks file's `metadata.branchName` instead of diffing against `HEAD`:
+No message is printed for the "already correct" half of Case A — `$REVIEW_BRANCH` needs no announcement to keep using itself.
 
-1. Resolve `$AIMI_CLI` by following the **Resolve CLI Path** and **Version Check** sections of `commands/references/cli-path-resolution.md`.
-2. Discover the active tasks file with the **read-only** lookup only — never `$AIMI_CLI init-session`, which writes `.aimi/state/current-tasks` and `.aimi/state/current-branch` as a side effect and could repoint a concurrently running `/aimi:execute` session's tracked tasks file:
+**Case B — HEAD is not the branch the tasks file names.** Fires whenever a valid `$CANDIDATE_BRANCH` differs from `$CURRENT_BRANCH`. This covers both the pre-existing scenario (HEAD parked on `$DEFAULT_BRANCH`, the ordinary container-mode end state) and the stacked-base scenario the widened trigger fixes (HEAD parked on a *different* feature branch because the run was stacked on top of it) — one rule for both, since neither case is special beyond "HEAD is not the tasks file's branch":
 
-   ```bash
-   TASKS_FILE=$($AIMI_CLI find-tasks 2>/dev/null)
-   ```
+```bash
+if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$' && [ "$CANDIDATE_BRANCH" != "$CURRENT_BRANCH" ]; then
+  echo "Resolved feature branch from the active tasks file: $CANDIDATE_BRANCH (HEAD was on $CURRENT_BRANCH)" >&2
+  REVIEW_BRANCH="$CANDIDATE_BRANCH"
+fi
+```
 
-3. When `$TASKS_FILE` is non-empty, read its branch name:
-
-   ```bash
-   CANDIDATE_BRANCH=$(jq -r '.metadata.branchName // empty' "$TASKS_FILE" 2>/dev/null)
-   ```
-
-4. Validate `$CANDIDATE_BRANCH` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command:
-
-   ```bash
-   if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
-     REVIEW_BRANCH="$CANDIDATE_BRANCH"
-   fi
-   ```
-
-5. **Fallback.** When `$TASKS_FILE` is empty (no tasks file discoverable), `$CANDIDATE_BRANCH` is empty, or validation fails, do not proceed with an unvalidated value — fall back to the checked-out branch and warn:
-
-   ```bash
-   REVIEW_BRANCH="$CURRENT_BRANCH"
-   ```
-
-   ```
-   Warning: No active tasks file found (or its branchName is missing/invalid) and HEAD is on $DEFAULT_BRANCH — nothing to review.
-   ```
+The correction is reported (to stderr, matching the Case A warning's own `>&2` convention) rather than applied silently: once the trigger also covers the stacked-base case, `$REVIEW_BRANCH` being swapped is no longer obviously "HEAD was on the default branch" — the swapped-from value is itself a plausible-looking feature branch, and a silent substitution there would be a surprise rather than a correction. Naming both branches makes it auditable in the transcript instead.
 
 Track whether `$REVIEW_BRANCH` was resolved from the tasks file (i.e. `$REVIEW_BRANCH` != `$CURRENT_BRANCH`) — Step 5's report surfaces this so the user is never confused about what was diffed.
 
@@ -96,7 +163,10 @@ Track whether `$REVIEW_BRANCH` was resolved from the tasks file (i.e. `$REVIEW_B
 
 ```bash
 # Get changed files
-gh pr view [number] --json files --jq '.files[].path'
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_FILES_JSON=$($AIMI_CLI forge-pr-view --pr [number] --include files)
+echo "$PR_FILES_JSON" | jq -r '.pr.files[].path'
 # OR for branch comparison (REVIEW_BRANCH is $ARGUMENTS for the explicit
 # branch-name path in item 3 above, or the value resolved by "Resolve Review
 # Branch (Empty Argument)" when no argument was given):
@@ -211,7 +281,7 @@ Automatically invoke the design-implementation reviewer when the tasks file sign
 **Trigger gate** — both conditions must be true:
 
 1. `jq -r '.metadata.prototypePaths // empty' $TASKS_FILE` returns a non-empty value
-2. `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE` returns a value greater than 0
+2. `$AIMI_CLI verification-report --tasks-file $TASKS_FILE | jq '.visual | length'` returns a value greater than 0 — the same verb `/aimi:execute` Step 0.7 answers this from, folded in here rather than left as its own third reading of the rule. It also closes a gap the old `jq -r '[.userStories[] | select(.verification.strategy == "visual")] | length' $TASKS_FILE'` had and Step 0.7's own scan never did: with no `type == "object"` guard on `.verification`, a string-typed `verification` made jq abort ("Cannot index string with strategy") where Step 0.7's guarded copy counted zero. `verification-report` type-checks before it reads `.strategy`, so a malformed `verification` answers zero visual stories here too, never an abort.
 
 If either condition fails (e.g., pre-1.73.0 tasks files that lack `metadata.prototypePaths`, or no story uses `verification.strategy: "visual"`), skip this section entirely — no agent is spawned.
 
@@ -323,5 +393,5 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 | No review target found | Ask user to specify PR number or branch |
 | Agent fails | Proceed with available results, note in report |
 | No changed files | Report "No changes to review" |
-| gh CLI not installed | Fall back to git diff for branch comparison |
-| Empty arguments, HEAD on `$DEFAULT_BRANCH` (or detached), no active tasks file discoverable (or its `branchName` is missing/invalid) | Fall back to `$CURRENT_BRANCH`; warn "nothing to review" (see Resolve Review Branch (Empty Argument)) |
+| `forge-pr-view` reports `status: "error"` (e.g. gh CLI not installed) | Fall back to git diff for branch comparison |
+| Empty arguments, no active tasks file discoverable (or its `branchName` is missing/invalid) | Fall back to `$CURRENT_BRANCH`; warn (see Resolve Review Branch (Empty Argument)) |

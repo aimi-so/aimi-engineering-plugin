@@ -41,6 +41,23 @@ ESCAPED_AIMI_DIR=$(printf '%s' "$RESOLVED_AIMI_DIR" | sed 's/[.[\*^$()+?{|\\]/\\
 #   ~/\.config\/aimi  |  \$\{XDG_CONFIG_HOME:-\$HOME\/\.config\}\/aimi  |  \$\{AIMI_CONFIG_DIR:-...\}  |  /resolved/path
 AIMI_DIR_RE="(~/\\.config/aimi|\\\$\\{XDG_CONFIG_HOME:-\\\$HOME/\\.config\\}/aimi|\\\$\\{AIMI_CONFIG_DIR:-\\\$\\{XDG_CONFIG_HOME:-\\\$HOME/\\.config\\}/aimi\\}|${ESCAPED_AIMI_DIR})"
 
+# --- The Layer 2 glob pipeline's version-comparison tail ---
+# Patterns 7 and 8 approve the Layer 2 glob one-liners written out in
+# commands/references/cli-path-resolution.md, and they match the command text
+# LITERALLY -- so this tail has to be spelled here exactly as those blocks
+# spell it, or the commands stop being auto-approved and start prompting.
+# The rule it encodes (sort on the version path segment, never lexicographic
+# `ls` order and never a whole-path `sort -V`) is owned by
+# _resolve_latest_cache_path in scripts/aimi-cli.sh.
+#
+# It is escaped by the same sed pass that escapes the config dirs above rather
+# than by hand, for two reasons: the fragment is dense with ERE
+# metacharacters -- `\1` left unescaped is a BACK-REFERENCE, not a literal --
+# and hand-escaping it twice, once here and once for the worktree-manager
+# twin, is exactly how two copies of one string drift apart.
+GLOB_VERSION_TAIL=' | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'
+GLOB_VERSION_TAIL_RE=$(printf '%s' "$GLOB_VERSION_TAIL" | sed 's/[].[\*^$()+?{|\\}]/\\&/g')
+
 # --- Helper: Reject shell metacharacters ---
 # Returns 0 (true) if dangerous metacharacters are found after the variable reference.
 has_metacharacters() {
@@ -186,15 +203,15 @@ if echo "$COMMAND" | grep -qE '^if \[ -n "\$WORKTREE_MGR" \] && \[ ! -x "\$WORKT
 fi
 
 # --- Pattern 7: AIMI_CLI Layer 2 glob fallback (bash -c wrapper) ---
-# Approves: if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | tail -1'); fi
-if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$AIMI_CLI\" \\]; then AIMI_CLI=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/scripts/aimi-cli\\.sh 2>/dev/null \\| tail -1'\\); fi\$"; then
+# Approves: if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null<version tail>'); fi
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$AIMI_CLI\" \\]; then AIMI_CLI=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/scripts/aimi-cli\\.sh 2>/dev/null${GLOB_VERSION_TAIL_RE}'\\); fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
 
 # --- Pattern 8: WORKTREE_MGR Layer 2 glob fallback (bash -c wrapper) ---
-# Approves: if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/scripts/worktree-manager.sh 2>/dev/null | tail -1'); fi
-if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/scripts/worktree-manager\\.sh 2>/dev/null \\| tail -1'\\); fi\$"; then
+# Approves: if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null<version tail>'); fi
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/skills/git-worktree/scripts/worktree-manager\\.sh 2>/dev/null${GLOB_VERSION_TAIL_RE}'\\); fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
@@ -242,8 +259,8 @@ if echo "$COMMAND" | grep -qE '^if \[ -z "\$AIMI_CLI" \] && \[ -f \.aimi/cli-pat
 fi
 
 # --- Pattern 12: WORKTREE_MGR Layer 3 per-project fallback ---
-# Approves: if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(cat .aimi/cli-path)")/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
-if echo "$COMMAND" | grep -qE '^if \[ -z "\$WORKTREE_MGR" \] && \[ -f \.aimi/cli-path \]; then WORKTREE_MGR=\$\(dirname "\$\(cat \.aimi/cli-path\)"\)/worktree-manager\.sh; if \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi; fi$'; then
+# Approves: if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(dirname "$(cat .aimi/cli-path)")")/skills/git-worktree/scripts/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
+if echo "$COMMAND" | grep -qE '^if \[ -z "\$WORKTREE_MGR" \] && \[ -f \.aimi/cli-path \]; then WORKTREE_MGR=\$\(dirname "\$\(dirname "\$\(cat \.aimi/cli-path\)"\)"\)/skills/git-worktree/scripts/worktree-manager\.sh; if \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi; fi$'; then
   echo "$ALLOW"
   exit 0
 fi

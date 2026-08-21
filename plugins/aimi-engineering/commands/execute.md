@@ -1,7 +1,7 @@
 ---
 name: aimi:execute
 description: Execute all pending stories autonomously with wave-based parallelism
-argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline] [--push]"
+argument-hint: "[--phase <N>] [--base <branch>] [--container|--inline]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash(git:*), Bash(mkdir:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*), Bash(WORKTREE_MGR=*), Bash($WORKTREE_MGR:*), Task
 ---
@@ -56,7 +56,26 @@ A non-zero exit here stops the run before any git, worktree, or CLI call consume
 
 When `--base` was not passed, `$BASE_BRANCH` stays empty and every `resolve-base-branch`/`setup-branch` call below omits `--base` — or passes it empty, which those verbs treat identically to omission — falling back to the verb's own resolution order. When it was passed, this runs in Step 0, before Step 0.9's split loop and Step 1.6's picker, so the value is available to be carried into every call site that threads it, including the multi-repo split path that has no other opportunity to learn it before its own worktrees are created. An explicit `--base` also short-circuits Step 1.6's own gating and any per-repo picker Step 2 would otherwise run: `resolve-base-branch` reports `reason: "explicit-base"` and `promptNeeded: false` whenever `--base` is supplied, so no `AskUserQuestion` fires on top of a choice the user already made — see Step 1.6 below.
 
-`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`/`--push`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container`/`--inline`/`--push` already coexist without either stripping the raw `$ARGUMENTS` string.
+`--base` is matched on its own literal token, independently of `--phase`'s (numeric-only) and `--container`/`--inline`'s (bare-token) extractions above and below — passing several of these flags in one invocation is unaffected, exactly as `--container` and `--inline` already coexist without either stripping the raw `$ARGUMENTS` string.
+
+### Refuse --push
+
+`--push` was removed. It is not accepted, not ignored and not deprecated: an invocation still carrying it STOPS here, in Step 0, before `init-session` mutates any state. The contract that removal enforces — what counts as publishing, why nothing in a file or on a command line is consent, and why agent mode therefore has no flag that re-enables a push — is defined in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here.
+
+Scan and exit in the **same** block, for the same reason the `--base` validation above does: each Bash tool call is an isolated shell, so a gate living in a fence of its own would test an unset variable and pass vacuously. The bare-token `case` is the shape Parse --container/--inline Override below already uses:
+
+```bash
+case " $ARGUMENTS " in
+  *" --push "*) PUSH_REFUSED=true ;;
+  *) PUSH_REFUSED=false ;;
+esac
+if [ "$PUSH_REFUSED" = "true" ]; then
+  echo "Removed flag: --push. An agent-mode run never publishes to origin, and no flag re-enables it. Publish with /aimi:open-pr --branch <branchName>." >&2
+  exit 1
+fi
+```
+
+The non-zero exit is the whole point, not a side effect. A pipeline that passed `--push` on the previous version got a published branch out of it; accepting the flag and quietly doing nothing would hand that same pipeline silence instead — the one outcome nobody notices. Failing is the only result that cannot be misread. Report the refusal to the person in whatever language they are writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule), and STOP.
 
 ## Multi-Repo Handling
 
@@ -120,7 +139,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Creat
 
 ## Release the Claim on Abort
 
-This section is the single source of truth for releasing a phase's `roadmap-claim` when a phase-mode session (Step 1.7 onward) stops without reaching the normal completion path (**Mark Phase Completed** in Phase Completion, which already releases the claim atomically as part of its `completed` status write). Every other STOP/abort in phase mode, once this session has successfully claimed a phase, releases the claim first. There are no exceptions: a session that has stopped acting on a phase is no longer "actively working" it, and `roadmap-claim`'s own auto-mode branch already treats any *unclaimed* `pending`/`planned`/`in_progress`/`verification_failed` phase as re-claimable (lowest id among dependency-eligible candidates) — so an unclaimed phase, whatever its status, is cleanly recoverable by a plain `/aimi:execute` re-run, self or otherwise. Holding the claim past this session's own stop only forces that recovery to wait on PID-liveness staleness instead of being immediate.
+This section is the single source of truth for releasing a phase's `roadmap-claim` when a phase-mode session (Step 1.7 onward) stops without reaching the normal completion path (**Mark Phase Completed** in Phase Completion, which already releases the claim atomically as part of its `completed` status write). Every other STOP/abort in phase mode, once this session has successfully claimed a phase, releases the claim first. There are no exceptions: a session that has stopped acting on a phase is no longer "actively working" it, and `roadmap-claim`'s own auto-mode branch already treats any *unclaimed* `pending`/`planned`/`in_progress`/`verification_failed` phase as re-claimable (among dependency-eligible candidates, ordered by remaining work first and lowest id second) — so an unclaimed phase, whatever its status, is cleanly recoverable by a plain `/aimi:execute` re-run, self or otherwise. Holding the claim past this session's own stop only forces that recovery to wait on PID-liveness staleness instead of being immediate. The work-first ordering **demotes, never excludes**: a phase with nothing left to run — a `verification_failed` phase awaiting re-verification, or a session that crashed after its last story — waits behind any phase that still has pending work, and is claimed as soon as it is the only dependency-eligible candidate. That wait is bounded by the with-work phases completing; a dependency-eligible phase that keeps failing keeps its work and can starve the stuck phase indefinitely in auto mode, in which case `/aimi:execute --phase <N>` reaches it directly, unranked.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -226,31 +245,46 @@ When `VISUAL_FOLLOW=true`, the `visual-follow` session is intentionally left ope
 
 ## Step 0.7: Visual Follow Prompt
 
-Check the tasks file directly for any stories with a visual verification strategy. Since `$AIMI_CLI status` omits the `verification` field, read the file with jq:
+Which stories carry a visual verification strategy, and whether any `verification` field is malformed, are both answered by one verb from one read of the tasks file — `$AIMI_CLI status` still omits `verification` (see the note above `story_row` in `tasks.py`, an intentional scope cut), and this is the verb that answers what `status` leaves out:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 TASKS_PATH="$($AIMI_CLI init-session 2>/dev/null | jq -r '.tasks // empty')"
-VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
-MALFORMED_VERIF=$(jq '[.userStories[] | select(.verification != null and (.verification | type != "object"))] | length' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+VISUAL_STORIES=$(printf '%s' "$VERIF_REPORT" | jq '.visual | length' 2>/dev/null)
+REPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.repairable | length' 2>/dev/null)
+UNREPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.unrepairable | length' 2>/dev/null)
 ```
 
-If `MALFORMED_VERIF` > 0, collect the affected story IDs and abort:
+If `REPAIRABLE_COUNT` > 0 or `UNREPAIRABLE_COUNT` > 0, collect the affected story IDs and abort. The two counts are kept apart deliberately: `normalize-verification` (`_verification_migrated` in `tasks.py`) rewrites a bare-string `verification` — the empty string included — and returns every other non-object shape untouched, so a number-, array- or boolean-typed `verification` is malformed but not something that verb can fix. Naming it as the fix for a shape it declines to touch would send the user into a loop with no exit; this is a deliberate divergence from the single undifferentiated `MALFORMED_VERIF` scan this replaced, not a preserved behavior — the UNION of the two counts still matches what that scan counted.
 
 ```bash
-MALFORMED_IDS=$(jq -r '[.userStories[] | select(.verification != null and (.verification | type != "object")) | .id] | join(", ")' "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+REPAIRABLE_IDS=$(printf '%s' "$VERIF_REPORT" | jq -r '.malformed.repairable | join(", ")' 2>/dev/null)
+UNREPAIRABLE_IDS=$(printf '%s' "$VERIF_REPORT" | jq -r '.malformed.unrepairable | join(", ")' 2>/dev/null)
 ```
 
-Report the error and STOP:
+Report the error and STOP. The header is always present; the two paragraphs below it are each included only when their own count is non-zero, so a file with only one shape of malformed `verification` gets a one-paragraph report, and a file with both gets both:
 ```
 Malformed verification fields detected — aborting.
+```
 
-Affected stories: [MALFORMED_IDS]
+When `REPAIRABLE_COUNT` > 0, add:
+```
 
-Verification must be an object, not a bare string. Run:
+Affected stories (bare string — repairable): [REPAIRABLE_IDS]
+
+Run:
   $AIMI_CLI normalize-verification <tasks-path>
-to fix the file, then re-run /aimi:execute.
+to fix these, then re-run /aimi:execute.
+```
+
+When `UNREPAIRABLE_COUNT` > 0, add:
+```
+
+Affected stories (verification must be an object {strategy, status, url, expect} — not automatically repairable): [UNREPAIRABLE_IDS]
+
+Rewrite each of these stories' verification field into the object form by hand, then re-run /aimi:execute.
 ```
 STOP execution.
 
@@ -552,8 +586,10 @@ Total commits: [TOTAL_COMMITS from the loop above]
 
 - Review [branch] commits: git -C [root] log --oneline [default]..[branch]   (one line per plan record)
 - Run /aimi:review for code review
-- Create PRs when ready: gh pr create
+- Open a PR for [branch] from [root]: /aimi:open-pr --branch [branch]   (one line per plan record)
 ```
+
+The PR line is per plan record and names that record's own `[root]` because `/aimi:open-pr` resolves its repository from the current directory — it has no `--project` flag — so in a multi-repo split a line naming only the branch would not be actionable. It uses the `--branch` argument form for the same reason the container report below does: Pass 4 removes every split worktree, leaving each branch checked out nowhere. Naming the command at all is the obligation `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr states; it is not restated here.
 
 Both `Total` lines are sums across **all** plan records, not two named Frontend/Backend slots. For a legacy pair every root is `$AIMI_ROOT` and every default is that repo's own default branch, so the two blocks render the same lines the paired-mode report produced before.
 
@@ -653,23 +689,14 @@ fi
 
 If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
 
-### Parse --push Override
-
-Scan `$ARGUMENTS` for an explicit `--push` token, the same way. `PUSH_FLAG` is consumed later, only in flat container mode, at container-execution.md's **Container Mode: Push the Branch** (invoked from Step 5) — it is agent mode's explicit opt-in to publish `[branchName]` to `origin` on completion; see that section for why an opt-in is required at all:
-
-```bash
-case " $ARGUMENTS " in
-  *" --push "*) PUSH_FLAG=true ;;
-  *) PUSH_FLAG=false ;;
-esac
-```
-
 ### Execution Mode Detection
 
-Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered:
+Read `metadata.execution` — the discriminator defined in `commands/references/execution-mode.md` — from the tasks file `init-session` discovered, via the same guarded `metadata` call the rest of this document uses for the same file:
 
 ```bash
-EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+EXECUTION_MODE=$($AIMI_CLI metadata | jq -r '.execution // "inline"')
 ```
 
 Only the literal string `"container"` selects the container path; every other value (`"inline"`, absence, or anything unrecognized) resolves to `inline` — the same fail-safe default rule the reference doc defines.
@@ -913,7 +940,10 @@ PHASE_ID=$(printf '%s' "$CLAIM_JSON" | jq -r '.id')
 PHASE_DIR=$(printf '%s' "$CLAIM_JSON" | jq -r '.dir')
 PHASE_SLUG=$(printf '%s' "$CLAIM_JSON" | jq -r '.slug // ""')
 PHASE_BRANCH=$(printf '%s' "$CLAIM_JSON" | jq -r '.branch // ""')
+PHASE_ENTRY_STATUS=$(printf '%s' "$CLAIM_JSON" | jq -r '.status // ""')
 ```
+
+`PHASE_ENTRY_STATUS` is the phase's **entry status** — its `roadmap.json` status as it stood at claim time, before this session touched it. It must be captured here, in this block, and nowhere else. `roadmap-claim` mutates only the `.claim` sub-object and never drives status itself (see the transition call further down this same step, which is the one and only status-mutating call), so the `.status` field on the returned phase object is the pre-claim value and is trustworthy. Moments later that same step transitions the phase to `in_progress`, so **every** later `roadmap-get` — including Phase Completion's own — reports `in_progress`, and the entry status is permanently unrecoverable from that point on. A phase re-entered after a failed creates verification is the case that needs it: `verification_failed` survives only in this variable. The `// ""` default keeps a roadmap object with no `status` field yielding an empty string rather than the literal text `null`, so a comparison against `verification_failed` can never accidentally match a stringified absence. Like `PHASE_ID`, it does not survive across Bash tool calls; the orchestrator carries it forward the same way it carries every other value this step extracts.
 
 `FEATURE_TYPE` must come from this phase's own tasks file, not the mtime-discovered `$TASKS_PATH` from Step 1 — a feature with multiple materialized phase tasks files could have a more-recently-touched sibling phase file win that mtime race, leaking the sibling's `type` into this phase's branch prefix. `PHASE_TASKS_PATH` itself isn't resolved until **Point the session at this phase's own tasks file** below, so read directly from the same path that section computes, tolerating the file not existing yet (a not-yet-planned phase, or a full-stack split phase with no single governing file):
 
@@ -922,14 +952,19 @@ FEATURE_TYPE=$(jq -r '.metadata.type // "feat"' "$AIMI_ROOT/.aimi/tasks/$FEATURE
 FEATURE_TYPE="${FEATURE_TYPE:-feat}"
 ```
 
-If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one:
+If `PHASE_BRANCH` is empty (the phase carries no pre-assigned `.branch`), compute it from the `type/<feature>-phase-<N>-<slug>` convention. `PHASE_SLUG` can itself be empty (a phase with no slug); when it is, drop the trailing `-` rather than emitting a branch name that ends in one.
+
+The branch name is built from a **dot-slugified copy** of the phase id (`.` → `-`), never from the raw `$PHASE_ID`. Phase ids are legitimately decimal — `roadmap-init` accepts `5.5` and composes `.dir` from the raw value, and `/aimi:plan` renders the id exactly as its numeric frontmatter value — but the validation regex directly below has no dot in its character class, and neither does aimi-cli.sh's own `_ROADMAP_BRANCH_REGEX`, which enforces that same shape on a roadmap's `.branch` at write time. Interpolating the raw id here yielded `...-phase-5.5-...`, which this section then rejected seven lines later, released the claim and STOPped — so every decimal-id phase whose `.branch` was null could not be executed at all.
+
+The slugifying is confined to this one derivation. Every filesystem path (`$FEATURE-phase-$PHASE_ID-tasks.json`, and the split-basename prefix strip that mirrors it) and every `--phase "$PHASE_ID"` argument keeps the **raw** id: those name real on-disk files that carry the dot, and match `roadmap.json`'s own numeric id. An id with no dot slugifies to itself, so every integer-id phase keeps the exact branch name it has today. The slugified copy is derived inside the same block that interpolates it — blocks run in isolated shells and do not share state, so it cannot be computed in an earlier one.
 
 ```bash
 if [ -z "$PHASE_BRANCH" ]; then
+  PHASE_ID_SLUG=$(printf '%s' "$PHASE_ID" | tr '.' '-')
   if [ -z "$PHASE_SLUG" ]; then
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}"
   else
-    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID}-${PHASE_SLUG}"
+    PHASE_BRANCH="${FEATURE_TYPE}/${FEATURE}-phase-${PHASE_ID_SLUG}-${PHASE_SLUG}"
   fi
 fi
 ```
@@ -1108,7 +1143,18 @@ if [ "$AIMI_ROOT_IS_GIT_REPO" != "true" ]; then
       # split has no single governing file, and that is not a refusal case.
       PHASE_MAIN_TASKS="$PHASE_DIR_PATH/$FEATURE-phase-$PHASE_ID-tasks.json"
       if [ -f "$PHASE_MAIN_TASKS" ]; then
-        GUARD_PROJECT_STORIES=$(jq '[.userStories[]? | select((.project // null) != null)] | length' "$PHASE_MAIN_TASKS")
+        # project-groups answers both this guard's question
+        # (projectStoryCount) and Derive Participating Project Groups' own
+        # question (groups) from one call -- see aimi-cli.sh's
+        # cmd_project_groups. A refusal here is a genuinely malformed tasks
+        # file (no userStories key, or an invalid project value) and is
+        # handled directly rather than through $GUARD_REFUSAL, which names
+        # only the two routability reasons below.
+        GUARD_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || {
+          $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+          exit 1
+        }
+        GUARD_PROJECT_STORIES=$(printf '%s' "$GUARD_GROUPS_JSON" | jq -r '.projectStoryCount')
         [ "${GUARD_PROJECT_STORIES:-0}" -eq 0 ] && GUARD_REFUSAL="no-project-anywhere"
       fi
       ;;
@@ -1218,7 +1264,19 @@ done <<< "$PHASE_SPLIT_CANDIDATES"
 
 PHASE_SPLIT_FILES=""
 if [ -n "$PHASE_ANCHOR_FILE" ]; then
-  PHASE_SPLIT_TOTAL=$(jq -r '.metadata.splitGroup.total' "$PHASE_ANCHOR_FILE")
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  # split-detect already resolves this exact anchor-plus-declared-siblings
+  # group over $PHASE_DIR_PATH -- one call replaces the two raw jq reads of
+  # $PHASE_ANCHOR_FILE that used to run here (`.metadata.splitGroup.total`
+  # and `.siblings[]?`), never a per-sibling read. The candidate loop above
+  # and the basename-resolution loop below are UNCHANGED: they still decide
+  # which file is the anchor and still validate every declared sibling
+  # against the anchor's own directory (the traversal-defeating property
+  # execute.md:312/:1223 both describe) -- only the SOURCE of the anchor's
+  # declared total and siblings moves from a raw file read to this call.
+  PHASE_SPLIT_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH")
+  PHASE_SPLIT_TOTAL=$(printf '%s' "$PHASE_SPLIT_JSON" | jq -r '.total')
   PHASE_SPLIT_FILES="$PHASE_ANCHOR_FILE"
   PHASE_SPLIT_OK=true
   while IFS= read -r sibling; do
@@ -1230,7 +1288,7 @@ if [ -n "$PHASE_ANCHOR_FILE" ]; then
       break
     fi
     PHASE_SPLIT_FILES="${PHASE_SPLIT_FILES}"$'\n'"${SIBLING_PATH}"
-  done < <(jq -r '.metadata.splitGroup.siblings[]?' "$PHASE_ANCHOR_FILE")
+  done < <(printf '%s' "$PHASE_SPLIT_JSON" | jq -r --arg anchor "$PHASE_ANCHOR_FILE" '.members[] | select(.path != $anchor) | .path')
   PHASE_SPLIT_COUNT=$(printf '%s\n' "$PHASE_SPLIT_FILES" | grep -c .)
   if [ "$PHASE_SPLIT_OK" != true ] || [ "$PHASE_SPLIT_COUNT" -ne "$PHASE_SPLIT_TOTAL" ] || [ "$PHASE_SPLIT_COUNT" -lt 2 ]; then
     echo "Warning: phase split group is incomplete (declared total ${PHASE_SPLIT_TOTAL}, resolved ${PHASE_SPLIT_COUNT}) — falling back to single-file phase execution" >&2
@@ -1283,9 +1341,17 @@ A member with nothing left to do takes no part in execution. Before any branch, 
 ```bash
 PHASE_ACTIVE_SPLIT_FILES=""
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # One split-detect call, hoisted above the loop, in place of a per-member
+  # jq pending-count read -- it already computes pendingCount per member
+  # from the same `(.status // "pending") != "completed"` predicate this
+  # loop used to apply itself.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    SPLIT_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+    SPLIT_PENDING=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .pendingCount')
     if [ "${SPLIT_PENDING:-0}" -gt 0 ]; then
       if [ -n "$PHASE_ACTIVE_SPLIT_FILES" ]; then
         PHASE_ACTIVE_SPLIT_FILES="${PHASE_ACTIVE_SPLIT_FILES}"$'\n'"${split_file}"
@@ -1337,19 +1403,34 @@ This phase's participating project groups cannot be known until **Detect a Full-
 
 ```bash
 PHASE_MAIN_TASKS="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHASE_ID-tasks.json"
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_ACTIVE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline (aimi-cli.sh's
+  # cmd_project_groups) -- and, new here, validates every group other than
+  # "." before returning it. A refusal (an invalid project value, every
+  # offender named on stderr) is a deliberate tightening: this site never
+  # validated before.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || {
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  }
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
 An empty result (a phase, or an active split file, whose `userStories` array is empty — legal, see Active Split Files above) falls back to exactly one `.` group, preserving today's single-container behavior rather than creating zero containers.
@@ -1368,6 +1449,14 @@ PHASE_GROUP_TOPLEVELS_SEEN=""
 PHASE_LAST_GROUP_TOPLEVEL=""
 while IFS= read -r GROUP_PROJECT; do
   [ -n "$GROUP_PROJECT" ] || continue
+  # This loop is fed by BOTH branches of Derive Participating Project Groups
+  # above: for PHASE_SPLIT_MODE=true, $GROUP_PROJECT is a split member's own
+  # metadata.splitGroup.project (validated only here, not by project-groups,
+  # which that branch never calls); for PHASE_SPLIT_MODE=false it is already
+  # project-groups-validated. Validating unconditionally here is therefore
+  # still required for the split-mode source and a harmless no-op re-check
+  # for the other -- removing it would leave split-mode's own project value
+  # unvalidated before it is joined onto GROUP_ROOT below.
   case "$GROUP_PROJECT" in
     .)
       GROUP_KEY="DEFAULT"
@@ -1455,19 +1544,29 @@ With `PHASE_SPLIT_MODE=false` and every story project-less — today's byte-for-
 
 When it applies, this MUST complete before Step 3.3's Open Visual Follow Session computes `VISUAL_URL` — the same hard ordering rule Container Dev Server Bootstrap (Step 3.3) already enforces for flat container mode: install-deps → serve start → compute VISUAL_URL → open the visual-follow session.
 
-Gate on the phase's own tasks file having at least one visual story at all — the same jq shape Step 0.7 already uses — before doing any per-group work:
+Gate on the phase's own tasks file having at least one visual story at all — the same verb Step 0.7 already uses — before doing any per-group work:
 
 ```bash
-PHASE_VISUAL_STORIES=$(jq '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")] | length' "$PHASE_TASKS_PATH" 2>/dev/null)
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_VISUAL_STORIES=$($AIMI_CLI verification-report --tasks-file "$PHASE_TASKS_PATH" 2>/dev/null | jq '.visual | length' 2>/dev/null)
 ```
 
 **When `PHASE_VISUAL_STORIES` is 0 or empty:** skip the rest of this subsection entirely — no group needs a server, so no `WORKTREE_MGR` resolution happens.
 
-**Otherwise**, compute each group's *own* `HAS_VISUAL_STORY` gate — filtering `PHASE_MAIN_TASKS`'s visual stories by that group's own `.project` value, never the whole-file count just computed above — into a `<toplevel>\t<true|false>` plan-line list, mirroring Split Container Dev Server Bootstrap's plan-line technique (Phase-Mode Paired Split, below) so a bare `HAS_VISUAL_STORY` scalar is never read after being reassigned across groups in a loop:
+**Otherwise**, compute each group's *own* `HAS_VISUAL_STORY` gate — filtering `PHASE_MAIN_TASKS`'s visual stories (fetched ONCE, before the loop, from the same verb) by that group's own `.project` value, never the whole-file count just computed above — into a `<toplevel>\t<true|false>` plan-line list, mirroring Split Container Dev Server Bootstrap's plan-line technique (Phase-Mode Paired Split, below) so a bare `HAS_VISUAL_STORY` scalar is never read after being reassigned across groups in a loop:
 
 ```bash
-PHASE_GROUP_PROJECTS=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_MAIN_TASKS" | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+# This subsection only runs for PHASE_SPLIT_MODE=false (see above), so
+# project-groups' single tasks-file mode is always the right one here --
+# unlike Derive Participating Project Groups, there is no split branch to
+# preserve. A refusal here (an invalid project value) is new: this site
+# never validated before.
+PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_MAIN_TASKS") || exit 1
+PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
+PHASE_MAIN_VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$PHASE_MAIN_TASKS" 2>/dev/null)
 
 PHASE_SERVER_PLAN=""
 while IFS= read -r GROUP_PROJECT; do
@@ -1478,9 +1577,12 @@ while IFS= read -r GROUP_PROJECT; do
     GROUP_ROOT="$AIMI_ROOT/$GROUP_PROJECT"
   fi
   GROUP_TOPLEVEL=$(git -C "$GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || GROUP_TOPLEVEL="$GROUP_ROOT"
-  PHASE_GROUP_VISUAL=$(jq --arg p "$GROUP_PROJECT" \
-    '[.userStories[] | select((.project // ".") == $p) | select(.verification | type == "object" and .strategy == "visual")] | length' \
-    "$PHASE_MAIN_TASKS")
+  # A trivial jq FILTER over the verb's own JSON, already fetched above -- not
+  # a second document read with a --project flag. `.project` on each visual
+  # story already collapsed any non-string shape to null (verification_report
+  # in tasks.py), so `// "."` here fires on exactly the cases it always did.
+  PHASE_GROUP_VISUAL=$(printf '%s' "$PHASE_MAIN_VERIF_REPORT" | jq --arg p "$GROUP_PROJECT" \
+    '[.visual[] | select((.project // ".") == $p)] | length' 2>/dev/null)
   if [ "${PHASE_GROUP_VISUAL:-0}" -gt 0 ]; then
     PHASE_SERVER_PLAN="${PHASE_SERVER_PLAN}${GROUP_TOPLEVEL}"$'\t'"true"$'\n'
   else
@@ -1534,12 +1636,18 @@ while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dir
 [ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if git -C "$AIMI_ROOT" rev-parse --git-dir >/dev/null 2>&1; then AIMI_ROOT_IS_GIT_REPO=true; else AIMI_ROOT_IS_GIT_REPO=false; fi
 
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+# Hoisted once, above the loop -- never re-called per split_file.
+PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
+
 SPLIT_BRANCHES=""
 SPLIT_PLAN=""
 SPLIT_KEYS=""
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
-  SPLIT_PROJECT=$(jq -r '.metadata.splitGroup.project // ""' "$split_file")
+  SPLIT_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // ""')
   case "$SPLIT_PROJECT" in
     ""|null)
       SPLIT_SLUG=$(basename "$split_file" -tasks.json)
@@ -1652,6 +1760,8 @@ Independently for each active split — never against `PHASE_CONTAINER_PATH` its
 This block **computes** the gates; it starts no server. It re-assigns `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout (pasted back verbatim, same isolated-shell rule as above) and emits one plan line per active member — `<SPLIT_TOPLEVEL>\t<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` (or `SPLIT_TOPLEVEL`) would by then hold only the *last* member's value:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
@@ -1662,7 +1772,13 @@ while IFS= read -r member; do
   split_file=$(printf '%s' "$member" | jq -r '.file')
   SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
   SPLIT_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
-  SPLIT_VISUAL_STORIES=$(jq '[.userStories[]? | select(.verification | type == "object" and .strategy == "visual")] | length' "$split_file" 2>/dev/null)
+  # A missing or unreadable split file degrades to zero visual stories --
+  # mirroring the old `.userStories[]?` tolerance for a missing userStories
+  # key, which this verb raises for instead of swallowing (every other
+  # verification-report call site wants that raise; here the `2>/dev/null`
+  # plus the `${:-0}` fallback below swallow it, same as they already
+  # swallowed a genuinely malformed split file).
+  SPLIT_VISUAL_STORIES=$($AIMI_CLI verification-report --tasks-file "$split_file" 2>/dev/null | jq '.visual | length' 2>/dev/null)
   if [ "${SPLIT_VISUAL_STORIES:-0}" -gt 0 ]; then
     HAS_VISUAL_STORY=true
   else
@@ -2013,7 +2129,9 @@ Get the branch name from the init-session output (already validated by CLI).
 Read and validate `branchName` — defense in depth, mirroring `PHASE_BRANCH`'s validate-once-quote-everywhere discipline (`cmd_init_session` already rejected an invalid `branchName` in Step 1, before this subsection ever runs):
 
 ```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -2089,7 +2207,7 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
    PROJECT_DEFAULT=$($AIMI_CLI detect-default-branch --project [resolved_project_path])
    git -C [resolved_project_path] fetch origin 2>/dev/null || true
-   BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+   BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
    if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
      echo "Invalid branchName: $BRANCH_NAME" >&2
      exit 1
@@ -2188,6 +2306,35 @@ $AIMI_CLI count-pending
 ```
 
 If result is `0`:
+
+**Re-verify branch — a phase that entered `verification_failed` with nothing left to execute.** Evaluate this branch **first**, before the release-and-STOP below. It fires only when **all five** of these hold together:
+
+1. `count-pending` returned `0` (this is the `If result is 0` case, so it already holds here);
+2. `PHASE_MODE=true`;
+3. `$PHASE_ID` is set — the session itself ran Step 1.7, which is never true inside a Phase-Mode Paired Split sub-orchestrator, since one never learns `$PHASE_ID`;
+4. `PHASE_SPLIT_MODE=false`;
+5. `PHASE_ENTRY_STATUS` equals the literal string `verification_failed` (captured in Step 1.7's on-success extraction block — the only surviving witness of the entry status, since the `in_progress` transition in that same step overwrote it in `roadmap.json`).
+
+**If any single one of the five is false, fall through to the unchanged path below** — flat mode, flat container mode, a phase entered as `pending`/`planned`/`in_progress`, and a split sub-orchestrator with no `$PHASE_ID` all behave exactly as they do today, with no observable difference.
+
+When it fires: do **not** release the claim, do **not** print `All stories already complete!`, and do **not** STOP. Report the block below, then **skip Validate Dependencies, Steps 3.1, 3.2, 3.3 and 3.4, and all of Step 4**, and continue directly into the **Phase Completion** section.
+
+```
+Phase [PHASE_ID] has 0 pending stories but entered this run as
+verification_failed — every story is done, the phase's creates verification
+is what failed.
+
+Re-verifying branch [PHASE_BRANCH] instead of stopping. Skipping the wave
+loop (nothing to execute) and continuing straight to phase verification.
+```
+
+**Why this is not a STOP, and why the claim stays held.** Phase Completion owns the release on *both* of its outcomes: Mark Phase Completed releases atomically on success, and Creates Verification's `On any missing entry` path sets `verification_failed` again and releases on a repeat failure. Releasing here would hand the phase to a racing session in the middle of its own verification. Every *other* phase-mode STOP in Step 3 — the `All stories already complete!` STOP below and Validate Dependencies' failure STOP — keeps its existing release-first call unchanged.
+
+**Why skipping those steps is safe.** Phase Completion consumes nothing they produce: it re-fetches `PHASE_JSON`/`PHASE_NAME` from its own `roadmap-get` call, Creates Verification derives `PARTICIPATING_GROUP_KEYS` fresh from the phase's own tasks file and recomputes each participating repository's container as that repository's toplevel plus `.worktrees/$PHASE_BRANCH` rather than reusing anything from Step 1.7, and `$WORKTREE_MGR` is re-resolved inline where Mark Phase Completed needs it. `MAX_CONCURRENCY` (Step 3.2), the project guidelines (Step 3.3) and `VISUAL_URL` (Step 3.4) have no reader in Phase Completion or Step 5 on this path.
+
+**No `init-session` re-run is added here.** Step 1.7's **Point the session at this phase's own tasks file** already pointed session state at `$PHASE_TASKS_PATH`, and the `count-pending` that just returned `0` is the proof that it did — Phase Completion's own bare `count-pending` (Multi-File Pending Count, `PHASE_SPLIT_MODE=false` branch) reads that same session state, gets the same `0`, and its "pending count is greater than 0" abort branch is therefore not taken.
+
+This mirrors an already-supported route rather than inventing a new one: Phase-Mode Paired Split already continues to Phase Completion with `PHASE_ACTIVE_COUNT` of `0` — every member already completed, nothing spawned — precisely because Phase Completion is what re-runs the pending-count and creates-verification checks. This branch extends that same behavior to the non-split path. Condition 4 is belt-and-braces: a split phase's top-level orchestrator never reaches Step 3 at all (Step 1.7 routes `PHASE_SPLIT_MODE=true` to Phase-Mode Paired Split instead of Step 2), so the load-bearing conditions here are 3 and 5.
 
 **When `PHASE_MODE=true` and `$PHASE_ID` is set** (this session itself ran Step 1.7 — never true inside a Phase-Mode Paired Split sub-orchestrator, which never learns `$PHASE_ID`), release the claim first (see Release the Claim on Abort):
 
@@ -2294,13 +2441,21 @@ When stories target different projects (via the `project` field), each project m
 Scan ALL pending stories (not just this wave's ready set — the dev server is started once, before the wave loop, and kept alive across every wave rather than restarted per wave) for the set of project groups that have at least one visual story:
 
 ```bash
-VISUAL_GROUP_KEYS=$(jq -r '[.userStories[] | select(.verification | type == "object" and .strategy == "visual") | (.project // "DEFAULT")] | unique | .[]' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+# `.project` on each visual story is already normalized by verification_report
+# (tasks.py) -- any non-string shape collapsed to null there -- so `// "DEFAULT"`
+# below fires on exactly the cases it always did, and `unique` never sees an
+# array pretty-printed across several lines masquerading as several group keys.
+VISUAL_GROUP_KEYS=$($AIMI_CLI verification-report --tasks-file "$AIMI_ROOT/$TASKS_PATH" | jq -r '[.visual[] | (.project // "DEFAULT")] | unique | .[]')
 ```
 
 For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):
 
 ```bash
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -2345,13 +2500,15 @@ command -v agent-browser
 - **If `agent-browser` is available:** Get the verification URL from the first visual story. In phase mode, source it from `$PHASE_TASKS_PATH` — never the mtime-discovered `$TASKS_PATH` from Step 1, which (exactly like `FEATURE_TYPE` in Step 1.7) could belong to a different, more-recently-touched sibling phase file when several are materialized:
 
   ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   if [ "$PHASE_MODE" = "true" ]; then
     VISUAL_SOURCE="$PHASE_TASKS_PATH"
   else
     VISUAL_SOURCE="$AIMI_ROOT/$TASKS_PATH"
   fi
-  FIRST_VISUAL=$(jq -c '[.userStories[] | select(.verification | type == "object" and .strategy == "visual")][0]' "$VISUAL_SOURCE")
-  VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.verification.url')
+  FIRST_VISUAL=$($AIMI_CLI verification-report --tasks-file "$VISUAL_SOURCE" | jq -c '.visual[0]')
+  VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.url')
   VISUAL_GROUP_KEY=$(printf '%s' "$FIRST_VISUAL" | jq -r '.project // "DEFAULT"')
   ```
 
@@ -2376,9 +2533,11 @@ command -v agent-browser
   **When `CONTAINER_MODE` is true and `CONTAINER_DEV_URL[VISUAL_GROUP_KEY]` resolved** (see Container Dev Server Bootstrap above; `PHASE_MODE` and `CONTAINER_MODE` are mutually exclusive — see Execution Mode Detection — so at most one of these two branches ever applies): apply the same reference section with `EXEC_BRANCH` = this run's `branchName`, scoped to the FIRST visual story's OWN project group. This resolves the port of that group only — a second visual story from a different project group is unaffected by this rewrite and is instead resolved independently at its own post-merge verification step (Step 4). `EXEC_ROOT` is the same project root Container Dev Server Bootstrap (Step 3.3) already used for `VISUAL_GROUP_KEY` — `$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[VISUAL_GROUP_KEY]`:
 
   ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
   : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
-  BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+  BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
   if [ "[VISUAL_GROUP_KEY]" = "DEFAULT" ]; then
     cd "$AIMI_ROOT"
   else
@@ -2716,12 +2875,31 @@ while true:
                 "[conflict output from merge-all]"
                 ""
                 "Resolve the conflict on branch [merge_target] in [merge_cwd] and re-run `/aimi:execute` to continue."
-                "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure; only this wave's story worktrees (cleaned up below) are removed, so the conflict can be resolved directly in the still-live working tree."
+                "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure, so the conflict can be resolved directly in the still-live working tree."
+                "Merged story worktrees were removed; the ones that did NOT merge keep both their worktree and their branch, so the retry has something to retry."
 
-                # Cleanup ALL worktrees from this wave (across all project groups) before stopping
+                # Cleanup this wave's worktrees -- but ONLY the ones whose work
+                # is already reachable from the merge target. merge_all_worktrees
+                # processes its argv in order and stops at the first conflict
+                # without attempting the rest, so a story from the conflicting
+                # one onward has NOT been merged: removing it without
+                # --keep-branch would run `git branch -D` on the only ref naming
+                # its commits, stranding them. This is the same rule the
+                # Phase-Mode Paired Split conflict path already applies to its
+                # own members (see "Merge Split Branches Into the Phase Branch"),
+                # and the two must not disagree about the same scenario.
                 for full_story_id, wt in all_worktrees:
                     cd EXEC_ROOT[wt.group_key]
-                    $WORKTREE_MGR remove [wt.worktree_name]
+                    if git -C [EXEC_ROOT[wt.group_key]] merge-base --is-ancestor [wt.worktree_name] [EXEC_BRANCH[wt.group_key]]:
+                        # Merged: its commits live on the target branch, so the
+                        # branch ref has no remaining consumer.
+                        $WORKTREE_MGR remove [wt.worktree_name]
+                    else:
+                        # Unmerged -- the conflicting story, anything after it
+                        # merge-all never reached, and every story that failed
+                        # earlier in this wave. Leave the worktree AND the branch
+                        # in place; report the branch so the user can find it.
+                        Report: "  kept (unmerged): [wt.worktree_name]"
 
                 # PHASE_MODE with PHASE_ID set (this session itself ran Step 1.7 --
                 # never true inside a Phase-Mode Paired Split sub-orchestrator):
@@ -2780,8 +2958,12 @@ while true:
                     if not EXEC_OWNS_ROOT:
                         # Inline mode — identical to today's inline branch: the
                         # story's own verification.url, no rewrite, no gate.
+                        # verification-report already normalizes a non-string
+                        # url to the empty string, so no `// empty` is needed
+                        # here — see the closed jq -r non-string hazard note
+                        # above Container Dev Server Bootstrap.
                         STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
-                        STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                        STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                         EFFECTIVE_URL="$STORY_VERIFICATION_URL"
                     else:
                         # EXEC_OWNS_ROOT is true for both phase and container mode.
@@ -2802,7 +2984,7 @@ while true:
                             : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
                             cd "$AIMI_ROOT"
                             STORY_TASKS_FILE="$PHASE_TASKS_PATH"
-                            STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                            STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                             SERVE_URL_JSON=$($WORKTREE_MGR serve url "$PHASE_BRANCH" "$STORY_VERIFICATION_URL")
                             REWRITTEN=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.rewritten')
                             EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
@@ -2842,7 +3024,7 @@ while true:
                                   cd "$AIMI_ROOT/[group_key]"
                                 fi
                                 STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
-                                STORY_VERIFICATION_URL=$(jq -r --arg id "[full_story.id]" '.userStories[] | select(.id == $id) | .verification.url // empty' "$STORY_TASKS_FILE")
+                                STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                                 SERVE_URL_JSON=$($WORKTREE_MGR serve url "$BRANCH_NAME" "$STORY_VERIFICATION_URL")
                                 EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
                                 ```
@@ -3123,10 +3305,17 @@ $AIMI_CLI count-pending
 
 **When `PHASE_SPLIT_MODE=true`:** `count-pending`'s session-state read does not apply — Step 1.7's Detect a Full-Stack Split Inside This Phase step never pointed this session's state at a single governing file, because a split phase has none. Sum pending stories across **every** member of the split directly, by path, instead — a loop over `$PHASE_SPLIT_FILES` (the full member list resolved in Step 1.7, not just the active subset), never a fixed pair of named variables:
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+# Hoisted once, above the loop -- never re-called per split_file. Reads the
+# same pendingCount split-detect already computes from the identical
+# `(.status // "pending") != "completed"` predicate the paragraph below names.
+PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
 PHASE_PENDING=0
 while IFS= read -r split_file; do
   [ -n "$split_file" ] || continue
-  SPLIT_FILE_PENDING=$(jq '[.userStories[]? | select((.status // "pending") != "completed")] | length' "$split_file")
+  SPLIT_FILE_PENDING=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .pendingCount')
   PHASE_PENDING=$((PHASE_PENDING + ${SPLIT_FILE_PENDING:-0}))
 done <<< "$PHASE_SPLIT_FILES"
 ```
@@ -3159,7 +3348,7 @@ For every entry the phase declared in `roadmap.json`'s `creates[]`, confirm the 
 
 #### Inputs
 
-- `FEATURE` and `PHASE_ID` — the claimed phase. Every repository's own `verify-creates` call reads that phase's `creates[]` out of `roadmap.json` itself, applying the one existing identity definition (`_cv_identity`: the substring before the first `(`, trimmed), so no `creates` array is extracted here and no second copy of that rule exists in this file, in any repository's call. Because every call reads the same phase-level `creates[]`, every repository's own verdict array covers the identical, identically-ordered identity set.
+- `FEATURE` and `PHASE_ID` — the claimed phase. Every repository's own `verify-creates` call reads that phase's `creates[]` out of `roadmap.json` itself and takes each entry's own `identity` field, so no `creates` array is extracted here and no second copy of that rule exists in this file, in any repository's call. Because every call reads the same phase-level `creates[]`, every repository's own verdict array covers the identical, identically-ordered identity set.
 - `PARTICIPATING_GROUP_KEYS` — every project group with at least one story (non-split phase) or `$PHASE_SPLIT_FILES` member (split phase) scheduled for this phase, derived fresh in this block by the same rule that populated `PHASE_CONTAINER_PATHS[group_key]` for this phase run (Create Phase Containers Per Project Group's Derive Participating Project Groups, above) — branching on `PHASE_SPLIT_MODE` exactly as the adjacent Multi-File Pending Count block already does. Split mode sums over the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset — the same reason Multi-File Pending Count does: a repository whose split member already completed on a prior run still delivered artifacts there, and still needs checking. For each participating group, its own container — `<repo toplevel>/.worktrees/$PHASE_BRANCH` (`${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Container Paths Per Project Group), recomputed fresh via `git -C ... rev-parse --show-toplevel`, never read from a value assumed to survive from Step 1.7 — is passed as that repository's own `--dir`; it is the checkout whose **tracked** files are searched there. With exactly one participating group — today's single-repo case — this is exactly today's single `PHASE_CONTAINER_PATH` value, unchanged.
 
 #### Procedure
@@ -3179,17 +3368,27 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 # member list, $PHASE_SPLIT_FILES, exactly like the adjacent Multi-File
 # Pending Count block, not just this run's active subset.
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   CV_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    CV_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    CV_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     CV_GROUP_RAW="${CV_GROUP_RAW}${CV_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PARTICIPATING_GROUP_KEYS=$(printf '%s\n' "$CV_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PARTICIPATING_GROUP_KEYS" ] || PARTICIPATING_GROUP_KEYS="."
 else
-  CV_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. A refusal here (an
+  # invalid project value) is new: this site never validated before.
+  CV_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || {
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  }
+  PARTICIPATING_GROUP_KEYS=$(printf '%s' "$CV_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PARTICIPATING_GROUP_KEYS=$(printf '%s\n' "$CV_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PARTICIPATING_GROUP_KEYS" ] || PARTICIPATING_GROUP_KEYS="."
 
 # One verify-creates call per participating repository. Each repository's own
 # container is recomputed fresh here — <repo toplevel>/.worktrees/$PHASE_BRANCH,
@@ -3286,7 +3485,7 @@ printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling exit failures 
 
 Every value is still derived with a `jq` select on `.status` — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape) — now in two passes: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own **raw**, pre-union verdicts (so a tool failure is visible before any union is attempted), and `CREATES_REPORT`/`VERIFIED_ARTIFACTS`/`MISSING_CREATES`/`MISSING_COUNT` are computed from the **unioned** per-identity array, reached only once every repository's own call is confirmed clean. Each unioned verdict object keeps the existing shape, `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` (never `error` — an error anywhere already routed the phase to Verification tooling failed before this point), `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it, or, on a `missing`, what was found and rejected.
 
-`VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the winning repository's own `evidence` string as the location — never tagged with that repository's `group_key`, and never a concatenation of every repository that verified it: when more than one repository verifies the same identity, the location is the evidence from the first repository, in sorted `group_key` order, that verified it. Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `_cv_handoff_lists_artifact` substring-matches with `grep -qF` to resolve a downstream phase's `needs`.
+`VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the winning repository's own `evidence` string as the location — never tagged with that repository's `group_key`, and never a concatenation of every repository that verified it: when more than one repository verifies the same identity, the location is the evidence from the first repository, in sorted `group_key` order, that verified it. Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `roadmap.py`'s `handoff_lists_artifact` substring-matches to resolve a downstream phase's `needs`.
 
 `MISSING_CREATES` keeps the same `"<identity> — <evidence>"` shape, but with **more than one** participating repository its `evidence` names every repository that was searched: `"<group_key>: <that repository's own evidence>"`, joined with `"; "` in sorted `group_key` order, so a reader can tell "this name appears nowhere in any repository" from "this name appears only in prose in repository X" instead of one arbitrary repository's evidence standing in for all of them. Both the rejected-location detail and the tracked-files-only limitation `verify-creates` already returns per call (scope-contexts.md § What verification looks for) are preserved, once per repository, inside that combined string. With **exactly one** participating repository the tag is omitted — `MISSING_CREATES`, like `CREATES_REPORT`, `VERIFIED_ARTIFACTS`, `ERROR_CREATES` and `MISSING_COUNT`, is then byte-identical to today's single-call output: the union of one set is that set.
 
@@ -3403,7 +3602,7 @@ Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Ph
 Only reached when `verify-creates` exited 0 and returned neither a `missing` nor an `error` entry — i.e. every `creates` entry verified. Build the five-section payload:
 
 - **Decisions Made** — one bullet per notable implementation decision surfaced by this phase's stories (their `implementation.approach` text, gate resolutions, or explicit deviations the story-executor agents reported). Empty array if nothing stood out.
-- **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `_cv_handoff_lists_artifact` searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
+- **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `handoff_lists_artifact` (in `roadmap.py`) searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
 - **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap. Empty array if none.
 - **Deferred Items** — one bullet per this phase's own story left in `skipped` status, if any. Empty array if none.
 - **Contracts Delivered** — one bullet per `creates` entry restating the identity now available to dependent phases (`"<identity> — contract fulfilled, available to phases depending on [PHASE_ID]"`), mirroring Artifacts Created's identities but phrased for downstream `needs` resolution.
@@ -3461,18 +3660,29 @@ $AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status c
 Stop every participating repository's own phase dev server before the report below is composed — never just `$AIMI_ROOT`'s — so no server is left orphaned, still holding its port: phase mode's own container is never removed anywhere in this document (see Step 5's Container removal is completion-path-only note), so an un-stopped server here would stay alive indefinitely, not just until some later cleanup step. Derive this phase's participating project groups the same way **Create Phase Containers Per Project Group**'s Derive Participating Project Groups above already did when this phase's containers were created — `$PHASE_TASKS_PATH`'s own `userStories[].project` in single-file mode, or every member of `$PHASE_SPLIT_FILES`'s own `metadata.splitGroup.project` in split mode. Reading the **full** `$PHASE_SPLIT_FILES` member list, not just this run's active subset, mirrors Multi-File Pending Count's own reasoning above: a repository whose split member completed in an earlier session still had its own phase container and must still be named and stopped here, even though this run never touched it:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. Status is already
+  # `completed` and the claim already released by this point (roadmap-set-
+  # status above), so a refusal here is a plain stop rather than a release --
+  # there is nothing left to release.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || exit 1
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
 ```
 
@@ -3522,25 +3732,156 @@ With exactly one participating group — today's only supported case — `PHASE_
 Best-effort only — never reverts or changes the already-`completed` status on failure or refusal. Runs once per participating repository — the same project groups **Mark Phase Completed**'s report above already derived. Re-derived fresh in this block, since each Bash call is an isolated shell and nothing from that earlier block persists here:
 
 ```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 if [ "$PHASE_SPLIT_MODE" = true ]; then
+  PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
+  # Hoisted once, above the loop -- never re-called per split_file.
+  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
-    GROUP_PROJECT=$(jq -r '.metadata.splitGroup.project // "."' "$split_file")
+    GROUP_PROJECT=$(printf '%s\n' "$PHASE_MEMBERS_JSON" | jq -r --arg p "$split_file" 'select(.path == $p) | .project // "."')
     PHASE_GROUP_RAW="${PHASE_GROUP_RAW}${GROUP_PROJECT}"$'\n'
   done <<< "$PHASE_SPLIT_FILES"
+  PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
+  [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 else
-  PHASE_GROUP_RAW=$(jq -r '.userStories[] | (.project // ".")' "$PHASE_TASKS_PATH")
+  # project-groups now owns the jq, the sort-unique pipeline and the
+  # empty-fallback this branch used to run inline. A refusal here just skips
+  # this best-effort step -- the already-`completed` status above is never
+  # reverted.
+  PHASE_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || exit 1
+  PHASE_GROUP_PROJECTS=$(printf '%s' "$PHASE_GROUPS_JSON" | jq -r '.groups[]')
 fi
-PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
-[ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
 ```
 
-For each group, resolve its own repository root, container, and default branch, then push and open a PR against that repository — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above:
+#### Select the acting forge account per repository
+
+Before any of those repositories is pushed or gets a pull request, settle which account will author those writes — once per repository ever, and **separately per repository**, since a multi-repo phase can legitimately span two repositories that want two different accounts. Resolve interactivity once (re-resolved here when still unset, the same cheap idempotent safety net the per-repo base-branch picker above uses, since each Bash call is an isolated shell) and ask the CLI, per group, whether the question is warranted:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -z "$INTERACTIVE_MODE" ]; then
+  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+fi
+echo "$INTERACTIVE_MODE"
+while IFS= read -r ACCOUNT_GROUP_PROJECT; do
+  [ -n "$ACCOUNT_GROUP_PROJECT" ] || continue
+  if [ "$ACCOUNT_GROUP_PROJECT" = "." ]; then
+    ACCOUNT_GROUP_ROOT="$AIMI_ROOT"
+  else
+    ACCOUNT_GROUP_ROOT="$AIMI_ROOT/$ACCOUNT_GROUP_PROJECT"
+  fi
+  ACCOUNT_GROUP_TOPLEVEL=$(git -C "$ACCOUNT_GROUP_ROOT" rev-parse --show-toplevel 2>/dev/null) || ACCOUNT_GROUP_TOPLEVEL=""
+  [ -n "$ACCOUNT_GROUP_TOPLEVEL" ] || continue
+  ACCOUNT_CHECK_JSON=$($AIMI_CLI forge-account-select --check --project "$ACCOUNT_GROUP_TOPLEVEL") || ACCOUNT_CHECK_JSON=""
+  [ -n "$ACCOUNT_CHECK_JSON" ] || continue
+  printf '%s\t%s\t%s\n' "$ACCOUNT_GROUP_PROJECT" "$ACCOUNT_GROUP_TOPLEVEL" "$ACCOUNT_CHECK_JSON"
+done <<< "$PHASE_GROUP_PROJECTS"
+```
+
+Each printed line is one repository: its group key, its repository root, and its `forge-account-select --check` verdict. `detect-interactivity` prints exactly `picker` or `agent`, and `picker` is the default — `agent` comes only from an explicit opt-out (`--non-interactive`, `AIMI_AGENT_MODE=true`, `CI=true`); a non-TTY shell is **not** a signal for agent mode. `commands/references/interactivity.md` is the arbiter for mode resolution, option format and the agent-mode rule at this site.
+
+Ask for a given repository **only** when `INTERACTIVE_MODE` is `picker` AND that line's `.decision` is `"ask"` — the same two-condition AND the first-run model prompt uses (`commands/references/cli-path-resolution.md`). `forge-account-select --check` owns the second condition entirely: it reports `"ask"` only when that repository has no recorded answer *for its own host* and that project's git identity and the active forge account actually diverge. It decides on that repository's own entry, never on the store file's existence, so a store already holding other repositories' answers still asks here. Every other `.basis` — `answer_recorded`, `identity_override`, `no_repository`, `no_host`, `single_account`, `identity_matches_active`, `not_authenticated`, `cli_missing`, `no_adapter` — reports `"skip"`: that repository gets no picker and no output. `--check` writes nothing, so evaluating it never changes what a later run asks.
+
+**When `INTERACTIVE_MODE=picker` and a line's `.decision == "ask"`:** Use **AskUserQuestion** once for that repository, naming it so a multi-repo run's separate prompts stay distinguishable — the same discipline the per-repo `resolve-base-branch` picker above follows:
+
+```
+Which account should author the pull request for [project_path] on [host]?
+
+A — Always use the active account ([activeAccount])
+B — [the divergence candidate]
+C/D/E — [further logged-in accounts, in the order .accounts lists them]
+Other — Enter a different account login
+```
+
+- **Option A** is deliberately the least disruptive answer, and it is the one agent mode auto-picks below: every write for that repository stays on whichever account is active.
+- **Option B** is the divergence candidate — the login in that line's `.accounts` that the repository's own git identity points at and that is not `.activeAccount`. Derive it from `.identity.email`: a `…@users.noreply.github.com` address encodes the login exactly (dropping any leading `<digits>+`); otherwise use the address's local-part with the same leading `<digits>+` dropped. When no `.accounts` entry matches, option B is the first `.accounts` entry other than `.activeAccount`.
+- **C/D/E** are the remaining `.accounts` entries in gh's own order, and **Other** is the free-form escape hatch, always last. Never fewer than 2 options and never more than 6 in total, so at most five accounts are listed; when gh reports more than fit, keep option A and the divergence candidate and drop the remainder — `Other` already covers them.
+
+Record the answer once per repository that was actually answered — picker mode only. Both the repository and the chosen value cross into this call as literals the orchestrator substitutes, never as shell variables carried over from the enumeration fence above:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+FORGE_ACCOUNT_PROJECT="[the repository root printed for the group just answered]"
+FORGE_ACCOUNT_CHOICE="[the account chosen above — the literal word active for option A, otherwise the login]"
+if [ "$FORGE_ACCOUNT_CHOICE" = "active" ]; then
+  $AIMI_CLI forge-account-select --record-active --project "$FORGE_ACCOUNT_PROJECT"
+elif echo "$FORGE_ACCOUNT_CHOICE" | grep -qE '^[A-Za-z0-9][A-Za-z0-9-]*$'; then
+  $AIMI_CLI forge-account-select --record "$FORGE_ACCOUNT_CHOICE" --project "$FORGE_ACCOUNT_PROJECT"
+else
+  echo "Not a forge login: $FORGE_ACCOUNT_CHOICE — nothing recorded for $FORGE_ACCOUNT_PROJECT." >&2
+fi
+```
+
+Option A records the permanent "always use the active account" opt-out — a real stored answer, not the absence of one, which is why it stops the question being raised for that repository again. Every other option records that login. A free-form `Other` value that fails the login shape records nothing and is reported, and this step then continues on the active account rather than stopping: this whole step is best-effort like the rest of **Offer a Pull Request**, and the phase is already `completed`. Because nothing was recorded, the next run asks that repository again. This command layer performs no file I/O of its own — it owns the prompt, and `forge-account-select` owns both "should I ask?" and "remember this answer".
+
+**When `INTERACTIVE_MODE=agent`** (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`): no picker for any repository. Auto-select option A — act as whichever account is active — and make **no** `forge-account-select --record` or `--record-active` call at all, for any repository. Applying option A takes no action of any kind: the active account is already the one every forge verb uses, so "applied for this invocation" and "changed nothing" are the same thing here. Every participating repository's recorded state after an agent-mode run is byte-for-byte what it was before. Log exactly one line per repository — no retry, no blocking, no second line:
+
+```
+agent-mode: forge-account auto-selected active account (not recorded) — project: [project_path]
+```
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-select option A for every repository and record nothing. Log: `agent-mode: forge-account auto-selected active account (not recorded) — project: [project_path]`.*
+
+**Why the auto-answer is never persisted.** Option A is not merely the least disruptive answer — it is also that repository's *permanent* opt-out. Recording it is precisely what stops the question ever being raised again. So if agent mode persisted its own auto-answer, one unattended CI run would silently and permanently answer the question on behalf of every human who touches that repository afterwards: they would never be asked, and would have no way to discover why. `/aimi:execute` is the command most likely to run unattended, which is what makes this site the one where the mistake would actually be made. The failure is not hypothetical here — 1.93.0 shipped a remembered dismissal that could not be revoked and left users silently stuck with no way to re-trigger the prompt. Applied-but-not-persisted is what keeps it from recurring: the `(not recorded)` in each log line is the observable proof in the transcript, and `--check`'s zero-side-effect contract is the mechanical guarantee behind it.
+
+Whatever was recorded here is applied by the forge verbs themselves through the credential mechanism `commands/references/forge-contract.md`'s **Credential/Identity Model** describes — the loop below neither reads the answer nor passes it along, and is unchanged by this subsection.
+
+#### Confirm before publishing this phase
+
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` — it is the single source of truth for what counts as publishing, why nothing inside a file may authorize one, what each interactivity mode owes the reader, and why every outcome still names `/aimi:open-pr`. That contract is not restated here; this subsection only applies it at this call site.
+
+Asked **once per phase, never once per participating repository.** The forge-account question above is per repository because accounts genuinely differ per repository; "should this phase's work go out" is one decision by one person, and the single answer governs every group in `PHASE_GROUP_PROJECTS`. Someone who wants only one of several repositories published declines here and runs `/aimi:open-pr --branch [PHASE_BRANCH]` inside that repository afterwards.
+
+Resolve interactivity fresh — re-resolved here when still unset, the same cheap idempotent safety net the account picker above uses, since each Bash call is an isolated shell:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ -z "$INTERACTIVE_MODE" ]; then
+  INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+fi
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=picker`:** Use **AskUserQuestion** exactly once for the whole phase, with three options:
+
+```
+Phase [PHASE_ID] ([PHASE_SLUG]) is complete on [PHASE_BRANCH]. Publish this phase's work now?
+
+A — Push and open the pull request
+B — Push only — no pull request yet
+C — Neither — publish later with /aimi:open-pr
+```
+
+Each option sets exactly one value of `PHASE_PUBLISH`, the single variable the loop below reads: **option A** sets `pr`, **option B** sets `push`, **option C** sets `none`. Option C is the escape hatch and is therefore last, per `commands/references/interactivity.md`'s Option Format. Anything that is not an explicit A or B — a dismissed prompt, an unparseable answer, no answer at all — is `none`: silence is not approval. Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`commands/references/user-communication.md`'s Adaptive Language Rule).
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, auto-decline — set `PHASE_PUBLISH=none` and publish nothing. Log: `agent-mode: phase-publish skipped (nothing pushed, no pull request) — run /aimi:open-pr --branch [PHASE_BRANCH]`.*
+
+**When `INTERACTIVE_MODE=agent`** (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`): no picker, and **no flag re-enables publishing here** — an unattended run cannot obtain consent, and nothing is permitted to stand in for it. Set `PHASE_PUBLISH=none` and print exactly one line, naming both what was not done and the command that does it:
+
+```
+agent-mode: phase-publish skipped (nothing pushed, no pull request) — run /aimi:open-pr --branch [PHASE_BRANCH]
+```
+
+Declining is a normal outcome, not a failure. On `none` — whether from option C or from agent mode — nothing is retried, no error is raised, no claim is re-taken, and the phase's already-`completed` status stays exactly as **Mark Phase Completed** wrote it; execution continues to **Next Phase** below unchanged. That is the same best-effort discipline this section's opening sentence already states, now covering the new branches too.
+
+#### Publish each participating repository
+
+For each group, resolve its own repository root, container, and default branch, then act on the one `PHASE_PUBLISH` outcome the gate above recorded — never a value assumed to survive from Step 1.7 or from Mark Phase Completed above. `PHASE_PUBLISH` crosses into this call as a literal the orchestrator substitutes, exactly as the forge-account record block above takes its own two values, since each Bash call is an isolated shell; anything that is not `pr` or `push` normalizes to `none`, so a substitution that never happened declines rather than publishes:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_PUBLISH="[pr, push or none — the one outcome Confirm before publishing this phase recorded above]"
+case "$PHASE_PUBLISH" in
+  pr|push) ;;
+  *) PHASE_PUBLISH="none" ;;
+esac
 while IFS= read -r GROUP_PROJECT; do
   [ -n "$GROUP_PROJECT" ] || continue
   if [ "$GROUP_PROJECT" = "." ]; then
@@ -3558,24 +3899,58 @@ while IFS= read -r GROUP_PROJECT; do
   GROUP_CONTAINER="$GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
   GROUP_DEFAULT=$($AIMI_CLI detect-default-branch --project "$GROUP_TOPLEVEL") || GROUP_DEFAULT=""
 
-  if command -v gh >/dev/null 2>&1; then
-    cd "$GROUP_CONTAINER"
-    git push -u origin "$PHASE_BRANCH"
-    gh pr create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
-      --title "Phase [PHASE_ID]: [PHASE_NAME]" \
-      --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details."
-  else
-    echo "gh not found — create the PR manually for $GROUP_LABEL:"
+  if [ "$PHASE_PUBLISH" = "none" ]; then
+    echo "Nothing published for $GROUP_LABEL — no push, no pull request. Publish it when you are ready:"
+    echo "  /aimi:open-pr --branch $PHASE_BRANCH"
+    continue
+  fi
+
+  GROUP_FORGE_STATUS=$($AIMI_CLI forge-auth-status --project "$GROUP_TOPLEVEL" | jq -r '.status // empty')
+  if [ "$GROUP_FORGE_STATUS" != "found" ]; then
+    echo "No usable forge for $GROUP_LABEL — skipping the push and the pull request. Do both manually:"
     echo "  git -C \"$GROUP_CONTAINER\" push -u origin $PHASE_BRANCH"
     echo "  Then open a PR: $GROUP_DEFAULT...$PHASE_BRANCH"
+    echo "  Once a forge CLI is installed and authenticated for this repository, run this from $GROUP_TOPLEVEL instead: /aimi:open-pr --branch $PHASE_BRANCH"
+    continue
+  fi
+
+  cd "$GROUP_CONTAINER"
+  git push -u origin "$PHASE_BRANCH"
+  if [ "$PHASE_PUBLISH" = "push" ]; then
+    echo "Pushed $PHASE_BRANCH for $GROUP_LABEL — no pull request opened. Open one when you are ready:"
+    echo "  /aimi:open-pr --branch $PHASE_BRANCH"
+    continue
+  fi
+  GROUP_PR_JSON=$($AIMI_CLI forge-pr-create --base "$GROUP_DEFAULT" --head "$PHASE_BRANCH" \
+    --title "Phase [PHASE_ID]: [PHASE_NAME]" \
+    --body "Completes phase [PHASE_ID] of [FEATURE]. See [PHASE_DIR]/handoff.md for details." \
+    --project "$GROUP_TOPLEVEL") || GROUP_PR_JSON=""
+  if [ -n "$GROUP_PR_JSON" ]; then
+    GROUP_PR_STATUS=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.status // empty')
+    GROUP_PR_URL=$(printf '%s' "$GROUP_PR_JSON" | jq -r '.data.url // empty')
+    if [ "$GROUP_PR_STATUS" = "created" ]; then
+      echo "Opened pull request for $GROUP_LABEL: $GROUP_PR_URL"
+    elif [ "$GROUP_PR_STATUS" = "unchanged" ]; then
+      echo "Pull request already exists for $GROUP_LABEL: $GROUP_PR_URL"
+    fi
+  else
+    echo "Pull request not opened for $GROUP_LABEL — see forge-pr-create's error above."
   fi
 done <<< "$PHASE_GROUP_PROJECTS"
 cd "$AIMI_ROOT"
 ```
 
-If `git push` or `gh pr create` fails for a given repository (no permissions, offline, branch already has an open PR, etc.), report that repository's failure verbatim and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status.
+`PHASE_PUBLISH` is the only thing in this loop that decides **whether** to publish, and it decides nothing else. On `none` the repository's own decline line is printed with the `/aimi:open-pr --branch` command that publishes it later, and the iteration ends before `forge-auth-status` is even consulted — no forge is queried, no `origin` is contacted, and the branch stays exactly where the container left it. On `push` the branch is pushed and the iteration ends before `forge-pr-create`, printing the same `/aimi:open-pr --branch` command, which is safe to suggest for an already-pushed branch precisely because `/aimi:open-pr` re-attempts the push itself (`${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr). On `pr` the loop body runs end to end exactly as it did before this gate existed. Every other decision in the loop is untouched by all three: the not-a-git-repository skip, the `forge-auth-status` pre-push check and its recovery block, the `created`/`unchanged` reporting, the blank-`GROUP_PR_JSON` else branch, and the closing `cd "$AIMI_ROOT"` — which still runs after the loop no matter which branch each repository took. No branch here reverts, re-reads or rewrites the phase's `completed` status, and none re-claims the phase.
 
-With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. The commands issued are therefore byte-identical to before. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, and its own pull request.
+`forge-auth-status` is this loop's own actionability check, and it deliberately runs **before** the push rather than after it. It reports `status: "found"` if and only if the repository's remote resolves to a forge that has a working write adapter **and** that adapter's CLI is present on `PATH` — precisely the two conditions `forge-pr-create` gates its own write on (`commands/references/forge-contract.md`). This loop therefore reads that one `status` field and never re-derives the forge type or probes for a CLI binary itself, which is also why the check extends for free: the moment a GitLab or Gitea write adapter makes `forge-auth-status` report `found` for those remotes, they start pushing and opening PRs here with no change to this file. `data.authenticated` is deliberately **not** consulted — an installed-but-unauthenticated CLI still reaches the create call and fails there, which is an ordinary per-repository failure this loop already reports, not a reason to withhold the branch. Any status other than `found` means nothing here can open a pull request for that repository, so its branch is not published either: the loop prints that repository's own recovery block — its label, the container-scoped `git push -u origin` command, the `$GROUP_DEFAULT...$PHASE_BRANCH` compare range, and the `/aimi:open-pr --branch` line to run from that repository's own root once a forge CLI is installed and authenticated there — and moves to the next repository without ever touching `origin`. That last line is deliberately conditional: this branch fires precisely because no forge adapter or CLI is usable here, and `/aimi:open-pr` routes through the same forge verbs, so it would stop on the same condition if it were run right now. The push command and the compare range above it are the fallback that works with no forge at all, which is why both stay.
+
+**This is stricter than the binary-presence gate phase 1 deleted, not a restoration of it.** That gate tested only whether a GitHub CLI existed on `PATH`, so a GitLab or Gitea remote on a machine that happened to have one installed *did* get its branch pushed; only the PR call failed, leaving a merge request openable from the forge's web UI. Routing the decision through `forge-auth-status` withdraws that push, on the principle that whether a branch reaches `origin` should not depend on an unrelated binary being installed. The recovery block above is what keeps that a defensible change rather than a regression — those users lose one pasted command, not the push itself.
+
+`forge-pr-create` owns the presence check for whichever forge CLI this repository's remote needs, independently of the pre-push check above. When the forge is unsupported, its CLI is missing, or the create call itself fails, `forge-pr-create` prints the manual push/PR-URL fallback instructions itself (mandatory-print degrade mode, `commands/references/forge-contract.md`), emits a `status: "degraded"` envelope, and exits non-zero; this loop does not reimplement or duplicate that guidance — the non-zero exit blanks `GROUP_PR_JSON`, so neither the "opened" nor the "already exists" echo can be reached, and the `else` branch instead echoes one line naming that repository. That line is the attribution `_forge_pr_write_print_manual` cannot supply on its own: it has no repository context to name, so its banner is unattributed by construction, and a phase with N failing repositories would otherwise produce N indistinguishable banners. `forge-pr-create` checks for an existing open PR on `$PHASE_BRANCH` before ever creating one (its own check-then-create contract, matching open-pr.md's pre-existing "PR already exists" behavior) — a retried or re-entered phase reuses that PR (`status: "unchanged"`, `forge-contract.md`'s Write-Verb Status Convention: no new PR number was minted) rather than opening a duplicate.
+
+If `git push` or `forge-pr-create` fails for a given repository (no permissions, offline, branch already has an open PR the tool itself cannot read, etc.), that repository's failure is what `forge-pr-create` already reported on stderr — report it verbatim, echo the loop's own per-repository line naming it, and continue on to the next repository — do not retry, do not prompt interactively, and never revert the phase's `completed` status. The `forge-auth-status` skip above obeys the same isolation contract: it is reported for that one repository, it consumes no other repository's turn, and the phase stays `completed` no matter how many of the participating repositories are skipped or fail.
+
+With exactly one participating group — today's only previously-supported case — `PHASE_GROUP_PROJECTS` resolves to exactly `.`, `GROUP_TOPLEVEL` resolves to the same repository `$PHASE_CONTAINER_PATH` was built from, so `GROUP_CONTAINER` equals `$PHASE_CONTAINER_PATH` exactly, and `GROUP_DEFAULT` — detected fresh via the identical `--project`-scoped call Step 1.5's own `$DEFAULT_BRANCH` detection uses — equals `$DEFAULT_BRANCH`. Under the approving `pr` answer the push and the forge call issued are therefore the same single-repository push and PR creation as before, now routed through `forge-pr-create` instead of a direct GitHub-CLI invocation. That single repository is subject to the `forge-auth-status` check like any other: when its own status is not `found`, neither the push nor the PR call runs at all — the one group prints its recovery block, the loop body ends there, and the phase still finishes `completed`, exactly as the skip behaves for one repository out of many. When more than one group participates, the loop runs once per repository, each against its own container, its own default branch, its own actionability check, and its own pull request.
 
 ### Next Phase
 
@@ -3596,6 +3971,8 @@ ROADMAP_SWEEP_REPORT=$($AIMI_CLI roadmap-sweep "$FEATURE")
 `ROADMAP_SWEEP_REPORT` is rendered as a `## Roadmap Sweep` section in Step 5's final summary (see below). No next-phase offer of any kind is shown.
 
 **Otherwise**, `NEXT_ELIGIBLE_JSON` is the next eligible phase object; extract `NEXT_PHASE_ID=$(printf '%s' "$NEXT_ELIGIBLE_JSON" | jq -r '.id')`.
+
+The phase named here is whichever one `roadmap-get --next-eligible` selects, and that is **not necessarily the lowest-numbered** eligible phase: the verb ranks dependency-eligible candidates by remaining work first — every candidate with pending stories ahead of every candidate without — and only then by ascending id. A phase whose stories are all complete is therefore offered *after* a higher-numbered phase that still has work, even though its id is lower. When every eligible candidate has work the ordering collapses to ascending id, which is why this offer is unchanged for the common case. Do not reword this prompt to promise the "next" or "lowest" phase.
 
 - **Interactive mode** (`$AIMI_CLI detect-interactivity` = `picker`): use **AskUserQuestion** with exactly two options:
   ```
@@ -3627,7 +4004,29 @@ When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
-**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below. When `CONTAINER_MODE=false` (inline mode), skip all three and continue directly below.
+**When `CONTAINER_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Container Mode: Stop the Dev Server, § Container Mode: Push the Branch, and § Container Mode: Remove the Container, and run all three, in that order, before continuing below — raising the push confirmation immediately below in between, after every dev-server stop has completed and before anything is pushed. When `CONTAINER_MODE=false` (inline mode), skip all three, skip the confirmation with them, and continue directly below.
+
+**Confirm before this container's branch reaches `origin`.** The contract this question satisfies is defined once in `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` and is not restated here. The question itself lives in this command body rather than in that reference — or in `container-execution.md`, which owns the push it gates — because reference files reach OpenCode through a verbatim whole-tree copy that never translates the interactive-question tool's name, so a picker written into one would name a tool that host does not have. Resolve interactivity fresh — each Bash call is an isolated shell:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=picker`:** Use **AskUserQuestion** exactly once for the whole run, with exactly two options:
+
+```
+All stories are complete. Push [branchName] to origin now?
+
+A — Push now
+B — Skip (push it yourself later, or run /aimi:open-pr)
+```
+
+**Option A:** proceed to the push in § Container Mode: Push the Branch. **Option B:** set `SKIP_PUSH=true` — the same variable that reference's own push block gates on — and skip straight to § Container Mode: Remove the Container. Anything that is not an explicit A — a dismissed prompt, an unparseable answer, no answer at all — is B: silence is not approval. Ask once for the whole run, not once per project group; one answer governs every participating group (`publish-confirmation.md`). Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`'s Adaptive Language Rule).
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, raise no question at all — § Container Mode: Push the Branch's own `INTERACTIVE_MODE=agent` branch decides whether that run pushes and logs its own `agent-mode: container-push …` line.*
 
 Count commits on this branch:
 
@@ -3640,7 +4039,7 @@ git log --oneline $DEFAULT_BRANCH..HEAD | wc -l
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
 if ! [[ "$BRANCH_NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
   echo "Invalid branchName: $BRANCH_NAME" >&2
   exit 1
@@ -3784,13 +4183,13 @@ Decision gates ([pending_decision_gates]):
 Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 ```
 
-**When `CONTAINER_MODE=false` (inline mode, unchanged):**
+**When `CONTAINER_MODE=false` (inline mode):** no container was ever created and nothing was torn down, so the branch is still checked out right here — use the bare form, with no `--branch`, so that `/aimi:open-pr` still runs its uncommitted-changes check (it skips that check whenever `--branch` names a branch, since that branch is checked out elsewhere or nowhere). Naming the command at all is the obligation `${CLAUDE_PLUGIN_ROOT}/commands/references/publish-confirmation.md` § Always Name /aimi:open-pr states.
 ```
 ### Next Steps
 
 - Review commits: `git log --oneline -[count]`
 - Run `/aimi:review` for code review
-- Create PR when ready: `gh pr create`
+- Open a PR when ready: `/aimi:open-pr`
 ```
 
 **When `CONTAINER_MODE=true`:** the container was already removed above and nothing is checked out anywhere, so use the argument forms that work for a branch checked out nowhere instead:

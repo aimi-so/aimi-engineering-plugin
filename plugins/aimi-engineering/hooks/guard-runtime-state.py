@@ -99,7 +99,10 @@ def main(tool_input: dict) -> None:
             if target.name == "roadmap.json":
                 _deny_path(
                     str(target),
-                    "Roadmap state is owned by aimi-cli roadmap verbs",
+                    "Roadmap state is owned by aimi-cli roadmap verbs. "
+                    "To correct an existing phase's goal, successCriteria, "
+                    "creates, needs, areas or branch, use: aimi-cli "
+                    "roadmap-amend-phase --feature <slug> --phase <id>",
                     # provenance: staging pipeline outline step 02
                 )
 

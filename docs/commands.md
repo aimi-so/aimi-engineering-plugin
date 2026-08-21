@@ -82,6 +82,8 @@ Pass `--container` or `--inline` to override for one run. They are mutually excl
 
 `metadata.execution` applies only to flat tasks files. On a phase-scoped file — one with `metadata.phase` — `/aimi:next` refuses to run and points you at `/aimi:execute`, because it has no phase-claim logic and cannot resolve a phase's container base.
 
+Pass `--base <branch>` to name the container's base outright instead of being asked or having it inferred from your current checkout.
+
 ---
 
 ## `/aimi:execute`
@@ -112,7 +114,11 @@ With `metadata.execution: "container"`, the whole run happens inside a git workt
 4. Runs the wave loop inside the container.
 5. On completion, stops the dev server and removes the container while keeping the branch.
 
-Pushing the branch to `origin` needs confirmation. An interactive session is asked; an unattended one pushes only when `--push` was passed. Because nothing is left checked out locally afterward, the final report suggests `/aimi:open-pr --branch <branchName>` and `/aimi:review <branchName>` rather than the usual `gh pr create`.
+Publishing is a decision of its own, asked on every `/aimi:execute` path and not only this one. Before the branch reaches `origin`, and before any pull request is opened, you are asked once: a container run offers push or skip, a phase run offers push and open the pull request, push only, or neither. Anything that is not an explicit approval — a dismissed prompt, an unreadable answer, no answer at all — publishes nothing. An unattended run (`--non-interactive`, `AIMI_AGENT_MODE=true`, or `CI=true`) never publishes, and there is no flag that re-enables it. Declining is a normal outcome, not a failure: nothing is retried, and no story or phase status is rolled back. A multi-repo phase is asked once for the whole phase, not once per repository.
+
+Every ending names `/aimi:open-pr`, whether the run published or not — `/aimi:open-pr --branch <branchName>` when the container has been removed and the branch is checked out nowhere, and the bare `/aimi:open-pr` after an inline run, where the branch is still under your feet and the command's own uncommitted-changes check still applies. It is safe to suggest in every case because it pushes the named branch itself before opening anything. `/aimi:review <branchName>` sits alongside it as before. `/aimi:next` publishes nothing at all: when its last story completes it removes the container, keeps the branch, and points you at the same command.
+
+**Only publication moved behind that question.** Everything that delivers the work is untouched: each story worktree is still merged into the feature branch locally — a `git merge`, never a push — and the commits, the branch ref, the container teardown that keeps the branch (`--keep-branch`), and story and phase status all behave exactly as before. A run you decline to publish has lost nothing; the branch is complete on your machine, waiting for `/aimi:open-pr`.
 
 ### Choosing the mode
 
@@ -121,6 +127,8 @@ Pushing the branch to `origin` needs confirmation. An interactive session is ask
 `--inline` opts a single run back into the inline flow; `--container` forces container mode. They are mutually exclusive, and a change is persisted back to `metadata.execution`.
 
 On a phase-scoped tasks file the flags are ignored with a warning — a claimed phase always runs in its own phase container, and `metadata.execution` never applied there.
+
+Pass `--base <branch>` to cut every container from this branch outright, instead of asking or inferring it from your current checkout — including every repository in a multi-repo or full-stack split run.
 
 ### What container mode does not handle
 
@@ -141,6 +149,8 @@ Multi-agent code review. Runs architecture, security, simplicity, performance, a
 /aimi:review feat/auth  # a specific branch
 ```
 
+Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+
 ---
 
 ## `/aimi:open-pr`
@@ -152,6 +162,8 @@ Opens a pull request from the current task branch. Detects the parent branch, bu
 /aimi:open-pr --branch feat/user-auth
 ```
 
+Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+
 ---
 
 ## `/aimi:validate-bug`
@@ -161,6 +173,8 @@ Reproduces a bug report and confirms whether the described behavior is real, usi
 ```bash
 /aimi:validate-bug Login fails silently when the email has a plus sign
 ```
+
+When given an issue or PR reference, detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
 
 ---
 

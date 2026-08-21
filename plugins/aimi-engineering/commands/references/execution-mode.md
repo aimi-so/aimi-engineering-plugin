@@ -39,10 +39,12 @@ logic and cannot resolve a phase's own container base.
 
 ## Read Rule
 
-Read the field with a jq default that folds absence into `"inline"`:
+Read the field through the `metadata` verb, with a jq default that folds absence into `"inline"` — the same guarded call `commands/execute.md`'s own Execution Mode Detection uses, rather than a raw `jq` read of the tasks file. This snippet is a documented example of that call shape, not independent code, so it is kept in step with it deliberately: a caller copying this section is meant to land on the exact same shape execute.md already runs, not a shape that quietly re-derives what `metadata` already answers.
 
 ```bash
-jq -r '.metadata.execution // "inline"' "$TASKS_FILE"
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI metadata | jq -r '.execution // "inline"'
 ```
 
 Resolve the result with a fail-safe default: only the literal string
