@@ -241,7 +241,40 @@ Store the resolved value as `$CURRENT_BRANCH`.
 
 **Why Step 1c's skip condition is not widened to cover this case:** at Step 1c's point in the flow, neither `$DEFAULT_BRANCH` nor the Case A/Case B outcome exist yet — both are computed here in Step 2a, which runs after 1c. Widening 1c's skip condition would require moving branch detection earlier, out of this story's scope. The check is also advisory-only (it warns, never stops) and vacuously harmless in container mode, since the Main Working Tree Untouched Invariant keeps the CWD clean throughout the run regardless.
 
-### 2b. Detect parent branch via `detect-parent-branch`
+### 2b. Detect parent branch: a declared `integrationBranch` first, `detect-parent-branch` inference otherwise
+
+#### 2b-i. Prefer a declared `integrationBranch` when the active tasks file is phase-scoped
+
+A rolling-wave roadmap can declare a feature-level `integrationBranch` in its `roadmap.json` (materialized via `roadmap-init --integration-branch`, per issue #87's direction 1) — the long-lived branch every phase's PR should target, which the git graph alone cannot distinguish from the default branch until the two diverge. When one is declared, prefer it over inference outright: it is an explicit statement of intent, not a guess `detect-parent-branch`'s decoration walk needs to confirm.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+ROADMAP_PATH_REL=$($AIMI_CLI metadata 2>/dev/null | jq -r '.roadmapPath // empty' 2>/dev/null)
+INTEGRATION_BRANCH=""
+if [ -n "$ROADMAP_PATH_REL" ]; then
+  FEATURE_SLUG=$(basename "$(dirname "$ROADMAP_PATH_REL")")
+  INTEGRATION_BRANCH=$($AIMI_CLI roadmap-get --feature "$FEATURE_SLUG" 2>/dev/null | jq -r '.integrationBranch // empty' 2>/dev/null)
+fi
+```
+
+`metadata.roadmapPath` (`.aimi/tasks/<feature>/roadmap.json`, relative to `AIMI_ROOT`) is present only on a phase-scoped tasks file — see `plan.md`'s Roadmap Materialization — so a flat tasks file yields an empty `$ROADMAP_PATH_REL` and `$INTEGRATION_BRANCH` stays empty, falling straight through to 2b-ii below exactly as if this sub-step never ran. `roadmap-get --feature <slug>` with neither `--phase` nor `--next-eligible` dumps `roadmap.json` byte for byte, so `.integrationBranch` reads whatever `roadmap-init` wrote — or a value hand-added to a roadmap that predates the field, per issue #87's direction 1 — and the trailing `// empty` degrades a legacy roadmap missing the key, or a failed CLI call, the same way as "not declared": empty, not an error.
+
+**When `$INTEGRATION_BRANCH` is non-empty**, use it directly as the PR base and skip 2b-ii entirely — its `detect-parent-branch` call, and both of its warning blocks, never run:
+
+```bash
+if [ -n "$INTEGRATION_BRANCH" ]; then
+  BASE_BRANCH="$INTEGRATION_BRANCH"
+  PARENT_VERIFIED="true"
+  PARENT_SOURCE="integration-branch"
+fi
+```
+
+`$BASE_BRANCH` still passes through Step 2d's regex validation like every other source of it — a declared value is trusted as the RIGHT branch, not exempted from being a WELL-FORMED one.
+
+#### 2b-ii. Otherwise, infer via `detect-parent-branch`
+
+**Skip this whole sub-step when 2b-i already set a non-empty `$INTEGRATION_BRANCH`** — `$BASE_BRANCH`, `$PARENT_VERIFIED` and `$PARENT_SOURCE` are already set and proceed straight to Step 2c.
 
 Call the tested CLI verb instead of parsing decorations by hand — it already handles decoration parsing, `origin/` prefix normalization, and `git merge-base` verification internally, and owns the "no verified candidate" fallback (it returns the repository's default branch itself in that case).
 
@@ -277,7 +310,7 @@ Execution continues regardless of `$PARENT_VERIFIED` or `$PARENT_SOURCE`; Step 2
 
 ### 2c. Fallback when the CLI call itself failed
 
-`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where the CLI call in 2b itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed) and `$BASE_BRANCH` is still empty here:
+`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b-ii) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where 2b set no `$BASE_BRANCH` at all — no `integrationBranch` was declared (2b-i) AND the `detect-parent-branch` call in 2b-ii itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed):
 
 ```bash
 if [ -z "$BASE_BRANCH" ]; then

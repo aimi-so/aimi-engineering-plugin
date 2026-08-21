@@ -12598,7 +12598,7 @@ _roadmap_validate_phase_id() {
 # The guard and validate-contracts read the same cv_identity in roadmap.py, so
 # they agree on what an identity is; a second copy of it would drift.
 cmd_roadmap_init() {
-  local feature="" file="" sync_mode=false brainstorm_path=""
+  local feature="" file="" sync_mode=false brainstorm_path="" integration_branch=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -12606,6 +12606,7 @@ cmd_roadmap_init() {
       --file) shift; file="${1:-}" ;;
       --sync) sync_mode=true ;;
       --brainstorm-path) shift; brainstorm_path="${1:-}" ;;
+      --integration-branch) shift; integration_branch="${1:-}" ;;
       *)
         echo "Error: roadmap-init: unknown flag: $1" >&2
         exit 1
@@ -12662,7 +12663,7 @@ cmd_roadmap_init() {
       _lock "${roadmap_path}.lock"
       printf '%s' "$new_phases" | python3 "$(_aimi_roadmap_py)" init-write \
         --roadmap "$roadmap_path" --feature "$feature" \
-        --brainstorm-path "$brainstorm_path" $sync_flag
+        --brainstorm-path "$brainstorm_path" --integration-branch "$integration_branch" $sync_flag
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14118,12 +14119,22 @@ COMMANDS:
                               "missing": a tool failure is not an absent
                               artifact.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
+                              [--integration-branch <name>]
                               Read a sanitized phases array (stdin or --file) and
                               atomically create/append to .aimi/tasks/<slug>/roadmap.json.
                               Without --sync, an existing roadmap.json is a hard error.
                               With --sync, only phases whose id is not already present
                               are appended; existing phases are left byte-for-byte
-                              unchanged. Rejects (before any write) phases with a
+                              unchanged, and so is an already-stored integrationBranch --
+                              --integration-branch is read only when materializing a
+                              fresh roadmap.json, never to update one that already
+                              exists (hand-edit the file for that, per issue #87's
+                              direction 1). --integration-branch must match the same
+                              ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ pattern a phase's own
+                              --branch does, or the whole call is refused before any
+                              write; omitted or empty means "not declared" and writes
+                              no such field value (stored null).
+                              Rejects (before any write) phases with a
                               missing id/name/goal, a dangling dependsOn reference,
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized

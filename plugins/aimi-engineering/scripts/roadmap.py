@@ -2034,9 +2034,22 @@ def op_init_write(argv):
     path = _flag(argv, "--roadmap")
     feature = _flag(argv, "--feature")
     brainstorm_path = _flag(argv, "--brainstorm-path") or ""
+    integration_branch = _flag(argv, "--integration-branch") or ""
     sync_mode = "--sync" in argv
     if not path or not feature:
         die("Usage: roadmap.py init-write --roadmap <path> --feature <slug> [--sync]")
+
+    # Refused here, before the phases payload is even read, rather than stored:
+    # the field is a branch name, so it is judged against the exact pattern a
+    # phase's own `branch` field already enforces (BRANCH_REGEX above) instead
+    # of a second one. An empty value is legal -- it means "not declared" -- so
+    # only a non-empty, non-matching value dies.
+    if integration_branch and not BRANCH_REGEX.search(integration_branch):
+        die(
+            'Error: roadmap-init: integrationBranch "'
+            + integration_branch
+            + '" contains invalid characters'
+        )
 
     new_phases = jq_numbers(json.load(sys.stdin))
 
@@ -2076,8 +2089,17 @@ def op_init_write(argv):
 
         merged = existing_phases + filtered_new
         merged.sort(key=lambda p: jq_sort_key(p.get("id")))
-        # Only these four top-level keys survive a --sync, exactly as before.
-        doc = {k: existing.get(k) for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath")}
+        # Only these five top-level keys survive a --sync, exactly as before
+        # plus integrationBranch: it is additive-optional and, per issue #87's
+        # direction 1, addable to an existing roadmap.json by hand, so an
+        # additive --sync must carry whatever value is already on disk forward
+        # rather than silently erasing it. This call's own --integration-branch
+        # flag (if any) is NOT consulted here -- only materialization (the
+        # create branch below) writes a fresh value; --sync only preserves.
+        doc = {
+            k: existing.get(k)
+            for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath", "integrationBranch")
+        }
         doc["phases"] = merged
         added_count = len(filtered_new)
     else:
@@ -2104,6 +2126,9 @@ def op_init_write(argv):
             "feature": feature,
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "brainstormPath": rm_sanitize(brainstorm_path, 500) if brainstorm_path else None,
+            # Already validated above, against the same BRANCH_REGEX a phase's
+            # own `branch` field uses -- no further sanitization needed.
+            "integrationBranch": integration_branch or None,
             "phases": merged,
         }
         added_count = len(merged)

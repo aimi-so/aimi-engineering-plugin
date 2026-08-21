@@ -1423,6 +1423,127 @@ def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_unc
     assert written["phases"][1]["status"] == "planned"
 
 
+# ---------------------------------------------------------------------------
+# integrationBranch -- roadmap-init --integration-branch, through the real
+# aimi-cli.sh CLI rather than roadmap.py's init-write op directly, so the
+# same run also proves the flag threads through cmd_roadmap_init. Issue #87's
+# direction 1.
+# ---------------------------------------------------------------------------
+
+_IB_ROOT_PHASE = [{"id": 1, "name": "Root", "goal": "g", "slug": "root", "dependsOn": []}]
+
+
+def _ib_run(root, base, *args, stdin=None):
+    return subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-init"] + list(args),
+        input=json.dumps(stdin) if stdin is not None else None,
+        cwd=root, capture_output=True, text=True, timeout=120, env=_gt_branches_env(base),
+    )
+
+
+def test_roadmap_init_materializes_the_integration_branch(tmp_path):
+    """--integration-branch writes the field at creation time -- AC1."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-materialize"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc["integrationBranch"] == "integration"
+
+
+def test_roadmap_init_sync_preserves_the_integration_branch(tmp_path):
+    """The regression this story exists to prevent: op_init_write's --sync key
+    tuple at roadmap.py must carry integrationBranch, or a later additive
+    --sync silently erases whatever materialization wrote. Neither call below
+    passes --integration-branch a second time -- the second call proves the
+    value survives sync on its own, not because it was resupplied. AC3."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-sync"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc["integrationBranch"] == "integration"
+    assert [p["id"] for p in doc["phases"]] == [1, 2]
+
+
+def test_roadmap_init_sync_over_a_legacy_roadmap_leaves_it_absent(tmp_path):
+    """A roadmap.json written before this field existed carries no
+    integrationBranch key at all. Its absence is not an error, no migration
+    runs, and an additive --sync over it must not invent a value. AC5."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "ib-legacy"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(feature_dir, exist_ok=True)
+
+    legacy = {
+        "roadmapVersion": "2.0", "feature": feature, "createdAt": "2026-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [{
+            "id": 1, "name": "Root", "goal": "g", "slug": "root", "dir": "phase-1-root",
+            "status": "pending", "dependsOn": [], "branch": None, "notes": None,
+            "successCriteria": [], "creates": [], "needs": [], "areas": [], "claim": None,
+        }],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(legacy, handle)
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc.get("integrationBranch") is None
+    assert [p["id"] for p in doc["phases"]] == [1, 2]
+
+
+def test_roadmap_init_refuses_an_invalid_integration_branch_before_any_write(tmp_path):
+    """Validated against the same BRANCH_REGEX a phase's own branch field
+    already enforces, refused before roadmap.json is touched at all -- AC2."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-invalid"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "bad branch!",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 1
+    assert "integrationBranch" in proc.stderr
+    assert "invalid characters" in proc.stderr
+
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    assert not os.path.exists(roadmap_file)
+
+
 def test_the_empty_ground_truth_is_the_jq_capture_and_not_an_invention():
     """A tasks file that parses but whose userStories is absent made jq abort and
     the bash carry on with an empty capture. Reconcile then wrote status: "".
