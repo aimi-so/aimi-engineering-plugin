@@ -19,7 +19,7 @@ The planning input is `$ARGUMENTS` with the `--non-interactive` token removed (s
 
 | Variable | Value | Effect |
 |----------|-------|--------|
-| `AIMI_PLAN_DEBUG` | `1` | Opt-in diagnostic output. When set, Phase 1.9 (the Greenfield Foundation Gate) emits a `[plan-debug] phase-1.9: <fired\|skipped> (reason: <...>)` line to chat at its own fire/skip decision point. Unset (or any value other than `1`) produces no diagnostic output. Mirrors `brainstorm.md`'s `AIMI_BRAINSTORM_DEBUG` convention. |
+| `AIMI_PLAN_DEBUG` | `1` | Opt-in diagnostic output. When set, three decision points each emit a `[plan-debug] <phase>: <fired\|skipped> (reason: <...>)` line to chat at their own fire/skip decision point: Phase 1.9 (the Greenfield Foundation Gate), Roadmap Materialization (the `phases:` frontmatter parse), and Scope-Context Classification — Inline Fallback (Step 1's scope-context collapse). Unset (or any value other than `1`) produces no diagnostic output. Mirrors `brainstorm.md`'s `AIMI_BRAINSTORM_DEBUG` convention. |
 
 ## Step 0: Environment Setup
 
@@ -321,6 +321,8 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 1. Parse the `phases:` key from the same brainstorm frontmatter block already loaded above. Each entry carries `id, name, slug, goal, successCriteria, dependsOn, creates, needs, areas` in that fixed order.
 2. **If the key is absent** (legacy brainstorm, single scope-context feature, or the roadmap gate was skipped/collapsed): skip the rest of this section entirely. No `.aimi/tasks/<feature-slug>/` folder is created, no `roadmap.json` is written, and the rest of the pipeline (Phase 1 through Phase 3e) behaves identically to today's flat, non-phased flow. This is the default, most common path — emit no log line.
 3. **If present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry `phases:` list, but a hand-edited or externally authored brainstorm might): treat as absent. Emit one warning line `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip the rest of this section.
+
+*(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] roadmap-materialization: <fired|skipped> (reason: phase-entries=<N>)` to chat, where `<N>` is the number of `phases:` entries parsed from the frontmatter (0 when the key is absent) — `fired` when `<N>` is 2 or more and the rest of this section runs, `skipped` when `<N>` is 0 (key absent) or 1 (defensive re-check above, treated as absent).)*
 
 **Sanitize every phase field**
 
@@ -746,6 +748,8 @@ Otherwise, emit no line.
 
 - **0 or 1 scope contexts identified:** stop here. No `.aimi/tasks/<feature>/` folder is created, no roadmap CLI verb is called, no gate is shown — fall straight through to Phase 0.5 exactly as if this subsection did not exist. This is the default, most common path; emit no log line.
 - **2 or more scope contexts identified:** continue to Step 2.
+
+*(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] scope-context-classification: <fired|skipped> (reason: scope-contexts=<N>)` to chat, where `<N>` is the scope-context count Step 1 classified — `fired` when `<N>` is 2 or more (Step 2 proposes a phase cut), `skipped` when `<N>` is 0 or 1 (fall straight through to Phase 0.5).)*
 
 **Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact **identity** appearing in more than one proposed phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide), promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
 
