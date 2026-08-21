@@ -326,7 +326,7 @@ test_detect_parent_branch() {
   echo "=== Testing detect-parent-branch command ==="
 
   local stdout stderr_file stderr_output exit_code
-  local base_out verified_out source_out branch_out
+  local base_out verified_out source_out branch_out candidates_out
 
   # --- Case (a): DEFECT 1 fix — parent is the currently checked-out branch,
   #     decorated "HEAD -> <parent>, origin/<parent>" on the first ancestor
@@ -496,6 +496,65 @@ test_detect_parent_branch() {
   assert_eq "main" "$base_out" "detect-parent-branch (f): rejected candidate falls back to default branch"
   assert_eq "true" "$verified_out" "detect-parent-branch (f): verified true -- the walk continues past the rejected candidate and verifies main, rather than reporting an unverified fallback it never attempted"
   assert_eq "decoration" "$source_out" "detect-parent-branch (f): source is decoration -- main was found by walking, not by falling back"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (g): ambiguous decoration -- issue #87. An integration branch
+  #     and the default branch (main) sit on the SAME commit (main has not
+  #     diverged from integration yet), and the target branch is cut from
+  #     integration. Both "main" and "integration" decorate that one shared
+  #     commit, both verify via merge-base, and neither is nearer than the
+  #     other -- this is the regression commit 4384273 introduced: the old
+  #     caller took whichever of the two decoration listing put first and
+  #     answered verified:true, source:decoration, confidently wrong. The
+  #     verb must now refuse to guess between them. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b integration >/dev/null 2>&1
+  git checkout -b feat/on-integration >/dev/null 2>&1
+  echo "oi" > oi.txt && git add oi.txt && git commit -m "on-integration work" >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/on-integration) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  candidates_out=$(echo "$stdout" | jq -c '.candidates')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (g) ambiguous decoration: exit code"
+  assert_eq "main" "$base_out" "detect-parent-branch (g): base falls back to the default branch rather than an arbitrary tied winner"
+  assert_eq "false" "$verified_out" "detect-parent-branch (g): verified false -- neither tied candidate is asserted"
+  assert_eq "ambiguous-decoration" "$source_out" "detect-parent-branch (g): source is ambiguous-decoration"
+  assert_eq '["main","integration"]' "$candidates_out" "detect-parent-branch (g): candidates lists both tied names in walk order"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Case (h): unambiguous nested branches -- the fix's own regression
+  #     guard. feat/level-c is cut from feat/level-b, which is cut from
+  #     main, each at its OWN distinct commit. Both feat/level-b and main
+  #     independently verify (main is a genuine, farther ancestor too), but
+  #     they sit at different commits -- not a tie -- so the nearest one,
+  #     feat/level-b, must still win exactly as it did before this story:
+  #     verified true, source decoration, no ambiguity reported. ---
+  setup_parent_branch_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+
+  git checkout -b feat/level-b >/dev/null 2>&1
+  echo "lb" > lb.txt && git add lb.txt && git commit -m "level-b work" >/dev/null 2>&1
+  git checkout -b feat/level-c >/dev/null 2>&1
+  echo "lc" > lc.txt && git add lc.txt && git commit -m "level-c work" >/dev/null 2>&1
+
+  stdout=$("$CLI" detect-parent-branch feat/level-c) && exit_code=0 || exit_code=$?
+  base_out=$(echo "$stdout" | jq -r '.base')
+  verified_out=$(echo "$stdout" | jq -r '.verified')
+  source_out=$(echo "$stdout" | jq -r '.source')
+  candidates_out=$(echo "$stdout" | jq -c '.candidates')
+  assert_exit_code "0" "$exit_code" "detect-parent-branch (h) unambiguous nested branches: exit code"
+  assert_eq "feat/level-b" "$base_out" "detect-parent-branch (h): base is the nearest ancestor, not the farther one that also verifies"
+  assert_eq "true" "$verified_out" "detect-parent-branch (h): verified true -- a farther verifying candidate is not a tie"
+  assert_eq "decoration" "$source_out" "detect-parent-branch (h): source is decoration, not ambiguous-decoration"
+  assert_eq "null" "$candidates_out" "detect-parent-branch (h): candidates is null when the answer is unambiguous"
 
   popd >/dev/null
   teardown_git_fixture

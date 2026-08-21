@@ -2453,6 +2453,12 @@ _detect_parent_branch_candidate() {
 # the candidate's (post-normalization) name. Resolves the candidate against
 # a local branch first, falling back to an origin-prefixed remote-tracking
 # ref only when no local branch of that name exists.
+#
+# Prints the candidate's own commit SHA on success (nothing on failure) so
+# the caller can tell two verified candidates that happen to sit on the
+# SAME commit -- e.g. an integration branch and the default branch that
+# have not diverged yet -- apart from two verified candidates at genuinely
+# different commits, which is the ordinary nested-branch case, not a tie.
 _verify_parent_candidate() {
   local branch="$1" candidate="$2"
   local candidate_ref candidate_commit branch_commit merge_base
@@ -2476,7 +2482,11 @@ _verify_parent_candidate() {
   # the merge base), not a divergent sibling.
   merge_base=$(git merge-base "$branch" "$candidate_ref" 2>/dev/null) || return 1
 
-  [ "$merge_base" = "$candidate_commit" ]
+  if [ "$merge_base" = "$candidate_commit" ]; then
+    printf '%s' "$candidate_commit"
+    return 0
+  fi
+  return 1
 }
 
 # Detect a branch's parent (base) branch by parsing its --first-parent git
@@ -2486,8 +2496,38 @@ _verify_parent_candidate() {
 # git merge-base. Falls back to the repository's default branch (unverified)
 # when no decoration candidate survives normalization or merge-base
 # verification.
+#
 # Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
-# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":"decoration"|"default-branch"}
+# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":<source>,"candidates":<candidates>}
+#
+# `source` takes one of three values, following detect-forge's own
+# ambiguous-remotes precedent (this section's comment above _detect_forge's
+# builder) rather than inventing a new vocabulary:
+#   "decoration"          -- exactly one candidate verified at the nearest
+#                            surviving commit. `base` is that candidate,
+#                            `verified` is true, `candidates` is null.
+#   "ambiguous-decoration" -- two or more candidates verified at the SAME
+#                            nearest commit (e.g. an integration branch and
+#                            the default branch that have not diverged yet,
+#                            with a phase branch cut from either). This verb
+#                            cannot pick a winner among them, so it never
+#                            asserts one: `base` falls back to the
+#                            repository's default branch, `verified` is
+#                            false, and `candidates` is the tied names in
+#                            walk order -- the shape the caller must branch
+#                            on instead of trusting `base` as a confirmed
+#                            parent. This is the fix for the regression
+#                            commit 4384273 introduced (issue #87): that
+#                            topology used to answer verified true with
+#                            source "decoration", picking whichever tied
+#                            name decoration listing order put first.
+#   "default-branch"      -- no candidate survived normalization or
+#                            merge-base verification at all. `base` is the
+#                            repository's default branch, `verified` is
+#                            false, `candidates` is null.
+# `branch`, `base` and `verified` keep the names and meanings they had
+# before this contract grew a third source value; `candidates` is the
+# additive field, null except under "ambiguous-decoration".
 cmd_detect_parent_branch() {
   local branch="" project_dir=""
 
@@ -2526,21 +2566,46 @@ cmd_detect_parent_branch() {
 
   local raw_candidate
   local base="" verified="false" source="default-branch"
+  local -a winners=()
+  local winning_commit=""
 
-  # Try every candidate in walk order and take the first that verifies. A
-  # rejected candidate no longer ends the search -- see
-  # _detect_parent_branch_candidate's header for what that cost.
+  # Walk every candidate in nearest-first order (never break early -- see
+  # _detect_parent_branch_candidate's header for what breaking on the first
+  # rejection used to cost). A candidate that verifies is compared against
+  # the FIRST verified candidate's own commit: sharing that exact commit
+  # makes it a tie (both are decorations on the same nearest commit, e.g.
+  # an integration branch and the default branch that have not diverged
+  # yet); a different, farther commit makes it a legitimate but more
+  # distant ancestor further up the tree -- not a tie, and not the answer,
+  # since the nearest one already wins. Only the first tied group is ever
+  # collected: walk order guarantees tied decorations on one commit are
+  # adjacent in the candidate stream, so once a verified candidate's commit
+  # differs from winning_commit, every candidate at the nearest commit has
+  # already been seen.
   while IFS= read -r raw_candidate; do
     [ -n "$raw_candidate" ] || continue
-    if _verify_parent_candidate "$branch" "$raw_candidate"; then
-      base="$raw_candidate"
-      verified="true"
-      source="decoration"
-      break
+    local candidate_commit
+    if candidate_commit=$(_verify_parent_candidate "$branch" "$raw_candidate"); then
+      if [ -z "$winning_commit" ]; then
+        winning_commit="$candidate_commit"
+        winners=("$raw_candidate")
+      elif [ "$candidate_commit" = "$winning_commit" ]; then
+        winners+=("$raw_candidate")
+      fi
     fi
   done <<< "$(_detect_parent_branch_candidate "$branch")"
 
-  if [ -z "$base" ]; then
+  local candidates_json="null"
+  if [ "${#winners[@]}" -eq 1 ]; then
+    base="${winners[0]}"
+    verified="true"
+    source="decoration"
+  elif [ "${#winners[@]}" -gt 1 ]; then
+    base=$(_resolve_default_branch)
+    verified="false"
+    source="ambiguous-decoration"
+    candidates_json=$(jq -nc --args '$ARGS.positional' "${winners[@]}")
+  else
     base=$(_resolve_default_branch)
   fi
 
@@ -2549,7 +2614,8 @@ cmd_detect_parent_branch() {
     --arg base "$base" \
     --argjson verified "$verified" \
     --arg source "$source" \
-    '{branch: $branch, base: $base, verified: $verified, source: $source}'
+    --argjson candidates "$candidates_json" \
+    '{branch: $branch, base: $base, verified: $verified, source: $source, candidates: $candidates}'
 }
 
 # ============================================================================
@@ -13528,9 +13594,13 @@ COMMANDS:
                               Detect branch's parent (base) branch by token-aware
                               git log decoration parsing + git merge-base verification.
                               Output: {branch, base, verified, source
-                              ("decoration"|"default-branch")}. Falls back to the
-                              default branch (unverified) when no decoration
-                              candidate survives normalization or merge-base check.
+                              ("decoration"|"ambiguous-decoration"|"default-branch"),
+                              candidates}. Falls back to the default branch
+                              (unverified) when no decoration candidate survives
+                              normalization or merge-base check, or when two or
+                              more candidates verify at the same nearest commit
+                              (source "ambiguous-decoration", candidates lists the
+                              tied names instead of asserting a winner).
     detect-forge [--project <path>]
                               Classify the active git remote's hostname into
                               github|gitlab|gitea|unknown (exact-or-subdomain,
