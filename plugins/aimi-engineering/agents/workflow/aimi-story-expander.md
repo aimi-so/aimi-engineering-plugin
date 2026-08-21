@@ -72,6 +72,10 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 `gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
 
+## Verify working directory
+
+`implementation.verify` always runs from the story's project root: the repo at this story's own `project` field when set, or the single repo this run targets when `project` is absent (i.e. no sub-repos in this run). A multi-repo story (non-empty `project`) MUST prefix the command with `cd <project> &&`. A single-repo story (no `project` field) MUST NOT prefix the command with `cd . &&` — leave it bare.
+
 ## dependsOn encoding
 
 - Use `outline:NN` tokens (zero-padded, matching the outline `idx`).
