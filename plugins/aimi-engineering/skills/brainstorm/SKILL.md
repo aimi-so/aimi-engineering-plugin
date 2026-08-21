@@ -1,7 +1,6 @@
 ---
 name: brainstorm
 description: "Guide collaborative brainstorming sessions to clarify requirements before planning. Covers batched multiple-choice questions, adaptive exit, and design document capture. Triggers on: brainstorm, explore idea, think through, what should we build."
-user-invocable: false
 ---
 
 > **Deprecated:** This skill is no longer loaded by brainstorm.md. The command is self-contained. Retained for reference only.

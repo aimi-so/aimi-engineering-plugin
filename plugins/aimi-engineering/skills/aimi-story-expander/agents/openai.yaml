@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Story Expander
+  short_description: Expands a single outline entry into a full user-story JSON object
+    (schema v3.3) for the /aimi:plan two-pass pipeline. Receives one outline entry
+    plus full outli
+policy:
+  allow_implicit_invocation: false

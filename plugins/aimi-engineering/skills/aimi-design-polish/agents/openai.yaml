@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Polish
+  short_description: 'Final-pass polish for frontend interfaces — catches the small
+    details that separate good work from great work. Use after a feature is functionally
+    complete and '
+policy:
+  allow_implicit_invocation: false

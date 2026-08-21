@@ -573,7 +573,7 @@ Use the Write tool to save the JSON file(s). Validate JSON is well-formed before
 
 After writing the tasks.json file(s), validate each generated output independently.
 
-**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy). Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited; re-read from cache at the top of every Bash call that needs it:
+**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../../../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy). Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited; re-read from cache at the top of every Bash call that needs it:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)

@@ -4,7 +4,7 @@
 
 **Every change to this plugin MUST include:**
 
-1. **Bump version** in `.claude-plugin/plugin.json` (follow semver)
+1. **Bump version** in `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json` (follow semver)
    - MAJOR: Breaking changes to command syntax or output format
    - MINOR: New commands, skills, or features
    - PATCH: Bug fixes, documentation updates
@@ -15,7 +15,7 @@
 
 3. **Update README.md** component counts if adding/removing components
 
-4. **Update marketplace.json** version to match plugin.json
+4. **Update `.claude-plugin/marketplace.json`** version to match both plugin manifests. The Codex marketplace does not duplicate the version.
 
 ## Plugin Structure
 
@@ -23,9 +23,14 @@
 aimi-engineering-plugin/
 ├── .claude-plugin/
 │   └── marketplace.json         # Marketplace manifest (points to plugins/)
+├── .agents/plugins/
+│   └── marketplace.json         # Codex marketplace manifest
 ├── plugins/aimi-engineering/    # Actual plugin content
 │   ├── .claude-plugin/
 │   │   └── plugin.json          # Plugin manifest
+│   ├── .codex-plugin/
+│   │   └── plugin.json          # Codex plugin manifest
+│   ├── codex/                    # Codex generation metadata
 │   ├── commands/                # Slash commands (.md files)
 │   ├── skills/                  # Skills (subdirs with SKILL.md)
 │   │   └── skill-name/
@@ -55,7 +60,7 @@ aimi-engineering-plugin/
 
 ## Hook Conventions
 
-- Hooks emitting hookSpecificOutput must gate on CLAUDECODE env var when their output schema is Claude Code-specific.
+- Hooks emitting host-specific `hookSpecificOutput` must gate on the relevant event and host. Codex approvals use `PermissionRequest`; Claude Code approvals use `PreToolUse`.
 
 ## Command Conventions
 

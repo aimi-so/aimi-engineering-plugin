@@ -1,6 +1,6 @@
 ---
 name: aimi:setup-models
-description: Configure per-category model assignments interactively. Shows current values for the active host (claudeCode or opencode), then runs a five-question picker (research, review, design, workflow, executor) with current values pre-selected as defaults. Writes ~/.config/aimi/models.json (schema v2.0) via aimi-cli detect-models, preserving the other host's sub-table. Use when you want to change model assignments after first-run, or when ~/.config/aimi/models.json was deleted and you want to re-configure.
+description: Configure per-category model assignments interactively for Claude Code, OpenCode, or Codex while preserving every other host's settings.
 argument-hint: ""
 allowed-tools:
   - Bash(cat:*)
@@ -14,7 +14,7 @@ allowed-tools:
 
 # Aimi Setup Models
 
-Interactive (re)configuration of per-category model assignments for `~/.config/aimi/models.json` (schema v2.0). Writes only the active host's sub-table; the other host's settings are preserved on merge.
+Interactive (re)configuration of per-category model assignments for `~/.config/aimi/models.json` (schema v2.0). Writes only the active host's sub-table; every other host's settings are preserved on merge.
 
 ## Step 0: Resolve CLI Path
 
@@ -31,13 +31,15 @@ Identify the host and gather the two JSON inputs needed for the picker.
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-if [ -n "${CLAUDECODE}" ]; then
+if [ "${AIMI_HOST:-}" = "codex" ]; then
+  HOST_LABEL="Codex"
+elif [ -n "${CLAUDECODE:-}" ]; then
   HOST_LABEL="Claude Code"
 else
   HOST_LABEL="OpenCode"
 fi
-AVAILABLE_MODELS_JSON=$($AIMI_CLI list-models 2>/dev/null)
-CURRENT_MODELS_JSON=$($AIMI_CLI get-current-models 2>/dev/null)
+AVAILABLE_MODELS_JSON=$(AIMI_HOST="${AIMI_HOST:-}" $AIMI_CLI list-models 2>/dev/null)
+CURRENT_MODELS_JSON=$(AIMI_HOST="${AIMI_HOST:-}" $AIMI_CLI get-current-models 2>/dev/null)
 ```
 
 `AVAILABLE_MODELS_JSON` is a JSON array of model id strings. `CURRENT_MODELS_JSON` is a JSON object with five keys (research, review, design, workflow, executor) — each value is either a configured model id string or JSON null when unset.
@@ -70,11 +72,11 @@ Use **AskUserQuestion** with **five questions in one call** — one per category
 
 | Category | Default when current value is a configured id | Default when current value is JSON null |
 |----------|------------------------------------------------|-----------------------------------------|
-| research | the current value (option that matches it)    | Claude Code: `haiku` · OpenCode: an Anthropic Haiku model id from `AVAILABLE_MODELS_JSON` |
-| review   | the current value                              | Claude Code: `opus` · OpenCode: an Anthropic Opus model id |
-| design   | the current value                              | Claude Code: `sonnet` · OpenCode: an Anthropic Sonnet model id |
-| workflow | the current value                              | Claude Code: `sonnet` · OpenCode: an Anthropic Sonnet model id |
-| executor | the current value                              | Claude Code: `sonnet` · OpenCode: an Anthropic Sonnet model id |
+| research | the current value (option that matches it)    | Claude Code: `haiku` · OpenCode: Anthropic Haiku · Codex: `gpt-5.6-luna` |
+| review   | the current value                              | Claude Code: `opus` · OpenCode: Anthropic Opus · Codex: `gpt-5.6-sol` |
+| design   | the current value                              | Claude Code: `sonnet` · OpenCode: Anthropic Sonnet · Codex: `gpt-5.6-terra` |
+| workflow | the current value                              | Claude Code: `sonnet` · OpenCode: Anthropic Sonnet · Codex: `gpt-5.6-terra` |
+| executor | the current value                              | Claude Code: `sonnet` · OpenCode: Anthropic Sonnet · Codex: `gpt-5.6-terra` |
 
 Place the recommended/default option **first** in the option list for each question and append `(current)` or `(suggested default)` to its label — `(current)` when it matches the value parsed from `CURRENT_MODELS_JSON`, `(suggested default)` when the current value was JSON null.
 
@@ -92,12 +94,12 @@ Collect the user's five answers as `CHOSEN_RESEARCH`, `CHOSEN_REVIEW`, `CHOSEN_D
 
 ## Step 4: Write Configuration
 
-Invoke `aimi-cli detect-models` with the five chosen values. `detect-models` validates each model id against the host's available-model list before writing, preserves the other host's `categories.<host>` sub-table, and emits the resulting config JSON on stdout.
+Invoke `aimi-cli detect-models` with the five chosen values. `detect-models` validates each model id against the host's available-model list before writing, preserves every other host's `categories.<host>` sub-table, and emits the resulting config JSON on stdout.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI detect-models \
+AIMI_HOST="${AIMI_HOST:-}" $AIMI_CLI detect-models \
   --research  "[CHOSEN_RESEARCH]" \
   --review    "[CHOSEN_REVIEW]" \
   --design    "[CHOSEN_DESIGN]" \
@@ -122,10 +124,10 @@ Models configured for [HOST_LABEL]:
 Config: ~/.config/aimi/models.json (schema v2.0)
 ```
 
-If the other host's sub-table existed before this run, also note:
+If another host's sub-table existed before this run, also note:
 
 ```
-The other host's category assignments were preserved.
+The other hosts' category assignments were preserved.
 ```
 
 ## Error Handling

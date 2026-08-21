@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Execute
+  short_description: Execute all pending stories autonomously with wave-based parallelism
+policy:
+  allow_implicit_invocation: false

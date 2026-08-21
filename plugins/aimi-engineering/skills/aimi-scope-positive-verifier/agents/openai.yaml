@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Scope Positive Verifier
+  short_description: Independently re-checks a positive existence claim (already migrated
+    / natively present / thin alias) using data-flow analysis and caller tracing —
+    NOT by accep
+policy:
+  allow_implicit_invocation: false

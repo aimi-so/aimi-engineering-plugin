@@ -1,0 +1,20 @@
+{
+  "name": "aimi-marketplace",
+  "interface": {
+    "displayName": "Aimi"
+  },
+  "plugins": [
+    {
+      "name": "aimi-engineering",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aimi-engineering"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

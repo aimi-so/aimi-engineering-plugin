@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Status
+  short_description: Show current task execution progress
+policy:
+  allow_implicit_invocation: false

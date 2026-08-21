@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Performance Oracle
+  short_description: Analyzes code for performance bottlenecks, algorithmic complexity,
+    database queries, memory usage, and scalability. Use after implementing features
+    or when perf
+policy:
+  allow_implicit_invocation: false

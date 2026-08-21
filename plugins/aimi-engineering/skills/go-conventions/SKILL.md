@@ -1,6 +1,5 @@
 ---
 name: go-conventions
-version: "1.0.0"
 description: >
   Use when writing, reviewing, or scaffolding Go code — package layout under a
   module, error handling and wrapping, interface design, context propagation,
@@ -15,6 +14,8 @@ description: >
   structs, context.Context, goroutine leak, channels vs mutex, table-driven
   test, gofmt, Go project structure, golang-standards/project-layout.
 license: CC-BY 4.0, Apache-2.0, CC-BY 3.0 (NOTICE.md)
+metadata:
+  version: "1.0.0"
 ---
 
 # Go Conventions

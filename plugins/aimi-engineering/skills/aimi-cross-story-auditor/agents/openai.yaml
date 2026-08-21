@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Cross Story Auditor
+  short_description: 'Audits all Pass 2 staging JSONs (plus outline.json, consolidated
+    research summary, and failed-expansion idx list) for cross-story drift, emitting
+    a {patches[], '
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Julik Frontend Races Reviewer
+  short_description: Reviews JavaScript and Stimulus code for race conditions, timing
+    issues, and DOM lifecycle problems. Use after implementing or modifying frontend
+    controllers or
+policy:
+  allow_implicit_invocation: false

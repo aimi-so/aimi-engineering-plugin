@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Learnings
+  short_description: Review and triage Aimi friction events.
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Next
+  short_description: Execute the next pending story from tasks.json
+policy:
+  allow_implicit_invocation: false

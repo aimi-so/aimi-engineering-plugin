@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Critique
+  short_description: Design critique for frontend interfaces — visual hierarchy, information
+    architecture, anti-patterns, and Nielsen's heuristics scoring. Use when you want
+    a desig
+policy:
+  allow_implicit_invocation: false

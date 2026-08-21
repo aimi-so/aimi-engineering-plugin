@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Learnings Researcher
+  short_description: Searches .aimi/solutions/ for relevant past solutions by frontmatter
+    metadata. Use before implementing features or fixing problems to surface institutional
+    know
+policy:
+  allow_implicit_invocation: false

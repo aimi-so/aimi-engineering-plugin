@@ -1,0 +1,5 @@
+interface:
+  display_name: Aimi Review
+  short_description: Perform code reviews using parallel aimi-native review agents
+policy:
+  allow_implicit_invocation: false

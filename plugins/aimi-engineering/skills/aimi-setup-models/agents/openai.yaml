@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Setup Models
+  short_description: Configure per-category model assignments interactively for Claude
+    Code, OpenCode, or Codex while preserving every other host's settings.
+policy:
+  allow_implicit_invocation: false

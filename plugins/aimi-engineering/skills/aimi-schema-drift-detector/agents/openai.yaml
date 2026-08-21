@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Schema Drift Detector
+  short_description: Detects unrelated schema.rb changes in PRs by cross-referencing
+    against included migrations. Use when reviewing PRs with database schema changes.
+policy:
+  allow_implicit_invocation: false

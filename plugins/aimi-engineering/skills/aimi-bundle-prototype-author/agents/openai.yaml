@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Bundle Prototype Author
+  short_description: 'Reads DesignSpec.md, BusinessSpec.md, and chat files from a
+    Claude Design handoff bundle and authors a single self-contained HTML prototype
+    with a per-view tab '
+policy:
+  allow_implicit_invocation: false

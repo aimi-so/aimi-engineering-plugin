@@ -1,0 +1,5 @@
+interface:
+  display_name: Task Planner Internals
+  short_description: Internal workflow used by Aimi planning.
+policy:
+  allow_implicit_invocation: false

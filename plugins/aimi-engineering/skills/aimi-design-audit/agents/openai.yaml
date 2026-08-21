@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Design Audit
+  short_description: 'Technical quality audit for frontend interfaces — accessibility
+    (a11y), performance, theming, responsive design, and anti-pattern detection. Dedicated
+    home for '
+policy:
+  allow_implicit_invocation: false

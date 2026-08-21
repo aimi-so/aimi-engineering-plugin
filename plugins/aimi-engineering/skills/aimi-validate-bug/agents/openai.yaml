@@ -1,0 +1,7 @@
+interface:
+  display_name: Aimi Validate Bug
+  short_description: Validate and reproduce a bug report using the aimi-bug-reproduction-validator
+    agent. Returns a structured report covering Reproduction Status, Steps Taken,
+    Find
+policy:
+  allow_implicit_invocation: false

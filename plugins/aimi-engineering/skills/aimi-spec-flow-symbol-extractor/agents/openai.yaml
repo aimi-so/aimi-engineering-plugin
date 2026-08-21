@@ -1,0 +1,6 @@
+interface:
+  display_name: Aimi Spec Flow Symbol Extractor
+  short_description: Batched extractor that reads sanitized spec-flow open questions
+    and returns a JSON map of grep-safe code symbols for Phase 2.4 codebase cross-check.
+policy:
+  allow_implicit_invocation: false

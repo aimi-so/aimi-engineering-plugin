@@ -1,0 +1,5 @@
+interface:
+  display_name: Resolve PR Parallel
+  short_description: Resolve pull request feedback with parallel agents.
+policy:
+  allow_implicit_invocation: false
