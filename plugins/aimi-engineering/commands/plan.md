@@ -324,15 +324,6 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 
 *(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] roadmap-materialization: <fired|skipped> (reason: phase-entries=<N>)` to chat, where `<N>` is the number of `phases:` entries parsed from the frontmatter (0 when the key is absent) — `fired` when `<N>` is 2 or more and the rest of this section runs, `skipped` when `<N>` is 0 (key absent) or 1 (defensive re-check above, treated as absent).)*
 
-**Parse `integrationBranch:` frontmatter**
-
-Only reached when the `phases:` parse above did not already skip the rest of this section. A brainstorm's frontmatter may carry an optional **top-level** `integrationBranch:` key — the long-lived branch this feature's first phase should open its PR against (issue #87's direction 1) — distinct from any per-phase `branch` field and never itself a `phases:` entry.
-
-1. Parse `integrationBranch:` from the same frontmatter block already loaded. **If the key is absent or empty** (the common case, since nothing in this plugin writes it today — a human adds it by hand when a feature is meant to land on a long-lived integration branch rather than the default branch): leave the working-memory `integrationBranch` variable unset and skip the rest of this subsection with no log line. `roadmap-init` is then called exactly as it was before this field existed.
-2. **When present**, apply the same newline/`$(`-stripping and backtick-stripping extension the per-phase free-text fields below use, then validate the sanitized result against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` — the identical pattern `roadmap-init` itself enforces server-side (`BRANCH_REGEX` in `roadmap.py`, the same one a phase's own `branch` field is checked against).
-   - **Match:** populate the working-memory `integrationBranch` variable with the sanitized value.
-   - **No match:** emit one warning line `integrationBranch "<value>" failed validation — ignoring, roadmap materialized without it` and leave `integrationBranch` unset, exactly as if the key had been absent. One malformed top-level field must never fail the whole roadmap materialization the way an unrepairable `creates`/`needs` entry does — there is no per-phase repair-and-retry to reach for here, so the safe move is to drop the field, not the phases.
-
 **Sanitize every phase field**
 
 For each remaining phase entry, apply the base rules in `commands/references/sanitization.md` (delete fenced blocks whole but **unwrap** a single backticked span to its inner text, strip HTML/XML tags, strip instruction-override patterns) plus the newline/`$(`-stripping extension already applied to Path Hints and Phase 1.8 OQ text elsewhere in this command, to every free-text field, before it is used in any directory-segment derivation, CLI argument, or downstream prompt.
@@ -380,12 +371,14 @@ Collect the results into a `sanitizedPhases` working-memory list — each entry 
   PHASES_JSON
   ```
 
-- **`absent`:** call `roadmap-init` in creation mode, passing the brainstorm's own path (relative to `AIMI_ROOT`, no leading `./`, no `..` — the file read at the top of Phase 0) as `--brainstorm-path`, plus `--integration-branch "$integrationBranch"` when the parse step above populated it (omit the flag entirely when `integrationBranch` is unset — never pass an empty string). The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir` call is needed, and no Write tool call ever touches `roadmap.json`. This is materialization: the only point `integrationBranch` is ever written from this flag — an `exists`/`--sync` re-run above never passes it, since `roadmap-init --sync` preserves whatever value (if any) already sits on disk rather than accepting a new one from this call.
+- **`absent`:** call `roadmap-init` in creation mode, passing the brainstorm's own path (relative to `AIMI_ROOT`, no leading `./`, no `..` — the file read at the top of Phase 0) as `--brainstorm-path`. The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir` call is needed, and no Write tool call ever touches `roadmap.json`.
+
+  `roadmap-init` still accepts `--integration-branch` (see `plugins/aimi-engineering/CLAUDE.md`), and this step deliberately does not pass it. The flag is a human affordance for materialising a feature onto a long-lived integration branch, in the same shape `roadmap-amend-phase` is a human affordance for correcting a phase; nothing in this plugin writes the value, and issue #87 direction 1 documents hand-editing `roadmap.json` as the supported route. Threading it from brainstorm frontmatter meant parsing a key no command emits and interpolating the result — LLM-authored text — into this very bash line through a model-substituted placeholder, with sanitization guaranteed only by the prose telling the model to sanitize. Removing the parse removes that, and costs nothing that ever worked.
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-  $AIMI_CLI roadmap-init --feature "$featureSlug" --brainstorm-path "<brainstorm relative path>" --integration-branch "<integrationBranch value, or omit this flag entirely when unset>" <<'PHASES_JSON'
+  $AIMI_CLI roadmap-init --feature "$featureSlug" --brainstorm-path "<brainstorm relative path>" <<'PHASES_JSON'
   <sanitizedPhases as a JSON array>
   PHASES_JSON
   ```

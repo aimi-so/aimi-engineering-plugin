@@ -12002,8 +12002,12 @@ cmd_story_merge() {
 # exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
 
 # A story is pending when its status is neither "completed" nor "skipped" --
-# the terminal pair, and the same rule tasks.py applies in _dep_status_done and
-# roadmap.py applies in ground_truth. Exactly one definition, used for every
+# the terminal pair. NORMATIVE HOME: roadmap.py's TERMINAL_STORY_STATUSES,
+# which tasks.py's _dep_status_done and roadmap.py's ground_truth both import.
+# This copy cannot: it is a jq program and imports nothing. It is therefore the
+# one site that can drift again without the other two noticing, which is
+# exactly what happened -- see the paragraph below. Change it only together
+# with that constant. Exactly one definition, used for every
 # count this verb reports. The prose it replaces had two that disagreed --
 # `!= "completed"` for the active filter and `== "pending"` for the phase
 # completion count -- so an in_progress story was counted by one and not the

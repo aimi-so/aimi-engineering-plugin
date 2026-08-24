@@ -559,6 +559,34 @@ def normalize_contracts(doc):
 # ---------------------------------------------------------------------------
 
 DIR_REGEX = re.compile(r"^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$")
+# The terminal story statuses: the one rule that answers "has this story
+# finished?", and therefore "does this phase still have work?".
+#
+# One name, three readers, because a Python constant cannot reach all three:
+#   - ground_truth, below in this file
+#   - tasks.py's _dep_status_done, which imports this
+#   - aimi-cli.sh's split-detect, which is jq and cannot import anything
+#
+# The jq copy carries a comment pointing here. Three literal copies is what the
+# tree had before, and they DID drift: split-detect tested only "completed"
+# while the other two had already been taught that "skipped" is terminal too,
+# which is how issue #112 stayed open for split phases after being closed for
+# every other kind. A name does not prevent the jq copy drifting again, but it
+# gives the drift somewhere to be measured against.
+#
+# It lives here rather than in tasks.py, where a story rule semantically
+# belongs, only because tasks.py already imports FROM this module -- putting it
+# there would close an import cycle. Move it if that edge ever reverses; do not
+# move it without checking.
+TERMINAL_STORY_STATUSES = ("completed", "skipped")
+
+# Matched with .fullmatch(), never .search(). Python's `$` also matches just
+# BEFORE a trailing newline, so `re.search` accepted "main\n" -- a value no git
+# refname can hold, but this pattern also guards integrationBranch, which
+# arrives straight from a CLI flag with no rm_sanitize newline-stripping in
+# front of it. fullmatch anchors both ends and closes it for every caller at
+# once. The pattern itself is unchanged so the accepted set is otherwise
+# byte-identical.
 BRANCH_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
 
 
@@ -689,7 +717,7 @@ def init_shape_errors(phases):
     branch_errors = [
         "phase " + _num(p.get("id")) + ': branch "' + p["branch"] + '" contains invalid characters'
         for p in phases
-        if p.get("branch") is not None and not BRANCH_REGEX.search(p["branch"])
+        if p.get("branch") is not None and not BRANCH_REGEX.fullmatch(p["branch"])
     ]
     return dir_errors, branch_errors
 
@@ -1688,7 +1716,7 @@ def ground_truth(doc):
         return "unknown"
     if any(status == "failed" for status in statuses):
         return "verification_failed"
-    if all(status in ("completed", "skipped") for status in statuses):
+    if all(status in TERMINAL_STORY_STATUSES for status in statuses):
         return "completed"
     if all(status == "pending" for status in statuses):
         return "planned"
@@ -2014,7 +2042,7 @@ def op_init_validate(argv):
     it: two layers on purpose, the same shape validate_story_exists uses.
     """
     integration_branch = _flag(argv, "--integration-branch") or ""
-    if integration_branch and not BRANCH_REGEX.search(integration_branch):
+    if integration_branch and not BRANCH_REGEX.fullmatch(integration_branch):
         die(
             'Error: roadmap-init: integrationBranch "'
             + integration_branch
@@ -2066,7 +2094,7 @@ def op_init_write(argv):
     # phase's own `branch` field already enforces (BRANCH_REGEX above) instead
     # of a second one. An empty value is legal -- it means "not declared" -- so
     # only a non-empty, non-matching value dies.
-    if integration_branch and not BRANCH_REGEX.search(integration_branch):
+    if integration_branch and not BRANCH_REGEX.fullmatch(integration_branch):
         die(
             'Error: roadmap-init: integrationBranch "'
             + integration_branch
@@ -2111,17 +2139,37 @@ def op_init_write(argv):
 
         merged = existing_phases + filtered_new
         merged.sort(key=lambda p: jq_sort_key(p.get("id")))
-        # Only these five top-level keys survive a --sync, exactly as before
-        # plus integrationBranch: it is additive-optional and, per issue #87's
-        # direction 1, addable to an existing roadmap.json by hand, so an
-        # additive --sync must carry whatever value is already on disk forward
-        # rather than silently erasing it. This call's own --integration-branch
-        # flag (if any) is NOT consulted here -- only materialization (the
-        # create branch below) writes a fresh value; --sync only preserves.
-        doc = {
-            k: existing.get(k)
-            for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath", "integrationBranch")
-        }
+        # --sync preserves every top-level key it did not come to change, and
+        # replaces only `phases`. It used to rebuild from a whitelist instead,
+        # and that whitelist erased integrationBranch on its first use -- a
+        # field DOCUMENTED as addable to an existing roadmap.json by hand, i.e.
+        # arriving by a route a list of permitted names is structurally unable
+        # to know about. Widening the list to six would fix that one key and
+        # leave the shape that produced it.
+        #
+        # Inverted rather than widened, for three reasons:
+        #   - The list performed no admission function. The untrusted input is
+        #     the phases payload on stdin, already through init-validate;
+        #     `existing` is a document this CLI wrote and guard-runtime-state
+        #     protects from Write/Edit. It was filtering this script's own
+        #     output.
+        #   - It was the ONLY writer doing so. op_amend_write, op_set_status,
+        #     op_claim, op_release_claim, op_reconcile and op_normalize_contracts
+        #     all mutate `doc` in place and have always preserved unknown keys.
+        #     Six writers obeyed one rule and this one held an exception.
+        #   - The failure directions are not symmetric. A too-narrow allowlist
+        #     erases user data silently; a too-narrow denylist carries a stale
+        #     key forward, which is visible and repairable. Take the visible one.
+        #
+        # Accepted knowingly: a --sync over a document carrying a junk top-level
+        # key now preserves the junk. It can only have arrived by a hand-edit --
+        # the same route integrationBranch is designed to arrive by -- so
+        # preserving it is the same promise, not a new hazard.
+        #
+        # This call's own --integration-branch flag is still NOT consulted here:
+        # only materialization (the create branch below) writes a fresh value.
+        # --sync preserves; it never overwrites a value someone declared by hand.
+        doc = {k: v for k, v in existing.items() if k != "phases"}
         doc["phases"] = merged
         added_count = len(filtered_new)
     else:
@@ -2227,7 +2275,7 @@ def op_amend_validate(argv):
 
     sanitized = amend_sanitize(payload)
     branch = sanitized.get("branch")
-    if "branch" in sanitized and branch is not None and not BRANCH_REGEX.search(branch):
+    if "branch" in sanitized and branch is not None and not BRANCH_REGEX.fullmatch(branch):
         die('Error: roadmap-amend-phase: branch "' + branch + '" contains invalid characters')
 
     json.dump(sanitized, sys.stdout, ensure_ascii=False)
