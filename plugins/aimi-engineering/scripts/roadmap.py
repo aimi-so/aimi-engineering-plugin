@@ -1670,9 +1670,16 @@ def ground_truth(doc):
     -- so demoting the status changes what a human reading roadmap.json sees,
     not what a concurrent claim can do. reconcile also clears a claim only for
     a "completed" correction (see op_reconcile), so this demotion leaves
-    whatever claim exists in place; self-reclaim treats "planned" and
-    "in_progress" identically, so the session that owns the claim is
-    unaffected by the demotion either way.
+    whatever claim exists in place, and self-reclaim treats "planned" and
+    "in_progress" identically.
+
+    That reasoning covers roadmap-claim and stops there, which is exactly how
+    far it goes: the session that owns the claim IS affected, because
+    STATUS_TRANSITIONS has no planned -> completed edge, so a demoted phase
+    strands its owner at Mark Phase Completed after every story has already
+    run. This function cannot see that -- it is a pure function of the tasks
+    file and never reads the stored status -- so the refusal lives in
+    op_reconcile, which does. See the in_progress branch there.
     """
     statuses = _story_statuses(doc)
     if statuses is None:
@@ -1992,13 +1999,28 @@ def _die_list(header, lines, note=False):
     sys.exit(1)
 
 
-def op_init_validate(_argv):
+def op_init_validate(argv):
     """Everything roadmap-init checks BEFORE it takes the lock.
 
     Split from init-write for one reason: today an invalid payload never
     reaches `mkdir -p`, so it never creates the feature directory. Doing
     validation inside the lock would create it as a side effect of a refusal.
+
+    --integration-branch is judged here for exactly that reason. It shipped
+    validated in init-write instead, which put the refusal after the mkdir and
+    inside the lock -- so `roadmap-init --integration-branch 'bad branch!'`
+    exited 1 having created the feature directory and a stale .lock, which is
+    the side effect this split exists to prevent. init-write still re-checks
+    it: two layers on purpose, the same shape validate_story_exists uses.
     """
+    integration_branch = _flag(argv, "--integration-branch") or ""
+    if integration_branch and not BRANCH_REGEX.search(integration_branch):
+        die(
+            'Error: roadmap-init: integrationBranch "'
+            + integration_branch
+            + '" contains invalid characters'
+        )
+
     raw = sys.stdin.read()
     try:
         payload = jq_numbers(json.loads(raw))
@@ -3126,7 +3148,30 @@ def op_reconcile(argv):
         if truth == "unknown" or truth == status:
             continue
         row = {"id": jq_numbers(phase.get("id")), "from": status, "to": truth}
-        if truth == "completed" and not os.path.isfile(
+        if truth == "planned" and status == "in_progress":
+            # A phase a session has already transitioned to in_progress must not be
+            # demoted, even though its stories genuinely are all still pending. That
+            # is the normal shape of a phase mid-claim: execute.md writes in_progress
+            # before any story moves, so the window spans split detection, dependency
+            # validation, orphan reset and wave planning -- agent turns, not
+            # milliseconds -- and execute.md runs reconcile across the WHOLE roadmap
+            # on every claim, so a sibling session is what lands here.
+            #
+            # The demotion is unrecoverable rather than merely untidy: planned ->
+            # completed is not in STATUS_TRANSITIONS, so the owning session would run
+            # every story and then hard-fail at Mark Phase Completed, which is one
+            # call with no fallback. Reported instead of applied, so the divergence
+            # stays visible -- execute.md already prints blocked[] advisorily.
+            #
+            # Deliberately narrower than "never demote": pending -> planned, issue
+            # #102's own target, is a phase nobody has claimed and still self-heals.
+            row["reason"] = (
+                "phase is in_progress -- demoting to planned would strand its "
+                "completion transition, which STATUS_TRANSITIONS does not allow "
+                "from planned"
+            )
+            blocked.append(row)
+        elif truth == "completed" and not os.path.isfile(
             feature_dir + "/" + directory + "/handoff.md"
         ):
             row["reason"] = "no handoff.md -- write it with roadmap-write-handoff, then re-run"

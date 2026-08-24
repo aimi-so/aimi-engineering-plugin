@@ -2584,6 +2584,17 @@ cmd_detect_parent_branch() {
   # already been seen.
   while IFS= read -r raw_candidate; do
     [ -n "$raw_candidate" ] || continue
+    # Decoration names are repository-supplied -- a hostile upstream you clone,
+    # or anyone with push access, can create a ref named `-n` or `--rawfile`
+    # (git branch refuses those, git update-ref does not, and git fetch carries
+    # them). Until this guard, the ONLY validated value in this function was
+    # the caller-supplied $branch, i.e. the one that needed it least. Hold a
+    # decoration to the same allowlist a branch name gets everywhere else, so
+    # a name that could never be a branch never reaches the JSON, the base, or
+    # jq's argument list.
+    case "$raw_candidate" in
+      *[!a-zA-Z0-9/_-]*|-*|/*) continue ;;
+    esac
     local candidate_commit
     if candidate_commit=$(_verify_parent_candidate "$branch" "$raw_candidate"); then
       if [ -z "$winning_commit" ]; then
@@ -2604,7 +2615,12 @@ cmd_detect_parent_branch() {
     base=$(_resolve_default_branch)
     verified="false"
     source="ambiguous-decoration"
-    candidates_json=$(jq -nc --args '$ARGS.positional' "${winners[@]}")
+    # `--` is required, not decorative: --args does NOT stop jq parsing later
+    # arguments as flags, so without it a ref named `-n` is silently swallowed
+    # (the candidates array would omit the very name causing the tie) and one
+    # named `--rawfile` aborts the verb with no JSON at all. The allowlist in
+    # the loop above already rejects both; this is the second lock.
+    candidates_json=$(jq -nc --args '$ARGS.positional' -- "${winners[@]}")
   else
     base=$(_resolve_default_branch)
   fi
@@ -3458,7 +3474,7 @@ _forge_auth_status_github() {
   jq -nc --arg account "$active" --args \
     '{authenticated: true,
       account: (if $account == "" then null else $account end),
-      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
+      accounts: $ARGS.positional}' -- ${accounts[@]+"${accounts[@]}"}
 }
 
 # The GitLab arm of the same question _forge_auth_status_github answers, and
@@ -3525,7 +3541,7 @@ _forge_auth_status_gitlab() {
   jq -nc --arg account "${accounts[0]:-}" --args \
     '{authenticated: true,
       account: (if $account == "" then null else $account end),
-      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
+      accounts: $ARGS.positional}' -- ${accounts[@]+"${accounts[@]}"}
 }
 
 # gitea adapter for forge-auth-status. Same {authenticated, account, accounts}
@@ -11985,12 +12001,23 @@ cmd_story_merge() {
 # It is a QUERY, not a gate: every outcome, including "single" and "none",
 # exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
 
-# A story is pending when its status is anything other than "completed".
-# Exactly one definition, used for every count this verb reports. The prose
-# it replaces had two that disagreed -- `!= "completed"` for the active filter
-# and `== "pending"` for the phase completion count -- so an in_progress story
-# was counted by one and not the other, which let a phase close with work
-# still in flight.
+# A story is pending when its status is neither "completed" nor "skipped" --
+# the terminal pair, and the same rule tasks.py applies in _dep_status_done and
+# roadmap.py applies in ground_truth. Exactly one definition, used for every
+# count this verb reports. The prose it replaces had two that disagreed --
+# `!= "completed"` for the active filter and `== "pending"` for the phase
+# completion count -- so an in_progress story was counted by one and not the
+# other, which let a phase close with work still in flight.
+#
+# "skipped" joined the terminal side later than the other two sites, and its
+# absence here was issue #112 surviving in exactly one place: ground_truth had
+# been taught that a completed-or-skipped phase is finished, while this copy
+# kept answering the old way about the very same tasks file. A split member
+# whose remaining stories were all deliberately skipped therefore stayed
+# active forever -- drawing a worktree, a branch, a dev server and a spawned
+# Task on every run -- and the phase-completion gate never reached zero. Three
+# implementations of one sentence is the standing hazard; see the note above
+# _dep_status_done before adding a fourth.
 _SPLIT_DETECT_DESCRIBE_JQ='
   (if type == "object" then . else {} end) as $doc
 | (if ($doc.metadata | type) == "object" then $doc.metadata else {} end) as $m
@@ -12003,7 +12030,8 @@ _SPLIT_DETECT_DESCRIBE_JQ='
                  then ($doc.userStories | length) else 0 end),
     pendingCount: (if ($doc.userStories | type) == "array"
                    then ([$doc.userStories[]
-                          | select((.status? // "pending") != "completed")] | length)
+                          | select((.status? // "pending")
+                                   | . != "completed" and . != "skipped")] | length)
                    else 0 end),
     hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
     declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
@@ -12640,7 +12668,8 @@ cmd_roadmap_init() {
   # inside the lock would create one as a side effect of saying no.
   check_python3
   local new_phases
-  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate) || exit $?
+  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate \
+    --integration-branch "$integration_branch") || exit $?
 
   # A --sync merges 2.0 phases into whatever is already there. Into a pre-2.0
   # document that produces one file holding both entry shapes, which is worse

@@ -250,25 +250,45 @@ A rolling-wave roadmap can declare a feature-level `integrationBranch` in its `r
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-ROADMAP_PATH_REL=$($AIMI_CLI metadata 2>/dev/null | jq -r '.roadmapPath // empty' 2>/dev/null)
+METADATA_JSON=$($AIMI_CLI metadata 2>/dev/null) || METADATA_JSON=""
+if [ -z "$METADATA_JSON" ]; then
+  echo "Note: no active tasks file readable — not looking for a declared integration branch." >&2
+fi
+ROADMAP_PATH_REL=$(printf '%s' "$METADATA_JSON" | jq -r '.roadmapPath // empty' 2>/dev/null)
 INTEGRATION_BRANCH=""
 if [ -n "$ROADMAP_PATH_REL" ]; then
   FEATURE_SLUG=$(basename "$(dirname "$ROADMAP_PATH_REL")")
-  INTEGRATION_BRANCH=$($AIMI_CLI roadmap-get --feature "$FEATURE_SLUG" 2>/dev/null | jq -r '.integrationBranch // empty' 2>/dev/null)
+  ROADMAP_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE_SLUG" 2>/dev/null) || ROADMAP_JSON=""
+  if [ -z "$ROADMAP_JSON" ]; then
+    echo "Note: could not read $FEATURE_SLUG's roadmap — falling back to parent-branch inference." >&2
+  fi
+  INTEGRATION_BRANCH=$(printf '%s' "$ROADMAP_JSON" | jq -r '.integrationBranch // empty' 2>/dev/null)
 fi
 ```
 
-`metadata.roadmapPath` (`.aimi/tasks/<feature>/roadmap.json`, relative to `AIMI_ROOT`) is present only on a phase-scoped tasks file — see `plan.md`'s Roadmap Materialization — so a flat tasks file yields an empty `$ROADMAP_PATH_REL` and `$INTEGRATION_BRANCH` stays empty, falling straight through to 2b-ii below exactly as if this sub-step never ran. `roadmap-get --feature <slug>` with neither `--phase` nor `--next-eligible` dumps `roadmap.json` byte for byte, so `.integrationBranch` reads whatever `roadmap-init` wrote — or a value hand-added to a roadmap that predates the field, per issue #87's direction 1 — and the trailing `// empty` degrades a legacy roadmap missing the key, or a failed CLI call, the same way as "not declared": empty, not an error.
+`metadata.roadmapPath` (`.aimi/tasks/<feature>/roadmap.json`, relative to `AIMI_ROOT`) is present only on a phase-scoped tasks file — see `plan.md`'s Roadmap Materialization — so a flat tasks file yields an empty `$ROADMAP_PATH_REL` and `$INTEGRATION_BRANCH` stays empty, falling straight through to 2b-ii below exactly as if this sub-step never ran. `roadmap-get --feature <slug>` with neither `--phase` nor `--next-eligible` dumps `roadmap.json` byte for byte, so `.integrationBranch` reads whatever `roadmap-init` wrote — or a value hand-added to a roadmap that predates the field, per issue #87's direction 1 — and the trailing `// empty` degrades a legacy roadmap missing the key the same way as "not declared": empty, not an error.
 
-**When `$INTEGRATION_BRANCH` is non-empty**, use it directly as the PR base and skip 2b-ii entirely — its `detect-parent-branch` call, and both of its warning blocks, never run:
+**The two failure paths say so rather than degrading in silence.** A flat tasks file legitimately has no `roadmapPath`, and a roadmap that predates the field legitimately has no `integrationBranch` — those are the quiet cases and they stay quiet. But a `metadata` call that fails outright, or a `roadmap-get` that cannot read a roadmap this session just named, are different: both land on the default branch, which is precisely the wrong answer issue #87 was filed about. Landing there silently is how that issue went unnoticed for as long as it did, so each prints one line naming what it could not read.
+
+**When `$INTEGRATION_BRANCH` is non-empty**, confirm the branch actually resolves before adopting it, then skip 2b-ii — its `detect-parent-branch` call, and both of its warning blocks, never run:
 
 ```bash
 if [ -n "$INTEGRATION_BRANCH" ]; then
-  BASE_BRANCH="$INTEGRATION_BRANCH"
-  PARENT_VERIFIED="true"
-  PARENT_SOURCE="integration-branch"
+  if git rev-parse --verify --quiet "$INTEGRATION_BRANCH" >/dev/null \
+     || git rev-parse --verify --quiet "origin/$INTEGRATION_BRANCH" >/dev/null; then
+    BASE_BRANCH="$INTEGRATION_BRANCH"
+    PARENT_SOURCE="integration-branch"
+    echo "Base branch: $INTEGRATION_BRANCH (declared in the roadmap)" >&2
+  else
+    echo "Warning: the roadmap declares integrationBranch \"$INTEGRATION_BRANCH\", but no such branch resolves locally or on origin. Falling back to parent-branch inference — push that branch, or correct roadmap.json, if it is the base you meant." >&2
+    INTEGRATION_BRANCH=""
+  fi
 fi
 ```
+
+**Falling back rather than stopping is the deliberate choice.** A declared branch that does not resolve is most often one that simply has not been pushed yet — the first-phase case this whole feature exists for — and inference is a better answer than an abort. Clearing `$INTEGRATION_BRANCH` is what routes execution into 2b-ii, so the fallback needs no second condition anywhere below.
+
+`PARENT_VERIFIED` is deliberately **not** set here. That flag means "confirmed as the true parent via `git merge-base`", which is a claim about the git graph that nothing in this sub-step makes — the check above proves the ref exists, not that it is this branch's parent. Setting it `true` would give one variable two meanings in one file, directly against what 2b-ii's own `ambiguous-decoration` answer was added to fix. Read `$PARENT_SOURCE` instead: `integration-branch` says a human declared this base, which is a stronger warrant than any inference, and it says so without overloading a boolean that means something else.
 
 `$BASE_BRANCH` still passes through Step 2d's regex validation like every other source of it — a declared value is trusted as the RIGHT branch, not exempted from being a WELL-FORMED one.
 
@@ -324,13 +344,18 @@ Store the result as `$BASE_BRANCH`.
 
 ### 2d. Validate base branch name
 
-The detected `$BASE_BRANCH` must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`.
+The detected `$BASE_BRANCH` must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`, tested against the **whole value** rather than line by line:
 
 ```bash
-echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+case "$BASE_BRANCH" in
+  ''|*[!a-zA-Z0-9/_-]*|[!a-zA-Z0-9]*) BASE_BRANCH_OK=false ;;
+  *) BASE_BRANCH_OK=true ;;
+esac
 ```
 
-If validation fails, report: "Invalid parent branch name detected: $BASE_BRANCH" and STOP.
+`case` rather than `echo … | grep -qE`, and the difference is not stylistic. `grep` matches per line, so it exits 0 whenever **any** line of a multi-line value matches — a `$BASE_BRANCH` of `main\nfoo; bar` passed the old form. That was unreachable while every source of this variable was a git ref (refnames cannot contain a newline), and it stopped being unreachable when 2b-i began reading the value out of a hand-editable JSON document. `case` tests the whole string, which is also what `forge-pr-create` already does with `[[ =~ ]]` at its own `--base` gate.
+
+When `$BASE_BRANCH_OK` is `false`, report `Invalid parent branch name detected: $BASE_BRANCH` and STOP.
 
 ### 2e. Capture full commit log
 

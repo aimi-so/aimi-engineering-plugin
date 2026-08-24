@@ -2010,12 +2010,11 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   }
 
   IMPORTANT — verify working directory:
-  'implementation.verify' always runs from the story's project root: the
-  repo at this story's own 'project' field when set, or the single repo
-  this run targets when 'project' is absent (i.e. no sub-repos in this
-  run). A multi-repo story (non-empty 'project') MUST prefix the command
-  with 'cd <project> &&'. A single-repo story (no 'project' field) MUST
-  NOT prefix the command with 'cd . &&' — leave it bare.
+  Write 'implementation.verify' as if it already runs from the right
+  directory, because it does: the executor cds into the story's own
+  project before running anything (skills/story-executor/SKILL.md step
+  0). Do NOT prefix it with 'cd <project> &&' — that resolves to
+  <project>/<project> and fails.
 
   IMPORTANT — dependsOn encoding:
   Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
@@ -2763,7 +2762,7 @@ Specific obligations:
 - [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
-- [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths and the correct `cd <project> &&` prefix per the "verify working directory" rule in the Story JSON shape block above (multi-repo stories only; a single-repo story's `verify` stays bare)
+- [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths and no `cd <project> &&` prefix, per the "verify working directory" rule in the Story JSON shape block above — the executor has already entered the project
 - [ ] `verification` (if present) has `strategy` (`test`, `visual`, or `api`) and `status` (`"pending"`)
 - [ ] `gate` (if present) has `type` (`verify`, `decision`, or `action`), `status` (`"pending"`), and `prompt`
 - [ ] Gates only attached when heuristics clearly match

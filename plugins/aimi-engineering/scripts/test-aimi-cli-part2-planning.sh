@@ -7246,6 +7246,51 @@ test_split_detect_in_progress_counts_as_pending() {
 # TC44: files predating the project-split writer carry no marker, so the legacy
 # -frontend-tasks.json/-backend-tasks.json pair rule is what groups them. They
 # resolve to project "." — the flat flow's execution root.
+# TC54: the terminal pair. "skipped" is terminal exactly like "completed" --
+# the rule tasks.py's _dep_status_done and roadmap.py's ground_truth both apply
+# -- and this verb's own copy tested only against "completed". A member whose
+# remaining stories were all deliberately skipped therefore stayed active
+# forever: a worktree, a branch, a dev server and a spawned Task on every run,
+# with the phase-completion gate never reaching zero. That is issue #112
+# surviving here after ground_truth had already been fixed for a non-split
+# phase, i.e. one tasks file answering "done" to one reader and "pending" to
+# another.
+test_split_detect_skipped_is_terminal_like_completed() {
+  echo ""
+  echo "=== TC54: split-detect — a skipped story is terminal, not pending ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  # Member a: every story terminal, but one of them by way of skipped.
+  _sd_write "$t/2026-07-27-k-a-tasks.json" "feat/k-a" "$(_sd_stories completed skipped)" \
+    '{"project":"a","index":1,"total":2,"siblings":["2026-07-27-k-b-tasks.json"]}'
+  # Member b: one story genuinely outstanding, so the group is not dropped and
+  # the assertions below discriminate rather than passing on an empty result.
+  _sd_write "$t/2026-07-27-k-b-tasks.json" "feat/k-b" "$(_sd_stories completed pending)" \
+    '{"project":"b","index":2,"total":2,"siblings":["2026-07-27-k-a-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-k-a-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "TC54: exits 0"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.activeCount')" \
+    "TC54: only the member with a genuinely pending story is active"
+  assert_eq "0" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("k-a"))] | .[0].pendingCount')" \
+    "TC54: a skipped story is not counted as pending"
+  assert_eq "false" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("k-a"))] | .[0].active')" \
+    "TC54: completed+skipped leaves the member inactive"
+  assert_eq "1" \
+    "$(printf '%s' "$out" | jq -r '[.members[] | select(.path | test("k-b"))] | .[0].pendingCount')" \
+    "TC54: the sibling's own pending story still counts"
+
+  rm -rf "$d"
+}
+
 test_split_detect_legacy_pair_without_marker() {
   echo ""
   echo "=== TC44: split-detect — an unmarked frontend/backend pair is a paired-split ==="
@@ -7749,6 +7794,7 @@ main() {
   test_split_detect_total_mismatch_degrades_terminally
   test_split_detect_traversal_sibling_is_inert
   test_split_detect_in_progress_counts_as_pending
+  test_split_detect_skipped_is_terminal_like_completed
   test_split_detect_legacy_pair_without_marker
   test_split_detect_single_file
   test_split_detect_exit_codes_and_bad_input

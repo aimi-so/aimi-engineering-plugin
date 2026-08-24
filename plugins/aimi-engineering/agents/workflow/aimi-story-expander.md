@@ -74,7 +74,7 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 ## Verify working directory
 
-`implementation.verify` always runs from the story's project root: the repo at this story's own `project` field when set, or the single repo this run targets when `project` is absent (i.e. no sub-repos in this run). A multi-repo story (non-empty `project`) MUST prefix the command with `cd <project> &&`. A single-repo story (no `project` field) MUST NOT prefix the command with `cd . &&` — leave it bare.
+Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
 
 ## dependsOn encoding
 
