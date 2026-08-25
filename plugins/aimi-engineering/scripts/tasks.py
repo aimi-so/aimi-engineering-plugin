@@ -153,7 +153,7 @@ import tempfile
 # If a third module ever needs these, they follow rm_sanitize into a module of
 # their own -- that is what sanitize.py is, and why it was extracted in its own
 # commit rather than being imported out of whichever file happened to hold it.
-from roadmap import _json_type, jq_numbers, jq_sort_key
+from roadmap import TERMINAL_STORY_STATUSES, _json_type, jq_numbers, jq_sort_key
 
 # THE default, in the one place it is now written.
 #
@@ -815,9 +815,15 @@ def _dep_action_gate_clear(dep):
 
 def _dep_status_done(dep):
     """`$dep_status == "completed" or $dep_status == "skipped"`. Anything else
-    -- pending, in_progress, failed, absent -- leaves the dependent blocked."""
+    -- pending, in_progress, failed, absent -- leaves the dependent blocked.
+
+    The pair is TERMINAL_STORY_STATUSES rather than two literals: the identical
+    rule decides whether a PHASE is finished (roadmap.py's ground_truth) and
+    whether a split member is still active (aimi-cli.sh's split-detect), and the
+    three answered differently once. See the constant for why it lives in
+    roadmap.py and not here."""
     status = jq_index(dep, "status", STORY)
-    return status == "completed" or status == "skipped"
+    return status in TERMINAL_STORY_STATUSES
 
 
 def is_ready(story, stories):

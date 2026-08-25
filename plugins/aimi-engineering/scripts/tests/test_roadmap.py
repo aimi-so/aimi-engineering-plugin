@@ -1346,24 +1346,6 @@ def test_ground_truth_gets_the_two_terminal_branches_it_never_had():
     ) == "verification_failed"
 
 
-def _gt_branches_env(base):
-    """Every path the CLI could reach outside the fixture, pointed back into it.
-
-    roadmap-reconcile must never walk up past the fixture and reconcile the
-    repository's own .aimi/tasks/ -- the same isolation _la_env applies for
-    list-archivable, kept local here rather than shared because the two
-    sections read the fixture for different verbs."""
-    env = dict(os.environ)
-    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
-        env.pop(name, None)
-    env["HOME"] = base
-    env["AIMI_CONFIG_DIR"] = os.path.join(base, "cfg")
-    env["XDG_CONFIG_HOME"] = os.path.join(base, ".config")
-    env["CLAUDE_CONFIG_DIR"] = os.path.join(base, ".claude")
-    env["LC_ALL"] = "C"
-    return env
-
-
 def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_uncorrected(
     tmp_path,
 ):
@@ -1412,7 +1394,7 @@ def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_unc
 
     proc = subprocess.run(
         ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
-        cwd=root, capture_output=True, text=True, timeout=120, env=_gt_branches_env(base),
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == {"corrections": [], "blocked": []}
@@ -1472,7 +1454,7 @@ def test_reconcile_refuses_to_demote_an_in_progress_phase_but_still_heals_a_pend
 
     proc = subprocess.run(
         ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
-        cwd=root, capture_output=True, text=True, timeout=120, env=_gt_branches_env(base),
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
     )
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout)
@@ -1519,7 +1501,7 @@ def test_a_reconciled_in_progress_phase_can_still_reach_completed(tmp_path):
     with open(tasks_path, "w", encoding="utf-8") as handle:
         json.dump({"userStories": [{"status": "pending"}]}, handle)
 
-    env = _gt_branches_env(base)
+    env = _fixture_env(base)
     reconcile = subprocess.run(
         ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
         cwd=root, capture_output=True, text=True, timeout=120, env=env,
@@ -1555,7 +1537,7 @@ def _ib_run(root, base, *args, stdin=None):
     return subprocess.run(
         ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-init"] + list(args),
         input=json.dumps(stdin) if stdin is not None else None,
-        cwd=root, capture_output=True, text=True, timeout=120, env=_gt_branches_env(base),
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
     )
 
 
@@ -1576,6 +1558,54 @@ def test_roadmap_init_materializes_the_integration_branch(tmp_path):
     with open(roadmap_file, encoding="utf-8") as handle:
         doc = json.load(handle)
     assert doc["integrationBranch"] == "integration"
+
+
+def test_sync_preserves_a_top_level_key_it_was_never_told_about(tmp_path):
+    """The generalisation of the test below, and the reason --sync stopped
+    rebuilding from an allowlist.
+
+    That allowlist erased integrationBranch on its first use. Widening it to
+    name the field fixes that key and leaves the shape: a list of permitted
+    names cannot know about a key added by hand, which is exactly the route
+    issue #87 direction 1 documents for this field, and the route any future
+    one will take. So the test is written over a key NOTHING in the tree knows
+    -- if it survives, no named key can be silently dropped either.
+
+    Neither call passes --integration-branch a second time, so both values are
+    surviving on their own rather than being resupplied."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "sync-unknown"
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # A hand-edit, which is the only way such a key can arrive.
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    doc["someKeyNothingKnowsAbout"] = {"nested": ["value"]}
+    with open(roadmap_file, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        after = json.load(handle)
+    assert after["someKeyNothingKnowsAbout"] == {"nested": ["value"]}, (
+        "an additive --sync erased a top-level key it did not come to change"
+    )
+    assert after["integrationBranch"] == "integration"
+    assert after["feature"] == feature
+    assert [p["id"] for p in after["phases"]] == [1, 2], "phases is still replaced, not merged blindly"
 
 
 def test_roadmap_init_sync_preserves_the_integration_branch(tmp_path):
@@ -2220,12 +2250,20 @@ _BASH_LINE = re.compile(r"^(.*?): line \d+:", re.M)
 LA_CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
 
 
-def _la_env(base):
+def _fixture_env(base):
     """Every path the CLI could reach outside the fixture, pointed back into it.
 
-    The repository's own .aimi/tasks holds the tasks file this plan runs from,
-    and list-archivable is what feeds archive-task. A case that walked up to it
-    would be reading live state.
+    The repository's own .aimi/ holds live state -- the tasks file a session is
+    running from, and the roadmaps reconcile would walk. A case that reached it
+    would be reading and, worse, writing that state rather than its own fixture.
+
+    One helper, not one per section. This shipped as two byte-identical copies
+    (_la_env and _gt_branches_env) whose only difference was the docstring, on
+    the stated ground that "the two sections read the fixture for different
+    verbs" -- which describes nothing in the body: it pins HOME and the three
+    config roots and drops the two host variables, none of it verb-specific.
+    Name it for what it does so the next section reuses it instead of copying
+    it a third time.
     """
     env = dict(os.environ)
     for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
@@ -2263,7 +2301,7 @@ def _replay_la_roadmap(case, tmp_path):
 
     proc = subprocess.run(
         ["bash", LA_CLI] + case["args"],
-        cwd=root, capture_output=True, text=True, timeout=120, env=_la_env(base),
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
     )
 
     def norm(text):
@@ -2520,3 +2558,54 @@ def test_the_op_reads_no_tasks_file(tmp_path):
     body = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
     assert "tasks" not in body
     assert body.count("open(") == 1
+
+
+# ---------------------------------------------------------------------------
+# TERMINAL_STORY_STATUSES -- the one rule, and the drift guard over its three
+# readers. Two import it; the third is jq and cannot, so it is checked by
+# reading the source rather than by calling it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_three_readers_of_the_terminal_rule_agree():
+    """One sentence -- a story is finished iff completed or skipped -- decides
+    three different questions, in three languages, and they disagreed once.
+
+    split-detect tested only "completed" while ground_truth and _dep_status_done
+    had already been taught the pair, so a split member whose remaining stories
+    were all skipped stayed active forever and its phase never closed. That is
+    issue #112 open for split phases after being closed everywhere else, from
+    ONE tasks file answering two ways.
+
+    The two Python readers now share the constant, so they cannot drift without
+    this failing to import. The jq copy can, which is why it is asserted from
+    its source text: no import will ever tie it, and a comment alone did not
+    stop the drift the first time."""
+    assert R.TERMINAL_STORY_STATUSES == ("completed", "skipped")
+
+    import tasks as T
+    assert T.TERMINAL_STORY_STATUSES is R.TERMINAL_STORY_STATUSES, (
+        "tasks.py must import the constant, not redeclare it"
+    )
+    for status in R.TERMINAL_STORY_STATUSES:
+        assert T._dep_status_done({"status": status}), status
+    for status in ("pending", "in_progress", "failed", None):
+        assert not T._dep_status_done({"status": status}), status
+
+    # ground_truth reads the same tuple: a phase of any terminal mix is closed.
+    assert R.ground_truth({"userStories": [{"status": "completed"}, {"status": "skipped"}]}) == "completed"
+    assert R.ground_truth({"userStories": [{"status": "skipped"}]}) == "completed"
+
+    # The jq third copy, checked as text. It must exclude BOTH names; asserting
+    # only that "skipped" appears somewhere would pass on a comment mentioning it.
+    cli = os.path.join(SCRIPTS, "aimi-cli.sh")
+    with open(cli, encoding="utf-8") as handle:
+        source = handle.read()
+    predicate = '. != "completed" and . != "skipped"'
+    assert predicate in source, (
+        "split-detect's pendingCount must exclude the same pair; if this line moved, "
+        "move it together with TERMINAL_STORY_STATUSES -- see the comment above it"
+    )
+    assert 'select((.status? // "pending") != "completed")]' not in source, (
+        "the pre-#112 predicate is back: split-detect is counting skipped as pending again"
+    )
