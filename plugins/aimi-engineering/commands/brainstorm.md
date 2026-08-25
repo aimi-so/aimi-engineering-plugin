@@ -933,6 +933,8 @@ Classify the feature into scope contexts using the Cut Criteria in `${CLAUDE_PLU
 - **0 or 1 scope contexts identified:** Skip this entire phase — emit no log line, propose no phase cut, present no gate. Proceed directly to Phase 4 exactly as today. No `phases:` frontmatter is written and nothing about the document changes.
 - **2 or more scope contexts identified:** Continue to Step 2.
 
+*(Optional debug: if `AIMI_BRAINSTORM_DEBUG=1`, emit `[brainstorm-debug] phase-3.5: <fired|skipped> (reason: scope-contexts=<N>)` to chat, where `<N>` is the scope-context count this step classified — `fired` when `<N>` is 2 or more (Step 2 proposes a phase cut), `skipped` when `<N>` is 0 or 1 (collapse — no `phases:` frontmatter, document unchanged).)*
+
 ### Step 2: Propose the Phase Cut
 
 For each identified scope context, draft one phase entry in an in-memory `phases` array (no staging file is written — unlike `/aimi:plan`'s `outline.json`, this array never touches disk until Phase 4's frontmatter write):

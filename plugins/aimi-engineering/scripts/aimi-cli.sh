@@ -2453,6 +2453,12 @@ _detect_parent_branch_candidate() {
 # the candidate's (post-normalization) name. Resolves the candidate against
 # a local branch first, falling back to an origin-prefixed remote-tracking
 # ref only when no local branch of that name exists.
+#
+# Prints the candidate's own commit SHA on success (nothing on failure) so
+# the caller can tell two verified candidates that happen to sit on the
+# SAME commit -- e.g. an integration branch and the default branch that
+# have not diverged yet -- apart from two verified candidates at genuinely
+# different commits, which is the ordinary nested-branch case, not a tie.
 _verify_parent_candidate() {
   local branch="$1" candidate="$2"
   local candidate_ref candidate_commit branch_commit merge_base
@@ -2476,7 +2482,11 @@ _verify_parent_candidate() {
   # the merge base), not a divergent sibling.
   merge_base=$(git merge-base "$branch" "$candidate_ref" 2>/dev/null) || return 1
 
-  [ "$merge_base" = "$candidate_commit" ]
+  if [ "$merge_base" = "$candidate_commit" ]; then
+    printf '%s' "$candidate_commit"
+    return 0
+  fi
+  return 1
 }
 
 # Detect a branch's parent (base) branch by parsing its --first-parent git
@@ -2486,8 +2496,38 @@ _verify_parent_candidate() {
 # git merge-base. Falls back to the repository's default branch (unverified)
 # when no decoration candidate survives normalization or merge-base
 # verification.
+#
 # Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
-# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":"decoration"|"default-branch"}
+# Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":<source>,"candidates":<candidates>}
+#
+# `source` takes one of three values, following detect-forge's own
+# ambiguous-remotes precedent (this section's comment above _detect_forge's
+# builder) rather than inventing a new vocabulary:
+#   "decoration"          -- exactly one candidate verified at the nearest
+#                            surviving commit. `base` is that candidate,
+#                            `verified` is true, `candidates` is null.
+#   "ambiguous-decoration" -- two or more candidates verified at the SAME
+#                            nearest commit (e.g. an integration branch and
+#                            the default branch that have not diverged yet,
+#                            with a phase branch cut from either). This verb
+#                            cannot pick a winner among them, so it never
+#                            asserts one: `base` falls back to the
+#                            repository's default branch, `verified` is
+#                            false, and `candidates` is the tied names in
+#                            walk order -- the shape the caller must branch
+#                            on instead of trusting `base` as a confirmed
+#                            parent. This is the fix for the regression
+#                            commit 4384273 introduced (issue #87): that
+#                            topology used to answer verified true with
+#                            source "decoration", picking whichever tied
+#                            name decoration listing order put first.
+#   "default-branch"      -- no candidate survived normalization or
+#                            merge-base verification at all. `base` is the
+#                            repository's default branch, `verified` is
+#                            false, `candidates` is null.
+# `branch`, `base` and `verified` keep the names and meanings they had
+# before this contract grew a third source value; `candidates` is the
+# additive field, null except under "ambiguous-decoration".
 cmd_detect_parent_branch() {
   local branch="" project_dir=""
 
@@ -2526,21 +2566,62 @@ cmd_detect_parent_branch() {
 
   local raw_candidate
   local base="" verified="false" source="default-branch"
+  local -a winners=()
+  local winning_commit=""
 
-  # Try every candidate in walk order and take the first that verifies. A
-  # rejected candidate no longer ends the search -- see
-  # _detect_parent_branch_candidate's header for what that cost.
+  # Walk every candidate in nearest-first order (never break early -- see
+  # _detect_parent_branch_candidate's header for what breaking on the first
+  # rejection used to cost). A candidate that verifies is compared against
+  # the FIRST verified candidate's own commit: sharing that exact commit
+  # makes it a tie (both are decorations on the same nearest commit, e.g.
+  # an integration branch and the default branch that have not diverged
+  # yet); a different, farther commit makes it a legitimate but more
+  # distant ancestor further up the tree -- not a tie, and not the answer,
+  # since the nearest one already wins. Only the first tied group is ever
+  # collected: walk order guarantees tied decorations on one commit are
+  # adjacent in the candidate stream, so once a verified candidate's commit
+  # differs from winning_commit, every candidate at the nearest commit has
+  # already been seen.
   while IFS= read -r raw_candidate; do
     [ -n "$raw_candidate" ] || continue
-    if _verify_parent_candidate "$branch" "$raw_candidate"; then
-      base="$raw_candidate"
-      verified="true"
-      source="decoration"
-      break
+    # Decoration names are repository-supplied -- a hostile upstream you clone,
+    # or anyone with push access, can create a ref named `-n` or `--rawfile`
+    # (git branch refuses those, git update-ref does not, and git fetch carries
+    # them). Until this guard, the ONLY validated value in this function was
+    # the caller-supplied $branch, i.e. the one that needed it least. Hold a
+    # decoration to the same allowlist a branch name gets everywhere else, so
+    # a name that could never be a branch never reaches the JSON, the base, or
+    # jq's argument list.
+    case "$raw_candidate" in
+      *[!a-zA-Z0-9/_-]*|-*|/*) continue ;;
+    esac
+    local candidate_commit
+    if candidate_commit=$(_verify_parent_candidate "$branch" "$raw_candidate"); then
+      if [ -z "$winning_commit" ]; then
+        winning_commit="$candidate_commit"
+        winners=("$raw_candidate")
+      elif [ "$candidate_commit" = "$winning_commit" ]; then
+        winners+=("$raw_candidate")
+      fi
     fi
   done <<< "$(_detect_parent_branch_candidate "$branch")"
 
-  if [ -z "$base" ]; then
+  local candidates_json="null"
+  if [ "${#winners[@]}" -eq 1 ]; then
+    base="${winners[0]}"
+    verified="true"
+    source="decoration"
+  elif [ "${#winners[@]}" -gt 1 ]; then
+    base=$(_resolve_default_branch)
+    verified="false"
+    source="ambiguous-decoration"
+    # `--` is required, not decorative: --args does NOT stop jq parsing later
+    # arguments as flags, so without it a ref named `-n` is silently swallowed
+    # (the candidates array would omit the very name causing the tie) and one
+    # named `--rawfile` aborts the verb with no JSON at all. The allowlist in
+    # the loop above already rejects both; this is the second lock.
+    candidates_json=$(jq -nc --args '$ARGS.positional' -- "${winners[@]}")
+  else
     base=$(_resolve_default_branch)
   fi
 
@@ -2549,7 +2630,8 @@ cmd_detect_parent_branch() {
     --arg base "$base" \
     --argjson verified "$verified" \
     --arg source "$source" \
-    '{branch: $branch, base: $base, verified: $verified, source: $source}'
+    --argjson candidates "$candidates_json" \
+    '{branch: $branch, base: $base, verified: $verified, source: $source, candidates: $candidates}'
 }
 
 # ============================================================================
@@ -3392,7 +3474,7 @@ _forge_auth_status_github() {
   jq -nc --arg account "$active" --args \
     '{authenticated: true,
       account: (if $account == "" then null else $account end),
-      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
+      accounts: $ARGS.positional}' -- ${accounts[@]+"${accounts[@]}"}
 }
 
 # The GitLab arm of the same question _forge_auth_status_github answers, and
@@ -3459,7 +3541,7 @@ _forge_auth_status_gitlab() {
   jq -nc --arg account "${accounts[0]:-}" --args \
     '{authenticated: true,
       account: (if $account == "" then null else $account end),
-      accounts: $ARGS.positional}' ${accounts[@]+"${accounts[@]}"}
+      accounts: $ARGS.positional}' -- ${accounts[@]+"${accounts[@]}"}
 }
 
 # gitea adapter for forge-auth-status. Same {authenticated, account, accounts}
@@ -11919,12 +12001,27 @@ cmd_story_merge() {
 # It is a QUERY, not a gate: every outcome, including "single" and "none",
 # exits 0. Non-zero is reserved for real errors (bad argument, unreadable dir).
 
-# A story is pending when its status is anything other than "completed".
-# Exactly one definition, used for every count this verb reports. The prose
-# it replaces had two that disagreed -- `!= "completed"` for the active filter
-# and `== "pending"` for the phase completion count -- so an in_progress story
-# was counted by one and not the other, which let a phase close with work
-# still in flight.
+# A story is pending when its status is neither "completed" nor "skipped" --
+# the terminal pair. NORMATIVE HOME: roadmap.py's TERMINAL_STORY_STATUSES,
+# which tasks.py's _dep_status_done and roadmap.py's ground_truth both import.
+# This copy cannot: it is a jq program and imports nothing. It is therefore the
+# one site that can drift again without the other two noticing, which is
+# exactly what happened -- see the paragraph below. Change it only together
+# with that constant. Exactly one definition, used for every
+# count this verb reports. The prose it replaces had two that disagreed --
+# `!= "completed"` for the active filter and `== "pending"` for the phase
+# completion count -- so an in_progress story was counted by one and not the
+# other, which let a phase close with work still in flight.
+#
+# "skipped" joined the terminal side later than the other two sites, and its
+# absence here was issue #112 surviving in exactly one place: ground_truth had
+# been taught that a completed-or-skipped phase is finished, while this copy
+# kept answering the old way about the very same tasks file. A split member
+# whose remaining stories were all deliberately skipped therefore stayed
+# active forever -- drawing a worktree, a branch, a dev server and a spawned
+# Task on every run -- and the phase-completion gate never reached zero. Three
+# implementations of one sentence is the standing hazard; see the note above
+# _dep_status_done before adding a fourth.
 _SPLIT_DETECT_DESCRIBE_JQ='
   (if type == "object" then . else {} end) as $doc
 | (if ($doc.metadata | type) == "object" then $doc.metadata else {} end) as $m
@@ -11937,7 +12034,8 @@ _SPLIT_DETECT_DESCRIBE_JQ='
                  then ($doc.userStories | length) else 0 end),
     pendingCount: (if ($doc.userStories | type) == "array"
                    then ([$doc.userStories[]
-                          | select((.status? // "pending") != "completed")] | length)
+                          | select((.status? // "pending")
+                                   | . != "completed" and . != "skipped")] | length)
                    else 0 end),
     hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
     declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
@@ -12532,7 +12630,7 @@ _roadmap_validate_phase_id() {
 # The guard and validate-contracts read the same cv_identity in roadmap.py, so
 # they agree on what an identity is; a second copy of it would drift.
 cmd_roadmap_init() {
-  local feature="" file="" sync_mode=false brainstorm_path=""
+  local feature="" file="" sync_mode=false brainstorm_path="" integration_branch=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -12540,6 +12638,7 @@ cmd_roadmap_init() {
       --file) shift; file="${1:-}" ;;
       --sync) sync_mode=true ;;
       --brainstorm-path) shift; brainstorm_path="${1:-}" ;;
+      --integration-branch) shift; integration_branch="${1:-}" ;;
       *)
         echo "Error: roadmap-init: unknown flag: $1" >&2
         exit 1
@@ -12573,7 +12672,8 @@ cmd_roadmap_init() {
   # inside the lock would create one as a side effect of saying no.
   check_python3
   local new_phases
-  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate) || exit $?
+  new_phases=$(printf '%s' "$input_json" | python3 "$(_aimi_roadmap_py)" init-validate \
+    --integration-branch "$integration_branch") || exit $?
 
   # A --sync merges 2.0 phases into whatever is already there. Into a pre-2.0
   # document that produces one file holding both entry shapes, which is worse
@@ -12596,7 +12696,7 @@ cmd_roadmap_init() {
       _lock "${roadmap_path}.lock"
       printf '%s' "$new_phases" | python3 "$(_aimi_roadmap_py)" init-write \
         --roadmap "$roadmap_path" --feature "$feature" \
-        --brainstorm-path "$brainstorm_path" $sync_flag
+        --brainstorm-path "$brainstorm_path" --integration-branch "$integration_branch" $sync_flag
     ) 200>"${roadmap_path}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -13528,9 +13628,13 @@ COMMANDS:
                               Detect branch's parent (base) branch by token-aware
                               git log decoration parsing + git merge-base verification.
                               Output: {branch, base, verified, source
-                              ("decoration"|"default-branch")}. Falls back to the
-                              default branch (unverified) when no decoration
-                              candidate survives normalization or merge-base check.
+                              ("decoration"|"ambiguous-decoration"|"default-branch"),
+                              candidates}. Falls back to the default branch
+                              (unverified) when no decoration candidate survives
+                              normalization or merge-base check, or when two or
+                              more candidates verify at the same nearest commit
+                              (source "ambiguous-decoration", candidates lists the
+                              tied names instead of asserting a winner).
     detect-forge [--project <path>]
                               Classify the active git remote's hostname into
                               github|gitlab|gitea|unknown (exact-or-subdomain,
@@ -14048,12 +14152,22 @@ COMMANDS:
                               "missing": a tool failure is not an absent
                               artifact.
     roadmap-init --feature <slug> [--file <path>] [--sync] [--brainstorm-path <path>]
+                              [--integration-branch <name>]
                               Read a sanitized phases array (stdin or --file) and
                               atomically create/append to .aimi/tasks/<slug>/roadmap.json.
                               Without --sync, an existing roadmap.json is a hard error.
                               With --sync, only phases whose id is not already present
                               are appended; existing phases are left byte-for-byte
-                              unchanged. Rejects (before any write) phases with a
+                              unchanged, and so is an already-stored integrationBranch --
+                              --integration-branch is read only when materializing a
+                              fresh roadmap.json, never to update one that already
+                              exists (hand-edit the file for that, per issue #87's
+                              direction 1). --integration-branch must match the same
+                              ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ pattern a phase's own
+                              --branch does, or the whole call is refused before any
+                              write; omitted or empty means "not declared" and writes
+                              no such field value (stored null).
+                              Rejects (before any write) phases with a
                               missing id/name/goal, a dangling dependsOn reference,
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized

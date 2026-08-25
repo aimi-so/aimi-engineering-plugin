@@ -72,6 +72,10 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 `gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
 
+## Verify working directory
+
+Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
+
 ## dependsOn encoding
 
 - Use `outline:NN` tokens (zero-padded, matching the outline `idx`).

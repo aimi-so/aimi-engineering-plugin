@@ -559,6 +559,34 @@ def normalize_contracts(doc):
 # ---------------------------------------------------------------------------
 
 DIR_REGEX = re.compile(r"^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$")
+# The terminal story statuses: the one rule that answers "has this story
+# finished?", and therefore "does this phase still have work?".
+#
+# One name, three readers, because a Python constant cannot reach all three:
+#   - ground_truth, below in this file
+#   - tasks.py's _dep_status_done, which imports this
+#   - aimi-cli.sh's split-detect, which is jq and cannot import anything
+#
+# The jq copy carries a comment pointing here. Three literal copies is what the
+# tree had before, and they DID drift: split-detect tested only "completed"
+# while the other two had already been taught that "skipped" is terminal too,
+# which is how issue #112 stayed open for split phases after being closed for
+# every other kind. A name does not prevent the jq copy drifting again, but it
+# gives the drift somewhere to be measured against.
+#
+# It lives here rather than in tasks.py, where a story rule semantically
+# belongs, only because tasks.py already imports FROM this module -- putting it
+# there would close an import cycle. Move it if that edge ever reverses; do not
+# move it without checking.
+TERMINAL_STORY_STATUSES = ("completed", "skipped")
+
+# Matched with .fullmatch(), never .search(). Python's `$` also matches just
+# BEFORE a trailing newline, so `re.search` accepted "main\n" -- a value no git
+# refname can hold, but this pattern also guards integrationBranch, which
+# arrives straight from a CLI flag with no rm_sanitize newline-stripping in
+# front of it. fullmatch anchors both ends and closes it for every caller at
+# once. The pattern itself is unchanged so the accepted set is otherwise
+# byte-identical.
 BRANCH_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
 
 
@@ -689,7 +717,7 @@ def init_shape_errors(phases):
     branch_errors = [
         "phase " + _num(p.get("id")) + ': branch "' + p["branch"] + '" contains invalid characters'
         for p in phases
-        if p.get("branch") is not None and not BRANCH_REGEX.search(p["branch"])
+        if p.get("branch") is not None and not BRANCH_REGEX.fullmatch(p["branch"])
     ]
     return dir_errors, branch_errors
 
@@ -1632,16 +1660,66 @@ def ground_truth(doc):
     _story_statuses, kept because it is observable: reconcile turns it into a
     correction to "" rather than declining to correct. It is a defect, and
     fixing it is a behaviour change that does not belong in a port.
+
+    failed is checked before either terminal-set branch below, and that order
+    is load-bearing rather than cosmetic: a phase carrying even one failed
+    story is never "completed" and never "planned", no matter what its other
+    stories say. In practice the two conditions never actually compete --
+    "every story is completed-or-skipped" and "any story is failed" cannot
+    both be true of the same list -- but a reader should not have to prove
+    that to trust the precedence, so failed is asked first and answered first.
+
+    completed-or-skipped (issue #112): a story's status stops changing once it
+    is "completed" OR "skipped" -- nothing in this codebase ever un-skips one --
+    so a phase where every story has reached one of those two is exactly as
+    finished, from ground_truth's point of view, as a phase where every story
+    is "completed" outright. This is not a new rule invented for this phase
+    boundary: tasks.py's own _dep_status_done already treats "completed" and
+    "skipped" as the same "done" for a story's own dependents, and count-pending
+    treats them the same for a whole tasks file. ground_truth answers "is there
+    work left for execute to do here", not "did this phase deliver value" -- a
+    deliberately skipped story already made that call, at cascade-skip time,
+    and this function does not re-litigate it. That includes the all-skipped
+    case: a phase whose every story was skipped delivered nothing, and still
+    reads "completed", because every story in it has still reached a status
+    nothing will ever move again. Judging "delivered nothing" is a different
+    question than the one this function exists to answer, and answering it
+    here would make ground_truth read intent instead of state.
+
+    all-pending (issue #102): a phase whose stories are every one still
+    "pending" has not been started -- no story has moved, so the phase itself
+    has not moved, and "in_progress" was never true of it. This can correct an
+    "in_progress" phase back to "planned" on reconcile, when a claim crashed
+    before any story began: that direction is accepted rather than guarded
+    against, because concurrency here is guarded by the claim field, not the
+    status field. A live claim already excludes a phase from
+    roadmap-claim's candidates regardless of status, and a dead one is cleared
+    by roadmap-claim's own PID-liveness check before status is ever consulted
+    -- so demoting the status changes what a human reading roadmap.json sees,
+    not what a concurrent claim can do. reconcile also clears a claim only for
+    a "completed" correction (see op_reconcile), so this demotion leaves
+    whatever claim exists in place, and self-reclaim treats "planned" and
+    "in_progress" identically.
+
+    That reasoning covers roadmap-claim and stops there, which is exactly how
+    far it goes: the session that owns the claim IS affected, because
+    STATUS_TRANSITIONS has no planned -> completed edge, so a demoted phase
+    strands its owner at Mark Phase Completed after every story has already
+    run. This function cannot see that -- it is a pure function of the tasks
+    file and never reads the stored status -- so the refusal lives in
+    op_reconcile, which does. See the in_progress branch there.
     """
     statuses = _story_statuses(doc)
     if statuses is None:
         return ""
     if not statuses:
         return "unknown"
-    if all(status == "completed" for status in statuses):
-        return "completed"
     if any(status == "failed" for status in statuses):
         return "verification_failed"
+    if all(status in TERMINAL_STORY_STATUSES for status in statuses):
+        return "completed"
+    if all(status == "pending" for status in statuses):
+        return "planned"
     return "in_progress"
 
 
@@ -1668,8 +1746,14 @@ def has_work_map(roadmap_path, doc, feature):
     """{"<phase id>": <has work>} for every phase in a roadmap.
 
     A phase has NO work only when its own tasks file exists, parses, holds at
-    least one story, and every story is "completed" -- i.e. exactly when
-    ground_truth says "completed". Every other case is has-work:
+    least one story, and every story is "completed" or "skipped" -- i.e.
+    exactly when ground_truth says "completed". That now includes a phase
+    every one of whose stories was skipped: it reads has-work false and is
+    demoted the same way a fully-completed phase already was by
+    roadmap-claim's auto ranking (candidates, via _rank) -- a consequence
+    issue #102's own not-affected analysis of this function does not cover,
+    because it predates the skipped branch landing in the same ground_truth
+    this map reads. Every other case is has-work:
       - no tasks file: a pending phase /aimi:plan has not expanded yet. Demoting
         a phase for being unplanned would rank the whole front of the roadmap
         last, which is the opposite of the intent.
@@ -1943,13 +2027,28 @@ def _die_list(header, lines, note=False):
     sys.exit(1)
 
 
-def op_init_validate(_argv):
+def op_init_validate(argv):
     """Everything roadmap-init checks BEFORE it takes the lock.
 
     Split from init-write for one reason: today an invalid payload never
     reaches `mkdir -p`, so it never creates the feature directory. Doing
     validation inside the lock would create it as a side effect of a refusal.
+
+    --integration-branch is judged here for exactly that reason. It shipped
+    validated in init-write instead, which put the refusal after the mkdir and
+    inside the lock -- so `roadmap-init --integration-branch 'bad branch!'`
+    exited 1 having created the feature directory and a stale .lock, which is
+    the side effect this split exists to prevent. init-write still re-checks
+    it: two layers on purpose, the same shape validate_story_exists uses.
     """
+    integration_branch = _flag(argv, "--integration-branch") or ""
+    if integration_branch and not BRANCH_REGEX.fullmatch(integration_branch):
+        die(
+            'Error: roadmap-init: integrationBranch "'
+            + integration_branch
+            + '" contains invalid characters'
+        )
+
     raw = sys.stdin.read()
     try:
         payload = jq_numbers(json.loads(raw))
@@ -1985,9 +2084,22 @@ def op_init_write(argv):
     path = _flag(argv, "--roadmap")
     feature = _flag(argv, "--feature")
     brainstorm_path = _flag(argv, "--brainstorm-path") or ""
+    integration_branch = _flag(argv, "--integration-branch") or ""
     sync_mode = "--sync" in argv
     if not path or not feature:
         die("Usage: roadmap.py init-write --roadmap <path> --feature <slug> [--sync]")
+
+    # Refused here, before the phases payload is even read, rather than stored:
+    # the field is a branch name, so it is judged against the exact pattern a
+    # phase's own `branch` field already enforces (BRANCH_REGEX above) instead
+    # of a second one. An empty value is legal -- it means "not declared" -- so
+    # only a non-empty, non-matching value dies.
+    if integration_branch and not BRANCH_REGEX.fullmatch(integration_branch):
+        die(
+            'Error: roadmap-init: integrationBranch "'
+            + integration_branch
+            + '" contains invalid characters'
+        )
 
     new_phases = jq_numbers(json.load(sys.stdin))
 
@@ -2027,8 +2139,37 @@ def op_init_write(argv):
 
         merged = existing_phases + filtered_new
         merged.sort(key=lambda p: jq_sort_key(p.get("id")))
-        # Only these four top-level keys survive a --sync, exactly as before.
-        doc = {k: existing.get(k) for k in ("roadmapVersion", "feature", "createdAt", "brainstormPath")}
+        # --sync preserves every top-level key it did not come to change, and
+        # replaces only `phases`. It used to rebuild from a whitelist instead,
+        # and that whitelist erased integrationBranch on its first use -- a
+        # field DOCUMENTED as addable to an existing roadmap.json by hand, i.e.
+        # arriving by a route a list of permitted names is structurally unable
+        # to know about. Widening the list to six would fix that one key and
+        # leave the shape that produced it.
+        #
+        # Inverted rather than widened, for three reasons:
+        #   - The list performed no admission function. The untrusted input is
+        #     the phases payload on stdin, already through init-validate;
+        #     `existing` is a document this CLI wrote and guard-runtime-state
+        #     protects from Write/Edit. It was filtering this script's own
+        #     output.
+        #   - It was the ONLY writer doing so. op_amend_write, op_set_status,
+        #     op_claim, op_release_claim, op_reconcile and op_normalize_contracts
+        #     all mutate `doc` in place and have always preserved unknown keys.
+        #     Six writers obeyed one rule and this one held an exception.
+        #   - The failure directions are not symmetric. A too-narrow allowlist
+        #     erases user data silently; a too-narrow denylist carries a stale
+        #     key forward, which is visible and repairable. Take the visible one.
+        #
+        # Accepted knowingly: a --sync over a document carrying a junk top-level
+        # key now preserves the junk. It can only have arrived by a hand-edit --
+        # the same route integrationBranch is designed to arrive by -- so
+        # preserving it is the same promise, not a new hazard.
+        #
+        # This call's own --integration-branch flag is still NOT consulted here:
+        # only materialization (the create branch below) writes a fresh value.
+        # --sync preserves; it never overwrites a value someone declared by hand.
+        doc = {k: v for k, v in existing.items() if k != "phases"}
         doc["phases"] = merged
         added_count = len(filtered_new)
     else:
@@ -2055,6 +2196,9 @@ def op_init_write(argv):
             "feature": feature,
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "brainstormPath": rm_sanitize(brainstorm_path, 500) if brainstorm_path else None,
+            # Already validated above, against the same BRANCH_REGEX a phase's
+            # own `branch` field uses -- no further sanitization needed.
+            "integrationBranch": integration_branch or None,
             "phases": merged,
         }
         added_count = len(merged)
@@ -2131,7 +2275,7 @@ def op_amend_validate(argv):
 
     sanitized = amend_sanitize(payload)
     branch = sanitized.get("branch")
-    if "branch" in sanitized and branch is not None and not BRANCH_REGEX.search(branch):
+    if "branch" in sanitized and branch is not None and not BRANCH_REGEX.fullmatch(branch):
         die('Error: roadmap-amend-phase: branch "' + branch + '" contains invalid characters')
 
     json.dump(sanitized, sys.stdout, ensure_ascii=False)
@@ -3052,7 +3196,30 @@ def op_reconcile(argv):
         if truth == "unknown" or truth == status:
             continue
         row = {"id": jq_numbers(phase.get("id")), "from": status, "to": truth}
-        if truth == "completed" and not os.path.isfile(
+        if truth == "planned" and status == "in_progress":
+            # A phase a session has already transitioned to in_progress must not be
+            # demoted, even though its stories genuinely are all still pending. That
+            # is the normal shape of a phase mid-claim: execute.md writes in_progress
+            # before any story moves, so the window spans split detection, dependency
+            # validation, orphan reset and wave planning -- agent turns, not
+            # milliseconds -- and execute.md runs reconcile across the WHOLE roadmap
+            # on every claim, so a sibling session is what lands here.
+            #
+            # The demotion is unrecoverable rather than merely untidy: planned ->
+            # completed is not in STATUS_TRANSITIONS, so the owning session would run
+            # every story and then hard-fail at Mark Phase Completed, which is one
+            # call with no fallback. Reported instead of applied, so the divergence
+            # stays visible -- execute.md already prints blocked[] advisorily.
+            #
+            # Deliberately narrower than "never demote": pending -> planned, issue
+            # #102's own target, is a phase nobody has claimed and still self-heals.
+            row["reason"] = (
+                "phase is in_progress -- demoting to planned would strand its "
+                "completion transition, which STATUS_TRANSITIONS does not allow "
+                "from planned"
+            )
+            blocked.append(row)
+        elif truth == "completed" and not os.path.isfile(
             feature_dir + "/" + directory + "/handoff.md"
         ):
             row["reason"] = "no handoff.md -- write it with roadmap-write-handoff, then re-run"

@@ -153,7 +153,7 @@ import tempfile
 # If a third module ever needs these, they follow rm_sanitize into a module of
 # their own -- that is what sanitize.py is, and why it was extracted in its own
 # commit rather than being imported out of whichever file happened to hold it.
-from roadmap import _json_type, jq_numbers, jq_sort_key
+from roadmap import TERMINAL_STORY_STATUSES, _json_type, jq_numbers, jq_sort_key
 
 # THE default, in the one place it is now written.
 #
@@ -815,9 +815,15 @@ def _dep_action_gate_clear(dep):
 
 def _dep_status_done(dep):
     """`$dep_status == "completed" or $dep_status == "skipped"`. Anything else
-    -- pending, in_progress, failed, absent -- leaves the dependent blocked."""
+    -- pending, in_progress, failed, absent -- leaves the dependent blocked.
+
+    The pair is TERMINAL_STORY_STATUSES rather than two literals: the identical
+    rule decides whether a PHASE is finished (roadmap.py's ground_truth) and
+    whether a split member is still active (aimi-cli.sh's split-detect), and the
+    three answered differently once. See the constant for why it lives in
+    roadmap.py and not here."""
     status = jq_index(dep, "status", STORY)
-    return status == "completed" or status == "skipped"
+    return status in TERMINAL_STORY_STATUSES
 
 
 def is_ready(story, stories):
@@ -1062,6 +1068,18 @@ def _story_errors(story):
             errors.append(story_id + ": project contains shell metacharacters")
         elif not jq_test(project, VALID_PROJECT, owner):
             errors.append(story_id + ": project contains invalid characters")
+
+    # No rule governs implementation.verify's working directory here, and that
+    # is deliberate rather than an omission. A rule requiring a `cd <project>`
+    # prefix shipped briefly and was removed: the executor already establishes
+    # the CWD before verify ever runs (skills/story-executor/SKILL.md step 0),
+    # so the prefix pointed at <project>/<project> in three of the four
+    # layout-by-mode combinations. Issue #105's real defect is in that step 0
+    # contract, not in what an author writes here. If a future rule does need
+    # to read .implementation, it must go through a jq_type(...) == "object"
+    # guard first -- a bare jq_index on it aborts the whole run on a document
+    # whose implementation is a scalar, which is exactly how the removed rule
+    # turned a per-story verdict into an exit 1.
 
     skills = jq_index(story, "skills", STORY)
     if skills is not None:

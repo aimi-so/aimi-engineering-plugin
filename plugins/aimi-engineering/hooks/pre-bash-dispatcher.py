@@ -226,7 +226,9 @@ def handle_default_branch(command: str, tool_input: dict) -> None:
     if branch in protected:
         msg = (
             f"Commits on the protected branch `{branch}` are blocked.\n"
-            "Use a feature worktree:\n"
+            f"Resolved from directory: {cwd}\n"
+            "If that's not where you meant to be, `cd` into your feature worktree and retry.\n"
+            "Otherwise, use a feature worktree:\n"
             "  git worktree add /tmp/<feature> -b feat/<feature>\n"
             "Then commit from that worktree. The default branch stays clean for merges."
         )

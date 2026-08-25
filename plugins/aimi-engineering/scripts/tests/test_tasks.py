@@ -925,6 +925,24 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
         assert VALIDATE["limpo-" + verb]["exit"] == 0
 
 
+def _story(project=None, verify=None):
+    story = {
+        "id": "US-001",
+        "title": "t",
+        "description": "d",
+        "acceptanceCriteria": ["x"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    if project is not None:
+        story["project"] = project
+    if verify is not None:
+        story["implementation"] = {"verify": verify}
+    return story
+
+
 def test_validate_ids_keeps_its_asymmetric_shape_and_its_accepted_suffix():
     """THE two traps of the verb that had zero assertions before outline:02.
 

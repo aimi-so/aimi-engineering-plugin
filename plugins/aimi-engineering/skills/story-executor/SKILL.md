@@ -15,7 +15,7 @@ Defines how Task-spawned agents execute individual stories from the tasks file.
 ## The Job
 
 Execute ONE story from the tasks file:
-0. If PROJECT_PATH is provided, cd to it first; if WORKTREE_PATH is also provided, cd to WORKTREE_PATH instead (worktree takes precedence)
+0. Establish the working directory — see `<worktree_context>` below for the exact rule. In short: WORKTREE_PATH wins when given, but when PROJECT_PATH names a *subdirectory* of the repo rather than its own repository, the destination is that subdirectory **inside** the worktree, not the worktree root
 1. Read project guidelines (CLAUDE.md)
 2. Implement the story
 3. Verify acceptance criteria
@@ -235,8 +235,25 @@ If PROJECT_PATH is provided:
 
 [WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
 
-If both PROJECT_PATH and WORKTREE_PATH are provided:
-- cd to WORKTREE_PATH (worktree takes precedence; it is inside the project repo)
+If both PROJECT_PATH and WORKTREE_PATH are provided, the destination depends on whether PROJECT_PATH is its own repository or a subdirectory of one. `worktree-manager.sh` creates every worktree under `$(git rev-parse --show-toplevel)/.worktrees`, so a worktree sits beside the *repository root* — which is the same place as PROJECT_PATH only when PROJECT_PATH is itself that root. Decide it rather than assume it:
+
+```bash
+PROJECT_TOPLEVEL=$(git -C "$PROJECT_PATH" rev-parse --show-toplevel)
+if [ "$PROJECT_TOPLEVEL" = "$PROJECT_PATH" ]; then
+  # PROJECT_PATH is its own repository (multi-repo sibling layout):
+  # the worktree already IS the project.
+  cd "$WORKTREE_PATH"
+else
+  # PROJECT_PATH is a subdirectory of a larger repository (monorepo layout):
+  # the worktree is the repo root, and the project sits at the same
+  # relative path inside it.
+  cd "$WORKTREE_PATH/${PROJECT_PATH#"$PROJECT_TOPLEVEL"/}"
+fi
+```
+
+Getting this wrong is issue #105: a monorepo story ran from the repository root while its `implementation.verify` was written for the project directory, so a bare `bun run typecheck` failed for want of a `package.json` one level down. The fix belongs here, in the cd — never in what a story author writes. A `verify` must not carry a `cd <project> &&` prefix; by the time it runs you are already there.
+
+Then, in either case:
 - All file operations happen within the worktree
 - Commit to the worktree's branch (already checked out)
 - Do NOT modify the tasks.json file (leader handles this)
@@ -468,8 +485,25 @@ If PROJECT_PATH is provided:
 
 [WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
 
-If both PROJECT_PATH and WORKTREE_PATH are provided:
-- cd to WORKTREE_PATH (worktree takes precedence; it is inside the project repo)
+If both PROJECT_PATH and WORKTREE_PATH are provided, the destination depends on whether PROJECT_PATH is its own repository or a subdirectory of one. `worktree-manager.sh` creates every worktree under `$(git rev-parse --show-toplevel)/.worktrees`, so a worktree sits beside the *repository root* — which is the same place as PROJECT_PATH only when PROJECT_PATH is itself that root. Decide it rather than assume it:
+
+```bash
+PROJECT_TOPLEVEL=$(git -C "$PROJECT_PATH" rev-parse --show-toplevel)
+if [ "$PROJECT_TOPLEVEL" = "$PROJECT_PATH" ]; then
+  # PROJECT_PATH is its own repository (multi-repo sibling layout):
+  # the worktree already IS the project.
+  cd "$WORKTREE_PATH"
+else
+  # PROJECT_PATH is a subdirectory of a larger repository (monorepo layout):
+  # the worktree is the repo root, and the project sits at the same
+  # relative path inside it.
+  cd "$WORKTREE_PATH/${PROJECT_PATH#"$PROJECT_TOPLEVEL"/}"
+fi
+```
+
+Getting this wrong is issue #105: a monorepo story ran from the repository root while its `implementation.verify` was written for the project directory, so a bare `bun run typecheck` failed for want of a `package.json` one level down. The fix belongs here, in the cd — never in what a story author writes. A `verify` must not carry a `cd <project> &&` prefix; by the time it runs you are already there.
+
+Then, in either case:
 - All file operations happen within the worktree
 - Commit to the worktree's branch (already checked out)
 - Do NOT modify the tasks.json file (leader handles this)

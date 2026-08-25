@@ -1324,6 +1324,382 @@ def test_ground_truth_is_one_rule_reconcile_and_the_work_map_both_read():
     ) == "in_progress"
 
 
+def test_ground_truth_gets_the_two_terminal_branches_it_never_had():
+    """Issue #112 (skipped is terminal alongside completed, including when it is
+    the only status present) and issue #102 (all-pending reads planned). Both
+    are asked before the in_progress fallback, and failed still wins over
+    either one -- not just over the two original branches."""
+    assert R.ground_truth(
+        {"userStories": [{"status": "completed"}, {"status": "skipped"}]}
+    ) == "completed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "skipped"}, {"status": "skipped"}]}
+    ) == "completed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "pending"}, {"status": "pending"}]}
+    ) == "planned"
+    assert R.ground_truth(
+        {"userStories": [{"status": "skipped"}, {"status": "failed"}]}
+    ) == "verification_failed"
+    assert R.ground_truth(
+        {"userStories": [{"status": "pending"}, {"status": "failed"}]}
+    ) == "verification_failed"
+
+
+def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_uncorrected(
+    tmp_path,
+):
+    """The two new branches reproduced through the real CLI, on a throwaway
+    fixture rather than the repository's own .aimi/ -- AC6 and AC7 together,
+    since both are the same claim: a status ground_truth already agrees with
+    draws no correction from reconcile."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "gt-terminal"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(os.path.join(feature_dir, "phase-1"), exist_ok=True)
+    os.makedirs(os.path.join(feature_dir, "phase-2"), exist_ok=True)
+
+    def _phase_entry(pid, status):
+        return {
+            "id": pid, "name": "P" + str(pid), "goal": "g", "slug": "p" + str(pid),
+            "dir": "phase-" + str(pid), "status": status, "dependsOn": [],
+            "branch": None, "notes": None, "successCriteria": [],
+            "creates": [], "needs": [], "areas": [], "claim": None,
+        }
+
+    roadmap = {
+        "roadmapVersion": "1.0", "feature": feature, "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [_phase_entry(1, "completed"), _phase_entry(2, "planned")],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    with open(
+        os.path.join(feature_dir, "phase-1", feature + "-phase-1-tasks.json"),
+        "w", encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {"userStories": [{"status": "completed"}, {"status": "skipped"}]}, handle
+        )
+    with open(os.path.join(feature_dir, "phase-1", "handoff.md"), "w", encoding="utf-8") as handle:
+        handle.write("# handoff\n")
+    with open(
+        os.path.join(feature_dir, "phase-2", feature + "-phase-2-tasks.json"),
+        "w", encoding="utf-8",
+    ) as handle:
+        json.dump(
+            {"userStories": [{"status": "pending"}, {"status": "pending"}]}, handle
+        )
+
+    proc = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"corrections": [], "blocked": []}
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["status"] == "completed"
+    assert written["phases"][1]["status"] == "planned"
+
+
+def test_reconcile_refuses_to_demote_an_in_progress_phase_but_still_heals_a_pending_one(
+    tmp_path,
+):
+    """The direction the test above cannot reach: where reconcile WRITES.
+
+    A phase execute.md has already transitioned to in_progress has all its
+    stories still pending for a real window -- that transition happens before
+    any story moves -- and reconcile runs across the whole roadmap on every
+    claim, so a sibling session lands here routinely. Demoting it to planned
+    strands its owner, because STATUS_TRANSITIONS has no planned -> completed
+    edge, so the phase would run every story and then hard-fail at Mark Phase
+    Completed.
+
+    Both directions are asserted in one fixture so they cannot drift apart: the
+    in_progress phase must be REPORTED and left alone, and the pending phase --
+    issue #102's actual target -- must still be corrected. A guard written too
+    wide would break the second; no guard at all breaks the first."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "gt-demote"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(os.path.join(feature_dir, "phase-1"), exist_ok=True)
+    os.makedirs(os.path.join(feature_dir, "phase-2"), exist_ok=True)
+
+    def _phase_entry(pid, status):
+        return {
+            "id": pid, "name": "P" + str(pid), "goal": "g", "slug": "p" + str(pid),
+            "dir": "phase-" + str(pid), "status": status, "dependsOn": [],
+            "branch": None, "notes": None, "successCriteria": [],
+            "creates": [], "needs": [], "areas": [], "claim": None,
+        }
+
+    roadmap = {
+        "roadmapVersion": "1.0", "feature": feature, "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [_phase_entry(1, "in_progress"), _phase_entry(2, "pending")],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    for pid in (1, 2):
+        with open(
+            os.path.join(feature_dir, "phase-" + str(pid),
+                         feature + "-phase-" + str(pid) + "-tasks.json"),
+            "w", encoding="utf-8",
+        ) as handle:
+            json.dump({"userStories": [{"status": "pending"}, {"status": "pending"}]}, handle)
+
+    proc = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
+    )
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads(proc.stdout)
+
+    assert report["corrections"] == [{"id": 2, "from": "pending", "to": "planned"}]
+    assert len(report["blocked"]) == 1
+    assert report["blocked"][0]["id"] == 1
+    assert report["blocked"][0]["from"] == "in_progress"
+    assert report["blocked"][0]["to"] == "planned"
+    assert "in_progress" in report["blocked"][0]["reason"]
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["status"] == "in_progress"
+    assert written["phases"][1]["status"] == "planned"
+
+
+def test_a_reconciled_in_progress_phase_can_still_reach_completed(tmp_path):
+    """The consequence the guard exists to prevent, asserted end to end rather
+    than argued: after reconcile has seen an in_progress phase whose stories
+    were all pending, its owner must still be able to close it. Without the
+    guard the phase reads planned here and roadmap-set-status refuses, because
+    planned -> completed is not an edge -- and that refusal lands after every
+    story has already run."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "gt-close"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    phase_dir = os.path.join(feature_dir, "phase-1")
+    os.makedirs(phase_dir, exist_ok=True)
+    tasks_path = os.path.join(phase_dir, feature + "-phase-1-tasks.json")
+
+    roadmap = {
+        "roadmapVersion": "1.0", "feature": feature, "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [{
+            "id": 1, "name": "P1", "goal": "g", "slug": "p1", "dir": "phase-1",
+            "status": "in_progress", "dependsOn": [], "branch": None, "notes": None,
+            "successCriteria": [], "creates": [], "needs": [], "areas": [], "claim": None,
+        }],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    with open(tasks_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [{"status": "pending"}]}, handle)
+
+    env = _fixture_env(base)
+    reconcile = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
+        cwd=root, capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert reconcile.returncode == 0, reconcile.stderr
+
+    # The owning session finishes its work and writes the handoff.
+    with open(tasks_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [{"status": "completed"}]}, handle)
+    with open(os.path.join(phase_dir, "handoff.md"), "w", encoding="utf-8") as handle:
+        handle.write("# handoff\n")
+
+    closed = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-set-status",
+         "--feature", feature, "--phase", "1", "--status", "completed"],
+        cwd=root, capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert closed.returncode == 0, closed.stderr
+    assert json.loads(closed.stdout) == {"phase": 1, "from": "in_progress", "to": "completed"}
+
+
+# ---------------------------------------------------------------------------
+# integrationBranch -- roadmap-init --integration-branch, through the real
+# aimi-cli.sh CLI rather than roadmap.py's init-write op directly, so the
+# same run also proves the flag threads through cmd_roadmap_init. Issue #87's
+# direction 1.
+# ---------------------------------------------------------------------------
+
+_IB_ROOT_PHASE = [{"id": 1, "name": "Root", "goal": "g", "slug": "root", "dependsOn": []}]
+
+
+def _ib_run(root, base, *args, stdin=None):
+    return subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-init"] + list(args),
+        input=json.dumps(stdin) if stdin is not None else None,
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
+    )
+
+
+def test_roadmap_init_materializes_the_integration_branch(tmp_path):
+    """--integration-branch writes the field at creation time -- AC1."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-materialize"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc["integrationBranch"] == "integration"
+
+
+def test_sync_preserves_a_top_level_key_it_was_never_told_about(tmp_path):
+    """The generalisation of the test below, and the reason --sync stopped
+    rebuilding from an allowlist.
+
+    That allowlist erased integrationBranch on its first use. Widening it to
+    name the field fixes that key and leaves the shape: a list of permitted
+    names cannot know about a key added by hand, which is exactly the route
+    issue #87 direction 1 documents for this field, and the route any future
+    one will take. So the test is written over a key NOTHING in the tree knows
+    -- if it survives, no named key can be silently dropped either.
+
+    Neither call passes --integration-branch a second time, so both values are
+    surviving on their own rather than being resupplied."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "sync-unknown"
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    # A hand-edit, which is the only way such a key can arrive.
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    doc["someKeyNothingKnowsAbout"] = {"nested": ["value"]}
+    with open(roadmap_file, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        after = json.load(handle)
+    assert after["someKeyNothingKnowsAbout"] == {"nested": ["value"]}, (
+        "an additive --sync erased a top-level key it did not come to change"
+    )
+    assert after["integrationBranch"] == "integration"
+    assert after["feature"] == feature
+    assert [p["id"] for p in after["phases"]] == [1, 2], "phases is still replaced, not merged blindly"
+
+
+def test_roadmap_init_sync_preserves_the_integration_branch(tmp_path):
+    """The regression this story exists to prevent: op_init_write's --sync key
+    tuple at roadmap.py must carry integrationBranch, or a later additive
+    --sync silently erases whatever materialization wrote. Neither call below
+    passes --integration-branch a second time -- the second call proves the
+    value survives sync on its own, not because it was resupplied. AC3."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-sync"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "integration",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc["integrationBranch"] == "integration"
+    assert [p["id"] for p in doc["phases"]] == [1, 2]
+
+
+def test_roadmap_init_sync_over_a_legacy_roadmap_leaves_it_absent(tmp_path):
+    """A roadmap.json written before this field existed carries no
+    integrationBranch key at all. Its absence is not an error, no migration
+    runs, and an additive --sync over it must not invent a value. AC5."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "ib-legacy"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(feature_dir, exist_ok=True)
+
+    legacy = {
+        "roadmapVersion": "2.0", "feature": feature, "createdAt": "2026-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [{
+            "id": 1, "name": "Root", "goal": "g", "slug": "root", "dir": "phase-1-root",
+            "status": "pending", "dependsOn": [], "branch": None, "notes": None,
+            "successCriteria": [], "creates": [], "needs": [], "areas": [], "claim": None,
+        }],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(legacy, handle)
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--sync",
+        stdin=[{"id": 2, "name": "Second", "goal": "g", "slug": "second", "dependsOn": [1]}],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert doc.get("integrationBranch") is None
+    assert [p["id"] for p in doc["phases"]] == [1, 2]
+
+
+def test_roadmap_init_refuses_an_invalid_integration_branch_before_any_write(tmp_path):
+    """Validated against the same BRANCH_REGEX a phase's own branch field
+    already enforces, refused before roadmap.json is touched at all -- AC2."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "ib-invalid"
+
+    proc = _ib_run(
+        root, base, "--feature", feature, "--integration-branch", "bad branch!",
+        stdin=_IB_ROOT_PHASE,
+    )
+    assert proc.returncode == 1
+    assert "integrationBranch" in proc.stderr
+    assert "invalid characters" in proc.stderr
+
+    # "before any write" means the FEATURE DIRECTORY, not just roadmap.json.
+    # Asserting only the latter is what let this ship refused-but-inside-the-
+    # lock: the check ran in init-write, after `mkdir -p`, so a refusal left
+    # the directory and a stale roadmap.json.lock behind while this assertion
+    # still passed. cmd_roadmap_init's own pre-lock comment states the rule
+    # this now actually tests.
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    assert not os.path.exists(feature_dir), sorted(
+        os.listdir(feature_dir) if os.path.isdir(feature_dir) else []
+    )
+
+
 def test_the_empty_ground_truth_is_the_jq_capture_and_not_an_invention():
     """A tasks file that parses but whose userStories is absent made jq abort and
     the bash carry on with an empty capture. Reconcile then wrote status: "".
@@ -1874,12 +2250,20 @@ _BASH_LINE = re.compile(r"^(.*?): line \d+:", re.M)
 LA_CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
 
 
-def _la_env(base):
+def _fixture_env(base):
     """Every path the CLI could reach outside the fixture, pointed back into it.
 
-    The repository's own .aimi/tasks holds the tasks file this plan runs from,
-    and list-archivable is what feeds archive-task. A case that walked up to it
-    would be reading live state.
+    The repository's own .aimi/ holds live state -- the tasks file a session is
+    running from, and the roadmaps reconcile would walk. A case that reached it
+    would be reading and, worse, writing that state rather than its own fixture.
+
+    One helper, not one per section. This shipped as two byte-identical copies
+    (_la_env and _gt_branches_env) whose only difference was the docstring, on
+    the stated ground that "the two sections read the fixture for different
+    verbs" -- which describes nothing in the body: it pins HOME and the three
+    config roots and drops the two host variables, none of it verb-specific.
+    Name it for what it does so the next section reuses it instead of copying
+    it a third time.
     """
     env = dict(os.environ)
     for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
@@ -1917,7 +2301,7 @@ def _replay_la_roadmap(case, tmp_path):
 
     proc = subprocess.run(
         ["bash", LA_CLI] + case["args"],
-        cwd=root, capture_output=True, text=True, timeout=120, env=_la_env(base),
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
     )
 
     def norm(text):
@@ -2174,3 +2558,54 @@ def test_the_op_reads_no_tasks_file(tmp_path):
     body = "\n".join(l for l in body.split("\n") if not l.lstrip().startswith("#"))
     assert "tasks" not in body
     assert body.count("open(") == 1
+
+
+# ---------------------------------------------------------------------------
+# TERMINAL_STORY_STATUSES -- the one rule, and the drift guard over its three
+# readers. Two import it; the third is jq and cannot, so it is checked by
+# reading the source rather than by calling it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_three_readers_of_the_terminal_rule_agree():
+    """One sentence -- a story is finished iff completed or skipped -- decides
+    three different questions, in three languages, and they disagreed once.
+
+    split-detect tested only "completed" while ground_truth and _dep_status_done
+    had already been taught the pair, so a split member whose remaining stories
+    were all skipped stayed active forever and its phase never closed. That is
+    issue #112 open for split phases after being closed everywhere else, from
+    ONE tasks file answering two ways.
+
+    The two Python readers now share the constant, so they cannot drift without
+    this failing to import. The jq copy can, which is why it is asserted from
+    its source text: no import will ever tie it, and a comment alone did not
+    stop the drift the first time."""
+    assert R.TERMINAL_STORY_STATUSES == ("completed", "skipped")
+
+    import tasks as T
+    assert T.TERMINAL_STORY_STATUSES is R.TERMINAL_STORY_STATUSES, (
+        "tasks.py must import the constant, not redeclare it"
+    )
+    for status in R.TERMINAL_STORY_STATUSES:
+        assert T._dep_status_done({"status": status}), status
+    for status in ("pending", "in_progress", "failed", None):
+        assert not T._dep_status_done({"status": status}), status
+
+    # ground_truth reads the same tuple: a phase of any terminal mix is closed.
+    assert R.ground_truth({"userStories": [{"status": "completed"}, {"status": "skipped"}]}) == "completed"
+    assert R.ground_truth({"userStories": [{"status": "skipped"}]}) == "completed"
+
+    # The jq third copy, checked as text. It must exclude BOTH names; asserting
+    # only that "skipped" appears somewhere would pass on a comment mentioning it.
+    cli = os.path.join(SCRIPTS, "aimi-cli.sh")
+    with open(cli, encoding="utf-8") as handle:
+        source = handle.read()
+    predicate = '. != "completed" and . != "skipped"'
+    assert predicate in source, (
+        "split-detect's pendingCount must exclude the same pair; if this line moved, "
+        "move it together with TERMINAL_STORY_STATUSES -- see the comment above it"
+    )
+    assert 'select((.status? // "pending") != "completed")]' not in source, (
+        "the pre-#112 predicate is back: split-detect is counting skipped as pending again"
+    )

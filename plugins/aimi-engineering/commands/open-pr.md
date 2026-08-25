@@ -241,7 +241,60 @@ Store the resolved value as `$CURRENT_BRANCH`.
 
 **Why Step 1c's skip condition is not widened to cover this case:** at Step 1c's point in the flow, neither `$DEFAULT_BRANCH` nor the Case A/Case B outcome exist yet — both are computed here in Step 2a, which runs after 1c. Widening 1c's skip condition would require moving branch detection earlier, out of this story's scope. The check is also advisory-only (it warns, never stops) and vacuously harmless in container mode, since the Main Working Tree Untouched Invariant keeps the CWD clean throughout the run regardless.
 
-### 2b. Detect parent branch via `detect-parent-branch`
+### 2b. Detect parent branch: a declared `integrationBranch` first, `detect-parent-branch` inference otherwise
+
+#### 2b-i. Prefer a declared `integrationBranch` when the active tasks file is phase-scoped
+
+A rolling-wave roadmap can declare a feature-level `integrationBranch` in its `roadmap.json` (materialized via `roadmap-init --integration-branch`, per issue #87's direction 1) — the long-lived branch every phase's PR should target, which the git graph alone cannot distinguish from the default branch until the two diverge. When one is declared, prefer it over inference outright: it is an explicit statement of intent, not a guess `detect-parent-branch`'s decoration walk needs to confirm.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+METADATA_JSON=$($AIMI_CLI metadata 2>/dev/null) || METADATA_JSON=""
+if [ -z "$METADATA_JSON" ]; then
+  echo "Note: no active tasks file readable — not looking for a declared integration branch." >&2
+fi
+ROADMAP_PATH_REL=$(printf '%s' "$METADATA_JSON" | jq -r '.roadmapPath // empty' 2>/dev/null)
+INTEGRATION_BRANCH=""
+if [ -n "$ROADMAP_PATH_REL" ]; then
+  FEATURE_SLUG=$(basename "$(dirname "$ROADMAP_PATH_REL")")
+  ROADMAP_JSON=$($AIMI_CLI roadmap-get --feature "$FEATURE_SLUG" 2>/dev/null) || ROADMAP_JSON=""
+  if [ -z "$ROADMAP_JSON" ]; then
+    echo "Note: could not read $FEATURE_SLUG's roadmap — falling back to parent-branch inference." >&2
+  fi
+  INTEGRATION_BRANCH=$(printf '%s' "$ROADMAP_JSON" | jq -r '.integrationBranch // empty' 2>/dev/null)
+fi
+```
+
+`metadata.roadmapPath` (`.aimi/tasks/<feature>/roadmap.json`, relative to `AIMI_ROOT`) is present only on a phase-scoped tasks file — see `plan.md`'s Roadmap Materialization — so a flat tasks file yields an empty `$ROADMAP_PATH_REL` and `$INTEGRATION_BRANCH` stays empty, falling straight through to 2b-ii below exactly as if this sub-step never ran. `roadmap-get --feature <slug>` with neither `--phase` nor `--next-eligible` dumps `roadmap.json` byte for byte, so `.integrationBranch` reads whatever `roadmap-init` wrote — or a value hand-added to a roadmap that predates the field, per issue #87's direction 1 — and the trailing `// empty` degrades a legacy roadmap missing the key the same way as "not declared": empty, not an error.
+
+**The two failure paths say so rather than degrading in silence.** A flat tasks file legitimately has no `roadmapPath`, and a roadmap that predates the field legitimately has no `integrationBranch` — those are the quiet cases and they stay quiet. But a `metadata` call that fails outright, or a `roadmap-get` that cannot read a roadmap this session just named, are different: both land on the default branch, which is precisely the wrong answer issue #87 was filed about. Landing there silently is how that issue went unnoticed for as long as it did, so each prints one line naming what it could not read.
+
+**When `$INTEGRATION_BRANCH` is non-empty**, confirm the branch actually resolves before adopting it, then skip 2b-ii — its `detect-parent-branch` call, and both of its warning blocks, never run:
+
+```bash
+if [ -n "$INTEGRATION_BRANCH" ]; then
+  if git rev-parse --verify --quiet "$INTEGRATION_BRANCH" >/dev/null \
+     || git rev-parse --verify --quiet "origin/$INTEGRATION_BRANCH" >/dev/null; then
+    BASE_BRANCH="$INTEGRATION_BRANCH"
+    PARENT_SOURCE="integration-branch"
+    echo "Base branch: $INTEGRATION_BRANCH (declared in the roadmap)" >&2
+  else
+    echo "Warning: the roadmap declares integrationBranch \"$INTEGRATION_BRANCH\", but no such branch resolves locally or on origin. Falling back to parent-branch inference — push that branch, or correct roadmap.json, if it is the base you meant." >&2
+    INTEGRATION_BRANCH=""
+  fi
+fi
+```
+
+**Falling back rather than stopping is the deliberate choice.** A declared branch that does not resolve is most often one that simply has not been pushed yet — the first-phase case this whole feature exists for — and inference is a better answer than an abort. Clearing `$INTEGRATION_BRANCH` is what routes execution into 2b-ii, so the fallback needs no second condition anywhere below.
+
+`PARENT_VERIFIED` is deliberately **not** set here. That flag means "confirmed as the true parent via `git merge-base`", which is a claim about the git graph that nothing in this sub-step makes — the check above proves the ref exists, not that it is this branch's parent. Setting it `true` would give one variable two meanings in one file, directly against what 2b-ii's own `ambiguous-decoration` answer was added to fix. Read `$PARENT_SOURCE` instead: `integration-branch` says a human declared this base, which is a stronger warrant than any inference, and it says so without overloading a boolean that means something else.
+
+`$BASE_BRANCH` still passes through Step 2d's regex validation like every other source of it — a declared value is trusted as the RIGHT branch, not exempted from being a WELL-FORMED one.
+
+#### 2b-ii. Otherwise, infer via `detect-parent-branch`
+
+**Skip this whole sub-step when 2b-i already set a non-empty `$INTEGRATION_BRANCH`** — `$BASE_BRANCH`, `$PARENT_VERIFIED` and `$PARENT_SOURCE` are already set and proceed straight to Step 2c.
 
 Call the tested CLI verb instead of parsing decorations by hand — it already handles decoration parsing, `origin/` prefix normalization, and `git merge-base` verification internally, and owns the "no verified candidate" fallback (it returns the repository's default branch itself in that case).
 
@@ -251,21 +304,33 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 PARENT_RESULT=$($AIMI_CLI detect-parent-branch "$CURRENT_BRANCH")
 BASE_BRANCH=$(printf '%s' "$PARENT_RESULT" | jq -r '.base // empty')
 PARENT_VERIFIED=$(printf '%s' "$PARENT_RESULT" | jq -r '.verified // false')
+PARENT_SOURCE=$(printf '%s' "$PARENT_RESULT" | jq -r '.source // empty')
 ```
 
-Store as `$BASE_BRANCH` and `$PARENT_VERIFIED`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
+Store as `$BASE_BRANCH`, `$PARENT_VERIFIED` and `$PARENT_SOURCE`. Note `.base` is the resolved parent branch — `.branch` in the response is merely an echo of the input `$CURRENT_BRANCH` and must never be read here.
 
-When `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print an explicit warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
+**When `$PARENT_SOURCE` is `ambiguous-decoration`**, two or more candidate branches sit on the exact same commit (e.g. an integration branch and the default branch that have not diverged yet) and the verb could not pick between them — this is not the ordinary "no candidate at all" case, so it gets its own message naming the tied candidates before falling back to `$BASE_BRANCH` (already the repository's default branch in this case):
 
+```bash
+if [ "$PARENT_SOURCE" = "ambiguous-decoration" ]; then
+  PARENT_CANDIDATES=$(printf '%s' "$PARENT_RESULT" | jq -r '(.candidates // []) | join(", ")')
+  echo "Warning: could not determine a single parent branch for \"$CURRENT_BRANCH\" -- these candidates are tied at the same commit: $PARENT_CANDIDATES. Falling back to the default branch (\"$BASE_BRANCH\") as the PR base — double-check it before merging." >&2
+fi
 ```
-Warning: could not verify "$BASE_BRANCH" as the true parent branch of "$CURRENT_BRANCH" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging.
+
+**Otherwise**, when `$PARENT_VERIFIED` is not `true` (the candidate could not be confirmed via `git merge-base`, or no decoration candidate existed and the verb fell back to the default branch), print the general warning naming the unverified candidate before continuing — do not silently proceed as if the value were trustworthy:
+
+```bash
+if [ "$PARENT_SOURCE" != "ambiguous-decoration" ] && [ "$PARENT_VERIFIED" != "true" ]; then
+  echo "Warning: could not verify \"$BASE_BRANCH\" as the true parent branch of \"$CURRENT_BRANCH\" (git merge-base check failed or no candidate found). Proceeding with this value as the PR base — double-check it before merging." >&2
+fi
 ```
 
-Execution continues regardless of `$PARENT_VERIFIED`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
+Execution continues regardless of `$PARENT_VERIFIED` or `$PARENT_SOURCE`; Step 2d's regex validation is the only hard STOP gate on `$BASE_BRANCH`.
 
 ### 2c. Fallback when the CLI call itself failed
 
-`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where the CLI call in 2b itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed) and `$BASE_BRANCH` is still empty here:
+`detect-parent-branch` already owns the "no verified candidate" case internally (see 2b-ii) — this step is **not** a second "no parent found" handler. It exists only as defense-in-depth for the narrower case where 2b set no `$BASE_BRANCH` at all — no `integrationBranch` was declared (2b-i) AND the `detect-parent-branch` call in 2b-ii itself failed or produced no output (e.g., `$AIMI_CLI` resolution broke, the process exited non-zero, or the JSON could not be parsed):
 
 ```bash
 if [ -z "$BASE_BRANCH" ]; then
@@ -279,13 +344,18 @@ Store the result as `$BASE_BRANCH`.
 
 ### 2d. Validate base branch name
 
-The detected `$BASE_BRANCH` must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`.
+The detected `$BASE_BRANCH` must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$`, tested against the **whole value** rather than line by line:
 
 ```bash
-echo "$BASE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
+case "$BASE_BRANCH" in
+  ''|*[!a-zA-Z0-9/_-]*|[!a-zA-Z0-9]*) BASE_BRANCH_OK=false ;;
+  *) BASE_BRANCH_OK=true ;;
+esac
 ```
 
-If validation fails, report: "Invalid parent branch name detected: $BASE_BRANCH" and STOP.
+`case` rather than `echo … | grep -qE`, and the difference is not stylistic. `grep` matches per line, so it exits 0 whenever **any** line of a multi-line value matches — a `$BASE_BRANCH` of `main\nfoo; bar` passed the old form. That was unreachable while every source of this variable was a git ref (refnames cannot contain a newline), and it stopped being unreachable when 2b-i began reading the value out of a hand-editable JSON document. `case` tests the whole string, which is also what `forge-pr-create` already does with `[[ =~ ]]` at its own `--base` gate.
+
+When `$BASE_BRANCH_OK` is `false`, report `Invalid parent branch name detected: $BASE_BRANCH` and STOP.
 
 ### 2e. Capture full commit log
 
