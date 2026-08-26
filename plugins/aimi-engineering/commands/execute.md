@@ -532,6 +532,8 @@ Each parallel Task receives the full execute.md flow:
 - Each flow commits to its own branch (`metadata.branchName` from its file) inside its own repo — no branch conflicts
 - Prototype files are read by each subagent independently via `$AIMI_CLI get-story-context` (pointer-only handoff)
 
+**None of the above depends on the shared current-tasks pointer once running concurrently.** `init-session --file <path>` still writes that pointer (see Point the session at this phase's own tasks file for why the write itself is kept), but every call this flow's own Step 1/3/4 makes afterward — `reset-orphaned`, `validate-stories`, `count-pending`, `list-ready`, `status`, `mark-in-progress`, `mark-failed`, `cascade-skip`, `mark-complete`, and each spawned story executor's own `get-story-context` — passes `--tasks-file` resolved from this Task's own `TASKS_PATH` (the path this Task's own `init-session --file` call was given), never the bare form. Two or more of these Tasks run in the same turn and each overwrites the pointer with its own path; that stomping is harmless now, because nothing on this path reads the pointer back to decide what to read or mutate.
+
 After all Tasks return, collect results and proceed to **Aggregated Completion (Split Mode)**.
 
 ### Single-File Fallback
@@ -736,12 +738,20 @@ fi
 
 ### Orphaned Story Recovery
 
-Check for and reset stories stuck in `in_progress` status (from interrupted previous runs):
+Check for and reset stories stuck in `in_progress` status (from interrupted previous runs). Resolve this run's own tasks file explicitly rather than falling through to `reset-orphaned`'s shared current-tasks fallback — a split sub-orchestrator reaching this point (see Spawn Split Sub-Orchestrators) already has `PHASE_TASKS_PATH` pre-set. The one caller that reaches this subsection before Step 1.7 has resolved `PHASE_TASKS_PATH` — the top-level orchestrator's own first pass, claiming a phase for itself, with no sibling session racing it yet — has nothing to substitute, so the formula below yields `--tasks-file ""`; that empty value is `reset-orphaned`'s own signal to fall back to the shared pointer, which is exactly today's behavior:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI reset-orphaned
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if [ "$PHASE_MODE" = "true" ]; then
+  STEP1_TASKS_FILE="$PHASE_TASKS_PATH"
+else
+  STEP1_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+fi
+$AIMI_CLI reset-orphaned --tasks-file "$STEP1_TASKS_FILE"
 ```
 
 This atomically marks all `in_progress` stories as `failed` and returns:
@@ -755,10 +765,20 @@ Note: These stories will appear as "failed" in status. The user can review and r
 
 ### Content Validation
 
+Same resolution as Orphaned Story Recovery immediately above — a fresh `AIMI_ROOT` derivation (each Bash call is an isolated shell) feeding the identical `PHASE_MODE`-conditioned formula:
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI validate-stories
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if [ "$PHASE_MODE" = "true" ]; then
+  STEP1_TASKS_FILE="$PHASE_TASKS_PATH"
+else
+  STEP1_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+fi
+$AIMI_CLI validate-stories --tasks-file "$STEP1_TASKS_FILE"
 ```
 
 If validation fails (exit non-zero), report the errors and STOP:
@@ -1381,6 +1401,8 @@ PHASE_TASKS_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR/$FEATURE-phase-$PHA
 $AIMI_CLI init-session --file "$PHASE_TASKS_PATH"
 ```
 
+**`init-session --file` above still writes the global current-tasks pointer, and that write is kept, not removed.** Steps 3 and 4 below never read it back — every call they make resolves its own tasks file explicitly (`$PHASE_TASKS_PATH` here, `$AIMI_ROOT/$TASKS_PATH` in flat mode), so a concurrent split sub-orchestrator's own `init-session --file` call overwriting this pointer is harmless to them. The pointer still has two real readers: `cmd_get_state` (and therefore `/aimi:status`'s own bare reads) has no other source for a "current tasks file" value to report, and any single-session flat CLI usage with no locally-resolved path — a human typing `$AIMI_CLI list-ready` by hand outside of this flow — still depends on it. What stays racy after this fix is `cmd_get_state`'s own reported field, last-writer-wins across concurrent split orchestrators, and purely cosmetic: nothing on the wave-loop or executor-spawn path consults it to decide what to read or mutate.
+
 If this errors with "File not found," the claimed phase has not been planned yet. Report:
 ```
 Phase [PHASE_ID] is claimed but has no tasks file yet ([PHASE_TASKS_PATH]).
@@ -1856,7 +1878,9 @@ Task(
 )
 ```
 
-Each sub-orchestrator's individual story-level merges therefore land on its **own** split branch — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never any sibling split's worktree or branch. This reuses the existing phase-mode Step 4 wave-loop machinery unmodified, one level deeper, with the split worktree standing in for the outer `PHASE_CONTAINER_PATH` and the split branch standing in for the outer `PHASE_BRANCH`.
+Each sub-orchestrator's individual story-level merges therefore land on its **own** split branch — never `$DEFAULT_BRANCH`, never `AIMI_ROOT`, and never any sibling split's worktree or branch. This reuses the existing phase-mode Step 4 wave-loop structure one level deeper, with the split worktree standing in for the outer `PHASE_CONTAINER_PATH` and the split branch standing in for the outer `PHASE_BRANCH`.
+
+**Every Step 3/Step 4 call this sub-orchestrator makes carries its own `--tasks-file [that split_file]` explicitly** — `count-pending`, `list-ready`, `status`, `mark-in-progress`, `mark-failed`, `cascade-skip`, `mark-complete`, `reset-orphaned`, `validate-stories`, and each spawned story executor's own `get-story-context` — resolved from the pre-set `PHASE_TASKS_PATH` above via the same `PHASE_MODE`-conditioned formula Step 3/Step 4 use everywhere else. `$AIMI_CLI init-session --file [that split_file]` still writes the shared current-tasks pointer (see Point the session at this phase's own tasks file for why that write is kept), and `PHASE_ACTIVE_COUNT` sub-orchestrators spawned in the same turn each overwrite it with their own path — but nothing on this sub-orchestrator's own read/mark path reads that pointer back, so the concurrent overwrite is cosmetic, not a race.
 
 After every Task returns, collect each one's completed-story count and failure list.
 
@@ -2299,10 +2323,20 @@ Run the following sub-steps when any story has a non-null `project` field, or wh
 
 ## Step 3: Check for Pending Stories
 
+Resolve this run's own tasks file explicitly — `$PHASE_TASKS_PATH` when `PHASE_MODE=true` (already set by Step 1.7, or pre-set here for a split sub-orchestrator — see Spawn Split Sub-Orchestrators), `$AIMI_ROOT/$TASKS_PATH` otherwise — rather than letting `count-pending` fall through to its shared current-tasks fallback. Every remaining call in this step and in Step 4 below reuses the same formula, resolved fresh in each call's own isolated shell:
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI count-pending
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if [ "$PHASE_MODE" = "true" ]; then
+  RUN_TASKS_FILE="$PHASE_TASKS_PATH"
+else
+  RUN_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+fi
+$AIMI_CLI count-pending --tasks-file "$RUN_TASKS_FILE"
 ```
 
 If result is `0`:
@@ -2353,10 +2387,20 @@ STOP execution.
 
 ### Validate Dependencies
 
+Same resolution as this step's own `count-pending` above — a fresh `AIMI_ROOT` derivation feeding the identical `PHASE_MODE`-conditioned formula:
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI validate-deps
+AIMI_ROOT="$PWD"
+while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
+[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+if [ "$PHASE_MODE" = "true" ]; then
+  RUN_TASKS_FILE="$PHASE_TASKS_PATH"
+else
+  RUN_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+fi
+$AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE"
 ```
 
 If validation fails (non-zero exit), release the claim under the same phase-mode guard as above, report the error, and STOP:
@@ -2561,16 +2605,26 @@ is_first_story_in_session = true
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
 
+# WAVE_TASKS_FILE — this run's own tasks file, resolved once here with the
+# same PHASE_MODE-conditioned formula Step 3 above already applied ($PHASE_TASKS_PATH
+# when PHASE_MODE=true, else $AIMI_ROOT/$TASKS_PATH — both already resolved by
+# this point in every flow, including a split sub-orchestrator, which pre-sets
+# PHASE_TASKS_PATH before it ever reaches here). Every CLI call in this loop
+# passes it explicitly as --tasks-file instead of falling through to the
+# shared current-tasks pointer, which is what let two concurrent split
+# orchestrators silently read and mutate each other's file.
+WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else (AIMI_ROOT + "/" + TASKS_PATH)
+
 while true:
     # Check remaining work
-    pending = $AIMI_CLI count-pending
+    pending = $AIMI_CLI count-pending --tasks-file [WAVE_TASKS_FILE]
     if pending == 0: break
 
     # Get ready stories (brief mode — returns {id, title, priority, dependsOn, project, gate} only)
     # NOTE: The CLI's list-ready already filters out:
     #   - Stories with pending decision gates (blocked before start)
     #   - Stories whose dependencies have pending action gates (blocked until gate resolved)
-    ready_stories = $AIMI_CLI list-ready --brief
+    ready_stories = $AIMI_CLI list-ready --brief --tasks-file [WAVE_TASKS_FILE]
     if ready_stories is empty:
         if pending > 0:
             # ========================================
@@ -2578,7 +2632,7 @@ while true:
             # ========================================
             # Before reporting deadlock, check if stories are blocked by gates.
             # Use $AIMI_CLI status to get all stories and identify gate-blocked ones.
-            all_stories = $AIMI_CLI status
+            all_stories = $AIMI_CLI status --tasks-file [WAVE_TASKS_FILE]
             decision_blocked = []  # stories with pending decision gates
             action_blocked = []    # stories whose dependencies have pending action gates
 
@@ -2623,7 +2677,7 @@ while true:
 
     # Mark all selected stories as in-progress
     for story in selected_stories:
-        $AIMI_CLI mark-in-progress [story.id]
+        $AIMI_CLI mark-in-progress [story.id] --tasks-file [WAVE_TASKS_FILE]
 
     # ========================================
     # WORKTREE WAVE (parallel with worktrees)
@@ -2746,6 +2800,11 @@ while true:
                 - Omit the <visual_verification> section entirely for worktree stories
                   (the dev server cannot see worktree changes; verification runs after merge-all instead)
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
+                - TASKS_FILE_PATH = WAVE_TASKS_FILE  ← this wave's own resolved tasks file. The
+                  story-executor SKILL.md <task_pointer> template substitutes TASKS_FILE_PATH onto
+                  its own get-story-context call, so the spawned executor reads this orchestrator's
+                  file even when a sibling split orchestrator's init-session call last wrote the
+                  shared pointer
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )
@@ -2824,8 +2883,8 @@ while true:
 
     # Move no-commit stories to failed
     for full_story in no_commit_stories:
-        $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution"
-        $AIMI_CLI cascade-skip [full_story.id]
+        $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution" --tasks-file [WAVE_TASKS_FILE]
+        $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
         Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
 
     # Replace succeeded_stories with only verified ones (so merge-all skips no-commit stories)
@@ -2836,8 +2895,8 @@ while true:
         # Prefer the structured failureCause over generic message when available
         payload = result_payload_by_id.get(full_story.id)
         cause = (payload.get("failureCause") if payload else None) or "Failed during parallel wave [wave]"
-        $AIMI_CLI mark-failed [full_story.id] "[cause]"
-        $AIMI_CLI cascade-skip [full_story.id]
+        $AIMI_CLI mark-failed [full_story.id] "[cause]" --tasks-file [WAVE_TASKS_FILE]
+        $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
         Report: "[full_story.id] failed: [cause]. Dependent stories cascade-skipped."
 
     # ========================================
@@ -2931,7 +2990,7 @@ while true:
                 fi
                 ```
 
-                $AIMI_CLI mark-complete [full_story.id]
+                $AIMI_CLI mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE]
 
                 # --- Post-merge visual verification for visual stories ---
                 # Session lifecycle: see Visual Follow Lifecycle section.

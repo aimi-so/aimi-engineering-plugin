@@ -290,6 +290,7 @@ If HEADED_MODE is false or absent:
 <task_pointer>
 
 STORY_ID: [STORY_ID]
+TASKS_FILE_PATH: [TASKS_FILE_PATH]
 
 Your first action is to resolve the CLI path, then fetch full story context.
 
@@ -299,8 +300,11 @@ Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited. Re-read 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI get-story-context [STORY_ID]
+$AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 ```
+
+`--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file, threaded through explicitly so this call reads it even when a sibling split orchestrator's `init-session` last overwrote the shared current-tasks pointer — never fall back to the bare form.
+
 Parse the returned JSON for five top-level fields:
 - `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
 - `metadata` — contains `prototypePaths`, `prototypeAnchor`, `branchName`, and other session metadata
@@ -409,7 +413,7 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 <execution_flow>
 
-0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID` and parse the returned JSON. Extract:
+0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID --tasks-file $TASKS_FILE_PATH` and parse the returned JSON. Extract:
     - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
     - `metadata` — session metadata (`prototypePaths`, `prototypeAnchor`, `branchName`, etc.)
     - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
@@ -539,14 +543,17 @@ If HEADED_MODE is false or absent:
 
 <task_pointer>
 STORY_ID: [STORY_ID]
+TASKS_FILE_PATH: [TASKS_FILE_PATH]
 
 First action — re-read `$AIMI_CLI` from cache, then fetch story context:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI get-story-context [STORY_ID]
+$AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 ```
+
+`--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file — pass it explicitly rather than the bare form, which would fall back to whichever sibling split orchestrator's `init-session` call last wrote the shared current-tasks pointer.
 
 Parse `{story, metadata, skills, designContext, skillsDropped}` from the returned JSON. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions; a non-empty `skillsDropped[]` names a declared skill the 100KB cap excluded, and belongs in the completion report. Read `designContext.decisions` as design intent for UI-touching work. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
 </task_pointer>
@@ -564,7 +571,7 @@ CRITICAL: Stay within project root. Never read/write outside project boundary. W
 </project_root_boundary>
 
 <execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID`, parse `{story, metadata, skills, designContext, skillsDropped}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md); a non-empty `skillsDropped[]` names a declared skill the 100KB cap excluded, and belongs in the completion report. Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
+Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID --tasks-file $TASKS_FILE_PATH`, parse `{story, metadata, skills, designContext, skillsDropped}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md); a non-empty `skillsDropped[]` names a declared skill the 100KB cap excluded, and belongs in the completion report. Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). Then follow standard execution flow: read criteria → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate) → test → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.**
 </execution_flow>
 
 <on_failure>
