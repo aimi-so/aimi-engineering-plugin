@@ -37,8 +37,16 @@ Emit exactly one fenced `json` block as the **final content** of your response. 
     {
       "op": "add",
       "storyIdx": "<zero-padded outline idx string, e.g. \"02\">",
-      "field": "dependsOn" | "tasks" | "notes",
-      "value": "<new value to add to the field>",
+      "field": "dependsOn",
+      "value": "<new value to append to the field>",
+      "reason": "<one-liner explaining why this patch is needed>"
+    },
+    {
+      "op": "replace",
+      "storyIdx": "<zero-padded outline idx string, e.g. \"03\">",
+      "field": "acceptanceCriteria",
+      "matchValue": "<the exact existing acceptanceCriteria entry to overwrite>",
+      "value": "<the corrected replacement text>",
       "reason": "<one-liner explaining why this patch is needed>"
     }
   ],
@@ -51,20 +59,25 @@ Emit exactly one fenced `json` block as the **final content** of your response. 
 }
 ```
 
-### Op semantics — `add` only
+`field` is one of the six allowlisted values below. `matchValue` appears only on an `acceptanceCriteria` replace patch (see Op semantics); omit it everywhere else.
 
-There is exactly one supported op: **`add`**. The orchestrator applies it as follows:
+### Op semantics — `add` and `replace`
 
-| Target field type | Effect of `add` |
-|---|---|
-| Array (`dependsOn`, `tasks`) | Appends `value` to the existing array. `value` MUST be a single string element. |
-| Scalar string (`notes`) | Appends `value` as a new paragraph, separated by `\n\n---\n\n` from any existing content. `value` MUST be a string. |
+Two ops are supported, each valid only for its own fields — there is no field that accepts both:
 
-Do NOT emit `op: replace` or `op: remove`. Patches with any op other than `add` are dropped silently by the orchestrator.
+| Target field | Op | Effect |
+|---|---|---|
+| `dependsOn`, `tasks` (arrays) | `add` | Appends `value` to the existing array. `value` MUST be a single string element. |
+| `notes` (scalar string) | `add` | Appends `value` as a new paragraph, separated by `\n\n---\n\n` from any existing content. `value` MUST be a string. |
+| `acceptanceCriteria` (array entry) | `replace` | Overwrites the single existing array entry equal to `matchValue` (exact string match) with `value`. `matchValue` is required. The orchestrator drops the patch when zero or more than one entry matches `matchValue` — only emit this when you can quote the exact existing text. |
+| `implementation.approach` (scalar string) | `replace` | Overwrites the whole scalar string with `value`. |
+| `gate.prompt` (scalar string) | `replace` | Overwrites the whole scalar string with `value`, but only applies when the story already has a `gate` object with an existing, non-null `prompt`. The orchestrator drops the patch rather than inventing a new `gate` — do not emit this patch for a story with no gate or no existing prompt. |
+
+Do NOT emit `op: remove`. Do NOT emit `add` on `acceptanceCriteria`/`implementation.approach`/`gate.prompt`, and do NOT emit `replace` on `dependsOn`/`tasks`/`notes`. Any op/field pairing outside this table is dropped silently by the orchestrator.
 
 ### Field allowlist
 
-You may only emit patches targeting these three fields: **`dependsOn`**, **`tasks`**, **`notes`**.
+You may only emit patches targeting these six fields: **`dependsOn`**, **`tasks`**, **`notes`**, **`acceptanceCriteria`**, **`implementation.approach`**, **`gate.prompt`**. The last two are dotted paths, and they are the only two recognized — no other dotted field name is valid.
 
 Patches targeting any other field are malformed. Do not emit them. The orchestrator will drop them silently, but emitting them wastes your patch budget. If you identify a problem that would require patching a field outside this allowlist, record it in `unresolved[]` instead.
 
@@ -86,7 +99,7 @@ Evaluate every pair (and individual story) against these six concerns:
 
 ### 1. Endpoint-name or schema-shape drift
 
-When two sibling stories describe the same API endpoint or shared data model but use different names for the endpoint path, field names, or return type shape, flag the discrepancy. Compare against canonical names in the research summary when available. Emit an `add` patch appending a correction note to the diverging story's `notes` field, or appending a clarifying task to its `tasks` array. If the discrepancy cannot be safely auto-patched (e.g., both stories may be right and the correct name is ambiguous), add an `unresolved[]` entry.
+When two sibling stories describe the same API endpoint or shared data model but use different names for the endpoint path, field names, or return type shape, flag the discrepancy. Compare against canonical names in the research summary when available. When you can point to the exact contradicted text — a specific `acceptanceCriteria` entry, `implementation.approach`, or `gate.prompt` naming the wrong endpoint/field/shape — prefer an `op: replace` patch correcting that field directly over only appending a clarifying note or task. Fall back to an `add` patch appending a correction note to the diverging story's `notes` field, or a clarifying task to its `tasks` array, when the wrong text cannot be safely isolated to one field. If the discrepancy still cannot be safely auto-patched (e.g., both stories may be right and the correct name is ambiguous), add an `unresolved[]` entry.
 
 ### 2. Missing `dependsOn` declarations
 
@@ -102,7 +115,7 @@ Skip this check for stories in the failed expansion idx list.
 
 ### 4. Approach duplication
 
-When two stories describe materially identical implementation work — same files, same algorithm, same behavior — flag the duplication. Emit an `add` patch appending a `notes` warning, or an `add` patch appending a clarifying `tasks[]` step instructing the implementor to coordinate with or depend on the other story. If the duplication suggests one story should be removed or merged, record it in `unresolved[]` since the field allowlist does not permit structural story removal.
+When two stories describe materially identical implementation work — same files, same algorithm, same behavior — flag the duplication. When you can identify which story's `implementation.approach` (or a specific `acceptanceCriteria`/`gate.prompt` entry) carries the duplicated or contradicted text, prefer an `op: replace` patch correcting that field directly over only appending a `notes` warning or a clarifying `tasks[]` step. Fall back to an `add` patch appending a `notes` warning, or a clarifying `tasks[]` step instructing the implementor to coordinate with or depend on the other story, when the fix is not a clean whole-field replacement. If the duplication suggests one story should be removed or merged, record it in `unresolved[]` since the field allowlist does not permit structural story removal.
 
 ### 5. Orphan public APIs
 
@@ -138,8 +151,8 @@ The regex is intentionally narrow — only `deferred to`, `deferred to story`, `
 - You do NOT call any tool. `allowed-tools` is empty; the harness has no Read, no Write, no Bash, no Edit. Everything you need is inline in your prompt.
 - You do NOT assign `US-NNN` IDs. All story references use `outline:NN` tokens.
 - You do NOT invoke story-merge or any CLI helper.
-- You do NOT emit patches for fields outside the allowlist (`dependsOn`, `tasks`, `notes`). Use `unresolved[]` for issues that require patching other fields.
-- You do NOT emit `op: replace` or `op: remove`. Only `op: add` is supported.
+- You do NOT emit patches for fields outside the allowlist (`dependsOn`, `tasks`, `notes`, `acceptanceCriteria`, `implementation.approach`, `gate.prompt`). Use `unresolved[]` for issues that require patching other fields.
+- You do NOT emit `op: remove`. `op: add` is only for `dependsOn`/`tasks`/`notes`; `op: replace` is only for `acceptanceCriteria`/`implementation.approach`/`gate.prompt` — never the other pairing.
 - You do NOT spawn sub-agents or delegate analysis.
 
 ## On empty result

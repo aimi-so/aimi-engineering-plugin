@@ -2158,7 +2158,7 @@ After all expansions complete (in parallel):
 
 ## Phase 3d.5: Cross-Story DAG Audit
 
-After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption.
+After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption. A non-empty `unresolved[]` list stays non-blocking here (see outline:04); it becomes a blocking pipeline decision only in that follow-up story.
 
 ### Skip Condition
 
@@ -2261,21 +2261,36 @@ Drop any patch whose `storyIdx` value either (a) does not match the regex `^[0-9
 
 #### Field allowlist
 
-Drop any patch whose `field` value is not one of: `dependsOn`, `tasks`, `notes`. Treat dropped patches as malformed; skip silently without logging.
+Drop any patch whose `field` value is not one of: `dependsOn`, `tasks`, `notes`, `acceptanceCriteria`, `implementation.approach`, `gate.prompt`. Treat dropped patches as malformed; skip silently without logging.
 
 #### Op allowlist
 
-Drop any patch whose `op` value is not `add`. Only `add` is supported; `replace` and `remove` are not part of the contract. Treat dropped patches as malformed; skip silently.
+The valid `op` depends on the target `field` — there is no single global op anymore:
+
+| `field` | Valid `op` |
+|---|---|
+| `dependsOn`, `tasks`, `notes` | `add` (unchanged append / paragraph-accumulate semantics) |
+| `acceptanceCriteria`, `implementation.approach`, `gate.prompt` | `replace` |
+
+Drop any patch whose `op`/`field` pairing is not in this table — `add` on `gate.prompt`, `replace` on `tasks`, `remove` on anything, etc. Treat dropped patches as malformed; skip silently.
+
+#### Dotted field-path resolution
+
+`field` is usually a top-level key, but two of the six allowlisted values — `implementation.approach` and `gate.prompt` — are dotted paths into a nested object. Resolve a dotted `field` by splitting it on `.` and matching the result against a **closed, two-literal allowlist**: only the exact strings `implementation.approach` and `gate.prompt` are recognized. Any other value containing a `.` (a different two-segment path, or anything with more than one dot) is dropped as malformed, the same as a field outside the top-level allowlist. This is a fixed lookup over two known cases, not a generic dotted-path or JSON-pointer traversal — no such resolver is introduced.
 
 #### Value sanitization for string fields
 
-For patches targeting `tasks` (array of strings) or `notes` (scalar string), sanitize the `value` before applying:
+For patches targeting `tasks` (array of strings), `notes`, `acceptanceCriteria` entries, `implementation.approach`, or `gate.prompt` (all scalar strings), sanitize `value` before applying — and, on an `acceptanceCriteria` replace patch, sanitize `matchValue` the same way:
 - Strip any `$(` sequences (prevents shell-substitution markers from reaching downstream executors).
 - Remove backtick characters.
 - Reject the patch entirely (drop silently) when the value contains the literal substrings `ignore previous`, `system:`, or `INSTRUCTIONS` (case-insensitive) — these match the forbidden-strings the existing tasks-validator rejects.
 - Truncate to 5000 characters (the same per-entry length cap that `validate-tasks` enforces).
 
+This is the same sanitization pass as before, reused unchanged and simply applied to a wider set of string inputs — no second sanitizer is introduced.
+
 Patches targeting `dependsOn` skip this sanitization (the value MUST already be a strict `outline:NN` token; reject anything else as malformed).
+
+`matchValue` is required only on `op: replace` patches targeting `acceptanceCriteria`. Drop the patch as malformed when `matchValue` is missing, empty, or not a string.
 
 #### Per-story patch cap
 
@@ -2292,7 +2307,7 @@ where `<N>` is the count of patches dropped for that `storyIdx`. One entry per a
 Before writing a patched staging file to disk, verify that the resulting JSON object:
 1. Parses as valid JSON (well-formed).
 2. Contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `status` (`"pending"`), `dependsOn` (array), `verification` (object with `strategy` and `status`).
-3. Per-field type check on the patched field: `dependsOn` MUST be an array of strings; `tasks` MUST be an array of strings; `notes` MUST be a string.
+3. Per-field type check on the patched field: `dependsOn` MUST be an array of strings; `tasks` MUST be an array of strings; `notes` MUST be a string; `acceptanceCriteria` MUST remain a non-empty array of strings; `implementation.approach` MUST remain a non-empty string; `gate.prompt`, when patched, MUST remain a non-empty string inside an intact `gate` object.
 
 If the post-patch object fails any check, **roll back that single patch** and continue processing the remaining patches in sequence. Do not propagate the validation failure — skip the offending patch silently.
 
@@ -2304,6 +2319,9 @@ Group surviving patches by `storyIdx`. For each `storyIdx` with one or more patc
 2. Apply each patch in the group sequentially against the in-memory object, in the deterministic order they appeared in the auditor's output:
    - `op: add` on `dependsOn` or `tasks` (array fields) — append `value` to the existing array.
    - `op: add` on `notes` (scalar string field) — when `notes` is non-empty, set `notes = existing + "\n\n---\n\n" + value`; when `notes` is empty/absent, set `notes = value`. Multiple `add` patches to the same `notes` accumulate paragraph-by-paragraph; no patch silently overwrites a prior one.
+   - `op: replace` on `acceptanceCriteria` — locate the array entry equal to `matchValue` by exact string match. Exactly one match: splice `value` in at that index, replacing the matched entry. Zero matches or more than one match: drop this individual patch — the rest of the group's patches still apply — and never let a replace reduce the array to empty.
+   - `op: replace` on `implementation.approach` — overwrite the scalar string with `value`.
+   - `op: replace` on `gate.prompt` — overwrite the scalar string with `value` only when the object already has a `gate` object with an existing, non-null `prompt`. When `gate` or `gate.prompt` is absent, drop this individual patch as malformed instead of inventing a new `gate`.
 3. After all patches in the group are applied, run the pre-validation check on the final object. If pre-validation fails, retry by applying patches one-by-one and dropping the first patch whose result fails validation (per-patch rollback semantics); repeat until either the object passes or all patches in the group are exhausted.
 4. Write the final patched object back to the staging file using the Edit or Write tool — exactly **one** write per affected staging file.
 5. Do not modify `outline.json`, `metadata.json`, `audit-result.json`, or any sidecar file — only per-story staging files (`<idx>-<slug>.json`) are eligible for patching.
@@ -2945,8 +2963,8 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 3d | Pass 2 sub-agent fails schema validation after 2 retries | Mark permanently failed; surface to user with skip/retry-with-hint/abort options; auto-skip in agent-mode |
 | Phase 3d.5 | Auditor Task crashes, times out, or returns malformed JSON | Skip silently; one log line, one `unresolved[]` entry; proceed to Phase 3e without patches |
 | Phase 3d.5 | Patch has invalid `storyIdx` (not `^[0-9]{2}$` or no matching staging file in `RUN_DIR`) | Skip patch silently as malformed; do not abort |
-| Phase 3d.5 | Patch targets field outside allowlist (`dependsOn`/`tasks`/`notes`) | Skip patch silently as malformed; do not abort |
-| Phase 3d.5 | Patch has `op` other than `add` | Skip patch silently as malformed; do not abort |
+| Phase 3d.5 | Patch targets field outside allowlist (`dependsOn`/`tasks`/`notes`/`acceptanceCriteria`/`implementation.approach`/`gate.prompt`) | Skip patch silently as malformed; do not abort |
+| Phase 3d.5 | Patch's `op`/`field` pairing is outside the matrix (`add` valid only for `dependsOn`/`tasks`/`notes`; `replace` valid only for `acceptanceCriteria`/`implementation.approach`/`gate.prompt`) | Skip patch silently as malformed; do not abort |
 | Phase 3d.5 | Patch `value` fails sanitization (forbidden substrings, length > 5000 chars) | Skip patch silently as malformed |
 | Phase 3d.5 | Patches exceed 10-per-storyIdx cap | Drop excess silently with one aggregate `unresolved[]` entry naming the storyIdx |
 | Phase 3d.5 | Patch result fails post-apply JSON / required-field / per-field type validation | Roll back the single patch; continue with remaining patches |
