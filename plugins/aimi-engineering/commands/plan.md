@@ -314,7 +314,7 @@ If no brainstorm was found, or the loaded brainstorm has no `foundationProposalP
 
 ### Roadmap Materialization
 
-Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. When this is the case, set the `roadmapMaterializationVerdict` working-memory variable to `not-run` — this gate's own trigger check (the `phases:` frontmatter parse below) never evaluates this run — and proceed directly to Rolling-Wave Phase Selection below. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
 
 **Parse `phases:` frontmatter**
 
@@ -323,6 +323,8 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 3. **If present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry `phases:` list, but a hand-edited or externally authored brainstorm might): treat as absent. Emit one warning line `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip the rest of this section.
 
 *(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] roadmap-materialization: <fired|skipped> (reason: phase-entries=<N>)` to chat, where `<N>` is the number of `phases:` entries parsed from the frontmatter (0 when the key is absent) — `fired` when `<N>` is 2 or more and the rest of this section runs, `skipped` when `<N>` is 0 (key absent) or 1 (defensive re-check above, treated as absent).)*
+
+Set the `roadmapMaterializationVerdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by the Classification Summary Line subsection below. (When a brainstorm was loaded but the `phases:` key was absent or held fewer than 2 entries, this gate's own trigger check DID run and decided not to fire — that is `skipped`, distinct from the `not-run` set at this section's entry guard above where the trigger check never evaluated at all.)
 
 **Sanitize every phase field**
 
@@ -742,9 +744,9 @@ Otherwise, emit no line.
 
 ### Scope-Context Classification (Inline Fallback)
 
-**Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here.
+**Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here. Set the `scopeContextClassificationVerdict` working-memory variable to `not-run` on this branch — Step 1's own classification never runs this session.
 
-**Additional guard.** Also skip entirely, with no log line, when `ROADMAP_MODE` is already `true` (set by Rolling-Wave Phase Selection above). An existing `.aimi/tasks/<feature>/roadmap.json` for this feature already resolved a phase cut in an earlier session; Rolling-Wave Phase Selection has already selected and is expanding one of its phases this invocation. Proposing a new cut here would conflict with that phase.
+**Additional guard.** Also skip entirely, with no log line, when `ROADMAP_MODE` is already `true` (set by Rolling-Wave Phase Selection above). An existing `.aimi/tasks/<feature>/roadmap.json` for this feature already resolved a phase cut in an earlier session; Rolling-Wave Phase Selection has already selected and is expanding one of its phases this invocation. Proposing a new cut here would conflict with that phase. Set `scopeContextClassificationVerdict` to `not-run` on this branch too, for the identical reason — Step 1's own classification never runs.
 
 **Step 1 — Classify.** Read `${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md` (the `${CLAUDE_PLUGIN_ROOT}` prefix is required — it is the only form `install.sh` rewrites to `${AIMI_PLUGIN_DIR}` for OpenCode) and apply its Cut Criteria, Collapse Rule, and Anti-Patterns — the same shared reference `/aimi:brainstorm`'s Phase 3.5 Step 1 applies, exactly as written there; do not restate them here — to the feature description plus any `businessSpecContent`, `designSpecContent`, or already-loaded prototype content this session. The question this step answers is *which scope contexts exist in this feature*, never *how many stories does this need*; no numeric story-count threshold applies anywhere in this subsection.
 
@@ -752,6 +754,8 @@ Otherwise, emit no line.
 - **2 or more scope contexts identified:** continue to Step 2.
 
 *(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] scope-context-classification: <fired|skipped> (reason: scope-contexts=<N>)` to chat, where `<N>` is the scope-context count Step 1 classified — `fired` when `<N>` is 2 or more (Step 2 proposes a phase cut), `skipped` when `<N>` is 0 or 1 (fall straight through to Phase 0.5).)*
+
+Set the `scopeContextClassificationVerdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by the Classification Summary Line subsection below. (Step 1 itself ran and classified 0 or 1 scope contexts here — that is `skipped`, distinct from the `not-run` set at this subsection's Trigger/Additional Guard above where Step 1 never ran at all.)
 
 **Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact **identity** appearing in more than one proposed phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide), promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
 
@@ -818,6 +822,21 @@ This mirrors `commands/brainstorm.md` Phase 3.5 Step 4, scoped to the feature de
 4. Set `ROADMAP_MODE=true` and continue at Rolling-Wave Phase Selection's "Load the roadmap and compute eligible pending phases" step above, treating the roadmap this step just wrote exactly as an existing one. Since every phase in a freshly created roadmap is `pending` with no live claim, the bare-invocation branch of "Select the target phase" selects the lowest eligible id automatically — confining this invocation to exactly one phase, per Rolling-Wave Phase Selection's rule; every other phase remains an outline-only entry in `roadmap.json` until a later `/aimi:plan` invocation selects it.
 
 No parallel roadmap-write or phase-selection logic is implemented in this subsection — every step above re-enters an existing section by name rather than reimplementing it.
+
+### Classification Summary Line
+
+Emit exactly one line to chat, unconditionally — on every run, never gated behind `AIMI_PLAN_DEBUG` or any other environment variable — after both Roadmap Materialization and Scope-Context Classification (Inline Fallback) above have reached their own verdict. Read `roadmapMaterializationVerdict` and `scopeContextClassificationVerdict` back from working memory; this step never recomputes either.
+
+```
+[classification] roadmap-materialization=<roadmapMaterializationVerdict> scope-context-classification=<scopeContextClassificationVerdict>
+```
+
+Each token distinguishes the gate's own trigger check never running from the trigger check running and deciding not to fire:
+
+- **`roadmap-materialization`** reads `not-run` when no brainstorm was loaded in Phase 0 (Roadmap Materialization's own "only runs when a brainstorm was loaded" guard means its `phases:` frontmatter parse never evaluates this run), and reads `skipped` — never `not-run` — when a brainstorm WAS loaded but its frontmatter's `phases:` key was absent or held fewer than 2 entries (the section's own debug line's `skipped` case).
+- **`scope-context-classification`** reads `not-run` when either its Trigger guard (a loaded brainstorm's frontmatter already carries a `phases:` key) or its Additional Guard (`ROADMAP_MODE` already `true` on entry) short-circuits before Step 1's own classification ever runs, and reads `skipped` — never `not-run` — only when Step 1 itself ran and classified 0 or 1 scope contexts (that subsection's own debug line's `skipped` case).
+
+This line carries only the two gate-name=token pairs above — no free-text classification content, scope-context names, phase names or goals, and no `reason:` detail. The two `[plan-debug]` lines above remain the only place that detail is carried, unchanged and still opt-in behind `AIMI_PLAN_DEBUG`; this line is an always-on summary above them, not a replacement.
 
 ### Phase 0.5: Open Questions Resolution Gate
 
