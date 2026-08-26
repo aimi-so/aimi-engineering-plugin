@@ -1028,6 +1028,38 @@ get_tasks_file() {
   echo "$tasks_file"
 }
 
+# Positional-preserving --tasks-file extraction for verbs whose existing
+# arguments are fixed positionals rather than flags (get-story, mark-*,
+# cascade-skip, gate-fail, set-execution-mode, update-field, ...). Walks the
+# args by INDEX rather than `shift`, so a legitimate positional value
+# beginning with "--" (mark-failed's notes, update-field's value) is never
+# misread as an unrecognized flag -- the strict `case ... *) exit 1` idiom
+# cmd_verification_report uses would collide with exactly that value.
+#
+# Sets the caller's two variables by nameref: $1 (tasks_file) to the
+# override value, or "" when no --tasks-file was given; $2 (positional) to
+# every remaining token, in order. The caller reassigns positional[0],
+# positional[1], ... onto its own named locals afterward.
+# Usage: _parse_positional_tasks_file tasks_file positional "$@"
+_parse_positional_tasks_file() {
+  local -n _pptf_tasks_file="$1"
+  local -n _pptf_positional="$2"
+  shift 2
+  _pptf_tasks_file=""
+  _pptf_positional=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--tasks-file" ]; then
+      i=$((i + 1))
+      _pptf_tasks_file="${args[$i]:-}"
+    else
+      _pptf_positional+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+}
+
 # ============================================================================
 # Commands
 # ============================================================================
@@ -1139,17 +1171,26 @@ cmd_init_session() {
 
 # Get comprehensive status summary
 # Flags: --counts-only (return aggregate counts without userStories array)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_status() {
   local counts_only=false
+  local tasks_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --counts-only) counts_only=true; shift ;;
+      --tasks-file) shift; tasks_file="${1:-}"; shift || true ;;
       *) break ;;
     esac
   done
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- same rule verification-report applies.
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The two branches used to be two 11-line jq programs whose first ten lines
   # were identical -- including a copy each of the maxConcurrency clamp. Both
@@ -1162,9 +1203,30 @@ cmd_status() {
 }
 
 # Get metadata only
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_metadata() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   check_python3
   python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
 }
@@ -1258,17 +1320,24 @@ cmd_project_groups() {
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
 # Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_list_ready() {
   local brief=false
+  local tasks_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --brief) brief=true; shift ;;
+      --tasks-file) shift; tasks_file="${1:-}"; shift || true ;;
       *) break ;;
     esac
   done
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The readiness predicate and the --brief projection both live in tasks.py's
   # is_ready and brief_row now, at one crossing. The gate rules and the
@@ -1341,7 +1410,22 @@ _next_story_selection() {
 }
 
 # Get currently active story from state
+#
+# REFUSES --tasks-file (does not honor it): the primary answer comes from
+# .aimi/state/current-story, and the tasks file is only a secondary lookup
+# keyed by that state -- a per-call file override has no coherent meaning
+# here. The scan runs before read_state so the refusal fires even when no
+# session state exists yet.
 cmd_current_story() {
+  local _cs_arg
+  for _cs_arg in "$@"; do
+    if [ "$_cs_arg" = "--tasks-file" ]; then
+      echo "Error: Unknown flag: --tasks-file" >&2
+      echo "Usage: aimi-cli.sh current-story" >&2
+      exit 1
+    fi
+  done
+
   local story_id tasks_file
   story_id=$(read_state "current-story")
 
@@ -1358,12 +1442,14 @@ cmd_current_story() {
 }
 
 # Get full story object by ID (read-only)
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_get_story() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh get-story <story-id>" >&2
+    echo "Usage: aimi-cli.sh get-story <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -1371,7 +1457,12 @@ cmd_get_story() {
   # about the ARGUMENT and about which file is current, not about the document.
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1438,18 +1529,26 @@ _resolve_skills_base_dir() {
 # the Claude Code plugin cache, or read $AIMI_PLUGIN_DIR -- and CLAUDECODE is a
 # discriminator this file already owns. Python is handed the answer, not the
 # question. No lock: a reader takes none, and this one writes nothing at all.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_get_story_context() {
-  local story_id="$1"
-  local tasks_file skills_base_dir
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local skills_base_dir
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh get-story-context <story-id>" >&2
+    echo "Usage: aimi-cli.sh get-story-context <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   skills_base_dir=$(_resolve_skills_base_dir)
@@ -1461,18 +1560,25 @@ cmd_get_story_context() {
 }
 
 # Mark a story as in-progress
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-in-progress <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-in-progress <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   # BEFORE the lock, deliberately, and every mark-* verb keeps it there. Moving
   # it inside would close a TOCTOU window that is ranked and owned elsewhere;
   # closing it here by accident is exactly what test-tasks-concurrency.sh
@@ -1497,18 +1603,25 @@ cmd_mark_in_progress() {
 }
 
 # Mark a story as complete
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_complete() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-complete <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-complete <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
@@ -1526,19 +1639,26 @@ cmd_mark_complete() {
 }
 
 # Mark a story as failed with notes
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_failed() {
-  local story_id="$1"
-  local notes="${2:-}"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local notes="${positional[1]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-failed <story-id> [notes]" >&2
+    echo "Usage: aimi-cli.sh mark-failed <story-id> [notes] [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1558,18 +1678,25 @@ cmd_mark_failed() {
 }
 
 # Mark a story as skipped
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_skipped() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-skipped <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-skipped <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1592,12 +1719,14 @@ cmd_mark_skipped() {
 # on a phase-scoped tasks file (metadata.phase present) — a claimed phase
 # always runs inside its own phase container, so writing metadata.execution
 # there would be the exact dead-data bug this subcommand exists to fix.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_set_execution_mode() {
-  local mode="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local mode="${positional[0]:-}"
 
   if [ -z "$mode" ]; then
-    echo "Usage: aimi-cli.sh set-execution-mode <container|inline>" >&2
+    echo "Usage: aimi-cli.sh set-execution-mode <container|inline> [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -1606,7 +1735,12 @@ cmd_set_execution_mode() {
     exit 1
   fi
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # One crossing, inside the lock. The phase guard used to be a jq read taken
   # OUTSIDE this lock, and the assignment a second jq into a bash mktemp file:
@@ -1629,18 +1763,60 @@ cmd_set_execution_mode() {
 }
 
 # Count pending stories
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_count_pending() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh count-pending [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   check_python3
   python3 "$(_aimi_tasks_py)" count-pending --tasks-file "$tasks_file"
 }
 
 # Validate dependencies in a tasks file
 # Checks for: circular dependencies, missing IDs, self-references
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_deps() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-deps [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # A pure reader: no lock, no temp file, one crossing. The exit status is the
   # crossing's own, which is what it was before -- the jq verdict and the
@@ -1651,9 +1827,30 @@ cmd_validate_deps() {
 }
 
 # Validate story content (field lengths, suspicious patterns)
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_stories() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-stories [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # Same shape as cmd_validate_deps above, and the same reason. Every one of
   # this verb's twenty-odd error strings is read by /aimi:plan's Phase 4.5 loop
@@ -1742,9 +1939,30 @@ cmd_normalize_status() {
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_ids() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-ids [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The regex, the line-at-a-time walk over `jq -r` output and the ASYMMETRIC
   # pass/failure shapes all moved together, because they are one rule: the
@@ -1755,18 +1973,25 @@ cmd_validate_ids() {
 }
 
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_cascade_skip() {
-  local failed_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local failed_id="${positional[0]:-}"
 
   if [ -z "$failed_id" ]; then
-    echo "Usage: aimi-cli.sh cascade-skip <story-id>" >&2
+    echo "Usage: aimi-cli.sh cascade-skip <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$failed_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$failed_id" "$tasks_file"
 
   # BEHAVIOUR CHANGE, and the one this verb existed to get. This used to be
@@ -1797,9 +2022,30 @@ cmd_cascade_skip() {
 }
 
 # Reset orphaned in_progress stories to failed
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_reset_orphaned() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh reset-orphaned [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # A REPORT FIX, and only a report fix. Do not rank it with cascade-skip.
   #
@@ -1833,7 +2079,22 @@ cmd_reset_orphaned() {
 # the document holds (gb-estado-presente-sem-documento answers with no tasks
 # file on disk; gb-estado-presente-documento-hostil answers while the document
 # holds a name init-session would refuse).
+#
+# REFUSES --tasks-file (does not honor it), for the same reason
+# cmd_current_story does -- the answer comes from session state and a tasks
+# file is only a secondary lookup. The scan runs before the fast path so the
+# refusal fires even when the fast path would otherwise answer without ever
+# opening a tasks file.
 cmd_get_branch() {
+  local _gb_arg
+  for _gb_arg in "$@"; do
+    if [ "$_gb_arg" = "--tasks-file" ]; then
+      echo "Error: Unknown flag: --tasks-file" >&2
+      echo "Usage: aimi-cli.sh get-branch" >&2
+      exit 1
+    fi
+  done
+
   local branch
   branch=$(read_state "current-branch")
 
@@ -11011,14 +11272,19 @@ cmd_prime_cache() {
 }
 
 # Pass a gate on a story
-# Usage: gate-pass US-NNN [--option 'value']
+# Usage: gate-pass US-NNN [--option 'value'] [--tasks-file <path>]
+#
+# --tasks-file is DELIBERATELY RE-CLASSIFIED here, not a pre-existing branch:
+# before this flag was recognized, it fell into the `*)` catch-all below and
+# was refused only as a side effect of being unknown. This adds an explicit
+# case so gate-pass HONORS it, matching every other mark-*/gate-* write verb.
 cmd_gate_pass() {
   local story_id="$1"
   shift || true
-  local option=""
+  local option="" tasks_file_override=""
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh gate-pass <story-id> [--option 'value']" >&2
+    echo "Usage: aimi-cli.sh gate-pass <story-id> [--option 'value'] [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -11032,6 +11298,11 @@ cmd_gate_pass() {
         fi
         shift 2
         ;;
+      --tasks-file)
+        tasks_file_override="${2:-}"
+        shift
+        shift || true
+        ;;
       *)
         echo "{\"valid\":false,\"errors\":[\"Unknown flag: $1\"]}"
         exit 1
@@ -11042,7 +11313,14 @@ cmd_gate_pass() {
   validate_story_id "$story_id"
 
   local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file_override" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- same rule verification-report applies.
+    tasks_file=$(resolve_path "$tasks_file_override")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # BEHAVIOUR CHANGE. The gate-present precondition was read in an unlocked jq
@@ -11073,18 +11351,25 @@ cmd_gate_pass() {
 }
 
 # Fail a gate on a story
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_gate_fail() {
-  local story_id="$1"
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh gate-fail <story-id>" >&2
+    echo "Usage: aimi-cli.sh gate-fail <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # Same three crossings, same behaviour change, same single call. See
@@ -11104,15 +11389,17 @@ cmd_gate_fail() {
 }
 
 # Update a nested field on a story
-# Usage: update-field US-NNN field.path value
+# Usage: update-field US-NNN field.path value [--tasks-file <path>]
 # field.path is a dotted chain of identifier segments, e.g. "verification.status"
 cmd_update_field() {
-  local story_id="$1"
-  local field_path="$2"
-  local value="$3"
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local field_path="${positional[1]:-}"
+  local value="${positional[2]:-}"
 
   if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
-    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value> [--tasks-file <path>]" >&2
     echo "  <field.path> is a dotted chain of identifier segments, e.g. verification.status" >&2
     exit 1
   fi
@@ -11125,8 +11412,12 @@ cmd_update_field() {
   # of that argument.
   validate_field_path "$field_path"
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # One crossing, inside the lock. The assignment and the {id, <top-segment>}
@@ -11153,9 +11444,30 @@ cmd_update_field() {
 }
 
 # Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_waves() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-waves [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # NO exit-status handling, and that is not an omission to tidy up. This body
   # ended at its jq call before the port and ends at the crossing now, so an
@@ -11187,9 +11499,30 @@ cmd_validate_waves() {
 # it and get_tasks_file has already been gated against it. The two spec paths
 # cannot be confined out here -- they are read out of metadata.designBundle,
 # which is only visible after the crossing.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_tasks() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-tasks [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   check_python3
   python3 "$(_aimi_tasks_py)" validate-tasks \
@@ -13568,9 +13901,11 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
-    status [--counts-only]    Get status summary as JSON
+    status [--counts-only] [--tasks-file <path>]
+                              Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
-    metadata                  Get metadata only
+    metadata [--tasks-file <path>]
+                              Get metadata only
     verification-report [--tasks-file <path>]
                               Visual stories (id/project/url) plus the malformed-verification
                               partition (repairable/unrepairable). Defaults to get_tasks_file.
@@ -13581,19 +13916,28 @@ COMMANDS:
                               named) on an invalid one. Defaults to get_tasks_file.
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
-    list-ready [--brief]      List stories ready to execute (dependency-aware)
+                              Refuses --tasks-file: answers from session state, not a file.
+    list-ready [--brief] [--tasks-file <path>]
+                              List stories ready to execute (dependency-aware)
                               --brief  Return only {id, title, priority, dependsOn} per story
-    mark-in-progress <id>     Mark story as in_progress (returns {id, status} JSON)
-    mark-complete <id>        Mark story as completed (returns {id, status} JSON)
-    mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
-    mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
-    set-execution-mode <container|inline>
+    mark-in-progress <id> [--tasks-file <path>]
+                              Mark story as in_progress (returns {id, status} JSON)
+    mark-complete <id> [--tasks-file <path>]
+                              Mark story as completed (returns {id, status} JSON)
+    mark-failed <id> [notes] [--tasks-file <path>]
+                              Mark story as failed (returns {id, status, notes} JSON)
+    mark-skipped <id> [--tasks-file <path>]
+                              Mark story as skipped (returns {id, status} JSON)
+    set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
                               phase-scoped tasks file (metadata.phase present).
-    count-pending             Count pending stories
-    validate-deps             Validate dependency graph (no cycles, no missing refs)
-    validate-stories          Validate story content (length, suspicious patterns)
+    count-pending [--tasks-file <path>]
+                              Count pending stories
+    validate-deps [--tasks-file <path>]
+                              Validate dependency graph (no cycles, no missing refs)
+    validate-stories [--tasks-file <path>]
+                              Validate story content (length, suspicious patterns)
     normalize-verification <file>
                               Rewrite any story whose verification is a bare string S
                               into {strategy: S, status: "pending", url: null, expect: null}.
@@ -13603,21 +13947,30 @@ COMMANDS:
                               Already-set status values are preserved (uses //= operator).
                               Writes atomically (tmp + mv). Exits 0 on success.
                               Reports count of stories with status field after heal.
-    validate-ids              Validate all story IDs match US-NNN format
-    gate-pass <id> [--option 'value']
+    validate-ids [--tasks-file <path>]
+                              Validate all story IDs match US-NNN format
+    gate-pass <id> [--option 'value'] [--tasks-file <path>]
                               Pass a gate on a story; optionally store selected option
-    gate-fail <id>            Fail a gate on a story
-    update-field <id> <field.path> <value>
+    gate-fail <id> [--tasks-file <path>]
+                              Fail a gate on a story
+    update-field <id> <field.path> <value> [--tasks-file <path>]
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
-    validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
-    validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
-    cascade-skip <id>         Skip all stories depending on failed story
-    reset-orphaned            Reset all in_progress stories to failed
+    validate-waves [--tasks-file <path>]
+                              Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-tasks [--tasks-file <path>]
+                              Validate tasks file citation fields (schemaVersion guard, no checks yet)
+    cascade-skip <id> [--tasks-file <path>]
+                              Skip all stories depending on failed story
+    reset-orphaned [--tasks-file <path>]
+                              Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
-    get-story <id>            Get full story object by ID (read-only)
-    get-story-context <id>    Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
+                              Refuses --tasks-file: answers from session state, not a file.
+    get-story <id> [--tasks-file <path>]
+                              Get full story object by ID (read-only)
+    get-story-context <id> [--tasks-file <path>]
+                              Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
@@ -14487,33 +14840,33 @@ main() {
     find-tasks)        cmd_find_tasks ;;
     find-tasks-all)    cmd_find_tasks_all ;;
     status)            shift; cmd_status "$@" ;;
-    metadata)          cmd_metadata ;;
+    metadata)          shift; cmd_metadata "$@" ;;
     verification-report) shift; cmd_verification_report "$@" ;;
     project-groups)     shift; cmd_project_groups "$@" ;;
     next-story)        cmd_next_story ;;
-    current-story)     cmd_current_story ;;
+    current-story)     shift; cmd_current_story "$@" ;;
     list-ready)        shift; cmd_list_ready "$@" ;;
-    mark-in-progress)  cmd_mark_in_progress "${2:-}" ;;
-    mark-complete)     cmd_mark_complete "${2:-}" ;;
-    mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
-    mark-skipped)      cmd_mark_skipped "${2:-}" ;;
-    set-execution-mode) cmd_set_execution_mode "${2:-}" ;;
-    count-pending)     cmd_count_pending ;;
-    validate-deps)            cmd_validate_deps ;;
-    validate-stories)         cmd_validate_stories ;;
+    mark-in-progress)  shift; cmd_mark_in_progress "$@" ;;
+    mark-complete)     shift; cmd_mark_complete "$@" ;;
+    mark-failed)       shift; cmd_mark_failed "$@" ;;
+    mark-skipped)      shift; cmd_mark_skipped "$@" ;;
+    set-execution-mode) shift; cmd_set_execution_mode "$@" ;;
+    count-pending)     shift; cmd_count_pending "$@" ;;
+    validate-deps)            shift; cmd_validate_deps "$@" ;;
+    validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
     normalize-status)         cmd_normalize_status "${2:-}" ;;
-    validate-ids)             cmd_validate_ids ;;
+    validate-ids)             shift; cmd_validate_ids "$@" ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
-    gate-fail)         cmd_gate_fail "${2:-}" ;;
-    update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
-    validate-waves)    cmd_validate_waves ;;
-    validate-tasks)    cmd_validate_tasks ;;
-    cascade-skip)      cmd_cascade_skip "${2:-}" ;;
-    reset-orphaned)    cmd_reset_orphaned ;;
-    get-branch)        cmd_get_branch ;;
-    get-story)         cmd_get_story "${2:-}" ;;
-    get-story-context) cmd_get_story_context "${2:-}" ;;
+    gate-fail)         shift; cmd_gate_fail "$@" ;;
+    update-field)      shift; cmd_update_field "$@" ;;
+    validate-waves)    shift; cmd_validate_waves "$@" ;;
+    validate-tasks)    shift; cmd_validate_tasks "$@" ;;
+    cascade-skip)      shift; cmd_cascade_skip "$@" ;;
+    reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;
+    get-branch)        shift; cmd_get_branch "$@" ;;
+    get-story)         shift; cmd_get_story "$@" ;;
+    get-story-context) shift; cmd_get_story_context "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
