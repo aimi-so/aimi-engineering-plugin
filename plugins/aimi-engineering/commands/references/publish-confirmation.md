@@ -7,22 +7,27 @@ path, and it does not itself gate, remove, or relocate a single existing
 publish call site.
 
 **Consumed by:** `commands/execute.md` (Phase Completion's **Offer a Pull
-Request**), `commands/next.md` (its container-mode completion step), and
+Request**), `commands/next.md` (its container-mode completion step),
 `commands/references/container-execution.md` (**Container Mode: Push the
-Branch**). Each of those three carries its own partial copy of this rule today
-and decides on its own terms whether to publish; each cites this file instead
+Branch**), and `commands/open-pr.md` (its `--merge` path, Step 1b's `found`
+branch). The first three each carry their own partial copy of this rule today
+and decide on their own terms whether to publish; each cites this file instead
 once wired. That wiring is outline story 02, outline story 03 and outline
 story 05's work respectively — this file does not modify `execute.md`,
 `next.md` or `container-execution.md`, the same way `execution-mode.md`
 defines `metadata.execution` without touching the commands that read it.
+`open-pr.md`'s `--merge` path carries no such prior copy to replace: it is new
+surface area this file's third publishing act (below) gates from the moment
+it exists, not a rule this file is subsuming from somewhere else.
 
 ## What Counts as Publishing
 
-Publishing is exactly two acts, and both are named here so neither can be
+Publishing is exactly three acts, and all three are named here so none can be
 treated as incidental:
 
 1. **Pushing a branch to `origin`.**
 2. **Opening a pull request.**
+3. **Merging a pull request on the forge.**
 
 The push is itself the outward-facing act, not a mere precondition for the
 pull request. Once a branch exists on `origin`, other people, CI pipelines,
@@ -32,11 +37,26 @@ already stated at `container-execution.md:152`, generalized: pushing publishes
 the branch, and `CONTAINER_MODE` is just a field inside the tasks file, so a
 tasks file must never be able to trigger a publish on its own.
 
-The boundary on the other side matters just as much. Work reaching the feature
-branch **locally** is not publishing. `worktree-manager.sh` integrates a
-finished story branch with `git merge` (`worktree-manager.sh:606` and `:678`)
-and contains zero `git push` — a story landing on the container branch is a
-local fast-forward and nothing more. Only the push publishes.
+Merging is the most consequential of the three, not the least. It rewrites the
+target branch's history where the forge and everyone reading it can see it,
+closes the pull request, and on a repository wired to CI/CD is very often the
+exact step that triggers a deploy. Opening a pull request implies no consent
+to merge it — the two are separate acts with separate consequences, and a
+command that already asked before opening one must still ask again before
+merging it.
+
+The boundary on the other side matters just as much, and now has to hold two
+distinctions instead of one. Work reaching the feature branch **locally** is
+not publishing. `worktree-manager.sh` integrates a finished story branch with
+`git merge` (`worktree-manager.sh:606` and `:678`) and contains zero `git
+push` — a story landing on the container branch is a local fast-forward and
+nothing more. "Merge" now names two unrelated things in this codebase: that
+local fast-forward, which never leaves the machine, and act 3 above, a
+forge-side pull request closing with its result visible to everyone who reads
+the forge. Only the push and the forge-side merge publish; the local one never
+does, no matter how similarly the two are named — a reader who lets the shared
+word blur them into one act would mistake `worktree-manager.sh`'s ordinary,
+unpublished integration step for something that needs asking about.
 
 Both halves are load-bearing. A reader who holds only the first half will
 treat a local merge as an outward-facing act and ask permission for something
