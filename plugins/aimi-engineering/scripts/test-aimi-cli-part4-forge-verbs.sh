@@ -17,8 +17,11 @@ set -uo pipefail
 #   - Forge Account Override Tests (phase 2 US-005)
 #   - Forge PR View Tests (US-004)
 #   - Forge PR Create/Edit Tests (US-005)
+#   - Forge PR Merge Tests (US-006, four-open-issues-remediation) -- github path
 #   - GitLab Write-Verb Tests (phase 3)
+#   - GitLab forge-pr-merge Tests (US-006, four-open-issues-remediation)
 #   - GitLab Account-Selection Tests (phase 3)
+#   - Gitea forge-pr-merge Tests (US-006, four-open-issues-remediation)
 #   - Forge Issue Verb Tests (US-006)
 #   - Forge Review-Thread Verb Tests (US-007)
 #   - GitLab Review-Thread Routing Tests (phase 3 US-004)
@@ -2527,7 +2530,13 @@ test_forge_writes_active_account_answer_needs_no_branch() {
   # the caller supplied it. Counting the branches individually is the point:
   # losing the prefix from exactly one of them is the regression this
   # assertion has to catch, and a total that folded them into one would not.
-  assert_eq "10" "$routed_sites" "identical shape: exactly 10 prefix-assignment sites -- 6 writes (gh pr edit branching three ways), 3 in-operation reads, 1 in-write failure classifier"
+  #
+  # 12 rather than 10 since US-006: forge-pr-merge added exactly two more
+  # routed sites of its own -- its preflight cmd_forge_pr_view read (a fourth
+  # in-operation read) and its own `gh pr merge` write (a seventh write) --
+  # both resolved from the identical two-local pattern every other routed
+  # site in this file already uses.
+  assert_eq "12" "$routed_sites" "identical shape: exactly 12 prefix-assignment sites -- 7 writes (gh pr edit branching three ways, gh pr merge), 4 in-operation reads, 1 in-write failure classifier"
 
   # And no process-wide export of either variable anywhere in the file, not
   # merely inside the override helper.
@@ -4299,6 +4308,533 @@ FAKE_GH
 }
 
 # ============================================================================
+# Forge PR Merge Tests (US-006, four-open-issues-remediation) — github path
+# ============================================================================
+# forge-pr-merge is the third WRITE verb to mutate a pull/merge request, and
+# the first that mints no new identifier -- see aimi-cli.sh's own
+# "forge-pr-merge (US-006, four-open-issues-remediation)" section header for
+# the full envelope mapping this block exercises. Numeric --pr values are
+# used throughout so the preflight forge-pr-view call skips its own
+# structural list probe (test_forge_pr_view_numeric_ref_skips_list_probe
+# already proves that behavior for forge-pr-view directly) and each fixture
+# stays a plain `pr view` + `pr merge` pair.
+
+test_forge_pr_merge_success_per_style() {
+  echo ""
+  echo "=== forge-pr-merge: open PR, one merge attempt per style -- gh pr merge <number> -m|-s|-r, data REUSED from the preflight, never a second re-read ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/77","number":77,"state":"OPEN"}'
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "merge" ]; then
+  exit 0
+fi
+echo "unexpected gh invocation: \$*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local style flag out exit_code
+  for style in merge squash rebase; do
+    case "$style" in
+      merge)  flag="-m" ;;
+      squash) flag="-s" ;;
+      rebase) flag="-r" ;;
+    esac
+    : > "$log"
+    out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 77 --style "$style") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-merge $style: exit 0"
+    assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/77","number":77},"message":null}' \
+      "$out" "forge-pr-merge $style: status unchanged with {url, number} REUSED from the preflight read"
+    assert_contains "pr merge 77 $flag" "$(cat "$log")" "forge-pr-merge $style: gh pr merge carries $flag"
+    assert_eq "1" "$(grep -c '^pr view' "$log")" "forge-pr-merge $style: exactly one gh pr view call -- the preflight, never a second post-merge re-read"
+    assert_eq "1" "$(grep -c '^pr merge' "$log")" "forge-pr-merge $style: exactly one gh pr merge call"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_failure_degrades_with_raw_stderr() {
+  echo ""
+  echo "=== forge-pr-merge: gh pr merge itself fails (conflicts) -- degraded with the raw stderr verbatim, manual fallback, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/9","number":9,"state":"OPEN"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  echo "GraphQL: Pull Request is not mergeable: the merge commit cannot be cleanly created. (mergePullRequest)" >&2
+  exit 1
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_merge_failure_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 9 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge failure: stdout carries the degraded envelope while the exit code stays 1"
+  assert_eq "null" "$(printf '%s' "$out" | jq -r '.data')" "forge-pr-merge failure: data is null on degraded"
+  assert_contains "not mergeable" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge failure: message carries gh's own stderr verbatim"
+  assert_stderr_contains "gh pr merge exited 1" "$(cat "$stderr_file")" "forge-pr-merge failure: stderr names the gh exit code"
+  assert_stderr_contains "merge it yourself" "$(cat "$stderr_file")" "forge-pr-merge failure: manual instruction printed (MANDATORY-PRINT)"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_already_merged_is_unchanged_no_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge: preflight state already merged -- idempotent short-circuit to unchanged, gh pr merge is NEVER invoked ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/50","number":50,"state":"MERGED"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  echo "gh pr merge must never run on an already-merged PR: $*" >&2
+  exit 66
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 50 --style merge) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-merge already-merged: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/50","number":50},"message":null}' \
+    "$out" "forge-pr-merge already-merged: unchanged with the existing PR's own identity, no merge attempted"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_closed_degrades_before_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge: preflight state closed (never merged) -- degrades BEFORE any merge CLI call runs ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/12","number":12,"state":"CLOSED"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  echo "gh pr merge must never run on a closed-not-merged PR: $*" >&2
+  exit 66
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 12 --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge closed: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge closed: degraded"
+  assert_contains "closed and was never merged" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge closed: message states the PR is closed and was never merged"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_not_found_degrades() {
+  echo ""
+  echo "=== forge-pr-merge: no PR exists for --pr -- degrades naming the searched ref, before any merge attempt ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo "no pull requests found for branch" >&2
+  exit 1
+fi
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr feat-nope --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge not_found: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge not_found: degraded"
+  assert_contains "no pull request found for ref: feat-nope" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge not_found: message names the searched ref"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_lookup_error_degrades() {
+  echo ""
+  echo "=== forge-pr-merge: forge-pr-view reports status error while resolving the PR -- degrades propagating that lookup's message, never attempts a merge ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && { [ "$2" = "view" ] || [ "$2" = "list" ]; }; then
+  echo "gh: To get started with GitHub CLI, please run:  gh auth login" >&2
+  exit 4
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  echo "gh pr merge must never run when the preflight lookup itself failed: $*" >&2
+  exit 66
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_merge_lookup_error_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr feat-x --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge lookup error: exits 1"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge lookup error: degraded"
+  assert_contains "gh auth login" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge lookup error: message propagates forge-pr-view's own lookup message"
+  assert_stderr_contains "merge it yourself" "$(cat "$stderr_file")" "forge-pr-merge lookup error: manual fallback printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_missing_gh_mandatory_print_nonzero_exit() {
+  echo ""
+  echo "=== forge-pr-merge: gh absent -- MANDATORY-PRINT degrade, EXIT NON-ZERO ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No gh in the sandbox -- simulates "gh not installed".
+
+  local stderr_file="/tmp/forge_pr_merge_no_gh_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 5 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gh-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"gh not found -- this pull request was not merged automatically."}' \
+    "$out" "forge-pr-merge gh-absent: stdout carries the degraded envelope"
+  assert_stderr_contains "gh not found" "$(cat "$stderr_file")" "forge-pr-merge gh-absent: _forge_bin_check's mandatory warning names gh"
+  assert_stderr_contains "merge it yourself" "$(cat "$stderr_file")" "forge-pr-merge gh-absent: manual instruction printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_non_github_forge_mandatory_print() {
+  echo ""
+  echo "=== forge-pr-merge: non-adapter forge (detect-forge unknown) -- MANDATORY-PRINT degrade, never shells to gh, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://git.example.invalid/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+echo "gh should never be invoked for a non-github forge: $*" >&2
+exit 77
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_merge_no_adapter_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 5 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge non-github forge: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge non-github forge: degraded"
+  assert_contains "no adapter for forge \"unknown\"" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge non-github forge: message names the unsupported forge"
+  if grep -q "gh should never be invoked" "$stderr_file"; then
+    echo -e "${RED}✗${NC} forge-pr-merge non-github forge: gh was invoked despite having no adapter for this forge"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-merge non-github forge: gh was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_invalid_style_is_cli_misuse() {
+  echo ""
+  echo "=== forge-pr-merge: an unrecognized --style value is CLI misuse -- exit 1, own message, before any forge CLI runs ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+echo "gh should never be invoked for an invalid --style: $*" >&2
+exit 77
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local stderr_file="/tmp/forge_pr_merge_bad_style_stderr.$$" exit_code
+  PATH="$sandbox" "$CLI" forge-pr-merge --pr 5 --style rebase-merge >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge invalid --style rebase-merge: exit 1"
+  assert_stderr_contains "invalid --style value: rebase-merge" "$(cat "$stderr_file")" "forge-pr-merge invalid --style: stderr names the bad value -- gitea's own fourth style is explicitly not accepted"
+
+  local other_style
+  for other_style in auto MERGE; do
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 5 --style "$other_style" >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+    assert_exit_code "1" "$exit_code" "forge-pr-merge invalid --style '$other_style': exit 1"
+  done
+
+  if grep -q "gh should never be invoked" "$stderr_file"; then
+    echo -e "${RED}✗${NC} forge-pr-merge invalid --style: gh was invoked despite CLI misuse"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-merge invalid --style: gh was never invoked"
+    ((TESTS_PASSED++))
+  fi
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_guard_failures() {
+  echo ""
+  echo "=== forge-pr-merge: missing --pr/--style and an invalid --pr are caller errors, exit 1, before any forge CLI call ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_merge_guard_stderr.$$" exit_code
+
+  "$CLI" forge-pr-merge --style merge >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge missing --pr: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-merge" "$(cat "$stderr_file")" "forge-pr-merge missing --pr: stderr prints usage"
+
+  "$CLI" forge-pr-merge --pr 5 >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge missing --style: exit 1"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-merge" "$(cat "$stderr_file")" "forge-pr-merge missing --style: stderr prints usage"
+
+  "$CLI" forge-pr-merge --pr "bad;ref" --style merge >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge invalid --pr: exit 1"
+  assert_stderr_contains "invalid --pr value" "$(cat "$stderr_file")" "forge-pr-merge invalid --pr: stderr names the bad value"
+
+  "$CLI" forge-pr-merge --bogus-flag x --pr 5 --style merge >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge unknown flag: exit 1"
+  assert_stderr_contains "unknown flag" "$(cat "$stderr_file")" "forge-pr-merge unknown flag: stderr names it"
+
+  rm -f "$stderr_file"
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# AC2's own explicit ordering requirement -- a deliberate DIFFERENCE from
+# forge-pr-create/forge-pr-edit, both of which run _require_git_repo before
+# their own usage check.
+test_forge_pr_merge_usage_check_precedes_git_repo_check() {
+  echo ""
+  echo "=== forge-pr-merge: missing --pr/--style is refused BEFORE the git-repo check runs -- a deliberate ordering difference from forge-pr-create/forge-pr-edit ==="
+
+  local nongit_dir
+  nongit_dir=$(mktemp -d)
+  pushd "$nongit_dir" >/dev/null
+
+  local stderr_file="/tmp/forge_pr_merge_order_stderr.$$" exit_code
+  "$CLI" forge-pr-merge --style merge >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-merge ordering: exit 1 even outside a git repository"
+  assert_stderr_contains "Usage: aimi-cli.sh forge-pr-merge" "$(cat "$stderr_file")" "forge-pr-merge ordering: the Usage line is printed, not the git-repo error"
+  if grep -q "Not a git repository" "$stderr_file"; then
+    echo -e "${RED}✗${NC} forge-pr-merge ordering: the git-repo check ran BEFORE the usage check -- wrong order"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} forge-pr-merge ordering: the usage check ran first, so the git-repo error never printed"
+    ((TESTS_PASSED++))
+  fi
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  rm -rf "$nongit_dir"
+}
+
+test_forge_pr_merge_credential_via_env_not_argv() {
+  echo ""
+  echo "=== forge-pr-merge: credential reaches gh via inherited env var, never argv or a --token flag ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    *token*|*TOKEN*|--token|ghp_*|gho_*) echo "credential leaked into argv: $arg" >&2; exit 2 ;;
+  esac
+done
+if [ -z "${GH_TOKEN:-}" ]; then
+  echo "GH_TOKEN not inherited from environment" >&2
+  exit 3
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/88","number":88,"state":"OPEN"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(GH_TOKEN="secret-value-xyz" PATH="$sandbox" "$CLI" forge-pr-merge --pr 88 --style merge) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-merge credential: exit 0 (GH_TOKEN inherited correctly, no argv leak, no --token flag)"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge credential: status unchanged"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_pr_merge_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== forge-pr-merge: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]" "$help_out" "help: lists forge-pr-merge with its flags"
+  assert_contains "structurally unreachable" "$help_out" "help: documents that status created is structurally unreachable for this verb"
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  cat > "$sandbox/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/1","number":1,"state":"OPEN"}'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
+  exit 0
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local merge_out
+  merge_out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 1 --style merge 2>&1)
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+
+  if printf '%s' "$merge_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: forge-pr-merge is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: forge-pr-merge is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
+# GATE checklist items 1 and 2, made mechanically checkable rather than
+# read-and-trust: status "created" never appears in any of the five new
+# functions' bodies, and none of them introduces a "reason" field on the
+# write envelope (that four-value vocabulary is the READ envelope's own).
+test_forge_pr_merge_created_status_never_emitted_and_envelope_has_no_reason_field() {
+  echo ""
+  echo "=== forge-pr-merge: status created is structurally unreachable across all three adapters, and no envelope anywhere gains a reason field ==="
+
+  local combined fn
+  combined=""
+  for fn in _forge_pr_merge_print_manual _forge_pr_merge_gitlab _forge_pr_merge_gitea _forge_pr_merge cmd_forge_pr_merge; do
+    combined="$combined
+$(sed -n "/^${fn}()/,/^}/p" "$CLI")"
+  done
+
+  assert_eq "0" "$(printf '%s' "$combined" | grep -c '_forge_emit_write_status created' || true)" \
+    "forge-pr-merge: no call anywhere in the merge code path emits status created -- a merge mints no new identifier"
+  assert_eq "0" "$(printf '%s' "$combined" | grep -c '"reason"' || true)" \
+    "forge-pr-merge: no reason field is introduced anywhere in the merge code -- that enum belongs to the read envelope only"
+}
+
+# ============================================================================
 # GitLab WRITE-verb tests (phase 3) — forge-pr-create / forge-pr-edit /
 # forge-issue-create routed to glab
 # ============================================================================
@@ -4384,6 +4920,15 @@ case "$1 $2" in
       exit "${GLW_MR_UPDATE_EXIT}"
     fi
     printf '%s\n' "${GLW_MR_UPDATE_STDOUT:-}"
+    exit 0
+    ;;
+  "mr merge")
+    # US-006's forge-pr-merge.
+    if [ "${GLW_MR_MERGE_EXIT:-0}" != "0" ]; then
+      printf '%s\n' "${GLW_MR_MERGE_STDERR:-glab: something went wrong}" >&2
+      exit "${GLW_MR_MERGE_EXIT}"
+    fi
+    printf '%s\n' "${GLW_MR_MERGE_STDOUT:-}"
     exit 0
     ;;
   "issue create")
@@ -5050,6 +5595,243 @@ test_glw_gitlab_write_call_sites_are_prefix_assignment_ready() {
   header=$(sed -n '/^# GitLab write adapters/,/^_forge_glab_write_url()/p' "$CLI")
   assert_contains "ACCOUNT-OVERRIDE LANDING SITE" "$header" "landing site: the section header names the landing site explicitly for the account-override story"
   assert_contains "PREFIX ASSIGNMENT" "$header" "landing site: the header states the mechanism (prefix assignment, never export)"
+}
+
+# ============================================================================
+# GitLab forge-pr-merge tests (US-006, four-open-issues-remediation)
+# ============================================================================
+# The gitlab arm of forge-pr-merge, reusing glw_install_fake_glab (this
+# section's own shared write stub) with its new "mr merge" case. Numeric
+# --pr values are used throughout so the preflight forge-pr-view call goes
+# straight to `glab mr view <ref> -F json`, skipping its own structural list
+# probe -- the same simplification the github block above relies on.
+
+test_glw_forge_pr_merge_gitlab_merges_per_style() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): open MR -- glab mr merge <id> -y [-s|-r], -y FIRST, no flag for the merge-commit default style ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  local style expected_line out exit_code
+  for style in merge squash rebase; do
+    case "$style" in
+      merge)  expected_line="mr merge 42 -y" ;;
+      squash) expected_line="mr merge 42 -y -s" ;;
+      rebase) expected_line="mr merge 42 -y -r" ;;
+    esac
+    : > "$log"
+    out=$(GLW_GLAB_LOG="$log" \
+      GLW_MR_VIEW_JSON='{"iid":42,"web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42","state":"opened"}' \
+      PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style "$style") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-merge gitlab $style: exit 0"
+    assert_eq '{"status":"unchanged","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/42","number":42},"message":null}' \
+      "$out" "forge-pr-merge gitlab $style: unchanged with {url, number} REUSED from the preflight, no re-read"
+    assert_eq "yes" "$(glw_argv_carries_yes "$log" "mr merge")" \
+      "forge-pr-merge gitlab $style: -y is present -- without it glab prompts and an autonomous run hangs forever"
+    assert_eq "$expected_line" "$(glw_argv_line "$log" "mr merge")" \
+      "forge-pr-merge gitlab $style: exact argv -- -y first, then the style flag"
+    assert_eq "1" "$(glw_argv_count "$log" "mr view")" "forge-pr-merge gitlab $style: exactly one mr view call -- the preflight, never a second re-read"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_merge_gitlab_already_merged_is_unchanged_no_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): preflight state merged -- idempotent short-circuit, glab mr merge NEVER invoked ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":42,"web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42","state":"merged"}' \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-merge gitlab merged: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitlab.com/acme/widgets/-/merge_requests/42","number":42},"message":null}' \
+    "$out" "forge-pr-merge gitlab merged: unchanged with the existing MR's own identity"
+  assert_eq "0" "$(glw_argv_count "$log" "mr merge")" "forge-pr-merge gitlab merged: glab mr merge was NEVER invoked"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# The AC's own named example: a locked MR takes the SAME branch as merged,
+# not a fourth undocumented outcome.
+test_glw_forge_pr_merge_gitlab_locked_is_unchanged_no_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): preflight state locked (GitLab's merged-and-lock-protected value) -- SAME short-circuit branch as merged ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":42,"web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42","state":"locked"}' \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-merge gitlab locked: exit 0"
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitlab locked: status unchanged -- a locked MR is already merged, not a fourth undocumented outcome"
+  assert_eq "0" "$(glw_argv_count "$log" "mr merge")" "forge-pr-merge gitlab locked: glab mr merge was NEVER invoked"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_merge_gitlab_closed_degrades_before_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): preflight state closed -- degrades BEFORE any merge call, glab mr merge NEVER invoked ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local log="$sandbox/glab.log"
+  : > "$log"
+  local out exit_code
+  out=$(GLW_GLAB_LOG="$log" \
+    GLW_MR_VIEW_JSON='{"iid":42,"web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42","state":"closed"}' \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitlab closed: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitlab closed: degraded"
+  assert_contains "closed and was never merged" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitlab closed: message states the MR is closed and was never merged"
+  assert_eq "0" "$(glw_argv_count "$log" "mr merge")" "forge-pr-merge gitlab closed: glab mr merge was NEVER invoked"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_merge_gitlab_not_found_degrades() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): no merge request found -- degrades naming the searched ref ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 99 --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitlab not_found: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitlab not_found: degraded"
+  assert_contains "no merge request found for ref: 99" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitlab not_found: message names the searched ref"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_merge_gitlab_merge_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): glab mr merge itself fails -- degraded with the raw stderr verbatim, manual fallback, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  glw_install_fake_glab "$sandbox"
+
+  local stderr_file="/tmp/glw_forge_pr_merge_failure_stderr.$$"
+  local out exit_code
+  out=$(GLW_MR_VIEW_JSON='{"iid":42,"web_url":"https://gitlab.com/acme/widgets/-/merge_requests/42","state":"opened"}' \
+    GLW_MR_MERGE_EXIT=1 GLW_MR_MERGE_STDERR="merge request has conflicts and cannot be merged" \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitlab merge-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitlab merge-failure: degraded"
+  assert_contains "conflicts" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitlab merge-failure: message carries glab's own stderr verbatim"
+  assert_stderr_contains "merge it yourself" "$(cat "$stderr_file")" "forge-pr-merge gitlab merge-failure: manual fallback printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_glw_forge_pr_merge_gitlab_missing_glab_prints_mr_url() {
+  echo ""
+  echo "=== forge-pr-merge (gitlab): glab absent -- MANDATORY-PRINT degrade, exit non-zero, manual instruction names the MR path ==="
+
+  setup_detect_forge_fixture origin https://gitlab.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No glab in the sandbox -- simulates "glab not installed".
+
+  local stderr_file="/tmp/glw_forge_pr_merge_no_glab_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitlab glab-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"glab not found -- this merge request was not merged automatically."}' \
+    "$out" "forge-pr-merge gitlab glab-absent: stdout carries the degraded envelope"
+  assert_stderr_contains "glab not found" "$(cat "$stderr_file")" "forge-pr-merge gitlab glab-absent: mandatory warning names glab"
+  assert_stderr_contains "-/merge_requests/42" "$(cat "$stderr_file")" "forge-pr-merge gitlab glab-absent: manual instruction names the MR path"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# GATE checklist item 5, made mechanically checkable: -y is the FIRST token
+# after "mr merge" on every glab mr merge invocation, with no branch that
+# omits it. GATE checklist item 6, same test: neither this adapter applies
+# any token prefix -- gitlab applies no account override on this verb,
+# exactly as its existing create/edit adapters already do not.
+test_glw_forge_pr_merge_gitlab_yes_always_first_and_no_token_prefix_in_source() {
+  echo ""
+  echo "=== source guard: every glab mr merge invocation in _forge_pr_merge_gitlab carries -y FIRST, and no token prefix precedes it ==="
+
+  local body write_lines total=0 missing=0 line
+  body=$(glw_fn_body _forge_pr_merge_gitlab)
+  write_lines=$(printf '%s\n' "$body" | grep -E '_forge_capture .* -- glab mr merge' | grep -vE '^[[:space:]]*#' || true)
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    total=$((total + 1))
+    if ! printf '%s' "$line" | grep -qE ' -y( |$)'; then
+      missing=$((missing + 1))
+    fi
+  done <<< "$write_lines"
+  assert_eq "2" "$total"   "forge-pr-merge gitlab source guard: both glab mr merge invocation lines are present (with and without a style flag)"
+  assert_eq "0" "$missing" "forge-pr-merge gitlab source guard: every glab mr merge invocation carries -y"
+
+  assert_eq "0" "$(printf '%s' "$body" | grep -cE '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITLAB_TOKEN)=' || true)" \
+    "forge-pr-merge gitlab source guard: no token prefix assignment anywhere in the gitlab merge adapter"
 }
 
 # ============================================================================
@@ -5722,6 +6504,18 @@ case "$1" in
           exit "${GTW_PULLS_EDIT_EXIT}"
         fi
         printf '%s\n' "${GTW_PULLS_EDIT_STDOUT:-}"
+        exit 0
+        ;;
+      merge)
+        # US-006's forge-pr-merge. Must be matched explicitly here, ahead of
+        # the DETAIL `*)` arm below -- without this case, "merge" as $2 would
+        # fall into the DETAIL branch, which treats $2 as a pull-request
+        # INDEX rather than a subcommand.
+        if [ "${GTW_PULLS_MERGE_EXIT:-0}" != "0" ]; then
+          printf 'Error: %s\n' "${GTW_PULLS_MERGE_STDERR:-something went wrong}" >&2
+          exit "${GTW_PULLS_MERGE_EXIT}"
+        fi
+        printf '%s\n' "${GTW_PULLS_MERGE_STDOUT:-}"
         exit 0
         ;;
       list)
@@ -7094,6 +7888,220 @@ gtw_test_gitea_write_verbs_mutation_matrix() {
   rm -rf "$mut_dir"
   popd >/dev/null
   teardown_detect_forge_fixture
+}
+
+# ============================================================================
+# Gitea forge-pr-merge tests (US-006, four-open-issues-remediation)
+# ============================================================================
+# The gitea arm of forge-pr-merge, reusing gtw_install_fake_tea (this
+# section's own shared write stub) with its new "merge" case. Numeric --pr
+# values are used throughout so the preflight forge-pr-view call goes
+# straight to the DETAIL read (`tea pulls <index> -o json`), skipping its
+# own structural list probe -- the same simplification the github and
+# gitlab blocks above rely on. `hasMerged` drives the derived `merged` state
+# exactly as _forge_pr_view_gitea's own header documents.
+
+gtw_test_forge_pr_merge_gitea_merges_per_style() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): open PR -- tea pulls merge <index> --style <style>, --style ALWAYS present, rebase-merge never emitted ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  local style out exit_code
+  for style in merge squash rebase; do
+    : > "$log"
+    out=$(GTW_TEA_LOG="$log" \
+      GTW_PULLS_DETAIL_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42","state":"open","hasMerged":false}' \
+      PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style "$style") && exit_code=0 || exit_code=$?
+
+    assert_exit_code "0" "$exit_code" "forge-pr-merge gitea $style: exit 0"
+    assert_eq '{"status":"unchanged","data":{"url":"https://gitea.com/acme/widgets/pulls/42","number":42},"message":null}' \
+      "$out" "forge-pr-merge gitea $style: unchanged with {url, number} REUSED from the preflight, no re-read"
+    assert_eq "pulls merge 42 --style $style" "$(gtw_argv_line "$log" "pulls merge")" \
+      "forge-pr-merge gitea $style: exact argv -- --style is always present and carries the caller's own style"
+    assert_eq "1" "$(gtw_argv_flag_count "$log" "pulls merge")" \
+      "forge-pr-merge gitea $style: exactly one flag token (--style), never zero -- zero would open tea's interactive survey"
+    assert_eq "1" "$(gtw_argv_detail_count "$log")" "forge-pr-merge gitea $style: exactly one DETAIL read -- the preflight, never a second re-read"
+  done
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_merge_gitea_already_merged_is_unchanged_no_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): preflight hasMerged true -- idempotent short-circuit, tea pulls merge NEVER invoked ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_DETAIL_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42","state":"closed","hasMerged":true}' \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-merge gitea already-merged: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://gitea.com/acme/widgets/pulls/42","number":42},"message":null}' \
+    "$out" "forge-pr-merge gitea already-merged: unchanged with the existing PR's own identity"
+  assert_eq "0" "$(gtw_argv_count "$log" "pulls merge")" "forge-pr-merge gitea already-merged: tea pulls merge was NEVER invoked"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_merge_gitea_closed_degrades_before_merge_call() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): closed and never merged -- degrades BEFORE any merge call, tea pulls merge NEVER invoked ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local log="$sandbox/tea.log"
+  : > "$log"
+  local out exit_code
+  out=$(GTW_TEA_LOG="$log" \
+    GTW_PULLS_DETAIL_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42","state":"closed","hasMerged":false}' \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitea closed: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitea closed: degraded"
+  assert_contains "closed and was never merged" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitea closed: message states the PR is closed and was never merged"
+  assert_eq "0" "$(gtw_argv_count "$log" "pulls merge")" "forge-pr-merge gitea closed: tea pulls merge was NEVER invoked"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_merge_gitea_not_found_degrades() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): no pull request found -- degrades naming the searched ref ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  # A BRANCH ref, deliberately, not a number: forge-pr-view-gitea's not_found
+  # detection is STRUCTURAL, driven by the `tea pulls list` probe -- which
+  # only runs for a non-numeric ref (a numeric ref skips straight to the
+  # DETAIL read, exactly like the github/gitlab arms). The stub's default
+  # LIST answer is an empty array, which is what makes this a genuine
+  # structural not_found rather than a stderr-text guess.
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr not-a-real-branch --style merge 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitea not_found: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitea not_found: degraded"
+  assert_contains "no pull request found for ref: not-a-real-branch" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitea not_found: message names the searched ref"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_merge_gitea_merge_failure_degrades() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): tea pulls merge itself fails -- degraded with the raw stderr verbatim, manual fallback, exit non-zero ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  gtw_install_fake_tea "$sandbox"
+
+  local stderr_file="/tmp/gtw_forge_pr_merge_failure_stderr.$$"
+  local out exit_code
+  out=$(GTW_PULLS_DETAIL_JSON='{"index":42,"url":"https://gitea.com/acme/widgets/pulls/42","state":"open","hasMerged":false}' \
+    GTW_PULLS_MERGE_EXIT=1 GTW_PULLS_MERGE_STDERR="pull request is not mergeable" \
+    PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitea merge-failure: exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$out" | jq -r '.status')" "forge-pr-merge gitea merge-failure: degraded"
+  assert_contains "not mergeable" "$(printf '%s' "$out" | jq -r '.message')" "forge-pr-merge gitea merge-failure: message carries tea's own stderr verbatim"
+  assert_stderr_contains "merge it yourself" "$(cat "$stderr_file")" "forge-pr-merge gitea merge-failure: manual fallback printed"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+gtw_test_forge_pr_merge_gitea_missing_tea_prints_manual() {
+  echo ""
+  echo "=== forge-pr-merge (gitea): tea absent -- MANDATORY-PRINT degrade, exit non-zero, manual instruction names the pull's path ==="
+
+  setup_detect_forge_fixture origin https://gitea.com/acme/widgets.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  # No tea in the sandbox -- simulates "tea not installed".
+
+  local stderr_file="/tmp/gtw_forge_pr_merge_no_tea_stderr.$$"
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-merge --pr 42 --style merge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "forge-pr-merge gitea tea-absent: exits non-zero"
+  assert_eq '{"status":"degraded","data":null,"message":"tea not found -- this pull request was not merged automatically."}' \
+    "$out" "forge-pr-merge gitea tea-absent: stdout carries the degraded envelope"
+  assert_stderr_contains "tea not found" "$(cat "$stderr_file")" "forge-pr-merge gitea tea-absent: mandatory warning names tea"
+  assert_stderr_contains "/pulls/42" "$(cat "$stderr_file")" "forge-pr-merge gitea tea-absent: manual instruction names the pull request's path"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+# GATE checklist item 4, made mechanically checkable: --style reaches
+# `tea pulls merge` on the one code path that calls it, with no branch that
+# could omit it. Also asserts gitea's own fourth style (rebase-merge) is
+# never referenced, and that the adapter applies no token prefix (GATE
+# checklist item 6) -- tea honours GH_TOKEN, so a github-shaped prefix here
+# would hand a GitHub credential to a Gitea instance.
+gtw_test_forge_pr_merge_gitea_style_always_present_in_source() {
+  echo ""
+  echo "=== source guard: the tea pulls merge invocation in _forge_pr_merge_gitea carries --style, and gitea's own rebase-merge fourth style is never emitted ==="
+
+  local body write_lines total=0 flagless=0 line
+  body=$(gtw_fn_body _forge_pr_merge_gitea)
+  write_lines=$(printf '%s\n' "$body" | grep -E '_forge_capture .* -- tea pulls merge' | grep -vE '^[[:space:]]*#' || true)
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    total=$((total + 1))
+    if ! printf '%s' "$line" | grep -q -- '--style'; then
+      flagless=$((flagless + 1))
+    fi
+  done <<< "$write_lines"
+  assert_eq "1" "$total"    "forge-pr-merge gitea source guard: the one tea pulls merge invocation line is present"
+  assert_eq "0" "$flagless" "forge-pr-merge gitea source guard: it carries --style -- with zero flags tea opens an interactive survey"
+
+  assert_eq "0" "$(printf '%s' "$body" | grep -c 'rebase-merge' || true)" \
+    "forge-pr-merge gitea source guard: rebase-merge (tea's own fourth style) is never referenced -- the normalized core deliberately does not expose it"
+  assert_eq "0" "$(printf '%s' "$body" | grep -cE '(GH_TOKEN|GH_ENTERPRISE_TOKEN|GITEA_TOKEN)=' || true)" \
+    "forge-pr-merge gitea source guard: no token prefix assignment anywhere in the gitea merge adapter"
 }
 
 # ============================================================================
@@ -12416,6 +13424,24 @@ main() {
   test_forge_write_verbs_degraded_exit_code_split
   test_forge_pr_create_and_edit_registered_in_help_and_dispatcher
 
+  # Forge PR Merge Tests (US-006, four-open-issues-remediation) -- github path
+  echo ""
+  echo "--- Forge PR Merge Tests (US-006) ---"
+  test_forge_pr_merge_success_per_style
+  test_forge_pr_merge_failure_degrades_with_raw_stderr
+  test_forge_pr_merge_already_merged_is_unchanged_no_merge_call
+  test_forge_pr_merge_closed_degrades_before_merge_call
+  test_forge_pr_merge_not_found_degrades
+  test_forge_pr_merge_lookup_error_degrades
+  test_forge_pr_merge_missing_gh_mandatory_print_nonzero_exit
+  test_forge_pr_merge_non_github_forge_mandatory_print
+  test_forge_pr_merge_invalid_style_is_cli_misuse
+  test_forge_pr_merge_guard_failures
+  test_forge_pr_merge_usage_check_precedes_git_repo_check
+  test_forge_pr_merge_credential_via_env_not_argv
+  test_forge_pr_merge_registered_in_help_and_dispatcher
+  test_forge_pr_merge_created_status_never_emitted_and_envelope_has_no_reason_field
+
   # GitLab WRITE-verb tests (phase 3) -- the three write verbs routed to glab.
   # The -y falsifiability proof runs FIRST, before anything trusts the
   # detector every other assertion in this block depends on.
@@ -12436,6 +13462,18 @@ main() {
   test_glw_forge_issue_create_gitlab_soft_fails_and_carries_yes
   test_glw_every_glab_write_invocation_carries_yes_in_source
   test_glw_gitlab_write_call_sites_are_prefix_assignment_ready
+
+  # GitLab forge-pr-merge tests (US-006, four-open-issues-remediation)
+  echo ""
+  echo "--- GitLab forge-pr-merge Tests (US-006) ---"
+  test_glw_forge_pr_merge_gitlab_merges_per_style
+  test_glw_forge_pr_merge_gitlab_already_merged_is_unchanged_no_merge_call
+  test_glw_forge_pr_merge_gitlab_locked_is_unchanged_no_merge_call
+  test_glw_forge_pr_merge_gitlab_closed_degrades_before_merge_call
+  test_glw_forge_pr_merge_gitlab_not_found_degrades
+  test_glw_forge_pr_merge_gitlab_merge_failure_degrades
+  test_glw_forge_pr_merge_gitlab_missing_glab_prints_mr_url
+  test_glw_forge_pr_merge_gitlab_yes_always_first_and_no_token_prefix_in_source
 
   # GitLab ACCOUNT selection (phase 3, US-005) -- the DEGRADED branch: glab has
   # no per-account token retrieval, so these police that the degradation is
@@ -12478,6 +13516,17 @@ main() {
   gtw_test_gitea_write_live_token_probe
   gtw_test_gitea_write_header_states_its_invariants
   gtw_test_gitea_write_verbs_mutation_matrix
+
+  # Gitea forge-pr-merge tests (US-006, four-open-issues-remediation)
+  echo ""
+  echo "--- Gitea forge-pr-merge Tests (US-006) ---"
+  gtw_test_forge_pr_merge_gitea_merges_per_style
+  gtw_test_forge_pr_merge_gitea_already_merged_is_unchanged_no_merge_call
+  gtw_test_forge_pr_merge_gitea_closed_degrades_before_merge_call
+  gtw_test_forge_pr_merge_gitea_not_found_degrades
+  gtw_test_forge_pr_merge_gitea_merge_failure_degrades
+  gtw_test_forge_pr_merge_gitea_missing_tea_prints_manual
+  gtw_test_forge_pr_merge_gitea_style_always_present_in_source
 
   # Forge Issue Verb Tests (US-006) -- forge-issue-view / forge-issue-create,
   # the first forge-* verbs that actually shell out to a forge CLI
