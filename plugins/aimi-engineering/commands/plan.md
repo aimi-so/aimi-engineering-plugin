@@ -2158,7 +2158,7 @@ After all expansions complete (in parallel):
 
 ## Phase 3d.5: Cross-Story DAG Audit
 
-After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption. A non-empty `unresolved[]` list stays non-blocking here (see outline:04); it becomes a blocking pipeline decision only in that follow-up story.
+After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption. A non-empty `unresolved[]` list stays non-blocking here (see outline:04); it becomes a blocking pipeline decision only in that follow-up story. That follow-up story is the Phase 3d.5 Unresolved Gate below — once this phase's `unresolved[]` list has finished accumulating, a non-empty list is never silently dropped: it is applied, deferred with a recorded reason, or the run is aborted before story-merge.
 
 ### Skip Condition
 
@@ -2352,19 +2352,73 @@ No patches are applied. Proceed immediately to Phase 3e.
 
 ### Agent-Mode Behavior
 
-When `INTERACTIVE_MODE=agent`, the audit runs normally: the auditor Task is spawned, patches are validated, and approved patches are applied to staging files. No behavior is suppressed. Any entries accumulated in `unresolved[]` (from auditor output or from the Failure Fallback) are emitted as log lines prefixed `[plan]` rather than surfacing a blocking gate. Emit:
+When `INTERACTIVE_MODE=agent`, the audit runs normally: the auditor Task is spawned, patches are validated, and approved patches are applied to staging files. No behavior is suppressed. Emit one interim log line naming the patches applied and the `unresolved[]` entries accumulated so far this phase:
 
 ```
 [plan] agent-mode: phase-3d.5 ran with <N> patches, <M> unresolved
 ```
 
-where N is the count of patches successfully applied and M is the count of `unresolved[]` entries added during this phase.
+where N is the count of patches successfully applied and M is the count of `unresolved[]` entries added during this phase. **This count is interim, not the final disposition** — the Phase 3d.5 Unresolved Gate below still runs afterward and decides what happens to any non-empty `unresolved[]` list. It never blocks an agent-mode run (see that subsection's own agent-mode fallback), but it is not silent either: every unresolved item is deferred with a recorded reason and flagged on its story.
 
 ### unresolved[] Forwarding
 
 The working-memory `unresolved[]` list (schema: `{storyIdx: string, message: string}`) is accumulated during Phase 3d.5 and forwarded to Step 5 / Phase 4 for inclusion in the plan report.
 
 `storyIdx` is normally a zero-padded outline index (e.g., `"01"`). One reserved sentinel value is also valid: `"_audit"` denotes an audit-system entry (auditor crash via Failure Fallback, or a per-storyIdx cap notice that is not tied to a single failure). Consumers that parse `storyIdx` as an outline index must treat `_audit` as a non-indexable system entry.
+
+Before that forwarding reaches Step 5 or Phase 4, the accumulated list passes through the Phase 3d.5 Unresolved Gate immediately below, which decides — per run, not per item — whether it ships applied, deferred, or aborts story-merge outright.
+
+### Phase 3d.5 Unresolved Gate
+
+**Fires once**, immediately after the full-run `unresolved[]` list above has finished accumulating — after Patch Validation's per-storyIdx cap-drop entries and the auditor's own returned `unresolved[]` entries, and after the Failure Fallback's own stub entry when that path fired instead. Never mid-accumulation. When `unresolved[]` is empty at this point — including every run where the Skip Condition fired (fewer than 2 staged stories, so nothing above ever populated the list) — this gate is a no-op: no AskUserQuestion, no log line, proceed straight to Phase 3e.
+
+**Interactive mode.** When `unresolved[]` is non-empty, sanitize each entry's `message` using the same four-step regime the Step 5 `Audit warnings` bullets use (replace newlines/CRs with spaces, strip `$(`, remove backticks, truncate to 200 characters, append `…` on truncation). Present **one** AskUserQuestion covering the whole accumulated list at once — never a per-item loop — rendering every entry as a bullet:
+
+```
+[storyIdx]: [sanitized message]
+[storyIdx]: [sanitized message]
+…
+```
+
+with exactly three options, verbatim:
+
+```
+Apply anyway — proceed to story-merge without acting on these findings
+Defer with reason — annotate the affected stories and proceed
+Abort — stop before story-merge; nothing is written this run
+```
+
+- **[Apply anyway]:** proceed straight to Phase 3e — no staging-file change. Still record one `oqDecisions[]` entry per `unresolved[]` item:
+  ```json
+  {
+    "anchor": "auditUnresolved:<storyIdx>",
+    "source": "auditGate",
+    "text": "<sanitized message>",
+    "resolution": "applied"
+  }
+  ```
+  `<storyIdx>` is the entry's own `storyIdx` value verbatim (a zero-padded index, or `_audit`). A reviewed-and-accepted finding gets the same paper trail a deferred one gets — mirroring the Phase 1.8 scope-pruning gates' own precedent of recording a CONFIRM outcome, not staying silent the way today's `Audit warnings` bullet does.
+
+- **[Defer with reason]:** ask one open follow-up free-text question — "What is the reason for deferring these unresolved findings?" — then sanitize the answer: strip newlines/CRs to spaces, strip `$(`, remove backticks, truncate to 500 characters (the same regime Phase 1.6b's research-conflict text already uses). Then, for every `unresolved[]` entry whose `storyIdx` matches `^[0-9]{2}$` and resolves through the `idx → staging file` lookup map (`idx_to_file`, built during Patch Validation above), append the fixed marker `[audit-deferred: unresolved — review before execution]` plus that entry's sanitized message to the target story's `notes` field — the same paragraph-accumulation semantics the `notes` `op: add` patches above already use (existing non-empty `notes` gets `\n\n---\n\n` before the new paragraph; multiple entries targeting the same `storyIdx` accumulate paragraph-by-paragraph; no entry silently overwrites a prior one), coalescing every entry that targets the same `storyIdx` into one read and one write per file. An entry that does not resolve this way — the `_audit` sentinel, or any `storyIdx` with no matching staging file — is never annotated onto a story (there is no staging file to annotate) but still receives its own `oqDecisions[]` entry below. Record one `oqDecisions[]` entry per `unresolved[]` item, annotated or not:
+  ```json
+  {
+    "anchor": "auditUnresolved:<storyIdx>",
+    "source": "auditGate",
+    "text": "<sanitized message> — reason: <sanitized reason>",
+    "resolution": "deferred"
+  }
+  ```
+  Proceed to Phase 3e.
+
+- **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion — an unattended run cannot answer one. It auto-selects **Defer with reason** using the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a closed, hardcoded literal — not re-sanitized), applying the identical story-notes annotation and `oqDecisions[]` recording the interactive Defer path uses above. Emit exactly one log line:
+
+```
+agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review
+```
+
+where `<N>` is the total count of `unresolved[]` entries processed by this gate, and `<F>` is the count of distinct `storyIdx` values annotated onto a story (excluding `_audit`, and excluding any `storyIdx` that did not resolve through `idx_to_file`).
 
 ## Phase 3e: story-merge Invocation
 
@@ -2530,7 +2584,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
-- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, AND phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
+- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate, AND the Phase 3d.5 Unresolved Gate below. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
 - **execution**: For flat tasks.json files (`ROADMAP_MODE=false`, no `metadata.phase`) — including flat full-stack split pairs — write the literal string `"container"` explicitly into every freshly generated file. For phase-scoped files (`ROADMAP_MODE=true`, `metadata.phase` present) — including phase-mode split pairs — omit the key entirely: a claimed phase always executes inside its own phase container (see execute.md's Create or Reuse the Phase Container), so the flat-mode discriminator would be dead data there. `/aimi:execute --container`/`--inline` and `/aimi:next --container`/`--inline` can later override the effective mode for a single invocation and persist the change onto a flat file via `aimi-cli.sh set-execution-mode`; that persistence is those commands' responsibility, not `/aimi:plan`'s. See `commands/references/execution-mode.md` for the full read/override contract.
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
@@ -2734,7 +2788,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories. `metadata.splitGroup` is written by `story-merge` on the **PROJECT axis only** and preserved verbatim by Phase 4 — SIDE-axis, legacy, and frontend-only files have no `splitGroup` key and none should be invented for them. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at that project's own repo.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Twelve valid source values:
+**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Thirteen valid source values:
 - `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
 - `businessSpec:L<line>` — a marker-style OQ scanned from `businessSpecContent` (Phase 0.5)
 - `designSpec:L<line>` — a marker-style OQ scanned from `designSpecContent` (Phase 0.5)
@@ -2747,6 +2801,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 - `codebaseVerified` — auto-resolved by Phase 2.4 codebase cross-check; evidence field holds classified file:line hits
 - `outline` — an outline-gate edit recorded in Phase 3c (rename, add, remove, reorder)
 - `phase` — a phase-cut Edit round recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate; anchor format `phase:edit:<idx>` (zero-padded index into the proposed phase list at edit time). Distinct from `/aimi:brainstorm`'s own roadmap-gate edits, which are local to that command's `phaseEditDecisions[]` working memory and use `source: "phaseGate"` instead — the two never share a decisions array.
+- `auditGate` — a decision recorded by the Phase 3d.5 Unresolved Gate (anchor `auditUnresolved:<storyIdx-or-_audit>`); `resolution` is `applied` | `deferred`
 
 Consumers can branch on the prefix to distinguish decisions by origin.
 
@@ -2890,7 +2945,8 @@ Outline: [N] stories (edits: [M])
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
-[If audit unresolved non-empty]: Audit warnings: [N] cross-story issues
+[If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
+[If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
 [If metadata.smellWarnings non-empty]: Smell warnings: [N] finding(s)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
@@ -2907,7 +2963,11 @@ Next steps:
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
 
-**Audit warnings line:** present only when Phase 3d.5 ran and `unresolved[]` is non-empty. `N` is the count of items in `unresolved[]`. Render each item as a bullet immediately after the `Audit warnings` line:
+**Audit warnings / Audit deferred line:** present only when Phase 3d.5 ran, `unresolved[]` was non-empty, and the Phase 3d.5 Unresolved Gate above resolved it via **Apply anyway** or **Defer with reason** — never via Abort, since Step 5 is never reached on that path. `N` is the count of items in `unresolved[]`. The two lines are mutually exclusive, keyed by the gate's outcome:
+- **Apply anyway:** `Audit warnings: [N] cross-story issue(s) — reviewed, applied`
+- **Defer with reason** (chosen interactively, or auto-selected by the agent-mode fallback): `Audit deferred: [N] item(s) — flagged on affected stories, review before execution`
+
+Either way, render each item as a bullet immediately after that line:
 - `[storyIdx]: [sanitized message]` — `storyIdx` and `message` come from the `unresolved[]` entry schema `{storyIdx, message}`.
 
 **Sanitization before rendering** — auditor-emitted `message` strings carry text that originated (transitively) from sub-agent output and may contain hostile characters. Before rendering each bullet, apply this sanitization to the `message` field in order:
@@ -2916,7 +2976,7 @@ Next steps:
 3. Remove backtick characters.
 4. Truncate to 200 characters; append `…` when truncation fires.
 
-The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty or Phase 3d.5 was skipped (fewer than 2 stories), omit the `Audit warnings` line and bullet list entirely — do not render an empty section.
+The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty, Phase 3d.5 was skipped (fewer than 2 stories), or the gate resolved via Abort (in which case Step 5 is never reached at all), omit both lines and the bullet list entirely — do not render an empty section.
 
 **Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line, choosing the case that matches its `type`:
 
@@ -2969,6 +3029,8 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 3d.5 | Patches exceed 10-per-storyIdx cap | Drop excess silently with one aggregate `unresolved[]` entry naming the storyIdx |
 | Phase 3d.5 | Patch result fails post-apply JSON / required-field / per-field type validation | Roll back the single patch; continue with remaining patches |
 | Phase 3d.5 | Auditor prompt exceeds 150 KB total cap | Drop research file blocks then largest staging blocks until under cap; emit one chat warning line per dropped block |
+| Phase 3d.5 | Unresolved Gate: `unresolved[]` non-empty once accumulation is complete | Interactively, present one AskUserQuestion covering the whole list (Apply anyway / Defer with reason / Abort); in agent-mode, auto-select Defer with reason with a fixed system-authored reason — the gate never blocks an unattended run |
+| Phase 3d.5 | Unresolved Gate: user selects Abort | Stop before `story-merge` is invoked; preserve `RUN_DIR` for inspection; write no `tasks.json` this run; do not call `roadmap-set-status`; record no `oqDecisions[]` entries for this gate |
 | Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually; do NOT call roadmap-set-status |
 | Phase 4 | File write fails | Report error with path |
 | Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |
