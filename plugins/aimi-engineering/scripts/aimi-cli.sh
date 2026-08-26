@@ -3588,16 +3588,19 @@ _forge_account_override_slots() {
 # and would leave the very before/after check that proves the machine account
 # was left alone structurally unable to detect a violation.
 #
-# SEVEN SITES, AND NO OTHERS. Each write function resolves BOTH slots ONCE into
-# two locals immediately after its own _forge_bin_check gate -- at most one is
-# ever non-empty, and only the matching one costs a `gh auth token` process --
-# then names both on every routed command:
+# NINE SITES, AND NO OTHERS (US-006's forge-pr-merge added the last two).
+# Each write function resolves BOTH slots ONCE into two locals immediately
+# after its own _forge_bin_check gate -- at most one is ever non-empty, and
+# only the matching one costs a `gh auth token` process -- then names both
+# on every routed command:
 #
 #   _forge_pr_create              gh pr create      the write
 #                                 cmd_forge_pr_view idempotency check
 #                                 cmd_forge_pr_view post-create re-read
 #   _forge_pr_edit                gh pr edit        the write
 #                                 cmd_forge_pr_view post-edit re-read
+#   _forge_pr_merge               gh pr merge       the write
+#                                 cmd_forge_pr_view preflight read
 #   _forge_issue_create           gh issue create   the write
 #   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
 #
@@ -7350,6 +7353,524 @@ cmd_forge_pr_edit() {
   fi
 
   _forge_pr_edit "$number" "$body" "$title" "$body_provided" "$title_provided"
+}
+
+# ============================================================================
+# forge-pr-merge (US-006, four-open-issues-remediation)
+# ============================================================================
+# The third WRITE verb to mutate a pull/merge request, and the first that
+# mints no new identifier at all -- a merge changes neither a PR's number nor
+# its url, so `status: "created"` is structurally unreachable here and is
+# never emitted. Only `unchanged` (the merge succeeded, or the PR/MR was
+# already merged/locked) and `degraded` (everything else) are emittable. See
+# forge-contract.md's Write-Verb Status Convention.
+#
+# NORMALIZED CORE ONLY, DELIBERATELY: merge style is explicit and REQUIRED
+# (never defaulted), validated against the closed three-value enum
+# {merge, squash, rebase} -- never gitea's own fourth `rebase-merge` style.
+# No conditional/auto-merge, no approval handling, no branch-deletion flag on
+# any forge. That exclusion is what makes the three forges normalizable: tea
+# exposes neither branch deletion nor an auto-merge equivalent, while gh and
+# glab expose both.
+#
+# PREFLIGHT REUSES forge-pr-view IN-PROCESS, NEVER A SECOND BESPOKE PROBE.
+# Unlike forge-pr-create's gitlab/gitea idempotency checks (which had to
+# hand-roll a forge-native inline probe because forge-pr-view's own
+# gitlab/gitea adapters postdated forge-pr-create), all three forge-pr-view
+# adapters already exist by the time this verb is written, so every one of
+# the three merge adapters below resolves `{number, url, state}` through the
+# identical `cmd_forge_pr_view --pr <ref> --include number,url,state` call --
+# a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess. The
+# call appears three times in source (github inline in _forge_pr_merge,
+# _forge_pr_merge_gitlab, _forge_pr_merge_gitea) rather than being factored
+# above the three-way dispatch, deliberately: that keeps the same
+# self-contained-per-adapter shape forge-pr-create/forge-pr-edit already use
+# (each adapter does its own everything, callable and testable on its own) at
+# the cost of the call appearing three times rather than once. This is NOT
+# the file's own "KNOWN, DELIBERATE DUPLICATE READ PATH" debt named in the
+# Gitea write adapters section header -- that debt exists because an adapter
+# was missing when its caller was written; here nothing is missing.
+#
+# ENVELOPE MAPPING (forge-pr-view's own found/not_found/error, read via the
+# preflight above):
+#   error/hard failure of the preflight call itself -> degraded, data null,
+#     naming the exit code. Never falls through to a merge attempt.
+#   not_found                                        -> degraded, data null,
+#     naming the searched ref. There is nothing to merge.
+#   found, state == closed (closed, never merged)     -> degraded, data null,
+#     BEFORE any merge CLI call runs -- a structural pre-check, not left to
+#     whatever gh/glab/tea happen to do when asked to merge a closed PR, the
+#     same not-worth-guessing reason forge-pr-view's own not_found detection
+#     was made structural.
+#   found, state == merged OR locked (GitLab's merged-and-lock-protected
+#     value)                                          -> unchanged, data
+#     {url, number} taken directly from the preflight, at exit 0, WITHOUT
+#     ever invoking gh/glab/tea's merge subcommand. A locked MR is already
+#     merged; treating it as a second, undocumented state instead of folding
+#     it into the same branch as merged would invent a fifth outcome the
+#     decided envelope mapping does not have.
+#   found, state == open                              -> the only branch that
+#     proceeds to an actual merge attempt.
+#   merge call exits 0                                -> unchanged, data
+#     {url, number} REUSED from the preflight read, never a second
+#     post-merge re-read: a merge changes neither a PR's number nor its url,
+#     so the identifiers the preflight already confirmed are still correct
+#     and a second forge-pr-view round-trip would be pure waste (unlike
+#     forge-pr-create, which mints a brand-new number, or forge-pr-edit,
+#     whose re-read reconfirms a title/body that may have changed).
+#   merge call exits non-zero                         -> degraded, data null,
+#     message carrying that call's own captured stderr verbatim -- covering
+#     conflicts, "not mergeable", a draft PR, a protected-branch/missing-
+#     approvals/no-permission refusal, and an auth failure alike, with no
+#     further classification attempted (matching forge-pr-create/
+#     forge-pr-edit's own generic rc-nonzero branches).
+#
+# EXIT CONTRACT MATCHES forge-pr-create/forge-pr-edit, NOT
+# forge-issue-create: every degraded branch exits non-zero, so a caller's own
+# per-repository failure isolation can react. Exits 0 only on unchanged.
+# Every degraded branch prints MANDATORY manual-fallback instructions to
+# stderr first (never stdout) via _forge_pr_merge_print_manual below.
+#
+# IDENTITY: no --token or credential-shaped flag, matching every other forge
+# write verb -- acting identity is read only from the environment
+# (AIMI_FORGE_IDENTITY / GH_TOKEN / an operator-exported GITLAB_TOKEN or
+# GITEA_TOKEN), never a flag.
+#
+# `tea`'s interactive-prompt behavior SPECIFICALLY FOR `tea pulls merge` (as
+# opposed to the already-documented `tea pulls create` hazard) is UNCONFIRMED
+# -- tea is not installed on this machine, matching every other gitea
+# adapter's own stated verification ceiling. The defense here is structural
+# rather than empirical: --style is required and ALWAYS passed on every code
+# path that reaches `tea pulls merge`, never optional and never defaulted, so
+# NumFlags() cannot be zero regardless of what tea's own prompt behavior for
+# this specific subcommand turns out to be.
+
+# Prints the MANDATORY manual-fallback instructions (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-pr-merge failure path
+# -- an unsupported forge, a missing gh/glab/tea binary, a failed preflight
+# lookup, a closed-but-never-merged PR/MR, or the merge call itself failing
+# all funnel through this one function so the wording is identical
+# regardless of WHY automatic merging did not happen. Always stderr, never
+# stdout, matching _forge_pr_write_print_manual's own contract.
+#
+# A SIBLING of _forge_pr_write_print_manual, not a mode grafted onto it:
+# merge has no title/body to conditionally print and does have a required
+# style, so the parameter shapes genuinely differ.
+#
+# repo-info is queried in-process, exactly like the create/edit helper above,
+# and is itself best-effort: when it cannot resolve owner/repo, the URL line
+# is simply omitted rather than guessing a wrong one.
+# Usage: _forge_pr_merge_print_manual <forge> <pr-ref> <style>
+_forge_pr_merge_print_manual() {
+  local forge="$1" pr_ref="$2" style="$3"
+
+  local repo_info="" owner="" repo="" host=""
+  repo_info=$(_forge_repo_info 2>/dev/null) || repo_info=""
+  if [ -n "$repo_info" ] && [ "$(printf '%s' "$repo_info" | jq -r '.status' 2>/dev/null)" = "found" ]; then
+    owner=$(printf '%s' "$repo_info" | jq -r '.data.owner // empty')
+    repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
+    host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
+  fi
+  if [ -z "$host" ]; then
+    case "$forge" in
+      gitlab) host="gitlab.com" ;;
+      gitea)  host="gitea.com" ;;
+      *)      host="github.com" ;;
+    esac
+  fi
+
+  {
+    if [ "$forge" = "gitlab" ]; then
+      local glab_style_flag=""
+      case "$style" in
+        squash) glab_style_flag=" -s" ;;
+        rebase) glab_style_flag=" -r" ;;
+      esac
+      echo "Warning: could not merge this gitlab merge request automatically -- merge it yourself with:"
+      echo "  glab mr merge $pr_ref -y${glab_style_flag}"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$pr_ref"
+      fi
+    elif [ "$forge" = "gitea" ]; then
+      echo "Warning: could not merge this gitea pull request automatically -- merge it yourself with:"
+      echo "  tea pulls merge $pr_ref --style $style"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pulls/$pr_ref"
+      fi
+    else
+      local gh_style_flag=""
+      case "$style" in
+        merge)  gh_style_flag="-m" ;;
+        squash) gh_style_flag="-s" ;;
+        rebase) gh_style_flag="-r" ;;
+      esac
+      echo "Warning: could not merge this $forge pull request automatically -- merge it yourself with:"
+      echo "  gh pr merge $pr_ref $gh_style_flag"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pull/$pr_ref"
+      fi
+    fi
+  } >&2
+}
+
+# gitlab adapter for forge-pr-merge. Preflight via cmd_forge_pr_view
+# in-process (see this section's header); short-circuits to unchanged on
+# state merged/locked, degrades on not_found/error/closed before any write,
+# otherwise shells `glab mr merge <id> -y [-s|-r]` -- -y FIRST, same rule as
+# every other glab write call in this file (see "GitLab write adapters"
+# section above: glab prompts for a submission confirmation without it, and
+# an autonomous run would hang forever). No flag at all for the merge-commit
+# default style, matching glab's own default. No token prefix assignment:
+# gitlab applies no account override on this verb, exactly as its existing
+# create/edit adapters do not (see forge-contract.md's Credential/Identity
+# Model, "Which calls are routed").
+_forge_pr_merge_gitlab() {
+  local pr_ref="$1" style="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not merged automatically."
+    return 1
+  fi
+
+  local existing="" existing_rc=0
+  existing=$(cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the merge request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the merge request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: merge request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: merge request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: merge request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: merge request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no merge request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no merge request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (gitlab). -y FIRST. No flag for merge-commit style; -s/-r for
+  # squash/rebase.
+  local style_flag=""
+  case "$style" in
+    squash) style_flag="-s" ;;
+    rebase) style_flag="-r" ;;
+  esac
+
+  local stdout="" stderr_out="" rc=0
+  if [ -n "$style_flag" ]; then
+    _forge_capture stdout stderr_out rc -- glab mr merge "$existing_number" -y "$style_flag" || true
+  else
+    _forge_capture stdout stderr_out rc -- glab mr merge "$existing_number" -y || true
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: glab mr merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# gitea adapter for forge-pr-merge. Same preflight-then-branch shape as the
+# gitlab arm above, then shells `tea pulls merge <index> --style
+# <merge|squash|rebase>` -- --style ALWAYS present, never optional, never
+# defaulted, so `tea`'s NumFlags()-driven interactive-survey hazard
+# (documented in the "Gitea write adapters" section header) cannot fire even
+# though tea's own prompt behavior for `pulls merge` specifically remains
+# unconfirmed (see this section's own header). No token prefix assignment:
+# tea honours GH_TOKEN as well as GITEA_TOKEN, so a github-shaped prefix here
+# would hand a GitHub token to a Gitea instance -- the same GH_TOKEN hazard
+# every other tea write call in this file avoids.
+_forge_pr_merge_gitea() {
+  local pr_ref="$1" style="$2"
+
+  if ! _forge_bin_check tea mandatory gitea; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "tea not found -- this pull request was not merged automatically."
+    return 1
+  fi
+
+  local existing="" existing_rc=0
+  existing=$(cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no pull request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no pull request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (gitea). --style ALWAYS present -- see this section's header.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- tea pulls merge "$existing_number" --style "$style" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: tea pulls merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "tea pulls merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# Routing function for forge-pr-merge. Detects the forge, degrades
+# no_adapter-style for anything but github/gitlab/gitea, routes gitlab/gitea
+# to their self-contained adapters above under this file's usual `set -e`
+# capture convention (`|| gl_rc=$?` / `|| gt_rc=$?`, mandatory because both
+# adapters return 1 on every degraded branch by contract), and for github
+# runs the preflight-then-merge sequence inline -- the same shape
+# _forge_pr_create/_forge_pr_edit use for their own github arm.
+#
+# ROUTED, GITHUB ONLY: both the preflight cmd_forge_pr_view call and the
+# `gh pr merge` call are routed under the resolved account-override prefix
+# assignment, resolved ONCE for both -- the identical pattern
+# _forge_pr_create/_forge_pr_edit already use, and for the identical reason:
+# on a private repository the account that merges can see (and act on) a PR
+# a different reader account cannot, so a preflight performed as the machine
+# account could disagree with the account the merge itself runs as.
+_forge_pr_merge() {
+  local pr_ref="$1" style="$2"
+  local forge=""
+  _detect_forge_type forge
+
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_merge_gitlab "$pr_ref" "$style" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    gitea)
+      local gt_rc=0
+      _forge_pr_merge_gitea "$pr_ref" "$style" || gt_rc=$?
+      return "$gt_rc"
+      ;;
+    *)
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      _forge_emit_write_status degraded "" "forge-pr-merge: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      return 1
+      ;;
+  esac
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not merged automatically."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local existing="" existing_rc=0
+  existing=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no pull request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no pull request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (github). Flag chosen 1:1 from --style: -m for merge, -s for
+  # squash, -r for rebase. Same prefix-assignment shape as every other
+  # routed gh write in this file: on the _forge_capture call itself, never
+  # inside its argv, never via `env`.
+  local style_flag=""
+  case "$style" in
+    merge)  style_flag="-m" ;;
+    squash) style_flag="-s" ;;
+    rebase) style_flag="-r" ;;
+  esac
+
+  local stdout rc=0 stderr_out
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr merge "$existing_number" "$style_flag" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: gh pr merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# Public wrapper: parses --pr/--style/--project (deliberately no --token or
+# similarly credential-shaped flag). --pr and --style are BOTH REQUIRED, and
+# the usage check for them runs BEFORE _require_git_repo -- a deliberate
+# ordering DIFFERENCE from forge-pr-create/forge-pr-edit's own guards (which
+# run _require_git_repo first): a merge's identifying flags are cheap to
+# check and a caller that forgot one should not pay for a git-repo probe
+# first to learn that. --style is validated against the closed
+# {merge, squash, rebase} enum and --pr against forge-pr-view's own
+# combined numeric-or-branch-name regex, both before _require_git_repo runs
+# and before either is ever interpolated into a git/gh/glab/tea invocation.
+# Delegates exactly once to _forge_pr_merge.
+cmd_forge_pr_merge() {
+  check_jq
+
+  local pr_ref="" style="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_ref="${1:-}" ;;
+      --style)   shift; style="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-merge: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$pr_ref" ] || [ -z "$style" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]" >&2
+    exit 1
+  fi
+
+  case "$style" in
+    merge|squash|rebase) ;;
+    *)
+      echo "Error: forge-pr-merge: invalid --style value: $style -- must be merge, squash or rebase." >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate --pr before it is ever interpolated into a git/gh/glab/tea
+  # invocation -- the exact combined regex cmd_forge_pr_view already applies
+  # to its own --pr flag.
+  if ! [[ "$pr_ref" =~ ^[0-9]+$ ]] && ! [[ "$pr_ref" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-merge: invalid --pr value: $pr_ref" >&2
+    exit 1
+  fi
+
+  _require_git_repo "$project_dir"
+
+  _forge_pr_merge "$pr_ref" "$style"
 }
 
 # ============================================================================
@@ -14121,6 +14642,38 @@ COMMANDS:
                               non-zero-exit-on-failure as forge-pr-create.
                               github, gitlab and gitea each have an adapter
                               (glab mr update -t/-d, tea pulls edit -t/-d).
+    forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]
+                              Write verb -- resolves the PR/MR's
+                              {number, url, state} via an in-process
+                              forge-pr-view preflight, then shells gh pr
+                              merge/glab mr merge/tea pulls merge. --pr and
+                              --style are BOTH REQUIRED; --style is
+                              validated against the closed enum
+                              {merge, squash, rebase} (never gitea's own
+                              fourth rebase-merge style, which this verb
+                              deliberately does not expose). Output:
+                              {status: "unchanged"|"degraded", data:
+                              {url, number}, message} -- "created" is
+                              structurally unreachable (a merge mints no new
+                              identifier) and is never emitted. An
+                              already-merged or GitLab-locked PR/MR
+                              short-circuits to "unchanged" with no merge
+                              attempted; a closed-but-never-merged one
+                              degrades before any merge call runs. A
+                              successful merge reuses the preflight's own
+                              {url, number} rather than re-reading. Same
+                              guards, degrade contract, and
+                              non-zero-exit-on-failure as forge-pr-create --
+                              a missing gh/glab/tea binary or an unsupported
+                              forge prints manual merge-it-yourself
+                              instructions to stderr (MANDATORY-PRINT
+                              degrade mode) and EXITS NON-ZERO. github,
+                              gitlab and gitea each have an adapter (glab mr
+                              merge -y [-s|-r], tea pulls merge --style,
+                              --style ALWAYS passed on the gitea call). No
+                              conditional/auto-merge and no branch-deletion
+                              flag on any forge. Identity, when needed, is
+                              read from an env var, never a flag.
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
@@ -14816,6 +15369,7 @@ main() {
     forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
     forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;
     forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
+    forge-pr-merge) shift; cmd_forge_pr_merge "$@"; return ;;
     forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
