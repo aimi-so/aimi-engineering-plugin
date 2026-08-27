@@ -193,9 +193,22 @@ def die_list(header, lines, code=1):
 # Reading the staging directory
 # ---------------------------------------------------------------------------
 #
-# Non-story sidecars written by plan.md Phase 3b (outline.json) and any future
-# *outline*.json metadata file have a different shape and would be mis-merged as
-# bogus stories, so they are skipped by name.
+# Non-story sidecars written by plan.md Phase 3b have a different shape and would
+# be mis-merged as bogus stories, so they are skipped by name. A sidecar is one of
+# the three exact names in _SIDECARS, or any file whose basename ENDS IN
+# "-outline.json" -- the open arm that keeps future <topic>-outline.json metadata
+# files out of the merge.
+#
+# The suffix is the contract, and it replaced a bare `"outline" in base` substring
+# test that was too wide by exactly the names a story author would choose. A story
+# file legitimately called 05-n-foundation-outline-entries.json was silently
+# dropped by it: six files loaded instead of seven, and because outline:NN is a
+# POSITION in the merged array rather than a filename prefix, every later position
+# shifted by one and two stories ended up depending on themselves. What the run
+# actually printed was "circular dependency detected among stories: US-005,
+# US-006" -- a message naming no missing file, no skipped filename and no filter.
+# So the word "outline" may appear anywhere in a story's name; only a file whose
+# name ENDS that way is claiming to BE an outline.
 
 _SIDECARS = ("outline.json", "metadata.json", "audit-result.json")
 
@@ -203,7 +216,7 @@ _SIDECARS = ("outline.json", "metadata.json", "audit-result.json")
 def is_sidecar(base):
     if base in _SIDECARS:
         return True
-    return base.endswith(".json") and "outline" in base[: -len(".json")]
+    return base.endswith("-outline.json")
 
 
 def staging_files(staging_dir):
@@ -217,7 +230,32 @@ def staging_files(staging_dir):
             continue
         paths.append(path)
     paths.sort(key=_collate)
-    return [p for p in paths if not is_sidecar(_basename(p))]
+
+    kept = []
+    for path in paths:
+        base = _basename(path)
+        if not is_sidecar(base):
+            kept.append(path)
+            continue
+        # Say so when the skipped file carries a story INDEX. read_staging reads
+        # that index with this same expression, and it is what makes a skip
+        # expensive: only a numbered file occupies a position, so only a numbered
+        # file can shift every outline:NN after it and manufacture the cycle that
+        # gets reported instead of the skip. The three exact _SIDECARS names and a
+        # plain <topic>-outline.json carry no index, hold no position, and are
+        # written beside the stories on every ordinary run -- announcing those
+        # would be noise on every merge, and would report nothing that can go
+        # wrong. So an ordinary merge stays silent on stderr, and the one shape
+        # that can silently renumber the array never does.
+        if re.match(r"[0-9]", base):
+            sys.stderr.write(
+                "Note: story-merge: skipped "
+                + base
+                + ": it carries a story index but its name ends in"
+                ' "-outline.json", so it is read as an outline sidecar and'
+                " contributes no story. Rename it if it is a story.\n"
+            )
+    return kept
 
 
 def read_staging(paths):
