@@ -923,6 +923,134 @@ def test_the_sidecars_plan_writes_beside_the_stories_are_skipped_by_name():
     assert "no *.json files found" in CASES["so-sidecars"]["stderr"]
 
 
+def test_a_sidecar_is_an_exact_name_or_a_name_ending_in_outline_json():
+    """The predicate is a SUFFIX, not a substring.
+
+    The four that must stay sidecars include topic-outline.json, which no exact
+    name covers -- it is matched only by the suffix arm, and golden_from_jq.json
+    records it as skipped, so an exact-list-only rule would move a recorded
+    verdict. The two that must NOT be sidecars are the names the substring rule
+    ate: 'outline' is a descriptive word in the middle of each, not the file's
+    kind."""
+    for name in ("outline.json", "topic-outline.json", "metadata.json", "audit-result.json"):
+        assert SM.is_sidecar(name), name
+    for name in (
+        "05-n-foundation-outline-entries.json",
+        "01-outline-generation.json",
+        "03-per-project-foundation-injection.json",
+    ):
+        assert not SM.is_sidecar(name), name
+
+
+def _merge(tmp_path, files, args=None):
+    """Run a real story-merge over a staging directory built from `files`."""
+    root = str(tmp_path)
+    staging = os.path.join(root, ".aimi", "stg")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    os.makedirs(staging)
+    for name, value in files.items():
+        with open(os.path.join(staging, name), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+    proc = subprocess.run(
+        ["bash", CLI, "story-merge", "--staging-dir", ".aimi/stg", "--output"]
+        + [".aimi/tasks/out-tasks.json"]
+        + (args or []),
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    doc = None
+    written = os.path.join(root, ".aimi", "tasks", "out-tasks.json")
+    if os.path.isfile(written):
+        with open(written, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    return proc, doc
+
+
+def _staging_story(title, deps=None):
+    return {
+        "title": title,
+        "description": "As a user, I want " + title + " so that it works.",
+        "acceptanceCriteria": ["Typecheck passes"],
+        "priority": 1,
+        "status": "pending",
+        "dependsOn": list(deps or []),
+        "notes": "",
+        "implementation": {
+            "files": ["src/x.ts"],
+            "approach": "Implement it",
+            "verify": "tsc --noEmit",
+        },
+    }
+
+
+def test_a_story_whose_name_embeds_outline_is_merged_rather_than_dropped(tmp_path):
+    """The bug, end to end, in the shape that produced it.
+
+    Three numbered stories, the middle one named the way a story about foundation
+    outline entries gets named, and the third depending on the middle by its
+    outline POSITION. Under the substring rule the middle file was dropped, the
+    array shrank to two, outline:02 then pointed at the third story itself, and
+    the run died with 'circular dependency detected' -- naming neither the
+    dropped file nor the filter."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-n-foundation-outline-entries.json": _staging_story("B"),
+            "03-c.json": _staging_story("C", ["outline:02"]),
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "circular dependency" not in proc.stderr
+    stories = doc["userStories"]
+    assert [s["id"] for s in stories] == ["US-001", "US-002", "US-003"], "all three merged"
+    assert [s["title"] for s in stories] == ["A", "B", "C"]
+    for story in stories:
+        assert story["id"] not in story["dependsOn"], story["id"] + " depends on itself"
+    assert _deps(stories)["US-003"] == ["US-002"], "outline:02 resolves to the middle story"
+
+
+def test_an_ordinary_merge_says_nothing_about_the_sidecars_beside_it(tmp_path):
+    """The routine sidecars are written beside the stories on EVERY plan run and
+    hold no position in the merged array, so announcing them would be noise on
+    every merge -- and golden_from_jq.json's sidecar-outline case records exactly
+    this silence."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "outline.json": "[{\"idx\": 1}]",
+            "topic-outline.json": "{\"idx\": 2}",
+            "metadata.json": "{\"k\": 1}",
+            "audit-result.json": "{\"k\": 2}",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == "", "an ordinary merge stays silent on stderr"
+    assert len(doc["userStories"]) == 1
+
+
+def test_a_skipped_file_that_carries_a_story_index_names_itself_on_stderr(tmp_path):
+    """The half of the bug that cost the most: a skip that says nothing.
+
+    Only a NUMBERED file occupies a position, so only a numbered file can shift
+    every outline:NN after it. That is the shape that must never be silent, and
+    it is the one the suffix rule still (correctly) treats as a sidecar."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-topic-outline.json": "{\"idx\": 2}",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "02-topic-outline.json" in proc.stderr, "the skipped basename is named"
+    assert "skipped" in proc.stderr
+    assert len(doc["userStories"]) == 1, "it is still treated as a sidecar"
+
+
 def test_a_document_whose_only_value_is_null_or_false_reads_as_malformed():
     """`jq -e .` reported both as a failure, so both stay malformed here."""
     for label in ("json-null", "json-false", "json-malformado"):
