@@ -4,8 +4,9 @@ Shared reference for the normalized forge PR/issue field contract and the
 degradation convention every `forge-*` verb in `aimi-cli.sh` builds on. This
 is the **single arbiter** of the vocabulary below — every later forge verb
 (`forge-auth-status`, `forge-repo-info`, `forge-pr-view`, `forge-pr-create`,
-`forge-pr-edit`, `forge-issue-view`, `forge-issue-create`, the review-thread
-verbs) consumes the field names, the envelope shapes, and the three-way
+`forge-pr-edit`, `forge-pr-merge`, `forge-issue-view`, `forge-issue-create`,
+the review-thread verbs) consumes the field names, the envelope shapes, and
+the three-way
 status convention exactly as documented here. **No sibling verb may
 introduce a variant field-name casing (e.g. camelCase `unsupportedFields`),
 and no verb may invent a further ad-hoc free-text degradation field of its
@@ -33,14 +34,14 @@ too.
 
 This file defines exactly **four** result envelope shapes and no others. An
 adapter author adding a GitLab or Gitea backend reads this list rather than
-inferring the total by reading all ten `forge-*` verb bodies, and a new verb
-picks one of these four rather than inventing a fifth.
+inferring the total by reading all eleven `forge-*` verb bodies, and a new
+verb picks one of these four rather than inventing a fifth.
 
 | # | Envelope | `status` values | Built by | Emitted by |
 |---|---|---|---|---|
 | 1 | **Read three-way** — `{status, data, message, reason}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
 | 2 | **`forge-pr-view`'s own** — `{status, pr, unsupported_fields, message}` | `found` / `not_found` / `error` | `_forge_pr_view_emit` | `forge-pr-view` only |
-| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-issue-create` |
+| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-pr-merge`, `forge-issue-create` |
 | 4 | **Review/Approval** — `{approved, changes_requested, approvals_count, unsupported_fields, raw}` | *(no `status` field)* | *(no builder yet)* | *(no verb yet — spec only)* |
 
 Envelopes 1 and 3 share the three field names `status`, `data` and `message`
@@ -293,12 +294,13 @@ shape.
 ## Write-Verb Status Convention
 
 Every forge **write** verb (`forge-pr-create`, `forge-pr-edit`,
-`forge-issue-create`) reports one of exactly three outcomes, through the same
-`{status, data, message}` field names and the same null-forcing discipline
-the read side uses. A write is never "not found" — nothing was looked up —
-so the read trio would be a bad fit; three per-verb vocabularies were worse
-still, since a caller then had to learn a different shape per verb, or read
-the exit code alone, to find out what a write actually did.
+`forge-pr-merge`, `forge-issue-create`) reports one of exactly three
+outcomes, through the same `{status, data, message}` field names and the
+same null-forcing discipline the read side uses. A write is never "not
+found" — nothing was looked up — so the read trio would be a bad fit; three
+(now four) per-verb vocabularies were worse still, since a caller then had
+to learn a different shape per verb, or read the exit code alone, to find
+out what a write actually did.
 
 | `status` | Meaning |
 |---|---|
@@ -315,12 +317,19 @@ below):
 {"status": "degraded",  "data": null, "message": "gh pr create exited 1: HTTP 403"}
 ```
 
-**`unchanged` covers two outcomes that look different but are the same
-fact.** `forge-pr-create` finding an already-open PR on `--head` reports it,
-and so does every successful `forge-pr-edit` call — an edit mutates a number
-that already existed. The PR's *title*, *body*, or both really did change
+**`unchanged` covers outcomes that look different but are the same fact.**
+`forge-pr-create` finding an already-open PR on `--head` reports it, and so
+does every successful `forge-pr-edit` call — an edit mutates a number that
+already existed. The PR's *title*, *body*, or both really did change
 (`forge-pr-edit` takes `--title` and `--body`, each optional, at least one
 required); the word is about the **resource identifier**, not the content.
+`forge-pr-merge` reports it two ways: a preflight that finds the PR/MR
+already `merged` (or GitLab's lock-protected `locked`, per the **State
+Mapping** table) short-circuits to `unchanged` without ever invoking a merge
+CLI, and a merge call that genuinely succeeds also reports `unchanged` —
+merging mutates a PR/MR that already existed and mints no new identifier
+either. `status: "created"` is consequently **structurally unreachable** for
+`forge-pr-merge`, and is never emitted by that verb's own code.
 `forge-issue-create` never reports `unchanged` at all: it only ever mints a
 new issue.
 
@@ -333,6 +342,7 @@ completely intact:
 |---|---|---|
 | `forge-pr-create` | **non-zero** | Opening a PR has no fallback. `execute.md`'s per-repository loop needs a real non-zero exit for its own per-repository failure isolation. |
 | `forge-pr-edit` | **non-zero** | Same contract as `forge-pr-create`. |
+| `forge-pr-merge` | **non-zero** | Same contract as `forge-pr-create`/`forge-pr-edit`. Merging a PR/MR has no fallback either, so a caller's own per-repository failure isolation needs the identical real non-zero exit. |
 | `forge-issue-create` | **always `0`** | A failed backend issue must never block PR creation (`open-pr.md`'s documented soft-fail behavior). A caller branches on `status`, never on this verb's exit code. |
 
 What the envelope adds is an **in-band** signal: stdout is no longer silent
@@ -539,14 +549,17 @@ inheritance this file's **Credential/Identity Model** promises stays intact. A
 recorded account still outranks an ambient token, because a non-empty override
 never reaches that default.
 
-**Which calls are routed.** The four write paths — create PR, edit PR, create
-issue, resolve review thread — plus the reads a write makes as part of the same
-logical operation: `forge-pr-create`'s idempotency check and post-create
-re-read, and `forge-pr-edit`'s post-edit re-read. That last group is
-correctness, not tidiness: on a **private** repository the account that creates
-a PR can see it while a different reader account cannot, so a re-read performed
-as the machine account would fail against a PR that was just created
-successfully. `forge-pr-view` invoked **directly as its own verb** is not
+**Which calls are routed.** The five write paths — create PR, edit PR, merge
+PR, create issue, resolve review thread — plus the reads a write makes as
+part of the same logical operation: `forge-pr-create`'s idempotency check and
+post-create re-read, `forge-pr-edit`'s post-edit re-read, and
+`forge-pr-merge`'s preflight read (github only — gitlab and gitea apply no
+account override on this verb either, exactly as their existing create/edit
+adapters already do not). That last group is correctness, not tidiness: on a
+**private** repository the account that creates or merges a PR can see it
+while a different reader account cannot, so a read performed as the machine
+account could disagree with the account the write itself runs as.
+`forge-pr-view` invoked **directly as its own verb** is not
 routed and stays a plain machine-account read — only the reads made *inside* a
 write inherit the account. The one failure classifier that runs inside a write
 path is routed too, so it re-checks the account that actually failed rather than
@@ -665,11 +678,11 @@ JSON assembly per verb — mirroring how `roadmap.py`'s `_verdict` centralizes
   null-forcing discipline the read-side builder uses, differing only in
   which three values `status` may take.
 - **`_forge_build_write_data`** — `_forge_build_write_data <url> [number]`.
-  Builds the `{url, number}` object the three write verbs nest under
+  Builds the `{url, number}` object the four write verbs nest under
   `_forge_emit_write_status`'s `data` key. An empty `url` or `number` comes
   back `null`; a supplied `number` is a JSON int, never a quoted string.
-  One builder for all three verbs, so their success shapes are identical by
-  construction rather than by three hand-rolled `jq` expressions that merely
+  One builder for all four verbs, so their success shapes are identical by
+  construction rather than by four hand-rolled `jq` expressions that merely
   happen to agree.
 - **`_forge_bin_check`** — `_forge_bin_check <binary> <quiet|mandatory>
   <forge-label>`. See **Degradation Contract** above for the mode

@@ -314,7 +314,7 @@ If no brainstorm was found, or the loaded brainstorm has no `foundationProposalP
 
 ### Roadmap Materialization
 
-Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
+Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. When this is the case, set the `roadmapMaterializationVerdict` working-memory variable to `not-run` — this gate's own trigger check (the `phases:` frontmatter parse below) never evaluates this run — and proceed directly to Rolling-Wave Phase Selection below. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
 
 **Parse `phases:` frontmatter**
 
@@ -323,6 +323,8 @@ Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can
 3. **If present but fewer than 2 entries** (defensive re-check — `/aimi:brainstorm` never emits a single-entry `phases:` list, but a hand-edited or externally authored brainstorm might): treat as absent. Emit one warning line `phases: frontmatter has fewer than 2 entries — ignoring, falling back to flat flow` and skip the rest of this section.
 
 *(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] roadmap-materialization: <fired|skipped> (reason: phase-entries=<N>)` to chat, where `<N>` is the number of `phases:` entries parsed from the frontmatter (0 when the key is absent) — `fired` when `<N>` is 2 or more and the rest of this section runs, `skipped` when `<N>` is 0 (key absent) or 1 (defensive re-check above, treated as absent).)*
+
+Set the `roadmapMaterializationVerdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by the Classification Summary Line subsection below. (When a brainstorm was loaded but the `phases:` key was absent or held fewer than 2 entries, this gate's own trigger check DID run and decided not to fire — that is `skipped`, distinct from the `not-run` set at this section's entry guard above where the trigger check never evaluated at all.)
 
 **Sanitize every phase field**
 
@@ -742,9 +744,9 @@ Otherwise, emit no line.
 
 ### Scope-Context Classification (Inline Fallback)
 
-**Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here.
+**Trigger.** Runs when EITHER no brainstorm was loaded in Phase 0, OR a brainstorm was loaded but its YAML frontmatter has no `phases:` key (legacy brainstorm). When the loaded brainstorm's frontmatter DOES contain a `phases:` key, skip this subsection entirely, with no log line — that feature's phase cut was already produced by `/aimi:brainstorm`'s Phase 3.5 roadmap-definition gate and is materialized by Roadmap Materialization above; it is never reclassified here. Set the `scopeContextClassificationVerdict` working-memory variable to `not-run` on this branch — Step 1's own classification never runs this session.
 
-**Additional guard.** Also skip entirely, with no log line, when `ROADMAP_MODE` is already `true` (set by Rolling-Wave Phase Selection above). An existing `.aimi/tasks/<feature>/roadmap.json` for this feature already resolved a phase cut in an earlier session; Rolling-Wave Phase Selection has already selected and is expanding one of its phases this invocation. Proposing a new cut here would conflict with that phase.
+**Additional guard.** Also skip entirely, with no log line, when `ROADMAP_MODE` is already `true` (set by Rolling-Wave Phase Selection above). An existing `.aimi/tasks/<feature>/roadmap.json` for this feature already resolved a phase cut in an earlier session; Rolling-Wave Phase Selection has already selected and is expanding one of its phases this invocation. Proposing a new cut here would conflict with that phase. Set `scopeContextClassificationVerdict` to `not-run` on this branch too, for the identical reason — Step 1's own classification never runs.
 
 **Step 1 — Classify.** Read `${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md` (the `${CLAUDE_PLUGIN_ROOT}` prefix is required — it is the only form `install.sh` rewrites to `${AIMI_PLUGIN_DIR}` for OpenCode) and apply its Cut Criteria, Collapse Rule, and Anti-Patterns — the same shared reference `/aimi:brainstorm`'s Phase 3.5 Step 1 applies, exactly as written there; do not restate them here — to the feature description plus any `businessSpecContent`, `designSpecContent`, or already-loaded prototype content this session. The question this step answers is *which scope contexts exist in this feature*, never *how many stories does this need*; no numeric story-count threshold applies anywhere in this subsection.
 
@@ -752,6 +754,8 @@ Otherwise, emit no line.
 - **2 or more scope contexts identified:** continue to Step 2.
 
 *(Optional debug: if `AIMI_PLAN_DEBUG=1`, emit `[plan-debug] scope-context-classification: <fired|skipped> (reason: scope-contexts=<N>)` to chat, where `<N>` is the scope-context count Step 1 classified — `fired` when `<N>` is 2 or more (Step 2 proposes a phase cut), `skipped` when `<N>` is 0 or 1 (fall straight through to Phase 0.5).)*
+
+Set the `scopeContextClassificationVerdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by the Classification Summary Line subsection below. (Step 1 itself ran and classified 0 or 1 scope contexts here — that is `skipped`, distinct from the `not-run` set at this subsection's Trigger/Additional Guard above where Step 1 never ran at all.)
 
 **Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact **identity** appearing in more than one proposed phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide), promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
 
@@ -818,6 +822,21 @@ This mirrors `commands/brainstorm.md` Phase 3.5 Step 4, scoped to the feature de
 4. Set `ROADMAP_MODE=true` and continue at Rolling-Wave Phase Selection's "Load the roadmap and compute eligible pending phases" step above, treating the roadmap this step just wrote exactly as an existing one. Since every phase in a freshly created roadmap is `pending` with no live claim, the bare-invocation branch of "Select the target phase" selects the lowest eligible id automatically — confining this invocation to exactly one phase, per Rolling-Wave Phase Selection's rule; every other phase remains an outline-only entry in `roadmap.json` until a later `/aimi:plan` invocation selects it.
 
 No parallel roadmap-write or phase-selection logic is implemented in this subsection — every step above re-enters an existing section by name rather than reimplementing it.
+
+### Classification Summary Line
+
+Emit exactly one line to chat, unconditionally — on every run, never gated behind `AIMI_PLAN_DEBUG` or any other environment variable — after both Roadmap Materialization and Scope-Context Classification (Inline Fallback) above have reached their own verdict. Read `roadmapMaterializationVerdict` and `scopeContextClassificationVerdict` back from working memory; this step never recomputes either.
+
+```
+[classification] roadmap-materialization=<roadmapMaterializationVerdict> scope-context-classification=<scopeContextClassificationVerdict>
+```
+
+Each token distinguishes the gate's own trigger check never running from the trigger check running and deciding not to fire:
+
+- **`roadmap-materialization`** reads `not-run` when no brainstorm was loaded in Phase 0 (Roadmap Materialization's own "only runs when a brainstorm was loaded" guard means its `phases:` frontmatter parse never evaluates this run), and reads `skipped` — never `not-run` — when a brainstorm WAS loaded but its frontmatter's `phases:` key was absent or held fewer than 2 entries (the section's own debug line's `skipped` case).
+- **`scope-context-classification`** reads `not-run` when either its Trigger guard (a loaded brainstorm's frontmatter already carries a `phases:` key) or its Additional Guard (`ROADMAP_MODE` already `true` on entry) short-circuits before Step 1's own classification ever runs, and reads `skipped` — never `not-run` — only when Step 1 itself ran and classified 0 or 1 scope contexts (that subsection's own debug line's `skipped` case).
+
+This line carries only the two gate-name=token pairs above — no free-text classification content, scope-context names, phase names or goals, and no `reason:` detail. The two `[plan-debug]` lines above remain the only place that detail is carried, unchanged and still opt-in behind `AIMI_PLAN_DEBUG`; this line is an always-on summary above them, not a replacement.
 
 ### Phase 0.5: Open Questions Resolution Gate
 
@@ -2139,7 +2158,7 @@ After all expansions complete (in parallel):
 
 ## Phase 3d.5: Cross-Story DAG Audit
 
-After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption.
+After all Pass 2 expansions complete (and the Failure Budget decision is made), the orchestrator optionally spawns a single `aimi-cross-story-auditor` agent to detect cross-story dependency gaps, endpoint-name drift, missing integration tasks, and approach duplication across the full set of staging files. The agent reads all staging JSON contents provided inline in its prompt and emits a `{patches[], unresolved[]}` JSON object. The orchestrator then applies allowlisted patches directly to the staging files using Edit/Write tools before invoking story-merge. This phase is entirely non-blocking: if the auditor fails or produces no useful patches, plan generation continues to Phase 3e without interruption. A non-empty `unresolved[]` list stays non-blocking here (see outline:04); it becomes a blocking pipeline decision only in that follow-up story. That follow-up story is the Phase 3d.5 Unresolved Gate below — once this phase's `unresolved[]` list has finished accumulating, a non-empty list is never silently dropped: it is applied, deferred with a recorded reason, or the run is aborted before story-merge.
 
 ### Skip Condition
 
@@ -2242,21 +2261,36 @@ Drop any patch whose `storyIdx` value either (a) does not match the regex `^[0-9
 
 #### Field allowlist
 
-Drop any patch whose `field` value is not one of: `dependsOn`, `tasks`, `notes`. Treat dropped patches as malformed; skip silently without logging.
+Drop any patch whose `field` value is not one of: `dependsOn`, `tasks`, `notes`, `acceptanceCriteria`, `implementation.approach`, `gate.prompt`. Treat dropped patches as malformed; skip silently without logging.
 
 #### Op allowlist
 
-Drop any patch whose `op` value is not `add`. Only `add` is supported; `replace` and `remove` are not part of the contract. Treat dropped patches as malformed; skip silently.
+The valid `op` depends on the target `field` — there is no single global op anymore:
+
+| `field` | Valid `op` |
+|---|---|
+| `dependsOn`, `tasks`, `notes` | `add` (unchanged append / paragraph-accumulate semantics) |
+| `acceptanceCriteria`, `implementation.approach`, `gate.prompt` | `replace` |
+
+Drop any patch whose `op`/`field` pairing is not in this table — `add` on `gate.prompt`, `replace` on `tasks`, `remove` on anything, etc. Treat dropped patches as malformed; skip silently.
+
+#### Dotted field-path resolution
+
+`field` is usually a top-level key, but two of the six allowlisted values — `implementation.approach` and `gate.prompt` — are dotted paths into a nested object. Resolve a dotted `field` by splitting it on `.` and matching the result against a **closed, two-literal allowlist**: only the exact strings `implementation.approach` and `gate.prompt` are recognized. Any other value containing a `.` (a different two-segment path, or anything with more than one dot) is dropped as malformed, the same as a field outside the top-level allowlist. This is a fixed lookup over two known cases, not a generic dotted-path or JSON-pointer traversal — no such resolver is introduced.
 
 #### Value sanitization for string fields
 
-For patches targeting `tasks` (array of strings) or `notes` (scalar string), sanitize the `value` before applying:
+For patches targeting `tasks` (array of strings), `notes`, `acceptanceCriteria` entries, `implementation.approach`, or `gate.prompt` (all scalar strings), sanitize `value` before applying — and, on an `acceptanceCriteria` replace patch, sanitize `matchValue` the same way:
 - Strip any `$(` sequences (prevents shell-substitution markers from reaching downstream executors).
 - Remove backtick characters.
 - Reject the patch entirely (drop silently) when the value contains the literal substrings `ignore previous`, `system:`, or `INSTRUCTIONS` (case-insensitive) — these match the forbidden-strings the existing tasks-validator rejects.
 - Truncate to 5000 characters (the same per-entry length cap that `validate-tasks` enforces).
 
+This is the same sanitization pass as before, reused unchanged and simply applied to a wider set of string inputs — no second sanitizer is introduced.
+
 Patches targeting `dependsOn` skip this sanitization (the value MUST already be a strict `outline:NN` token; reject anything else as malformed).
+
+`matchValue` is required only on `op: replace` patches targeting `acceptanceCriteria`. Drop the patch as malformed when `matchValue` is missing, empty, or not a string.
 
 #### Per-story patch cap
 
@@ -2273,7 +2307,7 @@ where `<N>` is the count of patches dropped for that `storyIdx`. One entry per a
 Before writing a patched staging file to disk, verify that the resulting JSON object:
 1. Parses as valid JSON (well-formed).
 2. Contains the required fields: `title`, `description`, `acceptanceCriteria` (non-empty array), `status` (`"pending"`), `dependsOn` (array), `verification` (object with `strategy` and `status`).
-3. Per-field type check on the patched field: `dependsOn` MUST be an array of strings; `tasks` MUST be an array of strings; `notes` MUST be a string.
+3. Per-field type check on the patched field: `dependsOn` MUST be an array of strings; `tasks` MUST be an array of strings; `notes` MUST be a string; `acceptanceCriteria` MUST remain a non-empty array of strings; `implementation.approach` MUST remain a non-empty string; `gate.prompt`, when patched, MUST remain a non-empty string inside an intact `gate` object.
 
 If the post-patch object fails any check, **roll back that single patch** and continue processing the remaining patches in sequence. Do not propagate the validation failure — skip the offending patch silently.
 
@@ -2285,6 +2319,9 @@ Group surviving patches by `storyIdx`. For each `storyIdx` with one or more patc
 2. Apply each patch in the group sequentially against the in-memory object, in the deterministic order they appeared in the auditor's output:
    - `op: add` on `dependsOn` or `tasks` (array fields) — append `value` to the existing array.
    - `op: add` on `notes` (scalar string field) — when `notes` is non-empty, set `notes = existing + "\n\n---\n\n" + value`; when `notes` is empty/absent, set `notes = value`. Multiple `add` patches to the same `notes` accumulate paragraph-by-paragraph; no patch silently overwrites a prior one.
+   - `op: replace` on `acceptanceCriteria` — locate the array entry equal to `matchValue` by exact string match. Exactly one match: splice `value` in at that index, replacing the matched entry. Zero matches or more than one match: drop this individual patch — the rest of the group's patches still apply — and never let a replace reduce the array to empty.
+   - `op: replace` on `implementation.approach` — overwrite the scalar string with `value`.
+   - `op: replace` on `gate.prompt` — overwrite the scalar string with `value` only when the object already has a `gate` object with an existing, non-null `prompt`. When `gate` or `gate.prompt` is absent, drop this individual patch as malformed instead of inventing a new `gate`.
 3. After all patches in the group are applied, run the pre-validation check on the final object. If pre-validation fails, retry by applying patches one-by-one and dropping the first patch whose result fails validation (per-patch rollback semantics); repeat until either the object passes or all patches in the group are exhausted.
 4. Write the final patched object back to the staging file using the Edit or Write tool — exactly **one** write per affected staging file.
 5. Do not modify `outline.json`, `metadata.json`, `audit-result.json`, or any sidecar file — only per-story staging files (`<idx>-<slug>.json`) are eligible for patching.
@@ -2315,19 +2352,73 @@ No patches are applied. Proceed immediately to Phase 3e.
 
 ### Agent-Mode Behavior
 
-When `INTERACTIVE_MODE=agent`, the audit runs normally: the auditor Task is spawned, patches are validated, and approved patches are applied to staging files. No behavior is suppressed. Any entries accumulated in `unresolved[]` (from auditor output or from the Failure Fallback) are emitted as log lines prefixed `[plan]` rather than surfacing a blocking gate. Emit:
+When `INTERACTIVE_MODE=agent`, the audit runs normally: the auditor Task is spawned, patches are validated, and approved patches are applied to staging files. No behavior is suppressed. Emit one interim log line naming the patches applied and the `unresolved[]` entries accumulated so far this phase:
 
 ```
 [plan] agent-mode: phase-3d.5 ran with <N> patches, <M> unresolved
 ```
 
-where N is the count of patches successfully applied and M is the count of `unresolved[]` entries added during this phase.
+where N is the count of patches successfully applied and M is the count of `unresolved[]` entries added during this phase. **This count is interim, not the final disposition** — the Phase 3d.5 Unresolved Gate below still runs afterward and decides what happens to any non-empty `unresolved[]` list. It never blocks an agent-mode run (see that subsection's own agent-mode fallback), but it is not silent either: every unresolved item is deferred with a recorded reason and flagged on its story.
 
 ### unresolved[] Forwarding
 
 The working-memory `unresolved[]` list (schema: `{storyIdx: string, message: string}`) is accumulated during Phase 3d.5 and forwarded to Step 5 / Phase 4 for inclusion in the plan report.
 
 `storyIdx` is normally a zero-padded outline index (e.g., `"01"`). One reserved sentinel value is also valid: `"_audit"` denotes an audit-system entry (auditor crash via Failure Fallback, or a per-storyIdx cap notice that is not tied to a single failure). Consumers that parse `storyIdx` as an outline index must treat `_audit` as a non-indexable system entry.
+
+Before that forwarding reaches Step 5 or Phase 4, the accumulated list passes through the Phase 3d.5 Unresolved Gate immediately below, which decides — per run, not per item — whether it ships applied, deferred, or aborts story-merge outright.
+
+### Phase 3d.5 Unresolved Gate
+
+**Fires once**, immediately after the full-run `unresolved[]` list above has finished accumulating — after Patch Validation's per-storyIdx cap-drop entries and the auditor's own returned `unresolved[]` entries, and after the Failure Fallback's own stub entry when that path fired instead. Never mid-accumulation. When `unresolved[]` is empty at this point — including every run where the Skip Condition fired (fewer than 2 staged stories, so nothing above ever populated the list) — this gate is a no-op: no AskUserQuestion, no log line, proceed straight to Phase 3e.
+
+**Interactive mode.** When `unresolved[]` is non-empty, sanitize each entry's `message` using the same four-step regime the Step 5 `Audit warnings` bullets use (replace newlines/CRs with spaces, strip `$(`, remove backticks, truncate to 200 characters, append `…` on truncation). Present **one** AskUserQuestion covering the whole accumulated list at once — never a per-item loop — rendering every entry as a bullet:
+
+```
+[storyIdx]: [sanitized message]
+[storyIdx]: [sanitized message]
+…
+```
+
+with exactly three options, verbatim:
+
+```
+Apply anyway — proceed to story-merge without acting on these findings
+Defer with reason — annotate the affected stories and proceed
+Abort — stop before story-merge; nothing is written this run
+```
+
+- **[Apply anyway]:** proceed straight to Phase 3e — no staging-file change. Still record one `oqDecisions[]` entry per `unresolved[]` item:
+  ```json
+  {
+    "anchor": "auditUnresolved:<storyIdx>",
+    "source": "auditGate",
+    "text": "<sanitized message>",
+    "resolution": "applied"
+  }
+  ```
+  `<storyIdx>` is the entry's own `storyIdx` value verbatim (a zero-padded index, or `_audit`). A reviewed-and-accepted finding gets the same paper trail a deferred one gets — mirroring the Phase 1.8 scope-pruning gates' own precedent of recording a CONFIRM outcome, not staying silent the way today's `Audit warnings` bullet does.
+
+- **[Defer with reason]:** ask one open follow-up free-text question — "What is the reason for deferring these unresolved findings?" — then sanitize the answer: strip newlines/CRs to spaces, strip `$(`, remove backticks, truncate to 500 characters (the same regime Phase 1.6b's research-conflict text already uses). Then, for every `unresolved[]` entry whose `storyIdx` matches `^[0-9]{2}$` and resolves through the `idx → staging file` lookup map (`idx_to_file`, built during Patch Validation above), append the fixed marker `[audit-deferred: unresolved — review before execution]` plus that entry's sanitized message to the target story's `notes` field — the same paragraph-accumulation semantics the `notes` `op: add` patches above already use (existing non-empty `notes` gets `\n\n---\n\n` before the new paragraph; multiple entries targeting the same `storyIdx` accumulate paragraph-by-paragraph; no entry silently overwrites a prior one), coalescing every entry that targets the same `storyIdx` into one read and one write per file. An entry that does not resolve this way — the `_audit` sentinel, or any `storyIdx` with no matching staging file — is never annotated onto a story (there is no staging file to annotate) but still receives its own `oqDecisions[]` entry below. Record one `oqDecisions[]` entry per `unresolved[]` item, annotated or not:
+  ```json
+  {
+    "anchor": "auditUnresolved:<storyIdx>",
+    "source": "auditGate",
+    "text": "<sanitized message> — reason: <sanitized reason>",
+    "resolution": "deferred"
+  }
+  ```
+  Proceed to Phase 3e.
+
+- **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion — an unattended run cannot answer one. It auto-selects **Defer with reason** using the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a closed, hardcoded literal — not re-sanitized), applying the identical story-notes annotation and `oqDecisions[]` recording the interactive Defer path uses above. Emit exactly one log line:
+
+```
+agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review
+```
+
+where `<N>` is the total count of `unresolved[]` entries processed by this gate, and `<F>` is the count of distinct `storyIdx` values annotated onto a story (excluding `_audit`, and excluding any `storyIdx` that did not resolve through `idx_to_file`).
 
 ## Phase 3e: story-merge Invocation
 
@@ -2493,7 +2584,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
-- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, AND phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
+- **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate, AND the Phase 3d.5 Unresolved Gate below. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
 - **execution**: For flat tasks.json files (`ROADMAP_MODE=false`, no `metadata.phase`) — including flat full-stack split pairs — write the literal string `"container"` explicitly into every freshly generated file. For phase-scoped files (`ROADMAP_MODE=true`, `metadata.phase` present) — including phase-mode split pairs — omit the key entirely: a claimed phase always executes inside its own phase container (see execute.md's Create or Reuse the Phase Container), so the flat-mode discriminator would be dead data there. `/aimi:execute --container`/`--inline` and `/aimi:next --container`/`--inline` can later override the effective mode for a single invocation and persist the change onto a flat file via `aimi-cli.sh set-execution-mode`; that persistence is those commands' responsibility, not `/aimi:plan`'s. See `commands/references/execution-mode.md` for the full read/override contract.
 - **frontendOnly** (when `implementationScope == "frontend-only"`): `true`
@@ -2697,7 +2788,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 
 **Notes:** `implementation`, `verification`, `gate`, `skills`, and `tasks` are optional per story. `wave` is required on all stories. `metadata.splitGroup` is written by `story-merge` on the **PROJECT axis only** and preserved verbatim by Phase 4 — SIDE-axis, legacy, and frontend-only files have no `splitGroup` key and none should be invented for them. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at that project's own repo.
 
-**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Twelve valid source values:
+**`metadata.decisions[].source` field:** each entry records where the Open Question or outline edit originated. Thirteen valid source values:
 - `<brainstorm-path>:L<line>` — an OQ line from the brainstorm doc (Phase 0.5)
 - `businessSpec:L<line>` — a marker-style OQ scanned from `businessSpecContent` (Phase 0.5)
 - `designSpec:L<line>` — a marker-style OQ scanned from `designSpecContent` (Phase 0.5)
@@ -2710,6 +2801,7 @@ The `metadata.backendSpec.endpoints[].responseShape` field follows a strict flat
 - `codebaseVerified` — auto-resolved by Phase 2.4 codebase cross-check; evidence field holds classified file:line hits
 - `outline` — an outline-gate edit recorded in Phase 3c (rename, add, remove, reorder)
 - `phase` — a phase-cut Edit round recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate; anchor format `phase:edit:<idx>` (zero-padded index into the proposed phase list at edit time). Distinct from `/aimi:brainstorm`'s own roadmap-gate edits, which are local to that command's `phaseEditDecisions[]` working memory and use `source: "phaseGate"` instead — the two never share a decisions array.
+- `auditGate` — a decision recorded by the Phase 3d.5 Unresolved Gate (anchor `auditUnresolved:<storyIdx-or-_audit>`); `resolution` is `applied` | `deferred`
 
 Consumers can branch on the prefix to distinguish decisions by origin.
 
@@ -2853,7 +2945,8 @@ Outline: [N] stories (edits: [M])
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
-[If audit unresolved non-empty]: Audit warnings: [N] cross-story issues
+[If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
+[If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
 [If metadata.smellWarnings non-empty]: Smell warnings: [N] finding(s)
 [If 10+ stories]: Warning: [N] stories generated. Consider splitting into smaller feature sets.
 [If parallel stories detected]: Parallel groups: [N] stories can run concurrently (max concurrency: [maxConcurrency])
@@ -2870,7 +2963,11 @@ Next steps:
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
 
-**Audit warnings line:** present only when Phase 3d.5 ran and `unresolved[]` is non-empty. `N` is the count of items in `unresolved[]`. Render each item as a bullet immediately after the `Audit warnings` line:
+**Audit warnings / Audit deferred line:** present only when Phase 3d.5 ran, `unresolved[]` was non-empty, and the Phase 3d.5 Unresolved Gate above resolved it via **Apply anyway** or **Defer with reason** — never via Abort, since Step 5 is never reached on that path. `N` is the count of items in `unresolved[]`. The two lines are mutually exclusive, keyed by the gate's outcome:
+- **Apply anyway:** `Audit warnings: [N] cross-story issue(s) — reviewed, applied`
+- **Defer with reason** (chosen interactively, or auto-selected by the agent-mode fallback): `Audit deferred: [N] item(s) — flagged on affected stories, review before execution`
+
+Either way, render each item as a bullet immediately after that line:
 - `[storyIdx]: [sanitized message]` — `storyIdx` and `message` come from the `unresolved[]` entry schema `{storyIdx, message}`.
 
 **Sanitization before rendering** — auditor-emitted `message` strings carry text that originated (transitively) from sub-agent output and may contain hostile characters. Before rendering each bullet, apply this sanitization to the `message` field in order:
@@ -2879,7 +2976,7 @@ Next steps:
 3. Remove backtick characters.
 4. Truncate to 200 characters; append `…` when truncation fires.
 
-The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty or Phase 3d.5 was skipped (fewer than 2 stories), omit the `Audit warnings` line and bullet list entirely — do not render an empty section.
+The `storyIdx` field is already constrained by the schema (`^[0-9]{2}$` or the `_audit` sentinel) and requires no sanitization. When `unresolved[]` is empty, Phase 3d.5 was skipped (fewer than 2 stories), or the gate resolved via Abort (in which case Step 5 is never reached at all), omit both lines and the bullet list entirely — do not render an empty section.
 
 **Smell warnings line:** present only when the merged tasks.json has a non-empty `metadata.smellWarnings` array. `N` is the count of entries. Render each item as a bullet immediately after the `Smell warnings` line, choosing the case that matches its `type`:
 
@@ -2926,12 +3023,14 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 3d | Pass 2 sub-agent fails schema validation after 2 retries | Mark permanently failed; surface to user with skip/retry-with-hint/abort options; auto-skip in agent-mode |
 | Phase 3d.5 | Auditor Task crashes, times out, or returns malformed JSON | Skip silently; one log line, one `unresolved[]` entry; proceed to Phase 3e without patches |
 | Phase 3d.5 | Patch has invalid `storyIdx` (not `^[0-9]{2}$` or no matching staging file in `RUN_DIR`) | Skip patch silently as malformed; do not abort |
-| Phase 3d.5 | Patch targets field outside allowlist (`dependsOn`/`tasks`/`notes`) | Skip patch silently as malformed; do not abort |
-| Phase 3d.5 | Patch has `op` other than `add` | Skip patch silently as malformed; do not abort |
+| Phase 3d.5 | Patch targets field outside allowlist (`dependsOn`/`tasks`/`notes`/`acceptanceCriteria`/`implementation.approach`/`gate.prompt`) | Skip patch silently as malformed; do not abort |
+| Phase 3d.5 | Patch's `op`/`field` pairing is outside the matrix (`add` valid only for `dependsOn`/`tasks`/`notes`; `replace` valid only for `acceptanceCriteria`/`implementation.approach`/`gate.prompt`) | Skip patch silently as malformed; do not abort |
 | Phase 3d.5 | Patch `value` fails sanitization (forbidden substrings, length > 5000 chars) | Skip patch silently as malformed |
 | Phase 3d.5 | Patches exceed 10-per-storyIdx cap | Drop excess silently with one aggregate `unresolved[]` entry naming the storyIdx |
 | Phase 3d.5 | Patch result fails post-apply JSON / required-field / per-field type validation | Roll back the single patch; continue with remaining patches |
 | Phase 3d.5 | Auditor prompt exceeds 150 KB total cap | Drop research file blocks then largest staging blocks until under cap; emit one chat warning line per dropped block |
+| Phase 3d.5 | Unresolved Gate: `unresolved[]` non-empty once accumulation is complete | Interactively, present one AskUserQuestion covering the whole list (Apply anyway / Defer with reason / Abort); in agent-mode, auto-select Defer with reason with a fixed system-authored reason — the gate never blocks an unattended run |
+| Phase 3d.5 | Unresolved Gate: user selects Abort | Stop before `story-merge` is invoked; preserve `RUN_DIR` for inspection; write no `tasks.json` this run; do not call `roadmap-set-status`; record no `oqDecisions[]` entries for this gate |
 | Phase 3e | story-merge exits non-zero | Report error with full stderr output; preserve staging dir for inspection; do not write tasks.json manually; do NOT call roadmap-set-status |
 | Phase 4 | File write fails | Report error with path |
 | Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |

@@ -5008,6 +5008,514 @@ EOF
   rm -f "$fixture_file"
 }
 
+# ============================================================================
+# --tasks-file Honor/Refuse Tests (US-001)
+# ============================================================================
+#
+# US-001 split all 23 tasks.json verbs into 21 that HONOR --tasks-file (parse
+# it, resolve+confine it via validate_path_in_project exactly like
+# verification-report/project-groups above, and answer from or mutate THAT
+# file rather than the pointer's) and 2 that REFUSE it (current-story,
+# get-branch — their answer comes from session state, and a tasks file is
+# only a secondary lookup keyed by that state, so a per-call override has no
+# coherent meaning). Every test below proves ONE of those two outcomes for
+# ONE verb; none may silently answer from the pointer while accepting the
+# flag.
+
+# A second tasks file, distinct from $TASKS_FILE (the session-pointed one),
+# shared by every read-only and write honor test below that does not need a
+# defect of its own. Two stories so list-ready, count-pending and
+# validate-ids each have a signal (US-901 blocked on US-900, a story count of
+# 2) that $TASKS_FILE's four stories can never produce, and US-900 carries a
+# gate so gate-pass/gate-fail have one to act on. The gate's type is "action"
+# rather than "decision": only a pending DECISION gate blocks its own story's
+# readiness (is_ready), and this fixture's US-900 also has to be the one
+# ready story list-ready sees.
+_write_tasks_file_flag_fixture() {
+  local path="$1"
+  cat > "$path" << 'FLAGFIXTUREEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Second tasks file for --tasks-file flag tests",
+    "type": "feat",
+    "branchName": "feat/tasks-file-flag-second",
+    "createdAt": "2026-08-26",
+    "planPath": null,
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-900",
+      "title": "Second-file story",
+      "description": "Lives only in the second tasks file",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 1,
+      "status": "pending",
+      "dependsOn": [],
+      "notes": "",
+      "wave": 0,
+      "gate": {"type": "action", "status": "pending", "prompt": "Second-file gate?"}
+    },
+    {
+      "id": "US-901",
+      "title": "Second-file dependent story",
+      "description": "Depends on US-900, lives only in the second tasks file",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 2,
+      "status": "pending",
+      "dependsOn": ["US-900"],
+      "notes": "",
+      "wave": 1
+    }
+  ]
+}
+FLAGFIXTUREEOF
+}
+
+test_tasks_file_flag_honored_by_read_verbs() {
+  echo ""
+  echo "=== Testing --tasks-file is honored by the read-only verbs: each answers from the named file, not the pointer's ==="
+
+  local second_file="$TASKS_DIR/9999-99-89-tasks-file-flag-read.json"
+  _write_tasks_file_flag_fixture "$second_file"
+
+  local output
+
+  output=$("$CLI" metadata --tasks-file "$second_file")
+  assert_eq "feat/tasks-file-flag-second" "$(printf '%s' "$output" | jq -r '.branchName')" \
+    "metadata --tasks-file: answers the named file's branchName, not the pointer's"
+
+  output=$("$CLI" status --tasks-file "$second_file")
+  assert_eq "2" "$(printf '%s' "$output" | jq '.total')" \
+    "status --tasks-file: answers the named file's story count, not the pointer's"
+
+  output=$("$CLI" list-ready --brief --tasks-file "$second_file")
+  assert_eq '["US-900"]' "$(printf '%s' "$output" | jq -c '[.[].id]')" \
+    "list-ready --tasks-file: only the named file's unblocked story is ready"
+
+  output=$("$CLI" count-pending --tasks-file "$second_file")
+  assert_eq "2" "$output" \
+    "count-pending --tasks-file: counts the named file's stories, not the pointer's"
+
+  output=$("$CLI" get-story US-900 --tasks-file "$second_file")
+  assert_eq "Second-file story" "$(printf '%s' "$output" | jq -r '.title')" \
+    "get-story --tasks-file: reads the story from the named file"
+
+  output=$("$CLI" get-story-context US-900 --tasks-file "$second_file")
+  assert_eq "Second-file story" "$(printf '%s' "$output" | jq -r '.story.title')" \
+    "get-story-context --tasks-file: reads the story from the named file"
+
+  output=$("$CLI" validate-ids --tasks-file "$second_file")
+  assert_eq '{"count":2,"valid":true}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "validate-ids --tasks-file: counts the named file's two ids, not the pointer's four"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_mark_in_progress() {
+  echo ""
+  echo "=== Testing mark-in-progress honors --tasks-file: mutates the named file, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-88-tasks-file-flag-mip.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" mark-in-progress US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "mark-in-progress --tasks-file: exits 0"
+  assert_eq '{"id":"US-900","status":"in_progress"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-in-progress --tasks-file: echoes back the named file's story"
+  assert_eq "in_progress" "$(jq -r '.userStories[] | select(.id == "US-900") | .status' "$second_file")" \
+    "mark-in-progress --tasks-file: on disk, the named file's story is in_progress"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "mark-in-progress --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_mark_complete() {
+  echo ""
+  echo "=== Testing mark-complete honors --tasks-file: mutates the named file, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-87-tasks-file-flag-mc.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" mark-complete US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "mark-complete --tasks-file: exits 0"
+  assert_eq '{"id":"US-900","status":"completed"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-complete --tasks-file: echoes back the named file's story"
+  assert_eq "completed" "$(jq -r '.userStories[] | select(.id == "US-900") | .status' "$second_file")" \
+    "mark-complete --tasks-file: on disk, the named file's story is completed"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "mark-complete --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_mark_failed() {
+  echo ""
+  echo "=== Testing mark-failed honors --tasks-file, and a notes value starting with -- passes through unaltered ==="
+
+  local second_file="$TASKS_DIR/9999-99-86-tasks-file-flag-mf.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" mark-failed US-900 "--looks-like-a-flag notes" --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "mark-failed --tasks-file: exits 0"
+  assert_eq '{"id":"US-900","notes":"--looks-like-a-flag notes","status":"failed"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-failed --tasks-file: echoes back the named file's story, notes unaltered despite starting with --"
+  assert_eq "--looks-like-a-flag notes" "$(jq -r '.userStories[] | select(.id == "US-900") | .notes' "$second_file")" \
+    "mark-failed --tasks-file: on disk, the named file's story carries the literal notes"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "mark-failed --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_mark_skipped() {
+  echo ""
+  echo "=== Testing mark-skipped honors --tasks-file: mutates the named file, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-85-tasks-file-flag-ms.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" mark-skipped US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "mark-skipped --tasks-file: exits 0"
+  assert_eq '{"id":"US-900","status":"skipped"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-skipped --tasks-file: echoes back the named file's story"
+  assert_eq "skipped" "$(jq -r '.userStories[] | select(.id == "US-900") | .status' "$second_file")" \
+    "mark-skipped --tasks-file: on disk, the named file's story is skipped"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "mark-skipped --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_cascade_skip() {
+  echo ""
+  echo "=== Testing cascade-skip honors --tasks-file: skips the named file's dependent, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-84-tasks-file-flag-cs.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" cascade-skip US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "cascade-skip --tasks-file: exits 0"
+  assert_eq '{"skipped":["US-901"],"count":1}' "$(printf '%s' "$output" | jq -c '.')" \
+    "cascade-skip --tasks-file: skips the named file's dependent story, US-901"
+  assert_eq "skipped" "$(jq -r '.userStories[] | select(.id == "US-901") | .status' "$second_file")" \
+    "cascade-skip --tasks-file: on disk, the named file's dependent is skipped"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "cascade-skip --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_gate_pass() {
+  echo ""
+  echo "=== Testing gate-pass honors --tasks-file: passes the named file's gate, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-83-tasks-file-flag-gp.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-pass US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "gate-pass --tasks-file: exits 0"
+  assert_eq "passed" "$(printf '%s' "$output" | jq -r '.gate.status')" \
+    "gate-pass --tasks-file: passes the named file's gate"
+  assert_eq "passed" "$(jq -r '.userStories[] | select(.id == "US-900") | .gate.status' "$second_file")" \
+    "gate-pass --tasks-file: on disk, the named file's gate is passed"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "gate-pass --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_gate_fail() {
+  echo ""
+  echo "=== Testing gate-fail honors --tasks-file: fails the named file's gate, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-82-tasks-file-flag-gf.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" gate-fail US-900 --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "gate-fail --tasks-file: exits 0"
+  assert_eq "failed" "$(printf '%s' "$output" | jq -r '.gate.status')" \
+    "gate-fail --tasks-file: fails the named file's gate"
+  assert_eq "failed" "$(jq -r '.userStories[] | select(.id == "US-900") | .gate.status' "$second_file")" \
+    "gate-fail --tasks-file: on disk, the named file's gate is failed"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "gate-fail --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_update_field() {
+  echo ""
+  echo "=== Testing update-field honors --tasks-file, and a value starting with -- passes through unaltered ==="
+
+  local second_file="$TASKS_DIR/9999-99-81-tasks-file-flag-uf.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" update-field US-900 verification.status "--not-a-flag" --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "update-field --tasks-file: exits 0"
+  assert_eq '{"id":"US-900","verification":{"status":"--not-a-flag"}}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "update-field --tasks-file: echoes back the named file's story, value unaltered despite starting with --"
+  assert_eq "--not-a-flag" "$(jq -r '.userStories[] | select(.id == "US-900") | .verification.status' "$second_file")" \
+    "update-field --tasks-file: on disk, the named file's story carries the literal value"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "update-field --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_set_execution_mode() {
+  echo ""
+  echo "=== Testing set-execution-mode honors --tasks-file: persists onto the named file, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-80-tasks-file-flag-sem.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" set-execution-mode container --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "set-execution-mode --tasks-file: exits 0"
+  assert_contains '"execution":"container"' "$output" \
+    "set-execution-mode --tasks-file: reports execution:container"
+  assert_eq "container" "$(jq -r '.metadata.execution' "$second_file")" \
+    "set-execution-mode --tasks-file: on disk, the named file's metadata.execution is container"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "set-execution-mode --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_reset_orphaned() {
+  echo ""
+  echo "=== Testing reset-orphaned honors --tasks-file: resets the named file's orphan, leaves the pointer's untouched ==="
+
+  local second_file="$TASKS_DIR/9999-99-79-tasks-file-flag-ro.json"
+  _write_tasks_file_flag_fixture "$second_file"
+  # Put US-900 in_progress directly on disk, so this test does not lean on
+  # mark-in-progress's own --tasks-file honoring to set up its fixture.
+  local orphaned
+  orphaned=$(jq '(.userStories[] | select(.id == "US-900") | .status) = "in_progress"' "$second_file")
+  printf '%s\n' "$orphaned" > "$second_file"
+  local pre_pointer
+  pre_pointer=$(jq -S '.' "$TASKS_FILE")
+
+  local output exit_code=0
+  output=$("$CLI" reset-orphaned --tasks-file "$second_file") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "reset-orphaned --tasks-file: exits 0"
+  assert_eq '{"count":1,"reset":["US-900"]}' "$(printf '%s' "$output" | jq -c '.')" \
+    "reset-orphaned --tasks-file: resets the named file's orphaned story, US-900"
+  assert_eq "failed" "$(jq -r '.userStories[] | select(.id == "US-900") | .status' "$second_file")" \
+    "reset-orphaned --tasks-file: on disk, the named file's orphan is now failed"
+
+  local post_pointer
+  post_pointer=$(jq -S '.' "$TASKS_FILE")
+  assert_eq "$pre_pointer" "$post_pointer" "reset-orphaned --tasks-file: leaves the pointer's tasks file byte-for-byte unchanged"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_validate_deps() {
+  echo ""
+  echo "=== Testing validate-deps honors --tasks-file: reports the named file's own dangling dependency ==="
+
+  local second_file="$TASKS_DIR/9999-99-78-tasks-file-flag-deps.json"
+  cat > "$second_file" << 'DEPSFLAGEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: deps flag test", "type": "feat", "branchName": "feat/deps-flag-test", "createdAt": "2026-08-26", "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Dangling-dep story", "description": "d", "acceptanceCriteria": ["a"], "priority": 1, "status": "pending", "dependsOn": ["US-899"], "notes": ""}
+  ]
+}
+DEPSFLAGEOF
+
+  local output exit_code=0
+  output=$("$CLI" validate-deps --tasks-file "$second_file" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-deps --tasks-file: refuses the named file's dangling dependency"
+  assert_contains "US-899" "$output" "validate-deps --tasks-file: names the named file's own missing id, which the pointer's file never carries"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_validate_stories() {
+  echo ""
+  echo "=== Testing validate-stories honors --tasks-file: reports the named file's own content defect ==="
+
+  local second_file="$TASKS_DIR/9999-99-77-tasks-file-flag-stories.json"
+  cat > "$second_file" << 'STORIESFLAGEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: stories flag test", "type": "feat", "branchName": "feat/stories-flag-test", "createdAt": "2026-08-26", "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Absolute-project story", "description": "d", "acceptanceCriteria": ["a"], "priority": 1, "status": "pending", "dependsOn": [], "notes": "", "project": "/etc"}
+  ]
+}
+STORIESFLAGEOF
+
+  local output exit_code=0
+  output=$("$CLI" validate-stories --tasks-file "$second_file" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-stories --tasks-file: refuses the named file's absolute project path"
+  assert_contains "must not be an absolute path" "$output" "validate-stories --tasks-file: names the named file's own defect"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_validate_waves() {
+  echo ""
+  echo "=== Testing validate-waves honors --tasks-file: reports the named file's own wave mismatch ==="
+
+  local second_file="$TASKS_DIR/9999-99-76-tasks-file-flag-waves.json"
+  cat > "$second_file" << 'WAVESFLAGEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: waves flag test", "type": "feat", "branchName": "feat/waves-flag-test", "createdAt": "2026-08-26", "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Wave-mismatch story", "description": "d", "acceptanceCriteria": ["a"], "priority": 1, "status": "pending", "dependsOn": [], "notes": "", "wave": 5}
+  ]
+}
+WAVESFLAGEOF
+
+  local output exit_code=0
+  output=$("$CLI" validate-waves --tasks-file "$second_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "validate-waves --tasks-file: exits 0 regardless of the verdict (see cmd_validate_waves)"
+  assert_eq "false" "$(printf '%s' "$output" | jq '.valid')" \
+    "validate-waves --tasks-file: reports the named file's own wave mismatch as invalid"
+
+  rm -f "$second_file"
+}
+
+test_tasks_file_flag_honored_by_validate_tasks() {
+  echo ""
+  echo "=== Testing validate-tasks honors --tasks-file: reports the named file's own invalid branchName ==="
+
+  local second_file="$TASKS_DIR/9999-99-75-tasks-file-flag-vtasks.json"
+  cat > "$second_file" << 'VTASKSFLAGEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: validate-tasks flag test", "type": "feat", "branchName": "feat/bad branch;rm -rf", "createdAt": "2026-08-26", "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Bad-branchName story", "description": "d", "acceptanceCriteria": ["a"], "priority": 1, "status": "pending", "dependsOn": [], "notes": "", "wave": 0}
+  ]
+}
+VTASKSFLAGEOF
+
+  local output exit_code=0
+  output=$("$CLI" validate-tasks --tasks-file "$second_file") && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-tasks --tasks-file: refuses the named file's invalid branchName (schemaVersion 3.3, unlike the pointer's 3.2, which would skip)"
+  assert_contains '"valid": false' "$output" "validate-tasks --tasks-file: names the named file's own invalid verdict"
+
+  rm -f "$second_file"
+}
+
+# Path-confinement escape: every one of the 21 honoring verbs refuses a
+# --tasks-file outside PROJECT_ROOT via validate_path_in_project, the same
+# CLI-argument authority verification-report/project-groups already exercise
+# above -- it is a CLI ARGUMENT, so it is that function's sole authority,
+# checked before python3 ever starts (top-level CLAUDE.md).
+_assert_tasks_file_escape_refused() {
+  local test_label="$1"
+  shift
+  local outside_file
+  outside_file=$(mktemp /tmp/test-tasks-file-flag-escape-XXXXXX.json)
+  echo '{"schemaVersion": "3.3", "userStories": []}' > "$outside_file"
+
+  local stderr_output exit_code
+  stderr_output=$("$CLI" "$@" --tasks-file "$outside_file" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "$test_label --tasks-file: refuses a path outside PROJECT_ROOT"
+  assert_stderr_contains "Path escapes project root" "$stderr_output" \
+    "$test_label --tasks-file: names the escape the same way every other CLI-argument path does"
+
+  rm -f "$outside_file"
+}
+
+test_tasks_file_flag_escape_refused_by_every_honoring_verb() {
+  echo ""
+  echo "=== Testing every one of the 21 honoring verbs refuses a --tasks-file outside PROJECT_ROOT ==="
+
+  _assert_tasks_file_escape_refused "metadata" metadata
+  _assert_tasks_file_escape_refused "status" status
+  _assert_tasks_file_escape_refused "list-ready" list-ready
+  _assert_tasks_file_escape_refused "count-pending" count-pending
+  _assert_tasks_file_escape_refused "get-story" get-story US-001
+  _assert_tasks_file_escape_refused "get-story-context" get-story-context US-001
+  _assert_tasks_file_escape_refused "validate-ids" validate-ids
+  _assert_tasks_file_escape_refused "mark-in-progress" mark-in-progress US-001
+  _assert_tasks_file_escape_refused "mark-complete" mark-complete US-001
+  _assert_tasks_file_escape_refused "mark-failed" mark-failed US-001 "some notes"
+  _assert_tasks_file_escape_refused "mark-skipped" mark-skipped US-001
+  _assert_tasks_file_escape_refused "cascade-skip" cascade-skip US-001
+  _assert_tasks_file_escape_refused "gate-pass" gate-pass US-001
+  _assert_tasks_file_escape_refused "gate-fail" gate-fail US-001
+  _assert_tasks_file_escape_refused "update-field" update-field US-001 verification.status passed
+  _assert_tasks_file_escape_refused "set-execution-mode" set-execution-mode container
+  _assert_tasks_file_escape_refused "reset-orphaned" reset-orphaned
+  _assert_tasks_file_escape_refused "validate-deps" validate-deps
+  _assert_tasks_file_escape_refused "validate-stories" validate-stories
+  _assert_tasks_file_escape_refused "validate-waves" validate-waves
+  _assert_tasks_file_escape_refused "validate-tasks" validate-tasks
+}
+
+test_current_story_and_get_branch_refuse_tasks_file_flag() {
+  echo ""
+  echo "=== Testing current-story and get-branch REFUSE --tasks-file outright (session-state verbs, not honoring ones) ==="
+
+  local stderr_output exit_code
+
+  stderr_output=$("$CLI" current-story --tasks-file "$TASKS_FILE" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "current-story --tasks-file: refuses rather than honoring"
+  assert_stderr_contains "Unknown flag: --tasks-file" "$stderr_output" \
+    "current-story --tasks-file: names the flag it refuses"
+
+  stderr_output=$("$CLI" get-branch --tasks-file "$TASKS_FILE" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "get-branch --tasks-file: refuses rather than honoring"
+  assert_stderr_contains "Unknown flag: --tasks-file" "$stderr_output" \
+    "get-branch --tasks-file: names the flag it refuses"
+}
+
 test_validate_stories_rejects_string_verification() {
   echo ""
   echo "=== Testing validate-stories rejects bare-string verification ==="
@@ -9935,6 +10443,28 @@ main() {
   test_project_groups_defaults_to_get_tasks_file
   test_project_groups_rejects_a_path_outside_the_project
   test_project_groups_refuses_every_offending_value_not_just_the_first
+
+  # --tasks-file honor/refuse tests (US-001) — all 23 tasks.json verbs
+  echo ""
+  echo "--- --tasks-file Honor/Refuse Tests (US-001) ---"
+  test_tasks_file_flag_honored_by_read_verbs
+  test_tasks_file_flag_honored_by_mark_in_progress
+  test_tasks_file_flag_honored_by_mark_complete
+  test_tasks_file_flag_honored_by_mark_failed
+  test_tasks_file_flag_honored_by_mark_skipped
+  test_tasks_file_flag_honored_by_cascade_skip
+  test_tasks_file_flag_honored_by_gate_pass
+  test_tasks_file_flag_honored_by_gate_fail
+  test_tasks_file_flag_honored_by_update_field
+  test_tasks_file_flag_honored_by_set_execution_mode
+  test_tasks_file_flag_honored_by_reset_orphaned
+  test_tasks_file_flag_honored_by_validate_deps
+  test_tasks_file_flag_honored_by_validate_stories
+  test_tasks_file_flag_honored_by_validate_waves
+  test_tasks_file_flag_honored_by_validate_tasks
+  test_tasks_file_flag_escape_refused_by_every_honoring_verb
+  test_current_story_and_get_branch_refuse_tasks_file_flag
+
   test_validate_stories_rejects_string_verification
   test_validate_stories_accepts_object_verification
 

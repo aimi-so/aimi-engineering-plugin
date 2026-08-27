@@ -1,7 +1,7 @@
 ---
 name: aimi:open-pr
-description: Open a pull request with title and description derived from git commits and diff
-argument-hint: "[--branch <name>]"
+description: Open a pull request with title and description derived from git commits and diff; --merge merges an existing pull request on that branch
+argument-hint: "[--branch <name>] [--merge [style]]"
 disable-model-invocation: true
 allowed-tools: Bash(git:*), Bash(AIMI_CLI=*), Bash($AIMI_CLI:*)
 ---
@@ -65,6 +65,34 @@ echo "$CURRENT_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'
 If validation fails, report `Invalid --branch value: $CURRENT_BRANCH` and STOP.
 
 When `--branch` was not passed, `$CURRENT_BRANCH` stays empty here — Step 2a resolves it from the current checked-out branch as before.
+
+### Parse --merge Argument
+
+Scan `$ARGUMENTS` for an explicit `--merge [style]` token, in the identical style to `--branch` above: same padded-scan `case`, same hard-stop on the inline `=` form. Unlike `--branch`, a bare `--merge` with no following value is **not** an error — it is accepted, and the style is resolved later, in Step 1b, via the confirm-before-publish picker:
+
+```bash
+case " $ARGUMENTS " in
+  *" --merge="*)
+    echo "Error: --merge requires a value." >&2
+    echo "Use '--merge <style>' (space-separated) — '--merge=<style>' is not supported." >&2
+    exit 1
+    ;;
+  *" --merge "*)
+    MERGE_REQUESTED=true
+    MERGE_STYLE=$(printf '%s' " $ARGUMENTS " | sed -n 's/.*--merge[[:space:]]\+\([^ ]*\).*/\1/p')
+    case "$MERGE_STYLE" in
+      merge|squash|rebase) ;;
+      *) MERGE_STYLE="" ;;
+    esac
+    ;;
+  *)
+    MERGE_REQUESTED=false
+    MERGE_STYLE=""
+    ;;
+esac
+```
+
+A captured value outside the `merge`/`squash`/`rebase` enum is reset to empty rather than rejected — the same non-destructive-default posture as a bare `--merge`, so a stray token immediately after `--merge` (e.g. another flag with no value of its own) safely falls through to the picker instead of failing the whole command. `$MERGE_REQUESTED` and `$MERGE_STYLE` are read again in Step 1b, where `--merge`'s actual effect lives — it changes nothing before then.
 
 ### 1a. Verify forge authentication
 
@@ -172,12 +200,99 @@ echo "$PR_VIEW_JSON"
 
 Branch on the printed JSON's `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention):
 
-- `status == "found"`: an existing PR already exists. Report the PR URL (`.pr.url`) to the user and STOP (do not error — this is informational):
+- `status == "found"`: an existing PR already exists. Report the PR URL (`.pr.url`) to the user and STOP (do not error — this is informational) — **unless `--merge` was requested** (`$MERGE_REQUESTED` is `true`), in which case do not STOP: continue into **1b-i. Merge the Existing Pull Request** below instead:
 ```
 PR already exists for this branch: <url>
 ```
-- `status == "not_found"`: no existing PR for this branch — fall through to Step 1c exactly as today.
+- `status == "not_found"`: no existing PR for this branch — fall through to Step 1c exactly as today. **When `--merge` was requested**, `--merge` is a no-op for this run: there is no pull request yet to merge, and opening one now (Step 5) is not the same as merging it. Print one informational line first, then fall through exactly as before — no other change to this branch's control flow:
+```
+No existing pull request found for this branch — nothing to merge yet. Opening one instead; merge it with a follow-up /aimi:open-pr --merge once it exists.
+```
 - `status == "error"`: the existing-PR check itself could not complete — a missing forge CLI, broken auth, or a network failure. This step has no fallback either, so the same mandatory-print degradation as Step 1a applies. Report `.message` verbatim, prefixed with "Warning: existing-PR check could not complete: ", plus "Verify your forge CLI is installed and authenticated, then re-run this command." and STOP. Never treat this the same as `not_found` — a broken check must never be read as "no PR yet," since that would let a broken token proceed straight into creating a duplicate PR.
+
+#### 1b-i. Merge the existing pull request (only when `--merge` was requested)
+
+This subsection runs only out of the `found` branch above, and only when `$MERGE_REQUESTED` is `true` — never out of `not_found` (auto-merging a pull request the same invocation is about to open would bypass the review a pull request exists to collect) and never out of `error`. It is the confirm-before-publish gate for the third publishing act named in `commands/references/publish-confirmation.md` — merging a pull request on the forge — applied to the PR already resolved by `PR_VIEW_JSON` above (`.pr.number`, `.pr.url`).
+
+Resolve interactivity fresh, in its own Bash call — the same per-call convention Step 1a's account selection already follows:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+echo "$INTERACTIVE_MODE"
+```
+
+**When `INTERACTIVE_MODE=agent`:** never merge. `publish-confirmation.md`'s absolute agent-mode rule for pushing applies identically to this third act, and no flag re-enables it — `--merge` included. This is a soft skip scoped to the merge alone: the PR was already reported above exactly as it is reported without `--merge`, and nothing else about this invocation changes. Log exactly one line and STOP:
+
+```
+agent-mode: open-pr-merge auto-declined (agent mode never merges)
+```
+
+Name the manual next step in the same output, so the person reading the transcript knows exactly how to finish: "Run `/aimi:open-pr --branch [CURRENT_BRANCH] --merge <merge|squash|rebase>` interactively to merge it, or merge it yourself on the forge."
+
+*Agent-mode fallback: if `INTERACTIVE_MODE=agent`, never merge. Log: `agent-mode: open-pr-merge auto-declined (agent mode never merges)`.*
+
+**When `INTERACTIVE_MODE=picker`:** ask exactly once via **AskUserQuestion**, combining the merge-style choice with the confirm-before-publish approval in the same call — this is the confirm gate, not merely a style picker, so it is asked even when a style was already supplied on the command line.
+
+**When `$MERGE_STYLE` is empty** (bare `--merge`, or a captured value outside the `merge`/`squash`/`rebase` enum — see **Parse --merge Argument**):
+
+```
+Merge pull request #[the PR's number, from .pr.number above] now?
+
+A — Merge (merge commit)
+B — Squash
+C — Rebase
+None — Do not merge now
+```
+
+**Option A** merges with a regular merge commit, **Option B** squashes, **Option C** rebases — whichever is chosen becomes `$CHOSEN_STYLE`. **None** declines.
+
+**When `$MERGE_STYLE` is already set** (a valid `--merge <style>` value was supplied on the command line): ask a two-option confirm naming that style instead of re-offering all three:
+
+```
+Merge pull request #[the PR's number, from .pr.number above] now using "[MERGE_STYLE]"?
+
+A — Merge now
+Other — Do not merge now
+```
+
+**Option A** sets `$CHOSEN_STYLE` to `$MERGE_STYLE`. **Other** declines.
+
+Write the question and its option text in whatever language the person is writing in, never a hardcoded one (`commands/references/user-communication.md`'s Adaptive Language Rule).
+
+An explicit non-escape selection is the only approval this gate accepts. The escape option (`None`/`Other`), a dismissed prompt, an unparseable answer, or no answer at all are all a decline, and per `publish-confirmation.md`'s Declining section a decline is a normal outcome, not a failure: report it plainly and STOP — no error, no retry, no fall-through to Step 1c.
+
+On an explicit selection, call the merge verb in its own Bash call. The confirmed PR number and style cross in as literals the orchestrator substitutes — each Bash call is its own shell, the same convention Step 5c's `PR_NUMBER` retyping already uses:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_MERGE_NUMBER="[the PR's number, from .pr.number above]"
+CHOSEN_STYLE="[merge|squash|rebase — the style chosen above]"
+if ! printf '%s' "$PR_MERGE_NUMBER" | grep -qE '^[0-9]+$'; then
+  echo "Error: PR number must be digits only (got: ${PR_MERGE_NUMBER:-<empty>}). Re-read the PR number reported above and retype it exactly." >&2
+  exit 1
+fi
+case "$CHOSEN_STYLE" in
+  merge|squash|rebase) ;;
+  *)
+    echo "Error: merge style must be one of merge, squash, rebase (got: ${CHOSEN_STYLE:-<empty>})." >&2
+    exit 1
+    ;;
+esac
+PR_MERGE_JSON=$($AIMI_CLI forge-pr-merge --pr "$PR_MERGE_NUMBER" --style "$CHOSEN_STYLE")
+PR_MERGE_STATUS=$(printf '%s' "$PR_MERGE_JSON" | jq -r '.status // empty' 2>/dev/null)
+if [ "$PR_MERGE_STATUS" = "unchanged" ]; then
+  PR_MERGE_URL=$(printf '%s' "$PR_MERGE_JSON" | jq -r '.data.url')
+  echo "PR merged: $PR_MERGE_URL"
+else
+  echo "Error: forge-pr-merge reported status ${PR_MERGE_STATUS:-<none>} — see the manual merge-it-yourself instructions above (mandatory-print degradation, forge-contract.md's Degradation Contract)." >&2
+  exit 1
+fi
+```
+
+`forge-pr-merge` returns `forge-contract.md`'s write-verb envelope — `{status, data: {url, number}, message}` — and for this verb reports only `unchanged` (a merge that genuinely succeeded, or a preflight that found the PR already merged/locked) or `degraded` (every failure path); `created` is structurally unreachable here, since a merge mints no new identifier. The check above accepts `unchanged` alone and treats everything else as the failure case, mirroring how Step 5b treats `forge-pr-create`'s degraded envelope. On `degraded`, `forge-pr-merge` has already printed its own manual fallback instructions to stderr (mandatory-print degradation) before this call exits non-zero — report those instructions and STOP; do not invent a second set.
 
 ### 1c. Warn about uncommitted changes
 

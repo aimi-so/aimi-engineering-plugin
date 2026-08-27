@@ -1028,6 +1028,38 @@ get_tasks_file() {
   echo "$tasks_file"
 }
 
+# Positional-preserving --tasks-file extraction for verbs whose existing
+# arguments are fixed positionals rather than flags (get-story, mark-*,
+# cascade-skip, gate-fail, set-execution-mode, update-field, ...). Walks the
+# args by INDEX rather than `shift`, so a legitimate positional value
+# beginning with "--" (mark-failed's notes, update-field's value) is never
+# misread as an unrecognized flag -- the strict `case ... *) exit 1` idiom
+# cmd_verification_report uses would collide with exactly that value.
+#
+# Sets the caller's two variables by nameref: $1 (tasks_file) to the
+# override value, or "" when no --tasks-file was given; $2 (positional) to
+# every remaining token, in order. The caller reassigns positional[0],
+# positional[1], ... onto its own named locals afterward.
+# Usage: _parse_positional_tasks_file tasks_file positional "$@"
+_parse_positional_tasks_file() {
+  local -n _pptf_tasks_file="$1"
+  local -n _pptf_positional="$2"
+  shift 2
+  _pptf_tasks_file=""
+  _pptf_positional=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--tasks-file" ]; then
+      i=$((i + 1))
+      _pptf_tasks_file="${args[$i]:-}"
+    else
+      _pptf_positional+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+}
+
 # ============================================================================
 # Commands
 # ============================================================================
@@ -1139,17 +1171,26 @@ cmd_init_session() {
 
 # Get comprehensive status summary
 # Flags: --counts-only (return aggregate counts without userStories array)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_status() {
   local counts_only=false
+  local tasks_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --counts-only) counts_only=true; shift ;;
+      --tasks-file) shift; tasks_file="${1:-}"; shift || true ;;
       *) break ;;
     esac
   done
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- same rule verification-report applies.
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The two branches used to be two 11-line jq programs whose first ten lines
   # were identical -- including a copy each of the maxConcurrency clamp. Both
@@ -1162,9 +1203,30 @@ cmd_status() {
 }
 
 # Get metadata only
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_metadata() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   check_python3
   python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
 }
@@ -1258,17 +1320,24 @@ cmd_project_groups() {
 # List stories that are ready to execute
 # A story is ready when: status == "pending" AND all dependsOn stories have status "completed" or "skipped"
 # Flags: --brief (return only {id, title, priority, dependsOn, project, gate} per story)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_list_ready() {
   local brief=false
+  local tasks_file=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --brief) brief=true; shift ;;
+      --tasks-file) shift; tasks_file="${1:-}"; shift || true ;;
       *) break ;;
     esac
   done
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The readiness predicate and the --brief projection both live in tasks.py's
   # is_ready and brief_row now, at one crossing. The gate rules and the
@@ -1341,7 +1410,22 @@ _next_story_selection() {
 }
 
 # Get currently active story from state
+#
+# REFUSES --tasks-file (does not honor it): the primary answer comes from
+# .aimi/state/current-story, and the tasks file is only a secondary lookup
+# keyed by that state -- a per-call file override has no coherent meaning
+# here. The scan runs before read_state so the refusal fires even when no
+# session state exists yet.
 cmd_current_story() {
+  local _cs_arg
+  for _cs_arg in "$@"; do
+    if [ "$_cs_arg" = "--tasks-file" ]; then
+      echo "Error: Unknown flag: --tasks-file" >&2
+      echo "Usage: aimi-cli.sh current-story" >&2
+      exit 1
+    fi
+  done
+
   local story_id tasks_file
   story_id=$(read_state "current-story")
 
@@ -1358,12 +1442,14 @@ cmd_current_story() {
 }
 
 # Get full story object by ID (read-only)
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_get_story() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh get-story <story-id>" >&2
+    echo "Usage: aimi-cli.sh get-story <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -1371,7 +1457,12 @@ cmd_get_story() {
   # about the ARGUMENT and about which file is current, not about the document.
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1438,18 +1529,26 @@ _resolve_skills_base_dir() {
 # the Claude Code plugin cache, or read $AIMI_PLUGIN_DIR -- and CLAUDECODE is a
 # discriminator this file already owns. Python is handed the answer, not the
 # question. No lock: a reader takes none, and this one writes nothing at all.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_get_story_context() {
-  local story_id="$1"
-  local tasks_file skills_base_dir
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local skills_base_dir
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh get-story-context <story-id>" >&2
+    echo "Usage: aimi-cli.sh get-story-context <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   skills_base_dir=$(_resolve_skills_base_dir)
@@ -1461,18 +1560,25 @@ cmd_get_story_context() {
 }
 
 # Mark a story as in-progress
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-in-progress <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-in-progress <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   # BEFORE the lock, deliberately, and every mark-* verb keeps it there. Moving
   # it inside would close a TOCTOU window that is ranked and owned elsewhere;
   # closing it here by accident is exactly what test-tasks-concurrency.sh
@@ -1497,18 +1603,25 @@ cmd_mark_in_progress() {
 }
 
 # Mark a story as complete
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_complete() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-complete <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-complete <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
@@ -1526,19 +1639,26 @@ cmd_mark_complete() {
 }
 
 # Mark a story as failed with notes
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_failed() {
-  local story_id="$1"
-  local notes="${2:-}"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local notes="${positional[1]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-failed <story-id> [notes]" >&2
+    echo "Usage: aimi-cli.sh mark-failed <story-id> [notes] [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1558,18 +1678,25 @@ cmd_mark_failed() {
 }
 
 # Mark a story as skipped
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_skipped() {
-  local story_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh mark-skipped <story-id>" >&2
+    echo "Usage: aimi-cli.sh mark-skipped <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   check_python3
@@ -1592,12 +1719,14 @@ cmd_mark_skipped() {
 # on a phase-scoped tasks file (metadata.phase present) — a claimed phase
 # always runs inside its own phase container, so writing metadata.execution
 # there would be the exact dead-data bug this subcommand exists to fix.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_set_execution_mode() {
-  local mode="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local mode="${positional[0]:-}"
 
   if [ -z "$mode" ]; then
-    echo "Usage: aimi-cli.sh set-execution-mode <container|inline>" >&2
+    echo "Usage: aimi-cli.sh set-execution-mode <container|inline> [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -1606,7 +1735,12 @@ cmd_set_execution_mode() {
     exit 1
   fi
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # One crossing, inside the lock. The phase guard used to be a jq read taken
   # OUTSIDE this lock, and the assignment a second jq into a bash mktemp file:
@@ -1629,18 +1763,60 @@ cmd_set_execution_mode() {
 }
 
 # Count pending stories
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_count_pending() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh count-pending [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   check_python3
   python3 "$(_aimi_tasks_py)" count-pending --tasks-file "$tasks_file"
 }
 
 # Validate dependencies in a tasks file
 # Checks for: circular dependencies, missing IDs, self-references
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_deps() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-deps [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # A pure reader: no lock, no temp file, one crossing. The exit status is the
   # crossing's own, which is what it was before -- the jq verdict and the
@@ -1651,9 +1827,30 @@ cmd_validate_deps() {
 }
 
 # Validate story content (field lengths, suspicious patterns)
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_stories() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-stories [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # Same shape as cmd_validate_deps above, and the same reason. Every one of
   # this verb's twenty-odd error strings is read by /aimi:plan's Phase 4.5 loop
@@ -1742,9 +1939,30 @@ cmd_normalize_status() {
 }
 
 # Validate all story IDs in the tasks file against the US-NNN format
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_ids() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-ids [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # The regex, the line-at-a-time walk over `jq -r` output and the ASYMMETRIC
   # pass/failure shapes all moved together, because they are one rule: the
@@ -1755,18 +1973,25 @@ cmd_validate_ids() {
 }
 
 # Cascade skip: given a failed story ID, mark all transitively-dependent stories as skipped
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_cascade_skip() {
-  local failed_id="$1"
-  local tasks_file
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local failed_id="${positional[0]:-}"
 
   if [ -z "$failed_id" ]; then
-    echo "Usage: aimi-cli.sh cascade-skip <story-id>" >&2
+    echo "Usage: aimi-cli.sh cascade-skip <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$failed_id"
 
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$failed_id" "$tasks_file"
 
   # BEHAVIOUR CHANGE, and the one this verb existed to get. This used to be
@@ -1797,9 +2022,30 @@ cmd_cascade_skip() {
 }
 
 # Reset orphaned in_progress stories to failed
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_reset_orphaned() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh reset-orphaned [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # A REPORT FIX, and only a report fix. Do not rank it with cascade-skip.
   #
@@ -1833,7 +2079,22 @@ cmd_reset_orphaned() {
 # the document holds (gb-estado-presente-sem-documento answers with no tasks
 # file on disk; gb-estado-presente-documento-hostil answers while the document
 # holds a name init-session would refuse).
+#
+# REFUSES --tasks-file (does not honor it), for the same reason
+# cmd_current_story does -- the answer comes from session state and a tasks
+# file is only a secondary lookup. The scan runs before the fast path so the
+# refusal fires even when the fast path would otherwise answer without ever
+# opening a tasks file.
 cmd_get_branch() {
+  local _gb_arg
+  for _gb_arg in "$@"; do
+    if [ "$_gb_arg" = "--tasks-file" ]; then
+      echo "Error: Unknown flag: --tasks-file" >&2
+      echo "Usage: aimi-cli.sh get-branch" >&2
+      exit 1
+    fi
+  done
+
   local branch
   branch=$(read_state "current-branch")
 
@@ -3327,16 +3588,19 @@ _forge_account_override_slots() {
 # and would leave the very before/after check that proves the machine account
 # was left alone structurally unable to detect a violation.
 #
-# SEVEN SITES, AND NO OTHERS. Each write function resolves BOTH slots ONCE into
-# two locals immediately after its own _forge_bin_check gate -- at most one is
-# ever non-empty, and only the matching one costs a `gh auth token` process --
-# then names both on every routed command:
+# NINE SITES, AND NO OTHERS (US-006's forge-pr-merge added the last two).
+# Each write function resolves BOTH slots ONCE into two locals immediately
+# after its own _forge_bin_check gate -- at most one is ever non-empty, and
+# only the matching one costs a `gh auth token` process -- then names both
+# on every routed command:
 #
 #   _forge_pr_create              gh pr create      the write
 #                                 cmd_forge_pr_view idempotency check
 #                                 cmd_forge_pr_view post-create re-read
 #   _forge_pr_edit                gh pr edit        the write
 #                                 cmd_forge_pr_view post-edit re-read
+#   _forge_pr_merge               gh pr merge       the write
+#                                 cmd_forge_pr_view preflight read
 #   _forge_issue_create           gh issue create   the write
 #   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
 #
@@ -7089,6 +7353,524 @@ cmd_forge_pr_edit() {
   fi
 
   _forge_pr_edit "$number" "$body" "$title" "$body_provided" "$title_provided"
+}
+
+# ============================================================================
+# forge-pr-merge (US-006, four-open-issues-remediation)
+# ============================================================================
+# The third WRITE verb to mutate a pull/merge request, and the first that
+# mints no new identifier at all -- a merge changes neither a PR's number nor
+# its url, so `status: "created"` is structurally unreachable here and is
+# never emitted. Only `unchanged` (the merge succeeded, or the PR/MR was
+# already merged/locked) and `degraded` (everything else) are emittable. See
+# forge-contract.md's Write-Verb Status Convention.
+#
+# NORMALIZED CORE ONLY, DELIBERATELY: merge style is explicit and REQUIRED
+# (never defaulted), validated against the closed three-value enum
+# {merge, squash, rebase} -- never gitea's own fourth `rebase-merge` style.
+# No conditional/auto-merge, no approval handling, no branch-deletion flag on
+# any forge. That exclusion is what makes the three forges normalizable: tea
+# exposes neither branch deletion nor an auto-merge equivalent, while gh and
+# glab expose both.
+#
+# PREFLIGHT REUSES forge-pr-view IN-PROCESS, NEVER A SECOND BESPOKE PROBE.
+# Unlike forge-pr-create's gitlab/gitea idempotency checks (which had to
+# hand-roll a forge-native inline probe because forge-pr-view's own
+# gitlab/gitea adapters postdated forge-pr-create), all three forge-pr-view
+# adapters already exist by the time this verb is written, so every one of
+# the three merge adapters below resolves `{number, url, state}` through the
+# identical `cmd_forge_pr_view --pr <ref> --include number,url,state` call --
+# a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess. The
+# call appears three times in source (github inline in _forge_pr_merge,
+# _forge_pr_merge_gitlab, _forge_pr_merge_gitea) rather than being factored
+# above the three-way dispatch, deliberately: that keeps the same
+# self-contained-per-adapter shape forge-pr-create/forge-pr-edit already use
+# (each adapter does its own everything, callable and testable on its own) at
+# the cost of the call appearing three times rather than once. This is NOT
+# the file's own "KNOWN, DELIBERATE DUPLICATE READ PATH" debt named in the
+# Gitea write adapters section header -- that debt exists because an adapter
+# was missing when its caller was written; here nothing is missing.
+#
+# ENVELOPE MAPPING (forge-pr-view's own found/not_found/error, read via the
+# preflight above):
+#   error/hard failure of the preflight call itself -> degraded, data null,
+#     naming the exit code. Never falls through to a merge attempt.
+#   not_found                                        -> degraded, data null,
+#     naming the searched ref. There is nothing to merge.
+#   found, state == closed (closed, never merged)     -> degraded, data null,
+#     BEFORE any merge CLI call runs -- a structural pre-check, not left to
+#     whatever gh/glab/tea happen to do when asked to merge a closed PR, the
+#     same not-worth-guessing reason forge-pr-view's own not_found detection
+#     was made structural.
+#   found, state == merged OR locked (GitLab's merged-and-lock-protected
+#     value)                                          -> unchanged, data
+#     {url, number} taken directly from the preflight, at exit 0, WITHOUT
+#     ever invoking gh/glab/tea's merge subcommand. A locked MR is already
+#     merged; treating it as a second, undocumented state instead of folding
+#     it into the same branch as merged would invent a fifth outcome the
+#     decided envelope mapping does not have.
+#   found, state == open                              -> the only branch that
+#     proceeds to an actual merge attempt.
+#   merge call exits 0                                -> unchanged, data
+#     {url, number} REUSED from the preflight read, never a second
+#     post-merge re-read: a merge changes neither a PR's number nor its url,
+#     so the identifiers the preflight already confirmed are still correct
+#     and a second forge-pr-view round-trip would be pure waste (unlike
+#     forge-pr-create, which mints a brand-new number, or forge-pr-edit,
+#     whose re-read reconfirms a title/body that may have changed).
+#   merge call exits non-zero                         -> degraded, data null,
+#     message carrying that call's own captured stderr verbatim -- covering
+#     conflicts, "not mergeable", a draft PR, a protected-branch/missing-
+#     approvals/no-permission refusal, and an auth failure alike, with no
+#     further classification attempted (matching forge-pr-create/
+#     forge-pr-edit's own generic rc-nonzero branches).
+#
+# EXIT CONTRACT MATCHES forge-pr-create/forge-pr-edit, NOT
+# forge-issue-create: every degraded branch exits non-zero, so a caller's own
+# per-repository failure isolation can react. Exits 0 only on unchanged.
+# Every degraded branch prints MANDATORY manual-fallback instructions to
+# stderr first (never stdout) via _forge_pr_merge_print_manual below.
+#
+# IDENTITY: no --token or credential-shaped flag, matching every other forge
+# write verb -- acting identity is read only from the environment
+# (AIMI_FORGE_IDENTITY / GH_TOKEN / an operator-exported GITLAB_TOKEN or
+# GITEA_TOKEN), never a flag.
+#
+# `tea`'s interactive-prompt behavior SPECIFICALLY FOR `tea pulls merge` (as
+# opposed to the already-documented `tea pulls create` hazard) is UNCONFIRMED
+# -- tea is not installed on this machine, matching every other gitea
+# adapter's own stated verification ceiling. The defense here is structural
+# rather than empirical: --style is required and ALWAYS passed on every code
+# path that reaches `tea pulls merge`, never optional and never defaulted, so
+# NumFlags() cannot be zero regardless of what tea's own prompt behavior for
+# this specific subcommand turns out to be.
+
+# Prints the MANDATORY manual-fallback instructions (forge-contract.md's
+# Degradation Contract, mandatory mode) for every forge-pr-merge failure path
+# -- an unsupported forge, a missing gh/glab/tea binary, a failed preflight
+# lookup, a closed-but-never-merged PR/MR, or the merge call itself failing
+# all funnel through this one function so the wording is identical
+# regardless of WHY automatic merging did not happen. Always stderr, never
+# stdout, matching _forge_pr_write_print_manual's own contract.
+#
+# A SIBLING of _forge_pr_write_print_manual, not a mode grafted onto it:
+# merge has no title/body to conditionally print and does have a required
+# style, so the parameter shapes genuinely differ.
+#
+# repo-info is queried in-process, exactly like the create/edit helper above,
+# and is itself best-effort: when it cannot resolve owner/repo, the URL line
+# is simply omitted rather than guessing a wrong one.
+# Usage: _forge_pr_merge_print_manual <forge> <pr-ref> <style>
+_forge_pr_merge_print_manual() {
+  local forge="$1" pr_ref="$2" style="$3"
+
+  local repo_info="" owner="" repo="" host=""
+  repo_info=$(_forge_repo_info 2>/dev/null) || repo_info=""
+  if [ -n "$repo_info" ] && [ "$(printf '%s' "$repo_info" | jq -r '.status' 2>/dev/null)" = "found" ]; then
+    owner=$(printf '%s' "$repo_info" | jq -r '.data.owner // empty')
+    repo=$(printf '%s' "$repo_info" | jq -r '.data.repo // empty')
+    host=$(printf '%s' "$repo_info" | jq -r '.data.host // empty')
+  fi
+  if [ -z "$host" ]; then
+    case "$forge" in
+      gitlab) host="gitlab.com" ;;
+      gitea)  host="gitea.com" ;;
+      *)      host="github.com" ;;
+    esac
+  fi
+
+  {
+    if [ "$forge" = "gitlab" ]; then
+      local glab_style_flag=""
+      case "$style" in
+        squash) glab_style_flag=" -s" ;;
+        rebase) glab_style_flag=" -r" ;;
+      esac
+      echo "Warning: could not merge this gitlab merge request automatically -- merge it yourself with:"
+      echo "  glab mr merge $pr_ref -y${glab_style_flag}"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$pr_ref"
+      fi
+    elif [ "$forge" = "gitea" ]; then
+      echo "Warning: could not merge this gitea pull request automatically -- merge it yourself with:"
+      echo "  tea pulls merge $pr_ref --style $style"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pulls/$pr_ref"
+      fi
+    else
+      local gh_style_flag=""
+      case "$style" in
+        merge)  gh_style_flag="-m" ;;
+        squash) gh_style_flag="-s" ;;
+        rebase) gh_style_flag="-r" ;;
+      esac
+      echo "Warning: could not merge this $forge pull request automatically -- merge it yourself with:"
+      echo "  gh pr merge $pr_ref $gh_style_flag"
+      if [ -n "$owner" ] && [ -n "$repo" ]; then
+        echo "  Or open: https://$host/$owner/$repo/pull/$pr_ref"
+      fi
+    fi
+  } >&2
+}
+
+# gitlab adapter for forge-pr-merge. Preflight via cmd_forge_pr_view
+# in-process (see this section's header); short-circuits to unchanged on
+# state merged/locked, degrades on not_found/error/closed before any write,
+# otherwise shells `glab mr merge <id> -y [-s|-r]` -- -y FIRST, same rule as
+# every other glab write call in this file (see "GitLab write adapters"
+# section above: glab prompts for a submission confirmation without it, and
+# an autonomous run would hang forever). No flag at all for the merge-commit
+# default style, matching glab's own default. No token prefix assignment:
+# gitlab applies no account override on this verb, exactly as its existing
+# create/edit adapters do not (see forge-contract.md's Credential/Identity
+# Model, "Which calls are routed").
+_forge_pr_merge_gitlab() {
+  local pr_ref="$1" style="$2"
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "glab not found -- this merge request was not merged automatically."
+    return 1
+  fi
+
+  local existing="" existing_rc=0
+  existing=$(cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the merge request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the merge request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: merge request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: merge request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: merge request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: merge request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no merge request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no merge request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (gitlab). -y FIRST. No flag for merge-commit style; -s/-r for
+  # squash/rebase.
+  local style_flag=""
+  case "$style" in
+    squash) style_flag="-s" ;;
+    rebase) style_flag="-r" ;;
+  esac
+
+  local stdout="" stderr_out="" rc=0
+  if [ -n "$style_flag" ]; then
+    _forge_capture stdout stderr_out rc -- glab mr merge "$existing_number" -y "$style_flag" || true
+  else
+    _forge_capture stdout stderr_out rc -- glab mr merge "$existing_number" -y || true
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitlab "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: glab mr merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "glab mr merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# gitea adapter for forge-pr-merge. Same preflight-then-branch shape as the
+# gitlab arm above, then shells `tea pulls merge <index> --style
+# <merge|squash|rebase>` -- --style ALWAYS present, never optional, never
+# defaulted, so `tea`'s NumFlags()-driven interactive-survey hazard
+# (documented in the "Gitea write adapters" section header) cannot fire even
+# though tea's own prompt behavior for `pulls merge` specifically remains
+# unconfirmed (see this section's own header). No token prefix assignment:
+# tea honours GH_TOKEN as well as GITEA_TOKEN, so a github-shaped prefix here
+# would hand a GitHub token to a Gitea instance -- the same GH_TOKEN hazard
+# every other tea write call in this file avoids.
+_forge_pr_merge_gitea() {
+  local pr_ref="$1" style="$2"
+
+  if ! _forge_bin_check tea mandatory gitea; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "tea not found -- this pull request was not merged automatically."
+    return 1
+  fi
+
+  local existing="" existing_rc=0
+  existing=$(cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no pull request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no pull request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (gitea). --style ALWAYS present -- see this section's header.
+  local stdout="" stderr_out="" rc=0
+  _forge_capture stdout stderr_out rc -- tea pulls merge "$existing_number" --style "$style" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: tea pulls merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "tea pulls merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# Routing function for forge-pr-merge. Detects the forge, degrades
+# no_adapter-style for anything but github/gitlab/gitea, routes gitlab/gitea
+# to their self-contained adapters above under this file's usual `set -e`
+# capture convention (`|| gl_rc=$?` / `|| gt_rc=$?`, mandatory because both
+# adapters return 1 on every degraded branch by contract), and for github
+# runs the preflight-then-merge sequence inline -- the same shape
+# _forge_pr_create/_forge_pr_edit use for their own github arm.
+#
+# ROUTED, GITHUB ONLY: both the preflight cmd_forge_pr_view call and the
+# `gh pr merge` call are routed under the resolved account-override prefix
+# assignment, resolved ONCE for both -- the identical pattern
+# _forge_pr_create/_forge_pr_edit already use, and for the identical reason:
+# on a private repository the account that merges can see (and act on) a PR
+# a different reader account cannot, so a preflight performed as the machine
+# account could disagree with the account the merge itself runs as.
+_forge_pr_merge() {
+  local pr_ref="$1" style="$2"
+  local forge=""
+  _detect_forge_type forge
+
+  case "$forge" in
+    github) ;;
+    gitlab)
+      local gl_rc=0
+      _forge_pr_merge_gitlab "$pr_ref" "$style" || gl_rc=$?
+      return "$gl_rc"
+      ;;
+    gitea)
+      local gt_rc=0
+      _forge_pr_merge_gitea "$pr_ref" "$style" || gt_rc=$?
+      return "$gt_rc"
+      ;;
+    *)
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      _forge_emit_write_status degraded "" "forge-pr-merge: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      return 1
+      ;;
+  esac
+
+  if ! _forge_bin_check gh mandatory "$forge"; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    _forge_emit_write_status degraded "" "gh not found -- this pull request was not merged automatically."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local existing="" existing_rc=0
+  existing=$(GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
+  if [ "$existing_rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)." >&2
+    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)."
+    return 1
+  fi
+
+  local existing_status existing_state existing_url existing_number existing_message
+  existing_status=$(printf '%s' "$existing" | jq -r '.status')
+  case "$existing_status" in
+    found)
+      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
+      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
+      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
+      case "$existing_state" in
+        merged|locked)
+          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+          return 0
+          ;;
+        closed)
+          _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref is closed and was never merged." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref is closed and was never merged."
+          return 1
+          ;;
+        open) ;;
+        *)
+          _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+          echo "Error: forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
+          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
+          return 1
+          ;;
+      esac
+      ;;
+    not_found)
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: no pull request found for ref: $pr_ref" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: no pull request found for ref: $pr_ref"
+      return 1
+      ;;
+    error|*)
+      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
+      _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
+      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
+      return 1
+      ;;
+  esac
+
+  # WRITE (github). Flag chosen 1:1 from --style: -m for merge, -s for
+  # squash, -r for rebase. Same prefix-assignment shape as every other
+  # routed gh write in this file: on the _forge_capture call itself, never
+  # inside its argv, never via `env`.
+  local style_flag=""
+  case "$style" in
+    merge)  style_flag="-m" ;;
+    squash) style_flag="-s" ;;
+    rebase) style_flag="-r" ;;
+  esac
+
+  local stdout rc=0 stderr_out
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture stdout stderr_out rc -- gh pr merge "$existing_number" "$style_flag" || true
+
+  if [ "$rc" -ne 0 ]; then
+    _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
+    echo "Error: forge-pr-merge: gh pr merge exited $rc: ${stderr_out:-unknown error}" >&2
+    _forge_emit_write_status degraded "" "gh pr merge exited $rc: ${stderr_out:-unknown error}"
+    return 1
+  fi
+
+  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
+}
+
+# Public wrapper: parses --pr/--style/--project (deliberately no --token or
+# similarly credential-shaped flag). --pr and --style are BOTH REQUIRED, and
+# the usage check for them runs BEFORE _require_git_repo -- a deliberate
+# ordering DIFFERENCE from forge-pr-create/forge-pr-edit's own guards (which
+# run _require_git_repo first): a merge's identifying flags are cheap to
+# check and a caller that forgot one should not pay for a git-repo probe
+# first to learn that. --style is validated against the closed
+# {merge, squash, rebase} enum and --pr against forge-pr-view's own
+# combined numeric-or-branch-name regex, both before _require_git_repo runs
+# and before either is ever interpolated into a git/gh/glab/tea invocation.
+# Delegates exactly once to _forge_pr_merge.
+cmd_forge_pr_merge() {
+  check_jq
+
+  local pr_ref="" style="" project_dir=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pr)      shift; pr_ref="${1:-}" ;;
+      --style)   shift; style="${1:-}" ;;
+      --project) shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-pr-merge: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$pr_ref" ] || [ -z "$style" ]; then
+    echo "Usage: aimi-cli.sh forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]" >&2
+    exit 1
+  fi
+
+  case "$style" in
+    merge|squash|rebase) ;;
+    *)
+      echo "Error: forge-pr-merge: invalid --style value: $style -- must be merge, squash or rebase." >&2
+      exit 1
+      ;;
+  esac
+
+  # Validate --pr before it is ever interpolated into a git/gh/glab/tea
+  # invocation -- the exact combined regex cmd_forge_pr_view already applies
+  # to its own --pr flag.
+  if ! [[ "$pr_ref" =~ ^[0-9]+$ ]] && ! [[ "$pr_ref" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
+    echo "Error: forge-pr-merge: invalid --pr value: $pr_ref" >&2
+    exit 1
+  fi
+
+  _require_git_repo "$project_dir"
+
+  _forge_pr_merge "$pr_ref" "$style"
 }
 
 # ============================================================================
@@ -11011,14 +11793,19 @@ cmd_prime_cache() {
 }
 
 # Pass a gate on a story
-# Usage: gate-pass US-NNN [--option 'value']
+# Usage: gate-pass US-NNN [--option 'value'] [--tasks-file <path>]
+#
+# --tasks-file is DELIBERATELY RE-CLASSIFIED here, not a pre-existing branch:
+# before this flag was recognized, it fell into the `*)` catch-all below and
+# was refused only as a side effect of being unknown. This adds an explicit
+# case so gate-pass HONORS it, matching every other mark-*/gate-* write verb.
 cmd_gate_pass() {
   local story_id="$1"
   shift || true
-  local option=""
+  local option="" tasks_file_override=""
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh gate-pass <story-id> [--option 'value']" >&2
+    echo "Usage: aimi-cli.sh gate-pass <story-id> [--option 'value'] [--tasks-file <path>]" >&2
     exit 1
   fi
 
@@ -11032,6 +11819,11 @@ cmd_gate_pass() {
         fi
         shift 2
         ;;
+      --tasks-file)
+        tasks_file_override="${2:-}"
+        shift
+        shift || true
+        ;;
       *)
         echo "{\"valid\":false,\"errors\":[\"Unknown flag: $1\"]}"
         exit 1
@@ -11042,7 +11834,14 @@ cmd_gate_pass() {
   validate_story_id "$story_id"
 
   local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file_override" ]; then
+    # An explicit path is a CLI ARGUMENT, so validate_path_in_project is the
+    # sole authority over it -- same rule verification-report applies.
+    tasks_file=$(resolve_path "$tasks_file_override")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # BEHAVIOUR CHANGE. The gate-present precondition was read in an unlocked jq
@@ -11073,18 +11872,25 @@ cmd_gate_pass() {
 }
 
 # Fail a gate on a story
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_gate_fail() {
-  local story_id="$1"
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh gate-fail <story-id>" >&2
+    echo "Usage: aimi-cli.sh gate-fail <story-id> [--tasks-file <path>]" >&2
     exit 1
   fi
 
   validate_story_id "$story_id"
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # Same three crossings, same behaviour change, same single call. See
@@ -11104,15 +11910,17 @@ cmd_gate_fail() {
 }
 
 # Update a nested field on a story
-# Usage: update-field US-NNN field.path value
+# Usage: update-field US-NNN field.path value [--tasks-file <path>]
 # field.path is a dotted chain of identifier segments, e.g. "verification.status"
 cmd_update_field() {
-  local story_id="$1"
-  local field_path="$2"
-  local value="$3"
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+  local field_path="${positional[1]:-}"
+  local value="${positional[2]:-}"
 
   if [ -z "$story_id" ] || [ -z "$field_path" ] || [ -z "$value" ]; then
-    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value>" >&2
+    echo "Usage: aimi-cli.sh update-field <story-id> <field.path> <value> [--tasks-file <path>]" >&2
     echo "  <field.path> is a dotted chain of identifier segments, e.g. verification.status" >&2
     exit 1
   fi
@@ -11125,8 +11933,12 @@ cmd_update_field() {
   # of that argument.
   validate_field_path "$field_path"
 
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
   validate_story_exists "$story_id" "$tasks_file"
 
   # One crossing, inside the lock. The assignment and the {id, <top-segment>}
@@ -11153,9 +11965,30 @@ cmd_update_field() {
 }
 
 # Validate waves: compute waves from dependsOn, compare to stored wave, report mismatches
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_waves() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-waves [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   # NO exit-status handling, and that is not an omission to tidy up. This body
   # ended at its jq call before the port and ends at the crossing now, so an
@@ -11187,9 +12020,30 @@ cmd_validate_waves() {
 # it and get_tasks_file has already been gated against it. The two spec paths
 # cannot be confined out here -- they are read out of metadata.designBundle,
 # which is only visible after the crossing.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_tasks() {
-  local tasks_file
-  tasks_file=$(get_tasks_file)
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-tasks [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
 
   check_python3
   python3 "$(_aimi_tasks_py)" validate-tasks \
@@ -13568,9 +14422,11 @@ USAGE:
 COMMANDS:
     init-session              Initialize execution session, save state
     find-tasks                Find most recent tasks file
-    status [--counts-only]    Get status summary as JSON
+    status [--counts-only] [--tasks-file <path>]
+                              Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
-    metadata                  Get metadata only
+    metadata [--tasks-file <path>]
+                              Get metadata only
     verification-report [--tasks-file <path>]
                               Visual stories (id/project/url) plus the malformed-verification
                               partition (repairable/unrepairable). Defaults to get_tasks_file.
@@ -13581,19 +14437,28 @@ COMMANDS:
                               named) on an invalid one. Defaults to get_tasks_file.
     next-story                Get next pending story, save to state
     current-story             Get currently active story from state
-    list-ready [--brief]      List stories ready to execute (dependency-aware)
+                              Refuses --tasks-file: answers from session state, not a file.
+    list-ready [--brief] [--tasks-file <path>]
+                              List stories ready to execute (dependency-aware)
                               --brief  Return only {id, title, priority, dependsOn} per story
-    mark-in-progress <id>     Mark story as in_progress (returns {id, status} JSON)
-    mark-complete <id>        Mark story as completed (returns {id, status} JSON)
-    mark-failed <id> [notes]  Mark story as failed (returns {id, status, notes} JSON)
-    mark-skipped <id>         Mark story as skipped (returns {id, status} JSON)
-    set-execution-mode <container|inline>
+    mark-in-progress <id> [--tasks-file <path>]
+                              Mark story as in_progress (returns {id, status} JSON)
+    mark-complete <id> [--tasks-file <path>]
+                              Mark story as completed (returns {id, status} JSON)
+    mark-failed <id> [notes] [--tasks-file <path>]
+                              Mark story as failed (returns {id, status, notes} JSON)
+    mark-skipped <id> [--tasks-file <path>]
+                              Mark story as skipped (returns {id, status} JSON)
+    set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
                               phase-scoped tasks file (metadata.phase present).
-    count-pending             Count pending stories
-    validate-deps             Validate dependency graph (no cycles, no missing refs)
-    validate-stories          Validate story content (length, suspicious patterns)
+    count-pending [--tasks-file <path>]
+                              Count pending stories
+    validate-deps [--tasks-file <path>]
+                              Validate dependency graph (no cycles, no missing refs)
+    validate-stories [--tasks-file <path>]
+                              Validate story content (length, suspicious patterns)
     normalize-verification <file>
                               Rewrite any story whose verification is a bare string S
                               into {strategy: S, status: "pending", url: null, expect: null}.
@@ -13603,21 +14468,30 @@ COMMANDS:
                               Already-set status values are preserved (uses //= operator).
                               Writes atomically (tmp + mv). Exits 0 on success.
                               Reports count of stories with status field after heal.
-    validate-ids              Validate all story IDs match US-NNN format
-    gate-pass <id> [--option 'value']
+    validate-ids [--tasks-file <path>]
+                              Validate all story IDs match US-NNN format
+    gate-pass <id> [--option 'value'] [--tasks-file <path>]
                               Pass a gate on a story; optionally store selected option
-    gate-fail <id>            Fail a gate on a story
-    update-field <id> <field.path> <value>
+    gate-fail <id> [--tasks-file <path>]
+                              Fail a gate on a story
+    update-field <id> <field.path> <value> [--tasks-file <path>]
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
-    validate-waves            Compute waves from dependsOn, compare to stored wave, report mismatches
-    validate-tasks            Validate tasks file citation fields (schemaVersion guard, no checks yet)
-    cascade-skip <id>         Skip all stories depending on failed story
-    reset-orphaned            Reset all in_progress stories to failed
+    validate-waves [--tasks-file <path>]
+                              Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-tasks [--tasks-file <path>]
+                              Validate tasks file citation fields (schemaVersion guard, no checks yet)
+    cascade-skip <id> [--tasks-file <path>]
+                              Skip all stories depending on failed story
+    reset-orphaned [--tasks-file <path>]
+                              Reset all in_progress stories to failed
     get-branch                Get branchName from metadata
-    get-story <id>            Get full story object by ID (read-only)
-    get-story-context <id>    Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
+                              Refuses --tasks-file: answers from session state, not a file.
+    get-story <id> [--tasks-file <path>]
+                              Get full story object by ID (read-only)
+    get-story-context <id> [--tasks-file <path>]
+                              Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
@@ -13768,6 +14642,38 @@ COMMANDS:
                               non-zero-exit-on-failure as forge-pr-create.
                               github, gitlab and gitea each have an adapter
                               (glab mr update -t/-d, tea pulls edit -t/-d).
+    forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]
+                              Write verb -- resolves the PR/MR's
+                              {number, url, state} via an in-process
+                              forge-pr-view preflight, then shells gh pr
+                              merge/glab mr merge/tea pulls merge. --pr and
+                              --style are BOTH REQUIRED; --style is
+                              validated against the closed enum
+                              {merge, squash, rebase} (never gitea's own
+                              fourth rebase-merge style, which this verb
+                              deliberately does not expose). Output:
+                              {status: "unchanged"|"degraded", data:
+                              {url, number}, message} -- "created" is
+                              structurally unreachable (a merge mints no new
+                              identifier) and is never emitted. An
+                              already-merged or GitLab-locked PR/MR
+                              short-circuits to "unchanged" with no merge
+                              attempted; a closed-but-never-merged one
+                              degrades before any merge call runs. A
+                              successful merge reuses the preflight's own
+                              {url, number} rather than re-reading. Same
+                              guards, degrade contract, and
+                              non-zero-exit-on-failure as forge-pr-create --
+                              a missing gh/glab/tea binary or an unsupported
+                              forge prints manual merge-it-yourself
+                              instructions to stderr (MANDATORY-PRINT
+                              degrade mode) and EXITS NON-ZERO. github,
+                              gitlab and gitea each have an adapter (glab mr
+                              merge -y [-s|-r], tea pulls merge --style,
+                              --style ALWAYS passed on the gitea call). No
+                              conditional/auto-merge and no branch-deletion
+                              flag on any forge. Identity, when needed, is
+                              read from an env var, never a flag.
     forge-issue-view (--number <n> | --url <issue-url>) [--project <path>]
                               Read verb -- shells gh issue view, normalized to
                               {status: "found"|"not_found"|"error", data, message}
@@ -14463,6 +15369,7 @@ main() {
     forge-pr-view) shift; cmd_forge_pr_view "$@"; return ;;
     forge-pr-create) shift; cmd_forge_pr_create "$@"; return ;;
     forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
+    forge-pr-merge) shift; cmd_forge_pr_merge "$@"; return ;;
     forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
@@ -14487,33 +15394,33 @@ main() {
     find-tasks)        cmd_find_tasks ;;
     find-tasks-all)    cmd_find_tasks_all ;;
     status)            shift; cmd_status "$@" ;;
-    metadata)          cmd_metadata ;;
+    metadata)          shift; cmd_metadata "$@" ;;
     verification-report) shift; cmd_verification_report "$@" ;;
     project-groups)     shift; cmd_project_groups "$@" ;;
     next-story)        cmd_next_story ;;
-    current-story)     cmd_current_story ;;
+    current-story)     shift; cmd_current_story "$@" ;;
     list-ready)        shift; cmd_list_ready "$@" ;;
-    mark-in-progress)  cmd_mark_in_progress "${2:-}" ;;
-    mark-complete)     cmd_mark_complete "${2:-}" ;;
-    mark-failed)       cmd_mark_failed "${2:-}" "${3:-}" ;;
-    mark-skipped)      cmd_mark_skipped "${2:-}" ;;
-    set-execution-mode) cmd_set_execution_mode "${2:-}" ;;
-    count-pending)     cmd_count_pending ;;
-    validate-deps)            cmd_validate_deps ;;
-    validate-stories)         cmd_validate_stories ;;
+    mark-in-progress)  shift; cmd_mark_in_progress "$@" ;;
+    mark-complete)     shift; cmd_mark_complete "$@" ;;
+    mark-failed)       shift; cmd_mark_failed "$@" ;;
+    mark-skipped)      shift; cmd_mark_skipped "$@" ;;
+    set-execution-mode) shift; cmd_set_execution_mode "$@" ;;
+    count-pending)     shift; cmd_count_pending "$@" ;;
+    validate-deps)            shift; cmd_validate_deps "$@" ;;
+    validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
     normalize-status)         cmd_normalize_status "${2:-}" ;;
-    validate-ids)             cmd_validate_ids ;;
+    validate-ids)             shift; cmd_validate_ids "$@" ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
-    gate-fail)         cmd_gate_fail "${2:-}" ;;
-    update-field)      cmd_update_field "${2:-}" "${3:-}" "${4:-}" ;;
-    validate-waves)    cmd_validate_waves ;;
-    validate-tasks)    cmd_validate_tasks ;;
-    cascade-skip)      cmd_cascade_skip "${2:-}" ;;
-    reset-orphaned)    cmd_reset_orphaned ;;
-    get-branch)        cmd_get_branch ;;
-    get-story)         cmd_get_story "${2:-}" ;;
-    get-story-context) cmd_get_story_context "${2:-}" ;;
+    gate-fail)         shift; cmd_gate_fail "$@" ;;
+    update-field)      shift; cmd_update_field "$@" ;;
+    validate-waves)    shift; cmd_validate_waves "$@" ;;
+    validate-tasks)    shift; cmd_validate_tasks "$@" ;;
+    cascade-skip)      shift; cmd_cascade_skip "$@" ;;
+    reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;
+    get-branch)        shift; cmd_get_branch "$@" ;;
+    get-story)         shift; cmd_get_story "$@" ;;
+    get-story-context) shift; cmd_get_story_context "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;

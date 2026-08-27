@@ -935,6 +935,8 @@ Classify the feature into scope contexts using the Cut Criteria in `${CLAUDE_PLU
 
 *(Optional debug: if `AIMI_BRAINSTORM_DEBUG=1`, emit `[brainstorm-debug] phase-3.5: <fired|skipped> (reason: scope-contexts=<N>)` to chat, where `<N>` is the scope-context count this step classified — `fired` when `<N>` is 2 or more (Step 2 proposes a phase cut), `skipped` when `<N>` is 0 or 1 (collapse — no `phases:` frontmatter, document unchanged).)*
 
+Set the `phase35Verdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by Phase 3.8's classification summary line.
+
 ### Step 2: Propose the Phase Cut
 
 For each identified scope context, draft one phase entry in an in-memory `phases` array (no staging file is written — unlike `/aimi:plan`'s `outline.json`, this array never touches disk until Phase 4's frontmatter write):
@@ -1112,6 +1114,8 @@ If neither signal is present, skip this phase silently: emit no log line, presen
 
 *(Optional debug: if `AIMI_BRAINSTORM_DEBUG=1`, emit `[brainstorm-debug] phase-3.6: <fired|skipped> (reason: <structural-signal|phase-1.7-fallback|no-signal|prototype-entries-non-empty>)` to chat.)*
 
+Set the `phase36Verdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by Phase 3.8's classification summary line.
+
 ### Step 2: Non-Interactive Fast Path
 
 When `INTERACTIVE_MODE=agent`:
@@ -1157,6 +1161,8 @@ The gate fires only when **both** of the following hold:
 If either condition is false, skip this entire phase silently: no log line, no artifact, no picker prompt. Proceed straight to Phase 4 exactly as if this phase did not exist.
 
 *(Optional debug: if `AIMI_BRAINSTORM_DEBUG=1`, emit `[brainstorm-debug] phase-3.7: <fired|skipped> (reason: <not-greenfield|no-foundation-answers|missing-load-bearing-answers|fire>)` to chat — `missing-load-bearing-answers` when some Foundation sub-topic was answered but folder/convention structure or lint/format tooling was not.)*
+
+Set the `phase37Verdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by Phase 3.8's classification summary line.
 
 ### Step 2: Reuse Check
 
@@ -1243,6 +1249,18 @@ Write the 4 synthesized sections, in the order given in Step 4, to that path. Se
 ### Cross-Reference: Foundation Proposal Handoff
 
 Phase 3.7 itself emits no frontmatter. Phase 4 is the sole writer of the `foundationProposalPath:` frontmatter key, and reads this working-memory variable verbatim to do so — see the "foundationProposalPath frontmatter rules" subsection under Phase 4, the same way Phase 4's `prototype:` frontmatter reads `prototype_entries` per the Cross-Reference above.
+
+## Phase 3.8: Classification Summary Line
+
+Emit exactly one line to chat, unconditionally — on every run, including the common all-skipped path — never gated behind `AIMI_BRAINSTORM_DEBUG` or any other environment variable. Read `phase35Verdict`, `phase36Verdict`, and `phase37Verdict` back from working memory (each already set to `fired` or `skipped` at its own gate's fire-condition check above); this step never recomputes any of them.
+
+```
+[classification] phase-3.5=<phase35Verdict> phase-3.6=<phase36Verdict> phase-3.7=<phase37Verdict>
+```
+
+All three gates in this file reach their own fire-condition check on every single run, with no bypass path ahead of them — the Visual Variant Rendering bundle early-exit (Step 0a above) affects only whether `prototype_entries` is pre-populated before Phase 3.6 evaluates its own fire condition; it never skips Phase 3.5, 3.6, or 3.7 wholesale. Every token in this line is therefore always exactly `fired` or `skipped`; the `not-run` token never appears here. This is a deliberate asymmetry with `/aimi:plan`'s Classification Summary Line, whose two gates each have an entry guard that can short-circuit ahead of their own fire-condition check — not an oversight or an inconsistency to reconcile.
+
+This line carries only the three gate-name=token pairs above — no free-text classification content, scope-context names, phase names or goals, and no `reason:` detail. The five `[brainstorm-debug]` lines above remain the only place that detail is carried, unchanged and still opt-in behind `AIMI_BRAINSTORM_DEBUG`; this line is an always-on summary above them, not a replacement.
 
 ## Phase 4: Capture the Design
 
