@@ -31,11 +31,25 @@ case-insensitive whole-word matching (regex word boundaries `\b`).
 Keyword matching is evaded by phrasing (a request can target a greenfield
 repo without saying so — e.g. "add the first endpoint"). Structural signals
 close that gap by inspecting the repository itself, not how the request is
-worded. All three signals below are absence-based and evaluated at
-`AIMI_ROOT`, not CWD.
+worded. All three signals below are absence-based and evaluated at the
+caller-supplied **evaluation root**, not CWD.
+
+**Evaluation root (parameter).** Every check in this section — manifest
+absence, the tracked source-file count, convention-file absence, and the
+ancestor-manifest lookup below — is performed at one caller-supplied
+evaluation root, written `<evalRoot>` throughout. The callers:
+
+- **brainstorm.md's Phase 1.8** passes `AIMI_ROOT`, exactly as it always has.
+  It is a degree-1-only, single-root consumer and nothing about it changes.
+- **plan.md's Phase 1.9** passes `AIMI_ROOT` for the single-repo `.` root of
+  its Foundation Roots derivation — unchanged — and each discovered child
+  repository's own absolute path for every other root of its per-repo loop.
+
+A caller that supplies no evaluation root evaluates at `AIMI_ROOT`, which is
+what every caller did before this parameter was named.
 
 **Manifest absence** — none of the following manifest files exist at
-`AIMI_ROOT`:
+`<evalRoot>`:
 
 | Manifest |
 |---|
@@ -50,13 +64,14 @@ worded. All three signals below are absence-based and evaluated at
 | `mix.exs` |
 
 **Tracked source-file count** — fewer than 5 files tracked by git match the
-source-extension regex:
+source-extension regex (run from `<evalRoot>`):
 
 ```
 git ls-files | grep -cE '\.(js|ts|jsx|tsx|py|rb|go|rs|java|kt|php|cs|c|cpp|h|swift|scala|ex|exs|vue|svelte)$'
 ```
 
-When `AIMI_ROOT` has no git history (no `.git`), fall back to:
+When `<evalRoot>` has no git history (no `.git`), fall back to (also run
+from `<evalRoot>`):
 
 ```
 find . -type f -regex '.*\.\(js\|ts\|jsx\|tsx\|py\|rb\|go\|rs\|java\|kt\|php\|cs\|c\|cpp\|h\|swift\|scala\|ex\|exs\|vue\|svelte\)$' | wc -l
@@ -65,15 +80,19 @@ find . -type f -regex '.*\.\(js\|ts\|jsx\|tsx\|py\|rb\|go\|rs\|java\|kt\|php\|cs
 Both use the same fewer-than-5 threshold.
 
 **Convention-file absence** — neither `CLAUDE.md` nor `AGENTS.md` exists at
-`AIMI_ROOT`.
+`<evalRoot>`.
 
 **Ancestor-manifest lookup (monorepo false-positive suppression):** before
 accepting either a greenfield (degree 1) or a brownfield-sem-convencoes
-(degree 2) classification, walk parent directories starting at `AIMI_ROOT`
+(degree 2) classification, walk parent directories starting at `<evalRoot>`
 up to the git toplevel (`git rev-parse --show-toplevel`) or 5 levels,
-whichever comes first. If any ancestor directory contains one of the nine
-manifests above, or a `CLAUDE.md`, the classification is disqualified — the
-repo is a package inside an established monorepo, not a greenfield root. For
+whichever comes first. When `<evalRoot>` is itself a git toplevel — which
+every child repository plan.md's per-repo loop passes already is — the walk
+correctly degenerates to zero levels and disqualifies nothing, exactly as it
+does today for an `AIMI_ROOT` that is its own repository. If any ancestor
+directory contains one of the nine manifests above, or a `CLAUDE.md`, the
+classification is disqualified — the repo is a package inside an established
+monorepo, not a greenfield root. For
 degree 2 specifically, this suppresses the monorepo-package false positive
 where the root already carries a `CLAUDE.md` but a subfolder has 5+ tracked
 source files and no local `CLAUDE.md`/`AGENTS.md` of its own — that subfolder
@@ -82,12 +101,13 @@ brownfield-sem-convencoes.
 
 **Second degree — brownfield-sem-convencoes:** a repo with 5 or more tracked
 source files (or find-fallback matches) AND no `CLAUDE.md`/`AGENTS.md` at
-`AIMI_ROOT` classifies as brownfield-sem-convencoes rather than greenfield —
+`<evalRoot>` classifies as brownfield-sem-convencoes rather than greenfield —
 established code with no captured conventions. plan.md's Phase 1.9 condition
 (a) is this degree's consumer: it fires on this classification exactly as it
 does on greenfield, filtered through the same (now dual-scoped)
-ancestor-manifest lookup above, and sets working-memory `foundationMode` to
-`brownfield` when this degree — rather than greenfield — is what held.
+ancestor-manifest lookup above, and records `brownfield` — rather than
+`greenfield` — as the resolved foundation mode for the evaluation root it
+asked about.
 
 ## How to Combine
 
