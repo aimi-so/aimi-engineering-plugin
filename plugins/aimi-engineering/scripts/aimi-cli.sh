@@ -12701,7 +12701,7 @@ $rp_entry"
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
-#           [--foundation <NN>]
+#           [--foundation <NN>|<project>:NN]...
 # ============================================================================
 #
 # Everything from "read the staging directory" to "the files are on disk" lives
@@ -12716,7 +12716,12 @@ $rp_entry"
 # derived from the stories themselves, and bash cannot hold a lock on a name it
 # has not computed yet.
 cmd_story_merge() {
-  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false foundation_idx=""
+  local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false
+  # --foundation is the one REPEATABLE flag here: injection is per project
+  # group, so a multi-repo plan names one foundation per repo. Collected, never
+  # deduplicated in bash -- story_merge.py's own dedup is the single source of
+  # truth for what an exact repeat means.
+  local foundation_vals=()
 
   # --- Parse flags ---
   while [ $# -gt 0 ]; do
@@ -12741,7 +12746,7 @@ cmd_story_merge() {
         ;;
       --foundation)
         shift
-        foundation_idx="${1:-}"
+        foundation_vals+=("${1:-}")
         ;;
       *)
         echo "Error: story-merge: unknown flag: $1" >&2
@@ -12764,10 +12769,32 @@ cmd_story_merge() {
     echo "Error: story-merge: --split must be 'legacy' or 'full-stack', got: $split_mode" >&2
     exit 1
   fi
-  if [ -n "$foundation_idx" ] && ! [[ "$foundation_idx" =~ ^[0-9]{2}$ ]]; then
-    echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $foundation_idx" >&2
-    exit 1
-  fi
+  # SHAPE only, one value at a time: is this a bare two-digit index, or a
+  # <project>:NN qualified one? The qualifier portion loosely mirrors .project's
+  # own grammar so an obviously malformed value dies before python3 starts;
+  # story_merge.py stays the authority on .project itself, and on both of the
+  # checks this deliberately does NOT make -- the bare-only-when-sole-value
+  # arity rule and the qualifier-vs-actual-project checksum are cross-value or
+  # staging-file-dependent, and belong to its own Gates 0 and 2.
+  #
+  # Two wordings, one refusal, and the split is not cosmetic: golden_from_jq's
+  # fundacao-formato-invalido and fundacao-formato-nao-numerico are the frozen
+  # recording of the bare-form line, so a value carrying no ':' keeps it byte
+  # for byte. A value that reached for the qualified form is told about both.
+  local _fv
+  for _fv in "${foundation_vals[@]+"${foundation_vals[@]}"}"; do
+    if ! [[ "$_fv" =~ ^([a-zA-Z0-9][a-zA-Z0-9/_.@-]*:)?[0-9]{2}$ ]]; then
+      case "$_fv" in
+        *:*)
+          echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01) or <project>:NN (e.g. apps/web:01), got: $_fv" >&2
+          ;;
+        *)
+          echo "Error: story-merge: --foundation must be a two-digit index (e.g. 01), got: $_fv" >&2
+          ;;
+      esac
+      exit 1
+    fi
+  done
   # --phase-aware strips ONE trailing "-tasks" segment from the --output
   # basename. Both writers do that strip with the same expansion, and on a
   # basename that is exactly "tasks" the strip is a no-op while on "-tasks" it
@@ -12830,9 +12857,11 @@ cmd_story_merge() {
   if [ "$phase_aware" = true ]; then
     sm_args+=(--phase-aware)
   fi
-  if [ -n "$foundation_idx" ]; then
-    sm_args+=(--foundation "$foundation_idx")
-  fi
+  # One --foundation pair per collected value, in the order given. Never joined
+  # into one value and never deduplicated here.
+  for _fv in "${foundation_vals[@]+"${foundation_vals[@]}"}"; do
+    sm_args+=(--foundation "$_fv")
+  done
   python3 "$(_aimi_script_py story_merge.py)" "${sm_args[@]}"
 }
 
@@ -14891,7 +14920,8 @@ COMMANDS:
                               --source-command must be exactly 'brainstorm' or 'plan'.
     story-merge --staging-dir <dir> --output <path>
                               [--split legacy|full-stack] [--agent-mode]
-                              [--phase-aware] [--foundation <NN>]
+                              [--phase-aware]
+                              [--foundation <NN>|<project>:NN]...
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -14960,24 +14990,40 @@ COMMANDS:
                               the strip would otherwise leave an empty or
                               "-"-leading basename. Omitted: unchanged legacy
                               derivation (double "-tasks-frontend-tasks.json").
-                              --foundation <NN> two-digit 1-based outline
-                              position of the shared foundation story (resolved
-                              against the same outline-position map as
+                              --foundation <NN>|<project>:NN, REPEATABLE.
+                              NN is a two-digit 1-based outline position
+                              (resolved against the same outline-position map as
                               outline:NN, not a literal staging-filename digit).
-                              Appends the foundation's assigned US-NNN to every
-                              OTHER story's dependsOn, deduplicated, after the
+                              Appends that story's assigned US-NNN to the
+                              dependsOn of every OTHER story sharing its OWN
+                              normalized .project group, deduplicated, after the
                               outline:NN remap and before cycle detection and
                               wave computation, so injected edges participate in
-                              both. Refuses the whole merge when the foundation
-                              story's own dependsOn is non-empty. On the PROJECT
-                              axis the foundation lives in exactly one group, so
-                              every other group's injected edge is dropped and
-                              flagged droppedDeps[].foundationEdge: true, with
-                              its own stderr note separate from the ordinary
-                              drop-count banner — that loss is expected fallout
-                              of --foundation + multi-repo, not a hand-authored
-                              dependency that went missing. The SIDE axis emits
-                              no foundationEdge field.
+                              both. Injection is PER PROJECT GROUP: a group no
+                              --foundation value names receives no injected edge
+                              at all — a normal, silent outcome, whether it has
+                              no foundation story or its own Foundation Gate
+                              resolved Skip. A bare NN is accepted only when it
+                              is the SOLE --foundation value, whatever project
+                              it resolves to; two or more values require EVERY
+                              one of them to use the qualified <project>:NN
+                              form, since a bare value alongside another names
+                              no project. The qualifier is a CHECKSUM, not a
+                              second source of truth: routing always comes from
+                              the resolved story's own .project, and a stated
+                              project disagreeing with it refuses the merge
+                              before any write, naming both. Also refused before
+                              any write: an index present among no staging file,
+                              a foundation whose own dependsOn is non-empty, and
+                              two values resolving into the same project group.
+                              On the PROJECT axis droppedDeps[].foundationEdge
+                              is true only for a dropped edge targeting a
+                              --foundation story in ANOTHER group — necessarily
+                              hand-authored, since an injected edge never leaves
+                              its own group and so is never dropped — with its
+                              own stderr note separate from the ordinary
+                              drop-count banner. The SIDE axis emits no
+                              foundationEdge field.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
     split-detect [--dir <phase-dir>]
