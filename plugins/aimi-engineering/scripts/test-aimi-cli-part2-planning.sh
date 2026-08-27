@@ -6646,14 +6646,17 @@ test_story_merge_project_split_project_keyed_warnings() {
   rm -f .aimi/tasks/sm-tc34-*
 }
 
-# TC35: --foundation combined with a multi-repo split. The foundation story
-# lives in exactly one project group, so every OTHER group's injected edge onto
-# it is dropped — recorded with foundationEdge:true, a message that names the
-# shared foundation story, and one stderr note line distinct from the ordinary
-# drop-count banner.
+# TC35: --foundation crossed with a multi-repo split, after injection became
+# per project group. The old fixture here — one bare-index foundation and two
+# sibling stories with NO hand-authored dependsOn — now produces ZERO injected
+# edges and therefore zero drops, so it can no longer exercise foundationEdge at
+# all. What still can, and is the only thing that can from here on, is a
+# HAND-AUTHORED dependency reaching into another group's foundation: one
+# repository's Foundation Gate resolved Accept while a sibling's resolved Skip.
+# An injected edge never leaves its own group, so _remap_block never drops one.
 test_story_merge_project_split_foundation_edge() {
   echo ""
-  echo "=== TC35: story-merge project axis — --foundation cross-group edges flagged distinctly ==="
+  echo "=== TC35: story-merge project axis — a hand-authored edge into another group's foundation ==="
 
   local stg=".aimi/.tasks-staging-tc35"
   local out_file=".aimi/tasks/sm-tc35-tasks.json"
@@ -6661,10 +6664,11 @@ test_story_merge_project_split_foundation_edge() {
   mkdir -p "$stg"
   rm -f .aimi/tasks/sm-tc35-*
 
-  # outline:01 is the foundation and lives in packages/core; the other two
-  # stories live in different repos and carry no hand-authored dependency.
+  # outline:01 is the foundation and lives alone in packages/core. apps/web
+  # authors a dependency onto it by hand; services/api authors none and names no
+  # foundation of its own, so it must come out completely untouched.
   _sm_make_project_story "$stg/01-core.json" "Shared core contracts" "packages/core" "src/contracts.ts"
-  _sm_make_project_story "$stg/02-web.json"  "React UserProfile page" "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/02-web.json"  "React UserProfile page" "apps/web"     "src/components/UserProfile.tsx" '["outline:01"]'
   _sm_make_project_story "$stg/03-api.json"  "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
 
   local output exit_code
@@ -6673,10 +6677,11 @@ test_story_merge_project_split_foundation_edge() {
 
   # Two lines, not one: the ordinary drop-count banner AND a separate note.
   assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC35: ordinary drop-count banner still emitted"
-  assert_contains "target the shared --foundation story" "$output" "TC35: distinct foundation note line emitted"
+  assert_contains "target a --foundation story in another project group" "$output" "TC35: distinct foundation note line emitted"
+  assert_contains "hand-authored dependencies reaching across the split" "$output" "TC35: the note states the corrected meaning, not the retired injected-edge premise"
 
   local note_line banner_line
-  note_line=$(printf '%s\n' "$output" | grep -c "target the shared --foundation story" || true)
+  note_line=$(printf '%s\n' "$output" | grep -c "target a --foundation story in another project group" || true)
   banner_line=$(printf '%s\n' "$output" | grep -c "cross-project dependsOn edge(s) dropped across" || true)
   assert_eq "1" "$note_line" "TC35: exactly one foundation note line"
   assert_eq "1" "$banner_line" "TC35: the note is separate from the single drop-count banner"
@@ -6709,40 +6714,162 @@ test_story_merge_project_split_foundation_edge() {
   local foundation_true_count total_dep_count
   foundation_true_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[] | select(.foundationEdge == true)] | length' "$web_file" 2>/dev/null)
   total_dep_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | .droppedDeps[]] | length' "$web_file" 2>/dev/null)
-  assert_eq "2" "$foundation_true_count" "TC35: both non-foundation groups record a foundationEdge:true entry"
-  assert_eq "2" "$total_dep_count" "TC35: every dropped edge on this run is a foundation edge"
+  assert_eq "1" "$foundation_true_count" "TC35: the one hand-authored cross-group edge is flagged as a foundation edge"
+  assert_eq "1" "$total_dep_count" "TC35: only the group that authored an edge loses one — injection dropped nothing"
 
   local web_entry
   web_entry=$(jq -c '.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "apps/web")' "$web_file" 2>/dev/null)
   assert_contains '"foundationEdge":true' "$web_entry" "TC35: the web group's dropped edge is flagged as a foundation edge"
   assert_contains '"project":"packages/core"' "$web_entry" "TC35: the dropped target is attributed to the foundation's own project"
-  assert_contains "shared --foundation story" "$web_entry" "TC35: the story-level message names the shared foundation story"
-  assert_contains '"becameRoot":true' "$web_entry" "TC35: the injected edge loss makes the story a false wave-1 root"
+  assert_contains "a --foundation story belonging to another project group" "$web_entry" "TC35: the story-level message names the target as another group's foundation"
+  assert_contains '"becameRoot":true' "$web_entry" "TC35: losing its only hand-authored edge makes the story a false wave-1 root"
 
   # The foundation's own group has no dropped edge at all.
   local core_entry_count
   core_entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "packages/core")] | length' "$core_file" 2>/dev/null)
   assert_eq "0" "$core_entry_count" "TC35: the group hosting the foundation records no dropped edge"
 
+  # services/api authored nothing and names no foundation of its own, so
+  # per-group injection left it completely alone: no entry keyed to it anywhere
+  # in the combined set, and its own story keeps an empty dependsOn.
+  local api_entry_count api_deps
+  api_entry_count=$(jq '[.metadata.smellWarnings[] | select(.type == "cross-file-dep-dropped") | select(.project == "services/api")] | length' "$api_file" 2>/dev/null)
+  api_deps=$(jq -c '.userStories[0].dependsOn' "$api_file" 2>/dev/null)
+  assert_eq "0" "$api_entry_count" "TC35: the group naming no foundation records no dropped edge"
+  assert_eq "[]" "$api_deps" "TC35: the group naming no foundation receives no injected edge either"
+
   # Internal working keys never leak.
   local leaked
   leaked=$(jq '[.userStories[] | select(has("__droppedDeps") or has("__becameRoot"))] | length' "$web_file" 2>/dev/null)
   assert_eq "0" "$leaked" "TC35: internal __droppedDeps/__becameRoot absent from output"
 
-  # --foundation put every non-foundation story one wave behind the foundation
-  # plan-wide; each of them then lost that edge to the split. Their files must
-  # say wave 1, not the plan-wide 2 -- otherwise the executor opens on an empty
-  # wave in both of the two repos that have no foundation story to run.
+  # The web story lost its only edge to the split, so its file must say wave 1,
+  # not the plan-wide 2 -- otherwise the executor opens on an empty wave there.
   local web_wave core_wave api_wave
   web_wave=$(jq -r '.userStories[0].wave' "$web_file" 2>/dev/null)
   core_wave=$(jq -r '.userStories[0].wave' "$core_file" 2>/dev/null)
   api_wave=$(jq -r '.userStories[0].wave' "$api_file" 2>/dev/null)
-  assert_eq "1" "$web_wave" "TC35: the web story is rebased to wave 1 after losing the foundation edge"
-  assert_eq "1" "$api_wave" "TC35: the api story is rebased to wave 1 after losing the foundation edge"
+  assert_eq "1" "$web_wave" "TC35: the web story is rebased to wave 1 after losing its cross-group edge"
+  assert_eq "1" "$api_wave" "TC35: the untouched api story stays at wave 1"
   assert_eq "1" "$core_wave" "TC35: the foundation story itself stays at wave 1"
 
   rm -rf "$stg"
   rm -f .aimi/tasks/sm-tc35-*
+}
+
+# TC55: the QUALIFIED, repeated --foundation form, end to end through the real
+# wrapper. This is the only place in the corpus that exercises cmd_story_merge's
+# array collection and one-flag-per-value forwarding at all -- test_story_merge's
+# own coverage calls SM.inject_foundation directly, and every --foundation case
+# in golden_from_jq.json is a lone bare index. It also pins the checksum: a
+# stated project disagreeing with the resolved story's own .project is the one
+# plan.md/story_merge divergence nothing else in the pipeline catches.
+test_story_merge_project_split_foundation_qualified() {
+  echo ""
+  echo "=== TC55: story-merge project axis — repeated --foundation <project>:NN ==="
+
+  local stg=".aimi/.tasks-staging-tc55"
+  local out_file=".aimi/tasks/sm-tc55-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc55-*
+
+  # Two repos, each with its own foundation accepted by its own Foundation Gate.
+  _sm_make_project_story "$stg/01-web.json"  "Web design tokens"       "apps/web"     "src/tokens.ts"
+  _sm_make_project_story "$stg/02-web2.json" "React UserProfile page"  "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-api.json"  "Rails app scaffold"      "services/api" "config/application.rb"
+  _sm_make_project_story "$stg/04-api2.json" "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
+
+  local output exit_code
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
+    --foundation apps/web:01 --foundation services/api:03 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC55: two qualified foundations exit 0"
+
+  local web_file=".aimi/tasks/sm-tc55-tasks-apps-web-tasks.json"
+  local api_file=".aimi/tasks/sm-tc55-tasks-services-api-tasks.json"
+
+  if [ -f "$web_file" ] && [ -f "$api_file" ]; then
+    echo -e "${GREEN}✓${NC} TC55: one tasks file written per distinct project"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} TC55: expected per-project output files missing"
+    echo "  CLI output: $output"
+    ((TESTS_FAILED++))
+  fi
+
+  # Each foundation injects only inside its own group. The web block is
+  # US-001/US-002 and the api block US-003/US-004 (contiguous per-group blocks,
+  # lexicographic group order), so a leaked cross-group edge would show up here
+  # as the wrong id, not merely as a dropped one.
+  local web_dep api_dep web_root api_root
+  web_dep=$(jq -c '.userStories[1].dependsOn' "$web_file" 2>/dev/null)
+  api_dep=$(jq -c '.userStories[1].dependsOn' "$api_file" 2>/dev/null)
+  web_root=$(jq -c '.userStories[0].dependsOn' "$web_file" 2>/dev/null)
+  api_root=$(jq -c '.userStories[0].dependsOn' "$api_file" 2>/dev/null)
+  assert_eq '["US-001"]' "$web_dep" "TC55: the web story depends on the web foundation"
+  assert_eq '["US-003"]' "$api_dep" "TC55: the api story depends on the api foundation"
+  assert_eq "[]" "$web_root" "TC55: the web foundation keeps its own empty dependsOn"
+  assert_eq "[]" "$api_root" "TC55: the api foundation keeps its own empty dependsOn"
+
+  # Nothing crossed a group boundary, so nothing was dropped and neither file
+  # mentions the other's foundation.
+  local web_smells api_smells
+  web_smells=$(jq -c '.metadata.smellWarnings // "absent"' "$web_file" 2>/dev/null)
+  api_smells=$(jq -c '.metadata.smellWarnings // "absent"' "$api_file" 2>/dev/null)
+  assert_eq '"absent"' "$web_smells" "TC55: no smellWarnings key on the web file — nothing crossed a boundary"
+  assert_eq '"absent"' "$api_smells" "TC55: no smellWarnings key on the api file — nothing crossed a boundary"
+
+  if printf '%s\n' "$output" | grep -q "dependsOn edge(s) dropped"; then
+    echo -e "${RED}✗${NC} TC55: a drop banner fired though every injected edge stayed in its group"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} TC55: no drop banner — an injected edge never leaves its own group"
+    ((TESTS_PASSED++))
+  fi
+
+  local web_wave api_wave
+  web_wave=$(jq -r '.userStories[1].wave' "$web_file" 2>/dev/null)
+  api_wave=$(jq -r '.userStories[1].wave' "$api_file" 2>/dev/null)
+  assert_eq "2" "$web_wave" "TC55: the injected edge survives into the web file's wave computation"
+  assert_eq "2" "$api_wave" "TC55: the injected edge survives into the api file's wave computation"
+
+  # The checksum: a stated project that disagrees with the resolved story's own
+  # .project refuses the whole merge before any write, naming both.
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc55-*
+  _sm_make_project_story "$stg/01-web.json"  "Web design tokens"       "apps/web"     "src/tokens.ts"
+  _sm_make_project_story "$stg/02-web2.json" "React UserProfile page"  "apps/web"     "src/components/UserProfile.tsx"
+  _sm_make_project_story "$stg/03-api.json"  "Rails app scaffold"      "services/api" "config/application.rb"
+
+  local bad_output bad_exit
+  bad_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
+    --foundation wrong-project:01 --foundation services/api:03 2>&1) && bad_exit=0 || bad_exit=$?
+  assert_exit_code "1" "$bad_exit" "TC55: a qualifier disagreeing with the staging file refuses the merge"
+  assert_contains "wrong-project" "$bad_output" "TC55: the refusal names the STATED project"
+  assert_contains "apps/web" "$bad_output" "TC55: the refusal names the ACTUAL project"
+  assert_contains "US-001" "$bad_output" "TC55: the refusal names the offending story id"
+
+  local written
+  written=$(ls .aimi/tasks/sm-tc55-*-tasks.json 2>/dev/null | wc -l | tr -d ' ')
+  assert_eq "0" "$written" "TC55: the refusal lands before any file is written"
+
+  # A bare value alongside another is refused for the arity alone, before any
+  # index is resolved -- which project would the bare one be for?
+  local bare_output bare_exit
+  bare_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
+    --foundation 01 --foundation services/api:03 2>&1) && bare_exit=0 || bare_exit=$?
+  assert_exit_code "1" "$bare_exit" "TC55: a bare value alongside another is refused"
+  assert_contains "must be qualified as <project>:NN" "$bare_output" "TC55: the arity refusal names the qualified form"
+
+  # Bash validates SHAPE only, one value at a time, before python3 runs.
+  local shape_output shape_exit
+  shape_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation apps/web:1 2>&1) && shape_exit=0 || shape_exit=$?
+  assert_exit_code "1" "$shape_exit" "TC55: a malformed qualified value is refused by the wrapper"
+  assert_contains "<project>:NN" "$shape_output" "TC55: the shape refusal names the qualified form too"
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc55-*
 }
 
 # TC48: --phase-aware crossed with the PROJECT axis. Both writers strip one
@@ -7778,6 +7905,7 @@ main() {
   test_story_merge_project_split_basename_collision
   test_story_merge_project_split_project_keyed_warnings
   test_story_merge_project_split_foundation_edge
+  test_story_merge_project_split_foundation_qualified
   test_story_merge_project_split_phase_aware
   test_story_merge_project_split_partial_write_failure
 
