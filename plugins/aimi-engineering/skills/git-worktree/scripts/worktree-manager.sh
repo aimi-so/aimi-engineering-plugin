@@ -50,6 +50,29 @@ ensure_gitignore() {
     return
   fi
 
+  # Container/phase mode runs `create` with its CWD inside a linked worktree,
+  # so GIT_ROOT — resolved once at script load from `git rev-parse
+  # --show-toplevel` — is that container's own top level rather than the real
+  # repository root. Appending here writes an UNTRACKED .gitignore inside the
+  # container, which a later `merge-all` then aborts on ("untracked working
+  # tree files would be overwritten by merge"). Detect the linked worktree
+  # structurally: a linked worktree keeps its own per-worktree git dir under
+  # the shared common dir, so the two differ. A `/.worktrees/` path-substring
+  # test would break the moment that directory is renamed.
+  local git_dir="" common_dir=""
+  git_dir=$(git -C "$GIT_ROOT" rev-parse --git-dir 2>/dev/null) || git_dir=""
+  common_dir=$(git -C "$GIT_ROOT" rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+  if [[ -n "$git_dir" && -n "$common_dir" ]]; then
+    # Either can come back relative to GIT_ROOT, so make them comparable
+    # first — a relative/absolute mix must never be read as a difference.
+    case "$git_dir" in /*) ;; *) git_dir="$GIT_ROOT/$git_dir" ;; esac
+    case "$common_dir" in /*) ;; *) common_dir="$GIT_ROOT/$common_dir" ;; esac
+    if ! [[ "$git_dir" -ef "$common_dir" ]]; then
+      echo -e "${YELLOW}Warning: running inside a linked worktree ($GIT_ROOT) whose .gitignore has no .worktrees entry. Container mode will not write one here — add .worktrees to the real repository's .gitignore and commit it.${NC}" >&2
+      return
+    fi
+  fi
+
   # HEAD doesn't have the entry (or there's no HEAD commit yet). Only
   # append when doing so introduces no *new* uncommitted-diff signal: the
   # file is untracked (nothing committed to diff against) or it already has
@@ -602,16 +625,35 @@ merge_worktree() {
     exit 1
   fi
 
+  # Capture git merge's own stderr. A content conflict reports entirely on
+  # stdout (left unredirected, so live output is unchanged), but a PRE-merge
+  # abort — an untracked file that would be overwritten, for instance —
+  # reports on stderr and leaves no unmerged index entries at all, so
+  # `--diff-filter=U` has nothing to list and the report below would be empty.
+  local merge_stderr
+  merge_stderr=$(mktemp)
+
   # Attempt the merge
-  if git merge -- "$worktree_branch"; then
+  if git merge -- "$worktree_branch" 2>"$merge_stderr"; then
     local merge_hash
     merge_hash=$(git rev-parse HEAD)
+    if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
+    rm -f "$merge_stderr"
     echo -e "${GREEN}Merge successful!${NC}"
     echo -e "Merge commit: ${GREEN}$merge_hash${NC}"
   else
     echo -e "${RED}Merge conflict detected!${NC}"
-    echo -e "${YELLOW}Conflicting files:${NC}"
-    git diff --name-only --diff-filter=U
+    local unmerged=""
+    unmerged=$(git diff --name-only --diff-filter=U) || unmerged=""
+    if [[ -n "$unmerged" ]]; then
+      echo -e "${YELLOW}Conflicting files:${NC}"
+      echo "$unmerged"
+    else
+      # Nothing unmerged: the merge never started. Report git's own reason.
+      echo -e "${YELLOW}Merge did not start. git reported:${NC}"
+      cat "$merge_stderr" >&2
+    fi
+    rm -f "$merge_stderr"
     exit 1
   fi
 }
@@ -674,16 +716,34 @@ merge_all_worktrees() {
       exit 1
     fi
 
+    # Capture this merge's own stderr — see merge_worktree for why: a
+    # pre-merge abort reports there and leaves no unmerged index entries,
+    # so the conflicting-files listing below would otherwise come back empty.
+    # stdout stays unredirected, so a real content conflict prints as before.
+    local merge_stderr
+    merge_stderr=$(mktemp)
+
     # Attempt merge
-    if git merge "$resolved_branch"; then
+    if git merge "$resolved_branch" 2>"$merge_stderr"; then
       local merge_hash
       merge_hash=$(git rev-parse HEAD)
+      if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
+      rm -f "$merge_stderr"
       echo -e "${GREEN}  Merged '$branch' successfully (commit: $merge_hash)${NC}"
       merged=$((merged + 1))
     else
       echo -e "${RED}Merge conflict on branch '$branch'!${NC}"
-      echo -e "${YELLOW}Conflicting files:${NC}"
-      git diff --name-only --diff-filter=U
+      local unmerged=""
+      unmerged=$(git diff --name-only --diff-filter=U) || unmerged=""
+      if [[ -n "$unmerged" ]]; then
+        echo -e "${YELLOW}Conflicting files:${NC}"
+        echo "$unmerged"
+      else
+        # Nothing unmerged: the merge never started. Report git's own reason.
+        echo -e "${YELLOW}Merge did not start. git reported:${NC}"
+        cat "$merge_stderr" >&2
+      fi
+      rm -f "$merge_stderr"
       echo ""
       echo -e "${RED}Stopping merge-all. $merged of ${#branches[@]} branch(es) merged before conflict.${NC}"
       exit 1

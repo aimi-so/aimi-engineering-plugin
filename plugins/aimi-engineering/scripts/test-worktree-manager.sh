@@ -53,6 +53,26 @@ assert_contains() {
   fi
 }
 
+# No counterpart in test-aimi-cli.sh: the ensure_gitignore and merge-all
+# tests below need to prove a warning is ABSENT (the linked-worktree guard
+# must not fire in a main checkout; an empty conflict list must not print a
+# "Conflicting files:" heading with nothing under it).
+assert_not_contains() {
+  local unexpected="$1"
+  local actual="$2"
+  local test_name="$3"
+
+  if [[ "$actual" != *"$unexpected"* ]]; then
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} $test_name"
+    echo "  Expected NOT to contain: $unexpected"
+    echo "  Actual: $actual"
+    ((TESTS_FAILED++))
+  fi
+}
+
 assert_exit_code() {
   local expected="$1"
   local actual="$2"
@@ -431,6 +451,359 @@ test_validate_branch_name_rejects_traversal() {
 }
 
 # ============================================================================
+# Ensure Gitignore Tests
+# ============================================================================
+#
+# ensure_gitignore() had no coverage at all before this section, and it has
+# four distinct outcomes: the HEAD-already-has-the-entry early return, the
+# linked-worktree skip (issue #127), the tracked-and-clean warning, and the
+# append. All four are reached through `create`, which is the only caller.
+#
+# The linked-worktree discriminator compares `git rev-parse --git-dir`
+# against `--git-common-dir`. Those two can come back in DIFFERENT FORMS for
+# the same directory — on git 2.34.1, run from a subdirectory of a main
+# checkout, --git-dir answers an absolute `/abs/.git` while --git-common-dir
+# answers a relative `../../.git` — so the guard normalizes both against
+# GIT_ROOT and compares with -ef. test_ensure_gitignore_writes_from_main_checkout_subdirectory
+# is the regression guard for exactly that: a raw string comparison would
+# make the guard fire on an ordinary repository and disable the append path
+# entirely.
+
+# The pre-existing repository-root write path, which had no test before.
+# Guards against the linked-worktree skip being widened until it swallows
+# the ordinary case.
+test_ensure_gitignore_writes_at_repository_root() {
+  echo ""
+  echo "=== Testing ensure_gitignore — writes at the repository root ==="
+
+  setup_wtm_fixture
+
+  local stderr_file rc stderr_output
+  stderr_file=$(mktemp)
+  bash "$WTM" create root-write-branch >/dev/null 2>"$stderr_file"
+  rc=$?
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$rc" "ensure_gitignore (repo root): create — exit code"
+
+  # grep -c prints 0 and exits 1 on no match, and prints nothing at all when
+  # the file is missing — normalize both into a plain count.
+  local worktrees_lines
+  worktrees_lines=$(grep -c '^\.worktrees$' "$WTM_FIXTURE_REPO/.gitignore" 2>/dev/null || true)
+  assert_eq "1" "${worktrees_lines:-0}" \
+    "ensure_gitignore (repo root): .gitignore written with exactly one .worktrees line"
+
+  # The append branch is only taken because the file is untracked — assert
+  # that precondition held, so a future change that starts tracking the
+  # fixture's .gitignore can't make this test pass for the wrong reason.
+  local tracked
+  tracked=$(git -C "$WTM_FIXTURE_REPO" ls-files --error-unmatch .gitignore >/dev/null 2>&1 && echo true || echo false)
+  assert_eq "false" "$tracked" \
+    "ensure_gitignore (repo root): the written .gitignore is untracked"
+
+  assert_not_contains "Warning:" "$stderr_output" \
+    "ensure_gitignore (repo root): no warning on stderr"
+
+  teardown_wtm_fixture
+}
+
+# Regression guard for the normalization inside the linked-worktree
+# discriminator: run from a SUBDIRECTORY of a main checkout, git answers
+# --git-dir and --git-common-dir in different forms for the same directory.
+# Comparing them as raw strings would fire the guard here and stop
+# ensure_gitignore writing anything in an ordinary repository.
+test_ensure_gitignore_writes_from_main_checkout_subdirectory() {
+  echo ""
+  echo "=== Testing ensure_gitignore — main checkout, invoked from a subdirectory ==="
+
+  setup_wtm_fixture
+
+  mkdir -p "$WTM_FIXTURE_REPO/pkg/deep"
+
+  # Assert the hazard itself, in a form no git version can invalidate: the
+  # two answers name the SAME directory even when their spellings differ.
+  local raw_git_dir raw_common_dir same_dir
+  raw_git_dir=$(cd "$WTM_FIXTURE_REPO/pkg/deep" && git rev-parse --git-dir)
+  raw_common_dir=$(cd "$WTM_FIXTURE_REPO/pkg/deep" && git rev-parse --git-common-dir)
+  case "$raw_git_dir" in /*) ;; *) raw_git_dir="$WTM_FIXTURE_REPO/pkg/deep/$raw_git_dir" ;; esac
+  case "$raw_common_dir" in /*) ;; *) raw_common_dir="$WTM_FIXTURE_REPO/pkg/deep/$raw_common_dir" ;; esac
+  same_dir=$([[ "$raw_git_dir" -ef "$raw_common_dir" ]] && echo true || echo false)
+  assert_eq "true" "$same_dir" \
+    "ensure_gitignore (subdirectory): --git-dir and --git-common-dir name the same dir in a main checkout"
+
+  local stderr_file rc stderr_output
+  stderr_file=$(mktemp)
+  ( cd "$WTM_FIXTURE_REPO/pkg/deep" && bash "$WTM" create subdir-invoked-branch ) >/dev/null 2>"$stderr_file"
+  rc=$?
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$rc" "ensure_gitignore (subdirectory): create — exit code"
+
+  local worktrees_lines
+  worktrees_lines=$(grep -c '^\.worktrees$' "$WTM_FIXTURE_REPO/.gitignore" 2>/dev/null || true)
+  assert_eq "1" "${worktrees_lines:-0}" \
+    "ensure_gitignore (subdirectory): .gitignore still written at the repository root"
+
+  assert_not_contains "linked worktree" "$stderr_output" \
+    "ensure_gitignore (subdirectory): linked-worktree guard does NOT fire in a main checkout"
+
+  teardown_wtm_fixture
+}
+
+# Issue #127: container/phase mode runs `create` with CWD inside a linked
+# worktree, so GIT_ROOT is the container's own top level. Appending there
+# leaves an untracked .gitignore that a later merge-all aborts on.
+test_ensure_gitignore_skips_in_linked_worktree() {
+  echo ""
+  echo "=== Testing ensure_gitignore — skips inside a linked worktree ==="
+
+  setup_wtm_fixture
+
+  local container_path="$WTM_FIXTURE_REPO/.worktrees/phase-branch"
+
+  bash "$WTM" create phase-branch --from main >/dev/null 2>&1
+
+  # `git worktree add` checks out tracked files only, and the root .gitignore
+  # written by the create above is untracked — so the container starts with
+  # no .gitignore of its own. That is the "before" state the assertions below
+  # require to stay unchanged.
+  local container_gitignore_before
+  container_gitignore_before=$([[ -e "$container_path/.gitignore" ]] && echo present || echo absent)
+  assert_eq "absent" "$container_gitignore_before" \
+    "ensure_gitignore (linked worktree): container starts with no .gitignore"
+
+  local stderr_file rc stderr_output
+  stderr_file=$(mktemp)
+  ( cd "$container_path" && bash "$WTM" create phase-branch-US-001 --from phase-branch ) >/dev/null 2>"$stderr_file"
+  rc=$?
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$rc" "ensure_gitignore (linked worktree): nested create — exit code"
+
+  local container_gitignore_after
+  container_gitignore_after=$([[ -e "$container_path/.gitignore" ]] && echo present || echo absent)
+  assert_eq "absent" "$container_gitignore_after" \
+    "ensure_gitignore (linked worktree): container .gitignore left exactly as it was (never written)"
+
+  assert_stderr_contains "running inside a linked worktree" "$stderr_output" \
+    "ensure_gitignore (linked worktree): warns instead of writing"
+
+  teardown_wtm_fixture
+}
+
+# The one case container mode must never silently dirty.
+test_ensure_gitignore_warns_on_tracked_clean_gitignore() {
+  echo ""
+  echo "=== Testing ensure_gitignore — tracked and clean, missing entry ==="
+
+  setup_wtm_fixture
+
+  printf 'node_modules\n' > "$WTM_FIXTURE_REPO/.gitignore"
+  git -C "$WTM_FIXTURE_REPO" add .gitignore
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Add .gitignore without a .worktrees entry"
+
+  local before after
+  before=$(cksum < "$WTM_FIXTURE_REPO/.gitignore")
+
+  local stderr_file rc stderr_output
+  stderr_file=$(mktemp)
+  bash "$WTM" create tracked-clean-branch >/dev/null 2>"$stderr_file"
+  rc=$?
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$rc" "ensure_gitignore (tracked+clean): create — exit code"
+
+  assert_stderr_contains "is tracked and clean but missing a .worktrees entry" "$stderr_output" \
+    "ensure_gitignore (tracked+clean): warning on stderr"
+
+  after=$(cksum < "$WTM_FIXTURE_REPO/.gitignore")
+  assert_eq "$before" "$after" \
+    "ensure_gitignore (tracked+clean): .gitignore byte-for-byte unchanged"
+
+  teardown_wtm_fixture
+}
+
+# Committed truth wins: nothing is appended on top of an entry HEAD already
+# carries, so no duplicate line accumulates across repeated creates.
+test_ensure_gitignore_early_return_when_entry_present() {
+  echo ""
+  echo "=== Testing ensure_gitignore — entry already in HEAD ==="
+
+  setup_wtm_fixture
+
+  printf '.worktrees\nnode_modules\n' > "$WTM_FIXTURE_REPO/.gitignore"
+  git -C "$WTM_FIXTURE_REPO" add .gitignore
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Add .gitignore with a .worktrees entry"
+
+  local before after
+  before=$(cksum < "$WTM_FIXTURE_REPO/.gitignore")
+
+  local stderr_file rc stderr_output
+  stderr_file=$(mktemp)
+  bash "$WTM" create has-entry-branch >/dev/null 2>"$stderr_file"
+  rc=$?
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_exit_code "0" "$rc" "ensure_gitignore (entry present): create — exit code"
+
+  after=$(cksum < "$WTM_FIXTURE_REPO/.gitignore")
+  assert_eq "$before" "$after" \
+    "ensure_gitignore (entry present): .gitignore byte-for-byte unchanged"
+
+  local worktrees_lines
+  worktrees_lines=$(grep -c '^\.worktrees$' "$WTM_FIXTURE_REPO/.gitignore" 2>/dev/null || true)
+  assert_eq "1" "${worktrees_lines:-0}" \
+    "ensure_gitignore (entry present): no duplicate .worktrees line appended"
+
+  assert_not_contains "Warning:" "$stderr_output" \
+    "ensure_gitignore (entry present): no warning on stderr"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
+# Merge-All Tests
+# ============================================================================
+#
+# merge_all_worktrees' reporting branch had no coverage either. Two of the
+# three tests below turn on the same fact: `git diff --name-only
+# --diff-filter=U` lists files with unmerged INDEX entries, and a merge that
+# git refuses BEFORE it starts creates none — so the old
+# "Conflicting files:" heading printed nothing at all and named no cause.
+
+# The end-to-end shape from the issue #127 report: container worktree, story
+# worktree created from inside it, story commits its own .gitignore, merge-all
+# run from the container. Before the fix this aborted with "The following
+# untracked working tree files would be overwritten by merge".
+test_merge_all_succeeds_with_container_and_story_worktree_gitignores() {
+  echo ""
+  echo "=== Testing merge-all — container + story worktree .gitignore ==="
+
+  setup_wtm_fixture
+
+  local container_path="$WTM_FIXTURE_REPO/.worktrees/phase-branch"
+  local story_path="$container_path/.worktrees/phase-branch-US-001"
+
+  bash "$WTM" create phase-branch --from main >/dev/null 2>&1
+
+  local nested_rc
+  ( cd "$container_path" && bash "$WTM" create phase-branch-US-001 --from phase-branch ) >/dev/null 2>&1
+  nested_rc=$?
+  assert_exit_code "0" "$nested_rc" "merge-all (container): nested create — exit code"
+
+  assert_eq "absent" "$([[ -e "$container_path/.gitignore" ]] && echo present || echo absent)" \
+    "merge-all (container): no untracked .gitignore left in the container to collide with"
+
+  # The story worktree commits the .gitignore a foundation story would.
+  printf '.worktrees\nnode_modules\n' > "$story_path/.gitignore"
+  git -C "$story_path" add .gitignore
+  git -C "$story_path" commit -q -m "Add .gitignore from the story worktree"
+
+  local stdout_file stderr_file merge_rc stdout_output stderr_output
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  ( cd "$container_path" && bash "$WTM" merge-all phase-branch-US-001 --into phase-branch ) \
+    >"$stdout_file" 2>"$stderr_file"
+  merge_rc=$?
+  stdout_output=$(cat "$stdout_file")
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stdout_file" "$stderr_file"
+
+  assert_exit_code "0" "$merge_rc" "merge-all (container): merge-all — exit code"
+  assert_contains "merged successfully into 'phase-branch'" "$stdout_output" \
+    "merge-all (container): reports success"
+  assert_not_contains "would be overwritten by merge" "$stderr_output" \
+    "merge-all (container): no untracked-overwrite abort"
+
+  assert_eq "present" "$([[ -e "$container_path/.gitignore" ]] && echo present || echo absent)" \
+    "merge-all (container): the story's .gitignore landed in the container"
+
+  teardown_wtm_fixture
+}
+
+# A pre-merge abort reached through a DIFFERENT condition than the untracked
+# .gitignore the fix removes: a local uncommitted change to a tracked file
+# the incoming branch also touches. git refuses before entering a conflicted
+# state, so --diff-filter=U is empty and only git's own stderr says why.
+test_merge_all_reports_stderr_on_empty_conflict_list() {
+  echo ""
+  echo "=== Testing merge-all — empty conflict list reports git's own stderr ==="
+
+  setup_wtm_fixture
+
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/incoming-branch"
+  bash "$WTM" create incoming-branch >/dev/null 2>&1
+
+  echo "incoming change" >> "$worktree_path/README.md"
+  git -C "$worktree_path" add README.md
+  git -C "$worktree_path" commit -q -m "Change README on the incoming branch"
+
+  # Local uncommitted modification to the same tracked file.
+  echo "local uncommitted change" >> "$WTM_FIXTURE_REPO/README.md"
+
+  local stdout_file stderr_file rc stdout_output stderr_output
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  bash "$WTM" merge-all incoming-branch --into main >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  stdout_output=$(cat "$stdout_file")
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stdout_file" "$stderr_file"
+
+  assert_exit_code "1" "$rc" "merge-all (empty conflict list): exit code"
+  assert_contains "Merge did not start. git reported:" "$stdout_output" \
+    "merge-all (empty conflict list): says the merge never started"
+  assert_not_contains "Conflicting files:" "$stdout_output" \
+    "merge-all (empty conflict list): does not print an empty 'Conflicting files:' listing"
+  assert_stderr_contains "would be overwritten by merge" "$stderr_output" \
+    "merge-all (empty conflict list): git's own reason reaches the user"
+
+  teardown_wtm_fixture
+}
+
+# Neither story specified success-path behaviour, so pin it: capturing git
+# merge's stderr must not swallow it when the merge SUCCEEDS. An ambiguous
+# refname (a tag sharing the branch's name) makes git warn on stderr while
+# still fast-forwarding. The branch deliberately has no worktree, because
+# merge_all_worktrees resolves a worktree-backed branch through
+# `rev-parse --abbrev-ref HEAD`, which disambiguates the name for us.
+test_merge_all_replays_stderr_on_successful_merge() {
+  echo ""
+  echo "=== Testing merge-all — successful merge still shows git's stderr ==="
+
+  setup_wtm_fixture
+
+  git -C "$WTM_FIXTURE_REPO" checkout -q -b ambig-branch
+  echo "incoming change" >> "$WTM_FIXTURE_REPO/README.md"
+  git -C "$WTM_FIXTURE_REPO" add README.md
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Change README on the ambiguous branch"
+  git -C "$WTM_FIXTURE_REPO" checkout -q main
+  git -C "$WTM_FIXTURE_REPO" tag ambig-branch refs/heads/ambig-branch
+
+  local stdout_file stderr_file rc stdout_output stderr_output
+  stdout_file=$(mktemp)
+  stderr_file=$(mktemp)
+  bash "$WTM" merge-all ambig-branch --into main >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  stdout_output=$(cat "$stdout_file")
+  stderr_output=$(cat "$stderr_file")
+  rm -f "$stdout_file" "$stderr_file"
+
+  assert_exit_code "0" "$rc" "merge-all (success path): exit code"
+  assert_contains "merged successfully into 'main'" "$stdout_output" \
+    "merge-all (success path): reports success"
+  assert_stderr_contains "refname 'ambig-branch' is ambiguous" "$stderr_output" \
+    "merge-all (success path): git's stderr is replayed, not swallowed"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -461,6 +834,20 @@ main() {
   echo ""
   echo "--- Branch Name Validation Tests ---"
   test_validate_branch_name_rejects_traversal
+
+  echo ""
+  echo "--- Ensure Gitignore Tests ---"
+  test_ensure_gitignore_writes_at_repository_root
+  test_ensure_gitignore_writes_from_main_checkout_subdirectory
+  test_ensure_gitignore_skips_in_linked_worktree
+  test_ensure_gitignore_warns_on_tracked_clean_gitignore
+  test_ensure_gitignore_early_return_when_entry_present
+
+  echo ""
+  echo "--- Merge-All Tests ---"
+  test_merge_all_succeeds_with_container_and_story_worktree_gitignores
+  test_merge_all_reports_stderr_on_empty_conflict_list
+  test_merge_all_replays_stderr_on_successful_merge
 
   echo ""
   echo "================================================"

@@ -193,9 +193,22 @@ def die_list(header, lines, code=1):
 # Reading the staging directory
 # ---------------------------------------------------------------------------
 #
-# Non-story sidecars written by plan.md Phase 3b (outline.json) and any future
-# *outline*.json metadata file have a different shape and would be mis-merged as
-# bogus stories, so they are skipped by name.
+# Non-story sidecars written by plan.md Phase 3b have a different shape and would
+# be mis-merged as bogus stories, so they are skipped by name. A sidecar is one of
+# the three exact names in _SIDECARS, or any file whose basename ENDS IN
+# "-outline.json" -- the open arm that keeps future <topic>-outline.json metadata
+# files out of the merge.
+#
+# The suffix is the contract, and it replaced a bare `"outline" in base` substring
+# test that was too wide by exactly the names a story author would choose. A story
+# file legitimately called 05-n-foundation-outline-entries.json was silently
+# dropped by it: six files loaded instead of seven, and because outline:NN is a
+# POSITION in the merged array rather than a filename prefix, every later position
+# shifted by one and two stories ended up depending on themselves. What the run
+# actually printed was "circular dependency detected among stories: US-005,
+# US-006" -- a message naming no missing file, no skipped filename and no filter.
+# So the word "outline" may appear anywhere in a story's name; only a file whose
+# name ENDS that way is claiming to BE an outline.
 
 _SIDECARS = ("outline.json", "metadata.json", "audit-result.json")
 
@@ -203,7 +216,7 @@ _SIDECARS = ("outline.json", "metadata.json", "audit-result.json")
 def is_sidecar(base):
     if base in _SIDECARS:
         return True
-    return base.endswith(".json") and "outline" in base[: -len(".json")]
+    return base.endswith("-outline.json")
 
 
 def staging_files(staging_dir):
@@ -217,7 +230,32 @@ def staging_files(staging_dir):
             continue
         paths.append(path)
     paths.sort(key=_collate)
-    return [p for p in paths if not is_sidecar(_basename(p))]
+
+    kept = []
+    for path in paths:
+        base = _basename(path)
+        if not is_sidecar(base):
+            kept.append(path)
+            continue
+        # Say so when the skipped file carries a story INDEX. read_staging reads
+        # that index with this same expression, and it is what makes a skip
+        # expensive: only a numbered file occupies a position, so only a numbered
+        # file can shift every outline:NN after it and manufacture the cycle that
+        # gets reported instead of the skip. The three exact _SIDECARS names and a
+        # plain <topic>-outline.json carry no index, hold no position, and are
+        # written beside the stories on every ordinary run -- announcing those
+        # would be noise on every merge, and would report nothing that can go
+        # wrong. So an ordinary merge stays silent on stderr, and the one shape
+        # that can silently renumber the array never does.
+        if re.match(r"[0-9]", base):
+            sys.stderr.write(
+                "Note: story-merge: skipped "
+                + base
+                + ": it carries a story index but its name ends in"
+                ' "-outline.json", so it is read as an outline sidecar and'
+                " contributes no story. Rename it if it is a story.\n"
+            )
+    return kept
 
 
 def read_staging(paths):
@@ -308,33 +346,175 @@ def unresolved_outline_refs(stories):
     return lines
 
 
-def inject_foundation(stories, foundation_idx):
-    """--foundation NN: every other story gains one edge toward the foundation.
+def _group_label(key):
+    """A normalized project group as a message names it.
 
-    Cycle-safe by construction -- the foundation's own dependsOn is asserted
-    empty first and injection only ever points toward it -- but the Kahn check
-    below still runs unmodified.
+    group_key() answers None for the untagged group, which has no path to
+    print; every message that names a group goes through here so the two
+    spellings cannot drift.
     """
-    foundation_id = outline_map(stories).get(foundation_idx, "")
-    if not foundation_id:
-        die(
-            "Error: story-merge: --foundation "
-            + foundation_idx
-            + " not present among staging files"
-        )
-    owned = [s for s in stories if s.get("id") == foundation_id]
-    if owned and _list(owned[0].get("dependsOn")) != []:
-        die(
-            "Error: story-merge: foundation story "
-            + foundation_id
-            + " has non-empty dependsOn"
-        )
+    return '"' + key + '"' if key else "(untagged)"
+
+
+def _die_each(lines):
+    """One complete message per violator, then exit 1.
+
+    Batched the way resolve_axis batches, with one deliberate difference: there
+    is NO header line. A single violator must print exactly the one line the
+    pre-batch implementation printed -- golden's fundacao-inexistente and
+    fundacao-dependson-nao-vazio are the frozen recording of that wording -- and
+    a header would prepend a second line to it.
+    """
+    for line in lines:
+        sys.stderr.write(line + "\n")
+    sys.exit(1)
+
+
+def inject_foundation(stories, foundation_values):
+    """--foundation NN | <project>:NN, repeatable: one foundation PER project group.
+
+    Each accepted foundation gains an edge from every OTHER story sharing its
+    own group_key(.project) -- never from a story in a different normalized
+    project group. A group no value names is left alone: a normal, silent
+    outcome, not a partial failure, whether it simply has no foundation story or
+    its own Foundation Gate resolved Skip.
+
+    The qualifier is a CHECKSUM, never a second source of truth. Routing is
+    always computed from the resolved story's own .project via group_key; the
+    stated project is only ever compared against that, and a mismatch refuses
+    the merge. That comparison is the one thing in the pipeline that catches
+    plan.md's own per-project bookkeeping disagreeing with what a staging file
+    actually says.
+
+    A bare value is accepted whenever it is the SOLE occurrence, whatever
+    project it resolves to -- golden's proj-fundacao-edge is a lone bare index
+    resolving to a tagged, non-root project, so a bare-means-root rule would be
+    wrong. Two or more values require every one of them to be qualified: with
+    two bare values there is no way to say which project each is for.
+
+    The SIDE axis and legacy mode need no special case here and have none:
+    group_key(None) is one value for every untagged story, so "inject only
+    within your own group" reduces to "inject into every other story" whenever
+    every story shares one group -- resolve_axis's own SIDE-axis boundary.
+
+    Cycle-safe by construction -- every accepted foundation's own dependsOn is
+    asserted empty first and injection only ever points toward one -- but the
+    Kahn check below still runs unmodified.
+
+    Returns every accepted foundation id, across every group, deduplicated and
+    in first-occurrence order. write_project_split needs the WHOLE set, not one
+    group's: a single id cannot express "this dropped edge targets some group's
+    foundation" once there can be many.
+    """
+    values = list(foundation_values)
+
+    # Gate 0 -- arity, before any index is resolved. Counted over the RAW
+    # occurrences, so two identical bare values are refused too: the question
+    # ("which project is the bare one for?") is asked of the flag surface, not
+    # of what the values happen to point at.
+    if len(values) > 1:
+        bare = [v for v in values if ":" not in v]
+        if bare:
+            _die_each(
+                [
+                    "Error: story-merge: --foundation "
+                    + v
+                    + " must be qualified as <project>:NN when more than one"
+                    " --foundation is given"
+                    for v in bare
+                ]
+            )
+
+    # An exact repeat is idempotent rather than a collision. First occurrence
+    # wins the ordering.
+    parsed = []
+    for raw in list(dict.fromkeys(values)):
+        head, sep, tail = raw.rpartition(":")
+        # A .project cannot contain ':' under PROJECT_GRAMMAR, so the LAST colon
+        # is unambiguously the separator.
+        parsed.append((raw, tail if sep else raw, head if sep else None))
+
+    mapping = outline_map(stories)
+
+    # Gate 1 -- indices resolving to nothing. Byte-identical to the pre-batch
+    # single message when exactly one value is at fault.
+    missing = [
+        "Error: story-merge: --foundation " + idx + " not present among staging files"
+        for _, idx, _ in parsed
+        if not mapping.get(idx)
+    ]
+    if missing:
+        _die_each(missing)
+
+    owned = {}
     for story in stories:
-        if story.get("id") == foundation_id:
+        owned.setdefault(story.get("id"), story)
+    resolved = [(raw, mapping[idx], stated) for raw, idx, stated in parsed]
+
+    def _actual(story_id):
+        return group_key(owned.get(story_id, {}).get("project"))
+
+    # Gate 2 -- the checksum, QUALIFIED values only. A bare value carries no
+    # stated project and is exempt by definition, which is exactly what keeps a
+    # lone bare index valid for any project, non-root included.
+    mismatched = [
+        "Error: story-merge: --foundation "
+        + raw
+        + ": story "
+        + story_id
+        + " belongs to project "
+        + _group_label(_actual(story_id))
+        + ", not "
+        + _group_label(group_key(stated))
+        for raw, story_id, stated in resolved
+        if stated is not None and group_key(stated) != _actual(story_id)
+    ]
+    if mismatched:
+        _die_each(mismatched)
+
+    # Gate 3 -- a foundation carrying dependencies of its own. Byte-identical to
+    # the pre-batch single message when exactly one value is at fault. A value
+    # naming an id no story owns is not a violation here, exactly as before.
+    nonempty = [
+        "Error: story-merge: foundation story " + story_id + " has non-empty dependsOn"
+        for _, story_id, _ in resolved
+        if story_id in owned and _list(owned[story_id].get("dependsOn")) != []
+    ]
+    if nonempty:
+        _die_each(nonempty)
+
+    # Gate 4 -- two foundations landing in one group. Necessarily both
+    # qualified, since Gate 0 already refused a bare value alongside another.
+    # New behaviour, so it carries no byte-identity constraint and uses the
+    # ordinary header-plus-lines shape.
+    groups = {}
+    for _, story_id, _ in resolved:
+        ids = groups.setdefault(_actual(story_id), [])
+        if story_id not in ids:
+            ids.append(story_id)
+    collisions = [
+        "  " + _join(" and ", ids) + " both resolve to project " + _group_label(key)
+        for key, ids in groups.items()
+        if len(ids) > 1
+    ]
+    if collisions:
+        die_list(
+            "Error: story-merge: --foundation names more than one foundation story in"
+            " the same project group; no files were written:",
+            collisions,
+        )
+
+    # Injection, once every gate has passed. A group with no accepted foundation
+    # is skipped silently.
+    foundation_of = {key: ids[0] for key, ids in groups.items()}
+    for story in stories:
+        foundation_id = foundation_of.get(group_key(story.get("project")))
+        if foundation_id is None or story.get("id") == foundation_id:
             continue
         deps = _list(story.get("dependsOn"))
         story["dependsOn"] = deps if foundation_id in deps else deps + [foundation_id]
-    return foundation_id
+
+    return list(dict.fromkeys(story_id for _, story_id, _ in resolved))
 
 
 def cycle_stories(stories):
@@ -1101,7 +1281,7 @@ def _derived_name_errors(group, branch_regex):
 
 
 def write_project_split(
-    stories, output_path, staging_dir, smells, phase_aware, foundation_id, branch_regex
+    stories, output_path, staging_dir, smells, phase_aware, foundation_ids, branch_regex
 ):
     # 1. Route every story to a project group. There is no fallback for a null
     #    key and there must not be one: this writer is only reached on the
@@ -1147,11 +1327,19 @@ def write_project_split(
     # `side` field to emit; the two keys are mutually exclusive per axis, which
     # is what lets the Step 5 renderer read whichever one an entry carries.
     #
-    # foundationEdge marks a dropped edge --foundation itself injected into every
-    # non-foundation story. The foundation lives in exactly one group, so every
-    # OTHER group loses that edge and would otherwise be indistinguishable from a
-    # hand-authored missing dependency. foundation_id is the PRE-remap id, and is
-    # "" when --foundation was omitted -- no real id matches it.
+    # foundationEdge marks a dropped edge whose target is a story --foundation
+    # named, in whichever project group that story lives. It can no longer mark
+    # an edge the merge itself injected: injection is per group, so both
+    # endpoints of an injected edge share one group_key, hence one per-block
+    # idmap, and _remap_block never drops it. Every true reading from here on is
+    # therefore a HAND-AUTHORED dependency reaching into another group's
+    # foundation -- worth naming apart from an ordinary cross-project drop
+    # because of WHAT IT TARGETS, not because of where it came from. It is the
+    # one repository's Foundation Gate resolved Accept while a sibling's
+    # resolved Skip case, and it is why the field is kept rather than removed.
+    # foundation_ids holds PRE-remap ids and is empty when --foundation was
+    # omitted -- no real id matches anything in it.
+    foundation_id_set = set(foundation_ids)
     cross = []
     for block in blocks:
         for story in block["stories"]:
@@ -1165,7 +1353,7 @@ def write_project_split(
                         "id": target["newId"],
                         "project": target["project"],
                         "title": rm_sanitize(target["title"], TITLE_MAXLEN),
-                        "foundationEdge": foundation_id != "" and old == foundation_id,
+                        "foundationEdge": old in foundation_id_set,
                     }
                 )
             foundation_hits = [d for d in dropped if d["foundationEdge"] is True]
@@ -1178,13 +1366,14 @@ def write_project_split(
                 message += (
                     " -- "
                     + str(len(foundation_hits))
-                    + " of these targets the shared --foundation story ("
+                    + " of these targets a --foundation story in another project group ("
                     + _join(
                         ", ",
                         [d["id"] + ' in project "' + d["project"] + '"' for d in foundation_hits],
                     )
-                    + "), an edge --foundation injected into every story rather than a"
-                    " hand-authored dependency"
+                    + "), a --foundation story belonging to another project group -- a"
+                    " hand-authored dependency reaching across the split, never an edge"
+                    " the merge injected"
                 )
             if story["__becameRoot"]:
                 message += " (story became a false wave-1 root)"
@@ -1203,9 +1392,12 @@ def write_project_split(
     if cross:
         _dropped_banner(cross, "cross-project", "--split full-stack, project axis")
         # The --foundation note is separate from the drop-count banner because
-        # these edges are structurally different: the merge itself injected them,
-        # so every non-foundation group losing one is expected fallout of
-        # combining --foundation with a multi-repo split.
+        # these edges are a different KIND of finding, not a louder count of the
+        # same one. Injection is per project group, so the merge cannot have
+        # produced one of them: each is a hand-authored dependency on a story
+        # some group's Foundation Gate accepted, written against a different
+        # foundation split than the one that shipped or predating the per-repo
+        # split entirely. That is worth a look, not expected fallout.
         foundation_edges = [d for e in cross for d in e["droppedDeps"] if d["foundationEdge"]]
         foundation_stories = [
             e for e in cross if any(d["foundationEdge"] for d in e["droppedDeps"])
@@ -1216,9 +1408,10 @@ def write_project_split(
                 + str(len(foundation_edges))
                 + " of those edge(s), across "
                 + str(len(foundation_stories))
-                + " stories, target the shared --foundation story, which lives in only one"
-                " project group; --foundation injected them, so their loss is expected on a"
-                " multi-repo split (see droppedDeps[].foundationEdge)\n"
+                + " stories, target a --foundation story in another project group;"
+                " --foundation injects only within a group, so these are hand-authored"
+                " dependencies reaching across the split (see"
+                " droppedDeps[].foundationEdge)\n"
             )
         _false_root_note(_false_root_lines(cross, "project", "cross-project"))
 
@@ -1356,12 +1549,23 @@ def _flag(argv, name, default=None):
     return default
 
 
+def _flags_all(argv, name):
+    """Every value following an occurrence of `name`, in argv order.
+
+    _flag() answers the FIRST occurrence, which is all a single-valued flag can
+    mean. --foundation is the one repeatable flag -- one accepted foundation per
+    project group -- so it needs the whole list; what to do with an exact repeat
+    is inject_foundation's decision, not this helper's.
+    """
+    return [argv[i + 1] for i, token in enumerate(argv) if token == name and i + 1 < len(argv)]
+
+
 def main(argv):
     args = argv[1:]
     staging_dir = _flag(args, "--staging-dir", "")
     output_path = _flag(args, "--output", "")
     split_mode = _flag(args, "--split", "legacy")
-    foundation_idx = _flag(args, "--foundation", "")
+    foundation_values = _flags_all(args, "--foundation")
     branch_regex = _flag(args, "--branch-regex", "")
     agent_mode = "--agent-mode" in args
     phase_aware = "--phase-aware" in args
@@ -1385,9 +1589,7 @@ def main(argv):
     # The axis is decided ONCE, here, and the writers below only read the answer.
     split_axis = resolve_axis(stories, split_mode)
 
-    foundation_id = ""
-    if foundation_idx:
-        foundation_id = inject_foundation(stories, foundation_idx)
+    foundation_ids = inject_foundation(stories, foundation_values) if foundation_values else []
 
     in_cycle = cycle_stories(stories)
     if in_cycle:
@@ -1460,18 +1662,18 @@ def main(argv):
     # the one the writer groups by.
     if split_mode == "full-stack":
         if split_axis == "project":
-            # foundation_id is threaded into the PROJECT writer ONLY: in a
-            # multi-repo split every group that does not host the foundation
-            # loses that injected edge and would otherwise look like an ordinary
-            # hand-authored missing dependency. The SIDE writer's signature is
-            # unchanged.
+            # foundation_ids is threaded into the PROJECT writer ONLY, and as
+            # the whole SET rather than one id: a dropped cross-group edge is
+            # worth flagging when it targets ANY group's foundation, and after
+            # per-group injection there can be one per group. The SIDE writer's
+            # signature is unchanged -- it emits no foundationEdge field.
             write_project_split(
                 stories,
                 output_path,
                 staging_dir,
                 smells,
                 phase_aware,
-                foundation_id,
+                foundation_ids,
                 branch_regex,
             )
         else:

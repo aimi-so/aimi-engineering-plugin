@@ -380,7 +380,7 @@ def test_side_and_project_key_their_drops_by_different_names():
 def test_the_same_combined_smell_set_reaches_every_file_of_a_split():
     """Reviewers see the same full smell surface regardless of which file they
     inspect first."""
-    for label in ("side-queda-cross-file", "proj-tres-repos", "proj-fundacao-edge"):
+    for label in ("side-queda-cross-file", "proj-tres-repos", "proj-avisos-por-projeto"):
         sets = [_smells(label, path) for path in _written(label)]
         assert all(s == sets[0] for s in sets), label
 
@@ -449,20 +449,37 @@ def test_a_foundation_with_its_own_dependencies_aborts_before_any_write():
     assert "not present among staging files" in CASES["fundacao-inexistente"]["stderr"]
 
 
-def test_a_dropped_foundation_edge_is_marked_and_noted_separately_from_the_banner():
-    """The foundation lives in exactly one group, so every OTHER group losing
-    that edge is expected fallout of --foundation plus a multi-repo split, not a
-    hand-authored dependency that went missing."""
+def test_a_lone_foundation_in_a_group_of_one_injects_nothing_and_drops_nothing():
+    """proj-fundacao-edge, re-recorded when injection became per project group.
+
+    Its lone bare --foundation 01 resolves into apps/web, which has no OTHER
+    member, and neither of the other two groups names a foundation of its own.
+    Nothing is injected anywhere, so nothing can be dropped: no banner, no note,
+    no smellWarnings key, every dependsOn still empty. Under the retired
+    global-injection rule this same input produced two cross-group drops.
+    """
     case = CASES["proj-fundacao-edge"]
-    assert "cross-project dependsOn edge(s) dropped" in case["stderr"]
-    assert "Note: story-merge: 2 of those edge(s), across 2 stories" in case["stderr"]
-    assert "see droppedDeps[].foundationEdge" in case["stderr"]
-    entries = [e for e in _smells("proj-fundacao-edge", _written("proj-fundacao-edge")[0])
-               if e["type"] == "cross-file-dep-dropped"]
-    assert entries
-    for entry in entries:
-        assert all(d["foundationEdge"] is True for d in entry["droppedDeps"])
-        assert "an edge --foundation injected into every story" in entry["message"]
+    assert case["exit"] == 0
+    assert case["stderr"] == ""
+    assert len(_written("proj-fundacao-edge")) == 3
+    for path in _written("proj-fundacao-edge"):
+        doc = _doc("proj-fundacao-edge", path)
+        assert "smellWarnings" not in doc["metadata"]
+        assert all(story["dependsOn"] == [] for story in doc["userStories"])
+
+
+def test_a_bare_index_is_valid_for_a_tagged_non_root_project():
+    """A bare value is bounded by ARITY, never by which project it lands in.
+
+    proj-fundacao-edge is the frozen evidence: a lone bare --foundation 01 over
+    a genuine 3-project layout, resolving to apps/web rather than to a root
+    repository. A bare-means-root rule would refuse a recording that exits 0.
+    """
+    case = CASES["proj-fundacao-edge"]
+    assert case["args"][-2:] == ["--foundation", "01"]
+    inputs = list(case["input"].values())
+    assert json.loads(inputs[0])["project"] == "apps/web"
+    assert case["exit"] == 0
 
 
 def test_foundation_edge_is_false_on_every_entry_of_a_run_without_the_flag():
@@ -477,6 +494,277 @@ def test_the_side_axis_carries_no_foundation_edge_field_at_all():
                if e["type"] == "cross-file-dep-dropped"]
     assert entries
     assert all("foundationEdge" not in d for e in entries for d in e["droppedDeps"])
+
+
+# --- inject_foundation, directly ------------------------------------------
+#
+# The golden corpus cannot reach any of this: every --foundation recording in it
+# is a LONE BARE index, because that was the only form the jq accepted. The
+# per-group contract is new capability, so it is exercised here against the
+# function itself, and end to end through the wrapper in
+# test-aimi-cli-part2-planning.sh's TC35/TC36.
+
+
+def _story(index, project, deps=None):
+    """One merged story as inject_foundation sees it: ids already assigned by
+    assign_ids, outline:NN already remapped, dependsOn already a real list."""
+    return {
+        "id": "US-" + str(index).zfill(3),
+        "title": "Story " + str(index),
+        "project": project,
+        "dependsOn": list(deps or []),
+    }
+
+
+def _deps(stories):
+    return {s["id"]: s["dependsOn"] for s in stories}
+
+
+def test_two_qualified_foundations_each_inject_only_inside_their_own_group():
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "apps/web"),
+        _story(3, "services/api"),
+        _story(4, "services/api"),
+    ]
+    assert SM.inject_foundation(stories, ["apps/web:01", "services/api:03"]) == [
+        "US-001",
+        "US-003",
+    ]
+    assert _deps(stories) == {
+        "US-001": [],
+        "US-002": ["US-001"],
+        "US-003": [],
+        "US-004": ["US-003"],
+    }
+
+
+def test_a_group_no_value_names_receives_no_injected_edge_at_all():
+    """Silent and normal -- the group either has no foundation story of its own
+    or its Foundation Gate resolved Skip. Never a partial failure."""
+    stories = [_story(1, "apps/web"), _story(2, "apps/web"), _story(3, "services/api")]
+    assert SM.inject_foundation(stories, ["apps/web:01"]) == ["US-001"]
+    assert _deps(stories) == {"US-001": [], "US-002": ["US-001"], "US-003": []}
+
+
+def test_the_untagged_group_reduces_to_the_legacy_inject_into_everything_rule():
+    """No axis-specific branch makes this true -- group_key(None) is one value
+    for every untagged story, so per-group injection IS the legacy rule whenever
+    every story shares one group. That is resolve_axis's own SIDE boundary."""
+    stories = [_story(1, None), _story(2, None), _story(3, None)]
+    assert SM.inject_foundation(stories, ["01"]) == ["US-001"]
+    assert _deps(stories) == {"US-001": [], "US-002": ["US-001"], "US-003": ["US-001"]}
+
+
+def test_a_bare_value_resolving_into_a_tagged_project_is_accepted_when_it_is_alone():
+    stories = [_story(1, "apps/web"), _story(2, "apps/web")]
+    assert SM.inject_foundation(stories, ["01"]) == ["US-001"]
+    assert _deps(stories) == {"US-001": [], "US-002": ["US-001"]}
+
+
+def test_a_story_that_already_names_its_own_foundation_keeps_exactly_one():
+    stories = [_story(1, "apps/web"), _story(2, "apps/web", ["US-001"])]
+    SM.inject_foundation(stories, ["01"])
+    assert stories[1]["dependsOn"] == ["US-001"]
+
+
+def test_an_exact_repeat_is_idempotent_rather_than_a_collision():
+    stories = [_story(1, "apps/web"), _story(2, "apps/web")]
+    assert SM.inject_foundation(stories, ["apps/web:01", "apps/web:01"]) == ["US-001"]
+    assert stories[1]["dependsOn"] == ["US-001"]
+
+
+def test_a_bare_value_is_refused_when_it_is_not_the_sole_occurrence(capsys):
+    """Asked of the flag surface, not of what the values resolve to: with two
+    bare values there is no way to say which project each one is for."""
+    stories = [_story(1, "apps/web"), _story(2, "services/api")]
+    with pytest.raises(SystemExit) as exc:
+        SM.inject_foundation(stories, ["01", "services/api:02"])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert err == (
+        "Error: story-merge: --foundation 01 must be qualified as <project>:NN when"
+        " more than one --foundation is given\n"
+    )
+    assert stories[1]["dependsOn"] == [], "refused before anything was injected"
+
+
+def test_two_identical_bare_values_are_refused_before_either_is_resolved(capsys):
+    stories = [_story(1, "apps/web"), _story(2, "apps/web")]
+    with pytest.raises(SystemExit):
+        SM.inject_foundation(stories, ["01", "01"])
+    assert capsys.readouterr().err.count("must be qualified as <project>:NN") == 2
+
+
+def test_a_qualifier_that_disagrees_with_the_resolved_story_refuses_the_merge(capsys):
+    """The one failure nothing else in the pipeline catches: plan.md's own
+    per-project bookkeeping disagreeing with what the staging file says."""
+    stories = [_story(1, "apps/web"), _story(2, "services/api"), _story(3, "services/api")]
+    with pytest.raises(SystemExit) as exc:
+        SM.inject_foundation(stories, ["apps/web:01", "apps/web:02"])
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == (
+        'Error: story-merge: --foundation apps/web:02: story US-002 belongs to project'
+        ' "services/api", not "apps/web"\n'
+    )
+    assert stories[2]["dependsOn"] == []
+
+
+def test_the_qualifier_only_ever_confirms_and_never_decides_the_routing():
+    """A qualifier that matches changes nothing about where the edges land --
+    grouping comes from the story's own .project either way."""
+    bare = [_story(1, "apps/web"), _story(2, "apps/web"), _story(3, "services/api")]
+    qualified = [_story(1, "apps/web"), _story(2, "apps/web"), _story(3, "services/api")]
+    SM.inject_foundation(bare, ["01"])
+    SM.inject_foundation(qualified, ["apps/web:01"])
+    assert _deps(bare) == _deps(qualified)
+
+
+def test_a_trailing_slash_qualifier_matches_because_both_sides_are_normalized():
+    stories = [_story(1, "apps/web/"), _story(2, "apps/web")]
+    assert SM.inject_foundation(stories, ["apps/web:01"]) == ["US-001"]
+    assert stories[1]["dependsOn"] == ["US-001"]
+
+
+def test_two_foundations_landing_in_one_group_abort_before_any_write(capsys):
+    stories = [_story(1, "apps/web"), _story(2, "apps/web"), _story(3, "apps/web")]
+    with pytest.raises(SystemExit) as exc:
+        SM.inject_foundation(stories, ["apps/web:01", "apps/web:02"])
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "names more than one foundation story in the same project group" in err
+    assert 'US-001 and US-002 both resolve to project "apps/web"' in err
+    assert stories[2]["dependsOn"] == []
+
+
+def test_an_untagged_collision_group_is_named_rather_than_printed_as_empty(capsys):
+    stories = [_story(1, None), _story(2, None)]
+    with pytest.raises(SystemExit):
+        SM.inject_foundation(stories, [":01", ":02"])
+    assert "US-001 and US-002 both resolve to project (untagged)" in capsys.readouterr().err
+
+
+def test_the_missing_index_message_is_byte_identical_for_one_violator(capsys):
+    """golden's fundacao-inexistente froze this exact line; batching must not
+    prepend a header to it."""
+    stories = [_story(1, None)]
+    with pytest.raises(SystemExit) as exc:
+        SM.inject_foundation(stories, ["09"])
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == (
+        "Error: story-merge: --foundation 09 not present among staging files\n"
+    )
+
+
+def test_every_missing_index_gets_its_own_complete_line(capsys):
+    stories = [_story(1, "apps/web")]
+    with pytest.raises(SystemExit):
+        SM.inject_foundation(stories, ["apps/web:08", "apps/web:09"])
+    assert capsys.readouterr().err == (
+        "Error: story-merge: --foundation 08 not present among staging files\n"
+        "Error: story-merge: --foundation 09 not present among staging files\n"
+    )
+
+
+def test_the_non_empty_dependson_message_is_byte_identical_for_one_violator(capsys):
+    """golden's fundacao-dependson-nao-vazio froze this exact line."""
+    stories = [_story(1, None, ["US-002"]), _story(2, None)]
+    with pytest.raises(SystemExit) as exc:
+        SM.inject_foundation(stories, ["01"])
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == (
+        "Error: story-merge: foundation story US-001 has non-empty dependsOn\n"
+    )
+
+
+def test_every_foundation_with_its_own_dependencies_gets_its_own_line(capsys):
+    stories = [
+        _story(1, "apps/web", ["US-002"]),
+        _story(2, "apps/web"),
+        _story(3, "services/api", ["US-002"]),
+    ]
+    with pytest.raises(SystemExit):
+        SM.inject_foundation(stories, ["apps/web:01", "services/api:03"])
+    assert capsys.readouterr().err == (
+        "Error: story-merge: foundation story US-001 has non-empty dependsOn\n"
+        "Error: story-merge: foundation story US-003 has non-empty dependsOn\n"
+    )
+
+
+def test_flags_all_collects_every_occurrence_in_argv_order():
+    argv = ["--foundation", "a:01", "--split", "full-stack", "--foundation", "b:02"]
+    assert SM._flags_all(argv, "--foundation") == ["a:01", "b:02"]
+    assert SM._flag(argv, "--foundation") == "a:01", "_flag still answers the first"
+    assert SM._flags_all(argv, "--branch-regex") == []
+
+
+# --- foundationEdge, directly ---------------------------------------------
+
+
+def _project_drops(tmp_path, stories, foundation_ids):
+    """Run the PROJECT writer and return its cross-file-dep-dropped entries.
+
+    Read out of ONE output file, not unioned across all of them: the combined
+    smell set is written identically into every file the split produces, so
+    flattening the whole set would count each entry N times.
+    """
+    staging = str(tmp_path / "stg")
+    os.makedirs(staging, exist_ok=True)
+    output = str(tmp_path / "tasks" / "out-tasks.json")
+    SM.write_project_split(stories, output, staging, [], False, foundation_ids, r"^[a-z0-9/-]+$")
+    written = sorted(n for n in os.listdir(str(tmp_path / "tasks")) if n.endswith(".json"))
+    with open(str(tmp_path / "tasks" / written[0]), encoding="utf-8") as handle:
+        doc = json.load(handle)
+    return [
+        e
+        for e in doc["metadata"].get("smellWarnings", [])
+        if e["type"] == "cross-file-dep-dropped"
+    ]
+
+
+def test_a_hand_authored_edge_into_another_groups_foundation_reads_true(tmp_path, capsys):
+    """The case the field is KEPT for: one repository's Foundation Gate resolved
+    Accept while a sibling's resolved Skip, so a story in the second repository
+    still carries a dependency pointing at the first repository's foundation.
+    Nothing mechanical put it there -- an injected edge never leaves its own
+    group, so it is never dropped -- but it targets what IS a foundation."""
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "services/api", ["US-001"]),
+    ]
+    entries = _project_drops(tmp_path, stories, ["US-001"])
+    assert len(entries) == 1
+    dropped = entries[0]["droppedDeps"]
+    assert [d["foundationEdge"] for d in dropped] == [True]
+    assert "a --foundation story belonging to another project group" in entries[0]["message"]
+    err = capsys.readouterr().err
+    assert "target a --foundation story in another project group" in err
+    assert "hand-authored dependencies reaching across the split" in err
+
+
+def test_an_ordinary_cross_group_edge_targeting_a_non_foundation_reads_false(tmp_path):
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "apps/web"),
+        _story(3, "services/api", ["US-002"]),
+    ]
+    dropped = [d for e in _project_drops(tmp_path, stories, ["US-001"]) for d in e["droppedDeps"]]
+    assert dropped and all(d["foundationEdge"] is False for d in dropped)
+
+
+def test_the_whole_set_is_threaded_in_not_one_group_s_id(tmp_path):
+    """A single scalar cannot express "this dropped edge targets SOME group's
+    foundation" once there can be one foundation per group."""
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "services/api"),
+        _story(3, "apps/mobile", ["US-001", "US-002"]),
+    ]
+    dropped = [
+        d for e in _project_drops(tmp_path, stories, ["US-001", "US-002"]) for d in e["droppedDeps"]
+    ]
+    assert len(dropped) == 2 and all(d["foundationEdge"] is True for d in dropped)
+    assert {d["project"] for d in dropped} == {"apps/web", "services/api"}
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +921,134 @@ def test_the_sidecars_plan_writes_beside_the_stories_are_skipped_by_name():
     assert len(stories) == 1, "four sidecars and one story"
     assert CASES["so-sidecars"]["exit"] == 1
     assert "no *.json files found" in CASES["so-sidecars"]["stderr"]
+
+
+def test_a_sidecar_is_an_exact_name_or_a_name_ending_in_outline_json():
+    """The predicate is a SUFFIX, not a substring.
+
+    The four that must stay sidecars include topic-outline.json, which no exact
+    name covers -- it is matched only by the suffix arm, and golden_from_jq.json
+    records it as skipped, so an exact-list-only rule would move a recorded
+    verdict. The two that must NOT be sidecars are the names the substring rule
+    ate: 'outline' is a descriptive word in the middle of each, not the file's
+    kind."""
+    for name in ("outline.json", "topic-outline.json", "metadata.json", "audit-result.json"):
+        assert SM.is_sidecar(name), name
+    for name in (
+        "05-n-foundation-outline-entries.json",
+        "01-outline-generation.json",
+        "03-per-project-foundation-injection.json",
+    ):
+        assert not SM.is_sidecar(name), name
+
+
+def _merge(tmp_path, files, args=None):
+    """Run a real story-merge over a staging directory built from `files`."""
+    root = str(tmp_path)
+    staging = os.path.join(root, ".aimi", "stg")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"))
+    os.makedirs(staging)
+    for name, value in files.items():
+        with open(os.path.join(staging, name), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+    proc = subprocess.run(
+        ["bash", CLI, "story-merge", "--staging-dir", ".aimi/stg", "--output"]
+        + [".aimi/tasks/out-tasks.json"]
+        + (args or []),
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    doc = None
+    written = os.path.join(root, ".aimi", "tasks", "out-tasks.json")
+    if os.path.isfile(written):
+        with open(written, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    return proc, doc
+
+
+def _staging_story(title, deps=None):
+    return {
+        "title": title,
+        "description": "As a user, I want " + title + " so that it works.",
+        "acceptanceCriteria": ["Typecheck passes"],
+        "priority": 1,
+        "status": "pending",
+        "dependsOn": list(deps or []),
+        "notes": "",
+        "implementation": {
+            "files": ["src/x.ts"],
+            "approach": "Implement it",
+            "verify": "tsc --noEmit",
+        },
+    }
+
+
+def test_a_story_whose_name_embeds_outline_is_merged_rather_than_dropped(tmp_path):
+    """The bug, end to end, in the shape that produced it.
+
+    Three numbered stories, the middle one named the way a story about foundation
+    outline entries gets named, and the third depending on the middle by its
+    outline POSITION. Under the substring rule the middle file was dropped, the
+    array shrank to two, outline:02 then pointed at the third story itself, and
+    the run died with 'circular dependency detected' -- naming neither the
+    dropped file nor the filter."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-n-foundation-outline-entries.json": _staging_story("B"),
+            "03-c.json": _staging_story("C", ["outline:02"]),
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "circular dependency" not in proc.stderr
+    stories = doc["userStories"]
+    assert [s["id"] for s in stories] == ["US-001", "US-002", "US-003"], "all three merged"
+    assert [s["title"] for s in stories] == ["A", "B", "C"]
+    for story in stories:
+        assert story["id"] not in story["dependsOn"], story["id"] + " depends on itself"
+    assert _deps(stories)["US-003"] == ["US-002"], "outline:02 resolves to the middle story"
+
+
+def test_an_ordinary_merge_says_nothing_about_the_sidecars_beside_it(tmp_path):
+    """The routine sidecars are written beside the stories on EVERY plan run and
+    hold no position in the merged array, so announcing them would be noise on
+    every merge -- and golden_from_jq.json's sidecar-outline case records exactly
+    this silence."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "outline.json": "[{\"idx\": 1}]",
+            "topic-outline.json": "{\"idx\": 2}",
+            "metadata.json": "{\"k\": 1}",
+            "audit-result.json": "{\"k\": 2}",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == "", "an ordinary merge stays silent on stderr"
+    assert len(doc["userStories"]) == 1
+
+
+def test_a_skipped_file_that_carries_a_story_index_names_itself_on_stderr(tmp_path):
+    """The half of the bug that cost the most: a skip that says nothing.
+
+    Only a NUMBERED file occupies a position, so only a numbered file can shift
+    every outline:NN after it. That is the shape that must never be silent, and
+    it is the one the suffix rule still (correctly) treats as a sidecar."""
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-topic-outline.json": "{\"idx\": 2}",
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "02-topic-outline.json" in proc.stderr, "the skipped basename is named"
+    assert "skipped" in proc.stderr
+    assert len(doc["userStories"]) == 1, "it is still treated as a sidecar"
 
 
 def test_a_document_whose_only_value_is_null_or_false_reads_as_malformed():
