@@ -7499,7 +7499,7 @@ _setup_gate_fixture() {
       "status": "pending",
       "dependsOn": [],
       "notes": "",
-      "wave": 0,
+      "wave": 1,
       "gate": {
         "type": "decision",
         "status": "pending",
@@ -7516,7 +7516,7 @@ _setup_gate_fixture() {
       "status": "completed",
       "dependsOn": [],
       "notes": "",
-      "wave": 0,
+      "wave": 1,
       "gate": {
         "type": "action",
         "status": "pending",
@@ -7532,7 +7532,7 @@ _setup_gate_fixture() {
       "status": "pending",
       "dependsOn": [],
       "notes": "",
-      "wave": 0,
+      "wave": 1,
       "gate": {
         "type": "verify",
         "status": "pending",
@@ -7548,7 +7548,7 @@ _setup_gate_fixture() {
       "status": "pending",
       "dependsOn": ["US-002"],
       "notes": "",
-      "wave": 1
+      "wave": 2
     },
     {
       "id": "US-005",
@@ -7559,7 +7559,7 @@ _setup_gate_fixture() {
       "status": "pending",
       "dependsOn": [],
       "notes": "",
-      "wave": 0
+      "wave": 1
     }
   ]
 }
@@ -7809,7 +7809,7 @@ test_validate_waves_mismatch() {
     {
       "id": "US-002",
       "title": "Depends on US-001",
-      "description": "Should be wave 1 but stored as 0",
+      "description": "Should be wave 2 but stored as 0",
       "acceptanceCriteria": ["Passes"],
       "priority": 2,
       "status": "pending",
@@ -7829,6 +7829,10 @@ WAVEOF
   local output exit_code
   output=$("$CLI" validate-waves) && exit_code=0 || exit_code=$?
 
+  # Both stories mismatch under the 1-based convention: the root stores 0 where
+  # it computes 1, and its dependent stores 0 where it computes 2. US-002 is the
+  # one asserted because it is the one whose wave comes from the WALK rather
+  # than from the seed.
   assert_contains '"valid": false' "$output" "validate-waves: mismatched waves fail validation"
   assert_contains "Wave mismatch" "$output" "validate-waves: reports wave mismatch error"
   assert_contains "US-002" "$output" "validate-waves: identifies US-002 as mismatched"

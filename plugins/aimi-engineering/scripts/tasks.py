@@ -1211,16 +1211,35 @@ def validate_ids(docs):
 
 
 def computed_waves(stories):
-    """The wave assignment, exactly as the jq's nested reduce built it.
+    """Roots are wave 1; everyone else is max(dependency waves) + 1.
 
-    n outer passes over the stories still unassigned; a story with no
-    dependencies lands in wave 0, one whose dependencies are ALL already
-    assigned lands one above their max, and one whose dependencies are not
-    lands nowhere this pass. A story inside a cycle is therefore never assigned
-    at all -- which is why validate-waves reports nothing for a cyclic file
-    (wave-ciclo) and why a dangling dependsOn hides every wave error in its
-    story (dep-pendurada). Both are recorded passes, not oversights: reporting
-    them is validate-deps' job.
+    THE SEED USED TO BE 0, AND THAT WAS THE OUTLIER. Four components state the
+    1-based convention and only this one stated 0-based, so every tasks file
+    story-merge writes reported a mismatch on every story it contains:
+
+      * story_merge.py's compute_waves -- the WRITER, "Roots are wave 1";
+      * commands/plan.md's schema -- "computed from dependsOn: roots=1, others
+        = max(dep waves)+1", repeated as "wave 1 for roots";
+      * commands/execute.md -- starts its display at `wave = 1` and prints it
+        as "--- Wave [wave] ---", so the stored field now agrees with the
+        number the user actually reads on screen.
+
+    The off-by-one was inherited, not introduced by the port: the jq this is a
+    port of already disagreed with the jq story_merge.py is a port of. Which is
+    why correcting it moves recorded answers in tests/golden_from_jq.json's
+    tasks_validate_cases block -- a rule change, recorded as one.
+
+    The walk itself is untouched, and its structure is load-bearing. n outer
+    passes over the stories still unassigned; a story with no dependencies
+    lands in wave 1, one whose dependencies are ALL already assigned lands one
+    above their max, and one whose dependencies are not lands nowhere this
+    pass. A story inside a cycle is therefore never assigned at all -- which is
+    why validate-waves reports nothing for a cyclic file (wave-ciclo) and why a
+    dangling dependsOn hides every wave error in its story (dep-pendurada).
+    Both are recorded passes, not oversights: reporting them is validate-deps'
+    job. Assignment is still tracked by key PRESENCE in $assigned, never by the
+    wave value, so seeding roots at 1 shifts every assigned story by exactly
+    one and changes nothing about who gets assigned.
     """
     deps = {}
     for story in stories:
@@ -1243,7 +1262,7 @@ def computed_waves(stories):
             story_deps = jq_alternative(deps.get(story_id), [])
             if jq_length(story_deps, STORY + ".dependsOn") == 0:
                 current = dict(current)
-                current[story_id] = 0
+                current[story_id] = 1
             elif all(
                 jq_has(current, dep, "$assigned")
                 for dep in jq_iterate(story_deps, STORY + ".dependsOn")

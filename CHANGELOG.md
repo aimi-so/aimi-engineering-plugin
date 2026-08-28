@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.123.1] - 2026-08-28
+
+One issue — #129 — closed by a one-character correction and the release that
+carries it. PATCH rather than MINOR: nothing is added, no syntax changes, and
+no field appears or disappears; a validator that disagreed with every other
+component in the plugin now agrees with them. The thing worth knowing before
+you upgrade is that `validate-waves` was not occasionally wrong — it was wrong
+about every story of every file it was ever given, so a verdict that flips
+from invalid to valid on this upgrade is the verb being repaired, not your
+data changing.
+
+### Fixed
+
+- **`validate-waves` computed waves from 0 while `story-merge` writes them from 1, so it reported a mismatch on every story of every tasks file for its entire existence.** `computed_waves` in `tasks.py` seeded a story with no dependencies at wave 0, while `compute_waves` in `story_merge.py` — the component that *writes* the field — seeds it at 1. The two never agreed, so every story in every file the planner produced came back off by exactly one. Concretely: the tasks file behind the previous release reported eight mismatches, `US-001 stored=1 computed=0` through `US-008 stored=2 computed=1`, every one off by one; it now reports `valid: true` with no errors. **If a file the verb used to call invalid now passes, nothing changed in your data** — the verb was previously wrong about every file it was handed, correct ones included.
+- **The validator is the side that was corrected, and that was not a coin flip.** Four components already stated the 1-based convention, against `tasks.py` alone: `story_merge.py`'s `compute_waves`, the writer; `commands/plan.md`'s schema, which defines the field as "computed from dependsOn: roots=1, others=max(dep waves)+1" and repeats "wave 1 for roots" in two further checklist lines; and `commands/execute.md`, which starts its displayed wave numbering at 1 and prints it as `--- Wave [n] ---`. Correcting the writer instead would have invalidated every `tasks.json` already on disk and left the stored field disagreeing with the number you read on screen. The change is one seed value — `current[story_id] = 0` becoming `= 1`. The n-pass reduce, the increment and the mismatch predicate are all untouched, so a story inside a dependency cycle is still assigned no wave at all and a dangling `dependsOn` still hides its own story's wave errors; reporting those remains `validate-deps`' job.
+- **Why this went unnoticed for the field's whole life: the failure was reported into a channel nothing branches on.** Nothing but `validate-waves` itself reads the stored `wave` field — `story-merge` writes it, `plan.md` documents it, and `execute.md` counts its own wave loop rather than reading it — so a wrong value corrupted no behavior anywhere. And `validate-waves` **always exits 0**, invalid verdict included: the verdict lives in `.valid` in its JSON output, so anything checking exit status saw success on every run. That exit status is unchanged here, deliberately, and a test still pins it against a wave-mismatch fixture. This release changes which verdict the verb computes, never how it reports one.
+- **`tests/golden_from_jq.json` moved, which it normally must not, and the reason is that the disagreement predates the Python port.** That corpus was captured from the jq implementations before they were deleted and is the evidence the port changed nothing, so it is frozen except for the single carve-out `CLAUDE.md` names — a genuine rule change, recorded in the same commit with the reason in the message. This is that case: both sides are faithful ports, the jq behind `tasks.py` already disagreed with the jq behind `story_merge.py`, so the 0-based answers recorded there were the jq's own and the port reproduced them correctly. Only the `tasks_validate_cases` block moved. Of its 82 recorded `validate-waves` cases, 63 were re-recorded, 6 came back byte-identical (every one a document in which no story is ever assigned a wave) and 13 are engine-abort recordings already excused by name, which never depended on the convention. Across all 82 only `stdout` differs — `input`, `exit`, `stderr` and `state_after` are byte-identical — and each of the 63 was re-recorded by replaying its own stored input through the CLI, never regenerated from the Python. Every other block in the file is untouched, and the block's own comment gained its reason as an append, keeping the existing text as a byte-for-byte prefix. Six new pytest cases pin the convention directly rather than through a recording, and all six fail against the 0-based seed. Issue #129.
+
 ## [1.123.0] - 2026-08-27
 
 Two issues — #126 and #127 — closed by six of the seven stories landed on one

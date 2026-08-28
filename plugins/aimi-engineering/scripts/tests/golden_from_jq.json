@@ -24268,7 +24268,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\",\n    \"Wave mismatch: US-003 stored=2 computed=3\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24388,7 +24388,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24448,7 +24448,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24748,7 +24748,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24808,7 +24808,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24868,7 +24868,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-001a stored=0 computed=1\",\n    \"Wave mismatch: US-012a stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -24928,7 +24928,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: us-002 stored=0 computed=1\",\n    \"Wave mismatch: US-3 stored=0 computed=1\",\n    \"Wave mismatch: US-0001 stored=0 computed=1\",\n    \"Wave mismatch: US-001A stored=0 computed=1\",\n    \"Wave mismatch: US-001  stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25048,7 +25048,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch:  stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25108,7 +25108,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001\\nUS-002 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25288,7 +25288,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25348,7 +25348,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25408,7 +25408,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25468,7 +25468,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25528,7 +25528,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25588,7 +25588,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25648,7 +25648,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25708,7 +25708,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25768,7 +25768,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25828,7 +25828,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25888,7 +25888,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -25948,7 +25948,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26008,7 +26008,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26068,7 +26068,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26128,7 +26128,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26188,7 +26188,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26248,7 +26248,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26308,7 +26308,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26368,7 +26368,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26428,7 +26428,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26488,7 +26488,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26548,7 +26548,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26608,7 +26608,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26668,7 +26668,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26728,7 +26728,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26788,7 +26788,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26848,7 +26848,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26908,7 +26908,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -26968,7 +26968,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27028,7 +27028,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27088,7 +27088,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27148,7 +27148,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27208,7 +27208,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27268,7 +27268,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27328,7 +27328,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27388,7 +27388,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27448,7 +27448,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=5 computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=5 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27508,7 +27508,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=null computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=null computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27568,7 +27568,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=null computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=null computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27628,7 +27628,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=1 computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27688,7 +27688,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27748,7 +27748,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=1 computed=0\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27868,7 +27868,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=1 computed=2\",\n    \"Wave mismatch: US-003 stored=1 computed=2\",\n    \"Wave mismatch: US-004 stored=2 computed=3\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27928,7 +27928,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=1 computed=2\",\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -27988,7 +27988,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=true computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=true computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28048,7 +28048,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=null computed=1\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\",\n    \"Wave mismatch: US-002 stored=null computed=2\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28108,7 +28108,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28168,7 +28168,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28228,7 +28228,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28288,7 +28288,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28348,7 +28348,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28408,7 +28408,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28588,7 +28588,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: us-002 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -28648,7 +28648,7 @@
         "state": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"valid\": true,\n  \"errors\": []\n}\n{\n  \"valid\": true,\n  \"errors\": []\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-001 stored=0 computed=1\"\n  ]\n}\n{\n  \"valid\": false,\n  \"errors\": [\n    \"Wave mismatch: US-002 stored=0 computed=1\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -29133,7 +29133,7 @@
       "state_after": {}
     }
   ],
-  "_comment_tasks_validate": "The four validator verbs -- validate-deps, validate-stories, validate-ids and validate-waves -- captured exactly the way the three blocks before them were, and before their jq was deleted: 328 cases, 82 adversarial documents run through all four verbs, at commit 8d5477e. Recorded per case: the argv, the tasks file the run was given and the .aimi/state/ files it started with (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, and every .aimi/ file left behind afterwards (`state_after`). All 328 `state_after` values are empty, and that is this block's own evidence rather than a formality: these four are pure readers, so they take no lock, write no temp file and leave the document untouched -- a port that started writing one would have nowhere to hide. Each case ran in its own throwaway project root; exactly one normalization rule fired, the temp root to /TMP, and nothing else in the recording is non-deterministic. 1234 of 1312 field comparisons identical after the port, and 289 of the 328 cases matched on all four fields -- every stdout and every state_after matched in all 328. The 78 fields that differ fall in 39 cases, are exit code and stderr ONLY, and are all of one kind: jq aborting mid-expression, so the exit status was the engine's (5 for a runtime error, 4 for a parse error) and the message the code would otherwise have printed did not exist. Every one of them was, and still is, a refusal that writes nothing to stdout; only the wording and the number moved, to `Error: <verb>: <file>: <expression>: <what went wrong>` at exit 1. Recorded rather than reproduced, same as the 37 in _comment_tasks_read: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose. VALIDATE_DIVERGENCES in test_tasks.py names all 39 individually, in the ten groups the engine's own messages fall into: a userStories that is absent, null or a string (12), an acceptanceCriteria that is absent or null (2), a dependsOn that is a number (2), a document that is an array (4), malformed JSON at jq's own exit 4 (4), a story that is a string (3), a `has` against a string (2), a `test` against a non-string (4), an id used as an OBJECT KEY (4) and a `has` against a non-string key (2). The object-key group is validate-waves' alone and is worth naming: it builds `{(.id): ...}` before anything else runs, so an absent, numeric or array id kills that verb where the other three answer -- id-ausente-ids records the answer validate-ids gives the same document, `Invalid story ID: null`. THE CORPUS IS ADVERSARIAL BY CONSTRUCTION, not by claim: every one of the four verbs has at least one PASS and at least one distinct failure of every error class it can emit. validate-deps: a dangling reference (dep-pendurada), a self-reference (auto-referencia, which is necessarily also a cycle) and a cycle that is not one (ciclo, ciclo-longo). validate-stories: all twenty-four of its strings, one document each -- the three length caps, the two suspicious-content screens plus the tasks[] one, all four project rules, all five skills rules, all six tasks rules, the plural-gates field, `gate` missing each of type, status and prompt in turn and all three at once, a bare-string verification, and a story with no status. validate-ids: the accepted US-NNNa suffix (id-sufixo) beside five rejected forms (id-malformado), plus the four shapes that are not strings at all. validate-waves: a stale wave (wave-lacuna), an absent one (wave-ausente), a null one, a string one, a boolean one and a float one that is NOT a mismatch because jq and Python agree that 1.0 == 1. THREE CONTRACT DETAILS ARE PINNED HERE BECAUSE EACH LOOKS LIKE A DEFECT AND EACH WOULD BE A REGRESSION TO 'CORRECT'. (1) validate-ids' regex is `^US-[0-9]{3}[a-z]?$` and its message says `(expected US-NNN)`: the regex is the contract -- task-format-v3.md documents the suffix with US-012a as its example -- and the message describes the common case. US-001a is ACCEPTED (id-sufixo) and the wording is what /aimi:plan matches on, so neither may move to agree with the other. (2) validate-ids' output shape is ASYMMETRIC: the pass branch is `{valid, count}` with no `errors` key, the failure branch `{valid, errors}` with no `count`. A uniform `{valid, errors}` would pass a naive shape test and break the caller that reads them apart. (3) validate-waves NEVER returns non-zero: its bash body ended at the jq call with no `return 1`, unlike all three of its siblings, so an invalid verdict still exits 0 and the verdict lives in `.valid`. wave-lacuna-waves records `{valid: false}` at exit 0. And one message that reads like a typo and is not ours to correct: the plural-gates error says `gates` and `gate` with NO quotes around either, because the jq program sat inside a bash SINGLE-quoted string and the quotes the author typed closed and reopened it. gates-plural records the string bash actually assembled, which is the string the caller sees. FIVE CLASSES NO VALIDATOR FLAGS are recorded as the passes they are, so a later 'improvement' that starts flagging one shows up as a golden diff rather than as a silent contract change: a duplicated story id passes ALL FOUR (id-duplicado -- validate-ids checks format alone and validate-deps checks references alone); a story inside a cycle is never assigned a computed wave, so validate-waves reports nothing about it (wave-ciclo); a dangling dependsOn does the same to its own story (dep-pendurada-waves); an explicitly empty `skills: []` is legal (skills-vazio); and a dependsOn holding an ARRAY is legal too, because jq's `index` searches for a contiguous SUBSEQUENCE when the needle is an array and finds `[\"US-001\"]` inside `[\"US-001\", \"US-002\"]` (deps-array-elemento). WHERE A NAIVE PYTHON WOULD HAVE DIVERGED, each with the recorded case that catches it: `unique` inside validate-deps' cycle reduce sorts a dependsOn holding null, a number and a string, which jq orders and Python's sorted() raises TypeError on (deps-heterogeneo, the one place in these four that needs roadmap.py's jq_sort_key); `==` says a boolean is not a number, so a hand-edited `wave: true` IS a mismatch against a computed 0 where Python's `1 == True` would have hidden it (wave-true); `jq -r` unquotes a string and pretty-prints everything else, so an id that is `[1, 2]` reaches bash's line-at-a-time loop as FOUR lines and yields four errors from one story (id-array), while an id containing a newline yields two well-formed ids from one story (id-newline) and an id that is the empty string is skipped entirely and not even counted (id-vazio). Two whole-file behaviours were preserved rather than tidied away. An EMPTY tasks file makes jq read zero values, and the three verbs that piped their output through `echo` therefore print a BLANK LINE and refuse (doc-vazio-deps and doc-vazio-stories at exit 1), while validate-ids answers `{valid: true, count: 0}` and validate-waves prints nothing at all, both at exit 0. And a file holding TWO concatenated documents runs each verb twice: validate-deps then exits 1 even when both documents are valid, because its status came from comparing two lines of `.valid` against the one word `true` (dois-documentos-validos-deps), while validate-stories' `jq -e` reported on the LAST document alone and validate-ids pooled both documents' ids into a single verdict.",
+  "_comment_tasks_validate": "The four validator verbs -- validate-deps, validate-stories, validate-ids and validate-waves -- captured exactly the way the three blocks before them were, and before their jq was deleted: 328 cases, 82 adversarial documents run through all four verbs, at commit 8d5477e. Recorded per case: the argv, the tasks file the run was given and the .aimi/state/ files it started with (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, and every .aimi/ file left behind afterwards (`state_after`). All 328 `state_after` values are empty, and that is this block's own evidence rather than a formality: these four are pure readers, so they take no lock, write no temp file and leave the document untouched -- a port that started writing one would have nowhere to hide. Each case ran in its own throwaway project root; exactly one normalization rule fired, the temp root to /TMP, and nothing else in the recording is non-deterministic. 1234 of 1312 field comparisons identical after the port, and 289 of the 328 cases matched on all four fields -- every stdout and every state_after matched in all 328. The 78 fields that differ fall in 39 cases, are exit code and stderr ONLY, and are all of one kind: jq aborting mid-expression, so the exit status was the engine's (5 for a runtime error, 4 for a parse error) and the message the code would otherwise have printed did not exist. Every one of them was, and still is, a refusal that writes nothing to stdout; only the wording and the number moved, to `Error: <verb>: <file>: <expression>: <what went wrong>` at exit 1. Recorded rather than reproduced, same as the 37 in _comment_tasks_read: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose. VALIDATE_DIVERGENCES in test_tasks.py names all 39 individually, in the ten groups the engine's own messages fall into: a userStories that is absent, null or a string (12), an acceptanceCriteria that is absent or null (2), a dependsOn that is a number (2), a document that is an array (4), malformed JSON at jq's own exit 4 (4), a story that is a string (3), a `has` against a string (2), a `test` against a non-string (4), an id used as an OBJECT KEY (4) and a `has` against a non-string key (2). The object-key group is validate-waves' alone and is worth naming: it builds `{(.id): ...}` before anything else runs, so an absent, numeric or array id kills that verb where the other three answer -- id-ausente-ids records the answer validate-ids gives the same document, `Invalid story ID: null`. THE CORPUS IS ADVERSARIAL BY CONSTRUCTION, not by claim: every one of the four verbs has at least one PASS and at least one distinct failure of every error class it can emit. validate-deps: a dangling reference (dep-pendurada), a self-reference (auto-referencia, which is necessarily also a cycle) and a cycle that is not one (ciclo, ciclo-longo). validate-stories: all twenty-four of its strings, one document each -- the three length caps, the two suspicious-content screens plus the tasks[] one, all four project rules, all five skills rules, all six tasks rules, the plural-gates field, `gate` missing each of type, status and prompt in turn and all three at once, a bare-string verification, and a story with no status. validate-ids: the accepted US-NNNa suffix (id-sufixo) beside five rejected forms (id-malformado), plus the four shapes that are not strings at all. validate-waves: a stale wave (wave-lacuna), an absent one (wave-ausente), a null one, a string one, a boolean one and a float one that is NOT a mismatch because jq and Python agree that 1.0 == 1. THREE CONTRACT DETAILS ARE PINNED HERE BECAUSE EACH LOOKS LIKE A DEFECT AND EACH WOULD BE A REGRESSION TO 'CORRECT'. (1) validate-ids' regex is `^US-[0-9]{3}[a-z]?$` and its message says `(expected US-NNN)`: the regex is the contract -- task-format-v3.md documents the suffix with US-012a as its example -- and the message describes the common case. US-001a is ACCEPTED (id-sufixo) and the wording is what /aimi:plan matches on, so neither may move to agree with the other. (2) validate-ids' output shape is ASYMMETRIC: the pass branch is `{valid, count}` with no `errors` key, the failure branch `{valid, errors}` with no `count`. A uniform `{valid, errors}` would pass a naive shape test and break the caller that reads them apart. (3) validate-waves NEVER returns non-zero: its bash body ended at the jq call with no `return 1`, unlike all three of its siblings, so an invalid verdict still exits 0 and the verdict lives in `.valid`. wave-lacuna-waves records `{valid: false}` at exit 0. And one message that reads like a typo and is not ours to correct: the plural-gates error says `gates` and `gate` with NO quotes around either, because the jq program sat inside a bash SINGLE-quoted string and the quotes the author typed closed and reopened it. gates-plural records the string bash actually assembled, which is the string the caller sees. FIVE CLASSES NO VALIDATOR FLAGS are recorded as the passes they are, so a later 'improvement' that starts flagging one shows up as a golden diff rather than as a silent contract change: a duplicated story id passes ALL FOUR (id-duplicado -- validate-ids checks format alone and validate-deps checks references alone); a story inside a cycle is never assigned a computed wave, so validate-waves reports nothing about it (wave-ciclo); a dangling dependsOn does the same to its own story (dep-pendurada-waves); an explicitly empty `skills: []` is legal (skills-vazio); and a dependsOn holding an ARRAY is legal too, because jq's `index` searches for a contiguous SUBSEQUENCE when the needle is an array and finds `[\"US-001\"]` inside `[\"US-001\", \"US-002\"]` (deps-array-elemento). WHERE A NAIVE PYTHON WOULD HAVE DIVERGED, each with the recorded case that catches it: `unique` inside validate-deps' cycle reduce sorts a dependsOn holding null, a number and a string, which jq orders and Python's sorted() raises TypeError on (deps-heterogeneo, the one place in these four that needs roadmap.py's jq_sort_key); `==` says a boolean is not a number, so a hand-edited `wave: true` IS a mismatch against a computed 0 where Python's `1 == True` would have hidden it (wave-true); `jq -r` unquotes a string and pretty-prints everything else, so an id that is `[1, 2]` reaches bash's line-at-a-time loop as FOUR lines and yields four errors from one story (id-array), while an id containing a newline yields two well-formed ids from one story (id-newline) and an id that is the empty string is skipped entirely and not even counted (id-vazio). Two whole-file behaviours were preserved rather than tidied away. An EMPTY tasks file makes jq read zero values, and the three verbs that piped their output through `echo` therefore print a BLANK LINE and refuse (doc-vazio-deps and doc-vazio-stories at exit 1), while validate-ids answers `{valid: true, count: 0}` and validate-waves prints nothing at all, both at exit 0. And a file holding TWO concatenated documents runs each verb twice: validate-deps then exits 1 even when both documents are valid, because its status came from comparing two lines of `.valid` against the one word `true` (dois-documentos-validos-deps), while validate-stories' `jq -e` reported on the LAST document alone and validate-ids pooled both documents' ids into a single verdict. THE WAVE CONVENTION CHANGED, AND 63 OF THIS BLOCK'S RECORDINGS MOVED WITH IT -- deliberately, in the commit that changed it, which is the one carve-out CLAUDE.md allows for this file: \"When a rule genuinely changes, the golden file changes in the same commit, with the reason in the message.\" Everything ABOVE this sentence describes the capture as it was taken and is left exactly as it was written; this paragraph is the amendment, not a rewrite of it. THE RULE: computed_waves used to seed a story with no dependencies at wave 0; it now seeds it at wave 1, so every assigned story's computed wave is exactly one higher than the number recorded at capture time. tasks.py was the OUTLIER and four components already said 1-based: story_merge.py's compute_waves (the writer -- \"Roots are wave 1\"), commands/plan.md's schema (\"roots=1, others = max(dep waves)+1\", and \"wave 1 for roots\") and commands/execute.md's display, which starts at `wave = 1` and prints \"--- Wave [wave] ---\". Because the writer was 1-based and the validator was 0-based, validate-waves reported a mismatch on EVERY story of EVERY tasks file story-merge produced. THE OFF-BY-ONE WAS INHERITED, NOT INTRODUCED BY THE PORT, which is the only reason this file may move at all: both sides are faithful ports of jq implementations that already disagreed with each other, so the 0-based answers recorded here were the JQ's answers and the port reproduced them correctly. Correcting them is a rule change, not a port repair. WHAT MOVED, MEASURED: of the 82 validate-waves cases, 63 changed, 6 came back byte-identical (vazio, auto-referencia, ciclo, ciclo-longo, wave-ciclo, doc-vazio -- every one of them a document in which no story is ever assigned a wave, or has none to compare) and 13 are the engine-abort recordings VALIDATE_DIVERGENCES already excuses, which never depended on the convention and were NOT re-recorded. Only `stdout` moved: all 82 keep their recorded `input` byte for byte, their `exit`, their `stderr` and their empty `state_after`. Each of the 63 was re-recorded by replaying its OWN stored input through the CLI -- the file was never regenerated from tasks.py, and no other block in it was touched. THREE READINGS ABOVE ARE NOW ONE HIGHER, and are left in place rather than edited so this stays an append: the `wave: true` note says a boolean \"IS a mismatch against a computed 0\" (wave-true-waves now records computed=1 -- the point it makes, that jq's `==` keeps a boolean and a number in different types, is untouched); wave-lacuna-waves and wave-ausente-waves now report computed=1 where the prose says the mismatch was against 0; and wave-um-em-vez-de-zero-waves -- the case named for storing 1 where the old convention wanted 0 -- is now a PASS, and limpo-waves, whose fixture stores the 0-based 0/1/2, is now the mismatch. That inversion is the clearest single statement in the diff that the convention, and not the walk, is what changed. WHAT DID NOT CHANGE: validate-waves still ALWAYS exits 0, verdict and all (contract detail (3) above still holds, and wave-lacuna-waves still records exit 0 alongside its `{valid: false}`); the n-pass reduce is untouched, so a story inside a cycle is still assigned no wave at all (wave-ciclo-waves is one of the 6 identical cases) and a dangling dependsOn still hides its OWN story's wave errors (dep-pendurada-waves moved only because its other story, a root storing the 0-based 0, is now reported -- US-001, the one with the dangling reference, is still absent from the list); and the mismatch predicate is unchanged, so an unreached story is still skipped entirely and a stored wave that is absent, null or false still reads as stored=null.",
   "validate_tasks_cases": [
     {
       "label": "limpo",
