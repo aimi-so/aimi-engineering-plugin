@@ -862,9 +862,18 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
         "Invalid story ID: " + bad + " (expected US-NNN)"
         for bad in ("us-002", "US-3", "US-0001", "US-001A", "US-001 ")
     ]
-    # 3. validate-waves: a stale wave, and an absent one
-    assert _errors("wave-lacuna-waves") == ["Wave mismatch: US-002 stored=5 computed=1"]
-    assert _errors("wave-ausente-waves") == ["Wave mismatch: US-002 stored=null computed=1"]
+    # 3. validate-waves: a stale wave, and an absent one. Both fixtures store the
+    #    OLD 0-based waves throughout, so under the 1-based convention their root
+    #    is reported as well -- the SECOND line of each is the class this bucket
+    #    is for, and the first is the convention correction showing its work.
+    assert _errors("wave-lacuna-waves") == [
+        "Wave mismatch: US-001 stored=0 computed=1",
+        "Wave mismatch: US-002 stored=5 computed=2",
+    ]
+    assert _errors("wave-ausente-waves") == [
+        "Wave mismatch: US-001 stored=0 computed=1",
+        "Wave mismatch: US-002 stored=null computed=2",
+    ]
     # 4. a story missing a required field
     assert _errors("sem-status-stories") == [
         "US-001: missing required field: status — run normalize-status to fix"
@@ -919,10 +928,17 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
     assert _errors("tasks-elemento-nao-string-stories") == [
         "US-001: tasks[] element must be a string"
     ] * 2
-    # 11. and a PASS for each of the four, so none of them is merely a refuser
-    for verb in ("deps", "stories", "ids", "waves"):
+    # 11. and a PASS for each of the four, so none of them is merely a refuser.
+    #     `limpo` stores the OLD 0-based 0/1/2, so it is the three siblings that
+    #     still pass it; validate-waves' pass is now the case the capture named
+    #     for the disagreement itself -- wave-um-em-vez-de-zero stores 1 on a
+    #     root, which is exactly what the writer produces.
+    for verb in ("deps", "stories", "ids"):
         assert _verdict("limpo-" + verb)["valid"] is True
         assert VALIDATE["limpo-" + verb]["exit"] == 0
+    assert _verdict("wave-um-em-vez-de-zero-waves") == {"valid": True, "errors": []}
+    assert VALIDATE["wave-um-em-vez-de-zero-waves"]["exit"] == 0
+    assert _verdict("limpo-waves")["valid"] is False, "0/1/2 is the old convention"
 
 
 def _story(project=None, verify=None):
@@ -990,24 +1006,215 @@ def test_a_duplicated_story_id_is_flagged_by_none_of_the_four():
     opinion either. Pinning the pass means a later change that starts flagging
     it shows up as a golden diff rather than as a silent contract change.
     """
-    for verb in ("deps", "stories", "ids", "waves"):
+    for verb in ("deps", "stories", "ids"):
         assert _verdict("id-duplicado-" + verb)["valid"] is True, verb
         assert VALIDATE["id-duplicado-" + verb]["exit"] == 0, verb
     assert _verdict("id-duplicado-ids")["count"] == 2, "both copies are counted"
+    # validate-waves has no opinion on the duplication either. Its fixture stores
+    # the old 0-based wave, so what it reports is the SAME wave mismatch twice,
+    # once per copy -- not a word about the id being repeated, which is the
+    # property this test is about.
+    assert _errors("id-duplicado-waves") == ["Wave mismatch: US-001 stored=0 computed=1"] * 2
+    assert VALIDATE["id-duplicado-waves"]["exit"] == 0
 
 
 def test_a_cycle_and_a_dangling_id_hide_their_story_from_validate_waves():
     """Two more recorded passes that read like misses and are the contract.
 
     A story the wave walk never places has a computed wave of null, and both
-    arms of the select require a non-null one -- so a cyclic file and a file
-    with a dangling dependsOn are both `{valid: true}` here. Reporting them is
+    arms of the select require a non-null one -- so neither the cyclic story nor
+    the one with the dangling dependsOn is ever reported here. Reporting them is
     validate-deps' job, and it does.
+
+    The property is per-STORY, and the 1-based correction is what made that
+    visible: wave-ciclo places NO story, so its whole document still passes,
+    while dep-pendurada holds a second story -- a root storing the old 0-based
+    0 -- which is now reported. US-001, the one with the dangling reference, is
+    still absent from the list, and that absence is the assertion.
     """
     assert _verdict("wave-ciclo-waves") == {"valid": True, "errors": []}
-    assert _verdict("dep-pendurada-waves") == {"valid": True, "errors": []}
+    assert _errors("dep-pendurada-waves") == ["Wave mismatch: US-002 stored=0 computed=1"]
+    assert not any("US-001" in error for error in _errors("dep-pendurada-waves"))
     assert _verdict("wave-ciclo-deps")["valid"] is False
     assert _verdict("dep-pendurada-deps")["valid"] is False
+
+
+# ---------------------------------------------------------------------------
+# The wave convention itself: 1-based, and the same 1-based as the writer's
+# ---------------------------------------------------------------------------
+#
+# The recordings above pin the MESSAGES. These pin the RULE, against documents
+# written here rather than replayed, because the corpus was captured while the
+# validator still seeded roots at 0 and no recording in it can state what the
+# convention ought to be. They discriminate, and that is checked rather than
+# claimed: with the seed flipped back to 0 in a throwaway copy of scripts/, ALL
+# SIX of them fail. None of them passes by accident.
+
+
+def _waves_doc(stories):
+    return json.dumps(
+        {
+            "schemaVersion": "3.3",
+            "metadata": {
+                "title": "ref: waves",
+                "type": "ref",
+                "branchName": "ref/waves",
+                "createdAt": "2020-01-01",
+                "planPath": None,
+            },
+            "userStories": stories,
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _wave_story(story_id, depends_on, wave="omit"):
+    story = {
+        "id": story_id,
+        "title": "Story " + story_id,
+        "description": "As a user, I want " + story_id + ".",
+        "acceptanceCriteria": ["Typecheck passes"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": depends_on,
+    }
+    if wave != "omit":
+        story["wave"] = wave
+    return story
+
+
+def _run_validate_waves(tmp_path, stories):
+    """One live validate-waves over a document written for the occasion."""
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    with open(os.path.join(tasks_dir, "2020-01-01-waves-tasks.json"), "w", encoding="utf-8") as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "validate-waves"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc, json.loads(proc.stdout)
+
+
+def test_computed_waves_numbers_roots_from_one_and_climbs_from_there():
+    """The rule this story corrected, stated three ways.
+
+    A story with no dependencies is wave 1, never 0; everyone else is one above
+    the max of its dependencies. tasks.py used to seed roots at 0 while
+    story_merge.py -- the WRITER -- seeded them at 1, so validate-waves reported
+    a mismatch on every story of every file the writer produced.
+    """
+    roots_only = [_wave_story("US-00" + str(n), []) for n in (1, 2, 3)]
+    assert T.computed_waves(roots_only) == {"US-001": 1, "US-002": 1, "US-003": 1}
+
+    chain = [
+        _wave_story("US-001", []),
+        _wave_story("US-002", ["US-001"]),
+        _wave_story("US-003", ["US-002"]),
+    ]
+    assert T.computed_waves(chain) == {"US-001": 1, "US-002": 2, "US-003": 3}
+
+    diamond = [
+        _wave_story("US-001", []),
+        _wave_story("US-002", ["US-001"]),
+        _wave_story("US-003", ["US-001"]),
+        _wave_story("US-004", ["US-002", "US-003"]),
+    ]
+    assert T.computed_waves(diamond) == {
+        "US-001": 1, "US-002": 2, "US-003": 2, "US-004": 3
+    }
+
+
+def test_the_validator_and_the_writer_now_number_the_same_document_alike():
+    """The defect was a disagreement between two components, so this is the
+    assertion that closes it: story_merge.compute_waves WRITES the field and
+    tasks.py's computed_waves CHECKS it, and they must agree on every shape --
+    a root, a chain, a diamond and a fan-out at once."""
+    import story_merge as SM
+
+    shapes = [
+        ("US-001", []), ("US-002", ["US-001"]), ("US-003", ["US-001"]),
+        ("US-004", ["US-002", "US-003"]), ("US-005", []), ("US-006", ["US-004"]),
+    ]
+    written = [{"id": sid, "dependsOn": deps} for sid, deps in shapes]
+    SM.compute_waves(written)
+    assert T.computed_waves([_wave_story(sid, deps) for sid, deps in shapes]) == {
+        story["id"]: story["wave"] for story in written
+    }
+
+
+def test_a_story_the_walk_never_reaches_is_still_skipped_entirely(tmp_path):
+    """The predicate's shape, unchanged by the reseeding.
+
+    Neither story in a cycle is ever assigned, so neither can be reported; the
+    story with the dangling dependsOn is not assigned either, while the root
+    beside it is. What survives the correction is that an UNREACHED story
+    contributes nothing at all -- not a `stored=X computed=null` line.
+    """
+    cycle = [_wave_story("US-001", ["US-002"]), _wave_story("US-002", ["US-001"])]
+    assert T.computed_waves(cycle) == {}
+    proc, verdict = _run_validate_waves(tmp_path, cycle)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+    dangling = [_wave_story("US-001", ["US-999"], 7), _wave_story("US-002", [], 1)]
+    assert T.computed_waves(dangling) == {"US-002": 1}
+    _, verdict = _run_validate_waves(tmp_path, dangling)
+    assert verdict == {"valid": True, "errors": []}, "US-001's stored 7 is not reported"
+
+
+def test_a_document_with_no_wave_field_at_all_is_reported_against_its_computed_one(tmp_path):
+    """An absent stored wave still reads as null and is still a mismatch.
+
+    This is the other half of the predicate the correction had to leave alone:
+    the story is skipped only when the WALK never reached it, never because the
+    document happens to carry no wave.
+    """
+    stories = [_wave_story("US-001", []), _wave_story("US-002", ["US-001"])]
+    assert all("wave" not in story for story in stories)
+    proc, verdict = _run_validate_waves(tmp_path, stories)
+    assert verdict == {
+        "valid": False,
+        "errors": [
+            "Wave mismatch: US-001 stored=null computed=1",
+            "Wave mismatch: US-002 stored=null computed=2",
+        ],
+    }
+    assert proc.returncode == 0
+
+
+def test_validate_waves_still_exits_zero_on_a_live_invalid_verdict(tmp_path):
+    """Pinned against a document written now, not only against the recordings.
+
+    op_validate_waves has no `return 1` and must not grow one: the verdict lives
+    in `.valid` and a caller branching on `$?` sees a pass today. A document
+    carrying the OLD 0-based waves is the sharpest fixture for it, because it is
+    exactly what this change made invalid.
+    """
+    old_convention = [_wave_story("US-001", [], 0), _wave_story("US-002", ["US-001"], 1)]
+    proc, verdict = _run_validate_waves(tmp_path, old_convention)
+    assert verdict["valid"] is False and verdict["errors"], "0/1 is the old convention"
+    assert proc.returncode == 0, "an invalid verdict still exits 0"
+    assert proc.stderr == ""
+
+    writer_convention = [_wave_story("US-001", [], 1), _wave_story("US-002", ["US-001"], 2)]
+    proc, verdict = _run_validate_waves(tmp_path, writer_convention)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
+    """What wave-true-waves used to prove and cannot any more.
+
+    Its US-002 now computes 2, and Python's own `2 == True` is False, so the
+    recording stopped discriminating. Against a ROOT the computed wave is 1 and
+    Python's `1 == True` is True -- so only jq's type-aware `==` reports this,
+    and this is the fixture that catches a jq_equal replaced by `==`.
+    """
+    assert (1 == True) is True, "the trap this test exists for"
+    _, verdict = _run_validate_waves(tmp_path, [_wave_story("US-001", [], True)])
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave mismatch: US-001 stored=true computed=1"],
+    }
 
 
 def test_the_places_a_naive_python_would_have_diverged_from_jq():
@@ -1021,11 +1228,20 @@ def test_the_places_a_naive_python_would_have_diverged_from_jq():
         "Missing ID: US-002 depends on null which does not exist",
         "Missing ID: US-002 depends on 3 which does not exist",
     ]
-    # `==` puts a boolean and a number in different types, so `wave: true` IS a
+    # `==` puts a boolean and a number in different types, so `wave: true` is a
     # mismatch against a computed 1 where Python's `1 == True` would hide it.
+    # THE RECORDING NO LONGER PROVES THAT ON ITS OWN: US-002 computes 2 under the
+    # 1-based convention and Python's own `2 == True` is False too, so the case
+    # stopped discriminating when the convention moved. It still pins the
+    # message; test_a_boolean_wave_is_a_mismatch_against_a_computed_one below is
+    # what pins the rule against a live root, and the two unit assertions here
+    # pin jq_equal itself.
     assert (1 == True) is True and T.jq_equal(1, True) is False
     assert T.jq_equal(1, 1.0) is True and T.jq_equal([1], [True]) is False
-    assert _errors("wave-true-waves") == ["Wave mismatch: US-002 stored=true computed=1"]
+    assert _errors("wave-true-waves") == [
+        "Wave mismatch: US-001 stored=0 computed=1",
+        "Wave mismatch: US-002 stored=true computed=2",
+    ]
     # `index` searches for a contiguous SUBSEQUENCE when the needle is an array,
     # so a dependsOn holding ["US-001"] resolves rather than dangling.
     assert T.jq_index_in(["US-001", "US-002"], ["US-001"]) == 0
