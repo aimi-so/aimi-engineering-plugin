@@ -181,6 +181,18 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 
 The `||` fallback covers the migration window: if only the legacy file exists, it is used. The `: "${VAR:?…}"` guard turns a silent empty into a loud failure that exits the Bash call immediately with a clear message.
 
+### Canonical single-line form (call sites)
+
+The two lines above are two statements — an assignment and a fail-loud guard. Joined by `;` into one line, with every token, the migration-window fallback and the guard's error message unchanged, that is the canonical spelling a call site should use:
+
+```
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null); : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+```
+
+**Inline per file, never sourced.** `commands/references/context-budget.md`'s three-way classification is what decides this: a `scripts/aimi-cli.sh` verb is off the table by construction — this snippet exists to locate the CLI, so it cannot itself call the CLI, the same reason Layer 2's note above gives for not calling `_resolve_latest_cache_path` directly — which leaves the always-needed-inline-decision shape as the only fit. Concretely that means a literal `AIMI_CLI=` assignment repeated in every file rather than a shared sourced helper, forced by two independent constraints. First, `scripts/test-command-blocks.sh` Check 4 flags a variable read but never assigned in the same file, and its `ENV_ALLOWLIST` does not carry `AIMI_CLI` — a sourced helper would make every block that reads `$AIMI_CLI` trip that finding, tree-wide, the moment a call site adopts this form. Second, `install.sh`'s `translate_command_body` rewrites `${CLAUDE_CONFIG_DIR:-$HOME/.claude}` to `${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}` by substring substitution inside inlined command bodies only; `commands/references/*.md` — this file included — reaches the OpenCode install through a separate, verbatim whole-tree copy that never calls that function. A sourced helper would carry the Claude Code token to OpenCode untranslated. Verified in isolation: `translate_command_body`, sourced on its own and fed the block above, returns it with only the `CLAUDE_CONFIG_DIR` token swapped and every other byte unchanged, so the existing rewrite already handles this shape with no logic change.
+
+**No call site uses this form yet, including the two examples above.** The block above is a plain fence, not one tagged `bash`: both `scripts/test-command-blocks.sh` and `hooks/tests/test_auto_approve_cli.py` scan only fences tagged `bash` under `commands/**/*.md`, and this file lives inside that tree. `hooks/auto-approve-cli.sh` matches resolution lines by anchored literal regex and does not yet recognize the joined form — piped through the hook, it falls through to a permission prompt rather than being approved. Turning either example above into a live `bash`-tagged occurrence of the joined form before the hook is taught the shape would hand `test_every_resolution_line_in_commands_is_approved` a corpus entry it cannot approve, failing that suite. All 131 call sites — including this file's own two — convert together once the hook knows the form.
+
 ### $WORKTREE_MGR one-liner
 
 ```bash
