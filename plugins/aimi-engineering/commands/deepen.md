@@ -117,9 +117,7 @@ When `COVERAGE_PATHS` is empty (legacy tasks file — see Step 2e), skip the gat
 For each covered story, determine the matching research path (prefer the per-story path if both conditions apply). Confirm freshness via:
 
 ```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" \
-           2>/dev/null || \
-           cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 "$AIMI_CLI" research-lookup --ignore-missing-cited-paths <matched-research-path>
 ```
 
