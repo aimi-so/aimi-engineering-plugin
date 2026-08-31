@@ -35,7 +35,7 @@ Before touching container, branch, or split-detection logic, read:
 
 ### Testing
 
-Seven independent test suites — five plain Bash, two Python (pytest):
+Eight independent test suites — six plain Bash, two Python (pytest):
 
 ```bash
 bash plugins/aimi-engineering/scripts/test-aimi-cli.sh            # four parts, concurrent
@@ -43,6 +43,7 @@ bash plugins/aimi-engineering/scripts/test-aimi-cli.sh --serial   # same tests, 
 bash plugins/aimi-engineering/scripts/test-worktree-manager.sh
 bash plugins/aimi-engineering/scripts/test-tasks-concurrency.sh
 bash plugins/aimi-engineering/scripts/test-command-blocks.sh
+bash plugins/aimi-engineering/scripts/test-command-size.sh
 bash plugins/aimi-engineering/scripts/test-resolve-pr-parallel.sh
 python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q
 python3 -m pytest plugins/aimi-engineering/scripts/tests/ -q
@@ -77,6 +78,7 @@ There are two Python components: `plugins/aimi-engineering/hooks/` (the hook dis
   - **This suite covers what `golden_from_jq.json` cannot.** That corpus is single-threaded by construction — one CLI invocation per case — so no recording in it can observe a lost update. A reviewer who assumes the golden covers concurrency is wrong.
   - The `reset-orphaned` entry is ranked separately and deliberately: its locked write always re-selected `status == "in_progress"`, so the file on disk was already correct and only the printed report could be stale. **Cosmetic, not data loss** — nothing was lost there and nothing was recovered. Its two file assertions did not invert, because they were never wrong.
 - **Run `test-command-blocks.sh` after any change under `plugins/aimi-engineering/commands/`** — including changes that touch only prose. Command files are executed, not read: an agent runs their ` ```bash ` blocks literally, each in its own isolated shell, so a "documentation-only" edit is a code change. This suite extracts every bash-fenced block and checks it parses, avoids bash-only constructs (blocks may run under zsh), does not read a variable that only exists inside a loop, and introduces no variable that nothing in the file assigns. Known findings are grandfathered in `scripts/command-blocks-baseline.txt`; the suite fails when a baselined entry stops firing, so that file shrinks as things are fixed. It cannot see a variable that a *prose sentence* reads — that class is only fixed by moving the logic into `aimi-cli.sh`.
+- **Run `test-command-size.sh` after any change under `plugins/aimi-engineering/commands/`** (the same trigger as `test-command-blocks.sh`, above) **or to `scripts/command-size-baseline.txt` itself.** This suite measures every `commands/**/*.md` file's byte size against a per-file budget: the twelve files in `command-size-baseline.txt` that already exceed 16384 bytes (`DEFAULT_CEILING`) get an individual, exact-match budget; everything else is held to that shared ceiling. The budget is a ratchet in both directions — a file that grows past its recorded budget fails as "over budget", and one that shrinks below it fails too, as "stale budget", forcing the commit that shrinks one of these twelve files to lower its number in the same diff. Standalone, like `test-command-blocks.sh`: not added to `test-aimi-cli.sh`'s `PARTS` array or its `EXPECTED_ASSERTIONS`.
 - Run `test-resolve-pr-parallel.sh` after any change to `plugins/aimi-engineering/skills/resolve-pr-parallel/scripts/`. It exists specifically because `test-command-blocks.sh` does not scan `skills/` at all, leaving these scripts with no other static-analysis safety net. (That suite's own scope is `commands/**/*.md` — it discovers inputs with a recursive `find`, so `commands/references/` **is** covered, and its baseline already carries entries from there. It is `skills/` alone that it never reaches.)
 - Run `python3 -m pytest plugins/aimi-engineering/hooks/tests/ -q` from the repo root after any change under `plugins/aimi-engineering/hooks/` (dispatcher handlers, guard logic, or their tests).
 

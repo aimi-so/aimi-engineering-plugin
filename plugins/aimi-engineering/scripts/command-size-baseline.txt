@@ -1,0 +1,43 @@
+# command-size-baseline.txt — grandfathered byte budgets for commands/
+# (including commands/references/), enforced by test-command-size.sh.
+#
+# Format, tab-separated:  <path relative to commands/>  <budget in bytes>
+#
+# Every line is a promise that someone measured this exact file's size and
+# wrote it down -- never rounded up. The budget is a RATCHET, not a ceiling
+# in one direction only: growing past it fails ("over budget"), and
+# shrinking below it fails too ("stale budget"). That second failure is
+# deliberate -- it forces the commit that shrinks one of these files to
+# lower its number in the same diff, so a budget can never sit generous
+# after the file that earned it got smaller. Slack like that is exactly what
+# a later, unrelated change could spend without anyone noticing.
+#
+# Every commands/**/*.md file NOT listed here is held to DEFAULT_CEILING
+# (16384 bytes, declared in test-command-size.sh) instead. These twelve are
+# the only files that already exceeded that ceiling when this baseline was
+# first written; a global rule strict enough to catch a new bloated file
+# cannot also pass execute.md's tree today (20x any plausible ceiling), so
+# these get an individual budget instead of a shared one.
+#
+# Measured against the source .md files under commands/, never against
+# install.sh's OpenCode translation. translate_command_body() prepends a
+# fixed ~4862-byte agent-invocation preamble to some command bodies and not
+# others, so measuring post-translation would blend "this file carries too
+# much prose" with "the installer added its own fixed boilerplate" -- see
+# plugins/aimi-engineering/CLAUDE.md § Command Conventions for where a
+# command's instruction content belongs, and
+# commands/references/context-budget.md for the classification this budget
+# backs.
+
+execute.md	347408
+plan.md	297204
+brainstorm.md	126671
+open-pr.md	58522
+references/forge-contract.md	45757
+references/container-execution.md	33262
+references/visual-variants.md	26960
+next.md	21750
+references/cli-path-resolution.md	21666
+review.md	21665
+references/scope-contexts.md	18915
+deepen.md	18029
