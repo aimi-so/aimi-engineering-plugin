@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.124.0] - 2026-08-31
+
+### Added
+
+- **A normative rule for where new `commands/` instruction content belongs** —
+  `plugins/aimi-engineering/commands/references/context-budget.md`. It
+  classifies three shapes: a deterministic procedure (validation,
+  sanitization, path confinement, shell orchestration) belongs in a
+  `scripts/aimi-cli.sh` verb; a rare conditional judgment belongs in a
+  lazily-read `commands/references/` file; an always-needed "does this
+  apply?" decision belongs inline in the parent, or in a verb that returns a
+  verdict. It states the rule that makes the lazy-reference shape actually
+  pay for itself — the condition gating whether to open the reference must
+  be cheap and already live in the parent, or the file is read every time
+  regardless and the saving is zero — grounded against this repo's own
+  history rather than asserted abstractly, and cites
+  `plugins/aimi-engineering/CLAUDE.md`'s "What stays `jq`, and why" section
+  as precedent for the same organising test applied to a different surface.
+  `plugins/aimi-engineering/CLAUDE.md`'s Command Conventions section gains
+  one pointer bullet at it, mirroring the existing Skill Conventions size
+  bullet.
+
 ## [1.123.2] - 2026-08-31
 
 ### Fixed

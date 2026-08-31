@@ -65,6 +65,7 @@ aimi-engineering-plugin/
 - Document allowed-tools in frontmatter with specific Bash prefixes
 - Validate inputs before passing to external commands
 - See `commands/references/user-communication.md` for the wording/tone rules governing text written to the human reader (completion reports, chat explanations, `AskUserQuestion` prompts); this file references them (no duplication)
+- `commands/` (including `commands/references/`) is subject to a size discipline, the same as `SKILL.md` below — but the discipline that keeps a command small is a rule about *where content belongs*, not a line count to trim toward. `commands/references/context-budget.md` is its normative home: a deterministic procedure belongs in an `aimi-cli.sh` verb, a rare conditional judgment in a lazily-read `commands/references/` file, an always-needed "does this apply?" check inline in the parent. It is not restated here, and the enforceable per-file budget that backs it arrives with `scripts/test-command-size.sh`
 
 ## Skill Conventions
 
