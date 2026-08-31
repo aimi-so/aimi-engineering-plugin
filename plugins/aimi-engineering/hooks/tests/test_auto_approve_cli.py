@@ -231,6 +231,13 @@ ADVERSARIAL = [
         id="valid-prefix-with-a-chained-command",
     ),
     pytest.param(
+        'AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}'
+        '/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}'
+        '/aimi-engineering-cli-path" 2>/dev/null); : "${AIMI_CLI:?AIMI_CLI is empty '
+        '— re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"; rm -rf /',
+        id="canonical-single-line-form-with-a-chained-command",
+    ),
+    pytest.param(
         'if [ -n "$AIMI_CLI" ]; then _aimi_cfg="/etc"; mkdir -p "$_aimi_cfg" && '
         "printf '%s\\n' \"$AIMI_CLI\" > \"$_aimi_cfg/cli-path.tmp\" && mv "
         '"$_aimi_cfg/cli-path.tmp" "$_aimi_cfg/cli-path" && chmod 600 '

@@ -154,6 +154,21 @@ if echo "$COMMAND" | grep -qE '^AIMI_CLI='; then
     echo "$ALLOW"
     exit 0
   fi
+  # Canonical single-line form: the Per-Call Resolution assignment directly
+  # above, joined by `;` with the fail-loud guard Pattern 13 below matches on
+  # its own -- the one-line spelling commands/references/cli-path-resolution.md's
+  # "Canonical single-line form (call sites)" section defines for a call site
+  # to use inline instead of two statements. Matched as one literal line built
+  # from those same two pieces, never a new alternative, so a chained
+  # `; rm -rf /` appended after the guard still falls through to the normal
+  # prompt: the guard's ${VAR:?word} word is matched literally here too, for
+  # the reason Pattern 13's own comment gives -- that word IS expanded when
+  # the variable is empty, so admitting it by wildcard would auto-approve
+  # command substitution.
+  if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(cat \"${AIMI_DIR_RE}/cli-path\" 2>/dev/null \\|\\| cat \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\" 2>/dev/null\\); : \"\\$\\{AIMI_CLI:\\?AIMI_CLI is empty — re-resolve via cat ~/\\.config/aimi/cli-path in this Bash call\\}\"\$"; then
+    echo "$ALLOW"
+    exit 0
+  fi
   # Invalid path pattern — fall through to normal permission prompt
   exit 0
 fi
