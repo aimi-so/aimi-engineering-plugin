@@ -3,6 +3,19 @@
 # Auto-approves only AIMI CLI and Worktree Manager commands.
 # Rejects shell metacharacter chaining and enforces subcommand whitelists.
 
+# NOTE -- deliberately NOT gated on CLAUDECODE, unlike inspect-session.py.
+# plugins/aimi-engineering/CLAUDE.md asks hooks emitting hookSpecificOutput to
+# gate when their output schema is Claude Code-specific, and this one's is. It
+# is left ungated for a reason worth stating rather than rediscovering:
+#   - install.sh registers no hooks at all for OpenCode, so this file is copied
+#     there but never invoked. The gate would protect against nothing.
+#   - CLAUDECODE is observably set in a SessionStart hook's environment, which
+#     is what inspect-session.py relies on; whether a PreToolUse hook inherits
+#     the same environment has NOT been verified here. If it does not, adding
+#     the gate would silently stop every approval, and a machine with Bash(*)
+#     in its allow list cannot tell that apart from working correctly.
+# Verify the PreToolUse hook environment before adding the gate; the asymmetric
+# downside is why it is absent, not oversight.
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 
@@ -10,7 +23,16 @@ if [ -z "$COMMAND" ]; then
   exit 0
 fi
 
-ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+# The payload MUST name the event this hook is registered on in hooks.json
+# (PreToolUse / matcher Bash) and use that event's decision key. Anthropic's
+# plugin-dev hook-development skill documents PreToolUse output as
+# hookSpecificOutput.permissionDecision = allow|deny|ask; hook_utils.deny()
+# emits the same shape for the sibling PreToolUse guards in this directory.
+# This line previously read hookEventName "PermissionRequest" with a
+# decision.behavior object -- the shape of a DIFFERENT event, one this plugin
+# never registers -- so it approved nothing from the day it was written.
+# test_auto_approve_cli.py now reads hooks.json and fails if the two disagree.
+ALLOW='{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 
 # --- Resolve config directory for dynamic path matching ---
 # The hook receives literal command text BEFORE shell expansion.
@@ -89,6 +111,22 @@ if echo "$COMMAND" | grep -qE '^if \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI
   exit 0
 fi
 
+# --- Pattern 0a2: Layer 0 AIMI_CLI assignment, current five-condition form ---
+# The Layer 0 guard grew from two conditions to five (CLAUDECODE unset, var set,
+# absolute path, directory exists, file executable). Pattern 0a above still
+# matches the older two-condition spelling; this one matches what commands/
+# actually emits today. Both stay: an older install may still carry either.
+if echo "$COMMAND" | grep -qE '^if \[ -z "\$\{CLAUDECODE:-\}" \] && \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ "\$\{AIMI_PLUGIN_DIR#/\}" != "\$AIMI_PLUGIN_DIR" \] && \[ -d "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI_PLUGIN_DIR/scripts/aimi-cli\.sh" \]; then AIMI_CLI="\$AIMI_PLUGIN_DIR/scripts/aimi-cli\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 0b2: Layer 0 WORKTREE_MGR assignment, current five-condition form ---
+if echo "$COMMAND" | grep -qE '^if \[ -z "\$\{CLAUDECODE:-\}" \] && \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ "\$\{AIMI_PLUGIN_DIR#/\}" != "\$AIMI_PLUGIN_DIR" \] && \[ -d "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh" \]; then WORKTREE_MGR="\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
 # --- Pattern 1: AIMI_CLI= assignment ---
 # Validates the assigned path matches the expected plugin cache pattern.
 # Accepts config dir as ~/.claude, ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, or resolved absolute path.
@@ -106,6 +144,13 @@ if echo "$COMMAND" | grep -qE '^AIMI_CLI='; then
   fi
   # Cache read: AIMI_CLI=$(cat <aimi-dir>/cli-path 2>/dev/null)  [new XDG]
   if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(cat ${AIMI_DIR_RE}/cli-path 2>/dev/null\\)\$"; then
+    echo "$ALLOW"
+    exit 0
+  fi
+  # Per-Call Resolution: AIMI_CLI=$(cat "<aimi-dir>/cli-path" 2>/dev/null || cat "<config>/aimi-engineering-cli-path" 2>/dev/null)
+  # This is the form commands/ actually emits (quoted paths, legacy fallback) --
+  # 104 occurrences. The bare unquoted branch above predates it.
+  if echo "$COMMAND" | grep -qE "^AIMI_CLI=\\$\\(cat \"${AIMI_DIR_RE}/cli-path\" 2>/dev/null \\|\\| cat \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\" 2>/dev/null\\)\$"; then
     echo "$ALLOW"
     exit 0
   fi
@@ -161,6 +206,11 @@ if echo "$COMMAND" | grep -qE '^WORKTREE_MGR='; then
     echo "$ALLOW"
     exit 0
   fi
+  # Per-Call Resolution: WORKTREE_MGR=$(cat "<aimi-dir>/worktree-path" 2>/dev/null || cat "<config>/aimi-engineering-worktree-path" 2>/dev/null)
+  if echo "$COMMAND" | grep -qE "^WORKTREE_MGR=\\$\\(cat \"${AIMI_DIR_RE}/worktree-path\" 2>/dev/null \\|\\| cat \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\" 2>/dev/null\\)\$"; then
+    echo "$ALLOW"
+    exit 0
+  fi
   # Invalid path pattern — fall through to normal permission prompt
   exit 0
 fi
@@ -198,6 +248,20 @@ fi
 # --- Pattern 6: WORKTREE_MGR Layer 1 validation ---
 # Approves: if [ -n "$WORKTREE_MGR" ] && [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi
 if echo "$COMMAND" | grep -qE '^if \[ -n "\$WORKTREE_MGR" \] && \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 6a: AIMI_CLI Layer 1 cache read, guarded form ---
+# Approves: if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "<aimi-dir>/cli-path" 2>/dev/null || cat "<config>/aimi-engineering-cli-path" 2>/dev/null); fi
+# Pattern 1 cannot reach this: it gates on ^AIMI_CLI= and this line starts with `if`.
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$AIMI_CLI\" \\]; then AIMI_CLI=\\$\\(cat \"${AIMI_DIR_RE}/cli-path\" 2>/dev/null \\|\\| cat \"${CONFIG_DIR_RE}/aimi-engineering-cli-path\" 2>/dev/null\\); fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 6b: WORKTREE_MGR Layer 1 cache read, guarded form ---
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(cat \"${AIMI_DIR_RE}/worktree-path\" 2>/dev/null \\|\\| cat \"${CONFIG_DIR_RE}/aimi-engineering-worktree-path\" 2>/dev/null\\); fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
@@ -244,6 +308,22 @@ if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$WORKTREE_MGR\" \\]; then printf 
   exit 0
 fi
 
+# --- Pattern 9z: AIMI_CLI Layer 2 cache write, current _aimi_cfg form ---
+# Approves: if [ -n "$AIMI_CLI" ]; then _aimi_cfg="<aimi-dir>"; mkdir -p "$_aimi_cfg" && printf '%s\\n' "$AIMI_CLI" > "$_aimi_cfg/cli-path.tmp" && mv "$_aimi_cfg/cli-path.tmp" "$_aimi_cfg/cli-path" && chmod 600 "$_aimi_cfg/cli-path"; fi
+# The write grew an _aimi_cfg temp variable and an mkdir -p; Pattern 9x above
+# still matches the older prefix-free spelling.
+if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$AIMI_CLI\" \\]; then _aimi_cfg=\"${AIMI_DIR_RE}\"; mkdir -p \"\\\$_aimi_cfg\" && printf '%s\\\\n' \"\\\$AIMI_CLI\" > \"\\\$_aimi_cfg/cli-path\\.tmp\" && mv \"\\\$_aimi_cfg/cli-path\\.tmp\" \"\\\$_aimi_cfg/cli-path\" && chmod 600 \"\\\$_aimi_cfg/cli-path\"; fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 10z: WORKTREE_MGR Layer 2 cache write, current _aimi_cfg form ---
+# (pairs with 9z above; 10y below is the unpaired mkdir pattern and predates both)
+if echo "$COMMAND" | grep -qE "^if \\[ -n \"\\\$WORKTREE_MGR\" \\]; then _aimi_cfg=\"${AIMI_DIR_RE}\"; mkdir -p \"\\\$_aimi_cfg\" && printf '%s\\\\n' \"\\\$WORKTREE_MGR\" > \"\\\$_aimi_cfg/worktree-path\\.tmp\" && mv \"\\\$_aimi_cfg/worktree-path\\.tmp\" \"\\\$_aimi_cfg/worktree-path\" && chmod 600 \"\\\$_aimi_cfg/worktree-path\"; fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
 # --- Pattern 10y: mkdir -p for new XDG aimi config dir ---
 # Approves: mkdir -p <aimi-dir>
 if echo "$COMMAND" | grep -qE "^mkdir -p \"?${AIMI_DIR_RE}\"?\$"; then
@@ -261,6 +341,24 @@ fi
 # --- Pattern 12: WORKTREE_MGR Layer 3 per-project fallback ---
 # Approves: if [ -z "$WORKTREE_MGR" ] && [ -f .aimi/cli-path ]; then WORKTREE_MGR=$(dirname "$(dirname "$(cat .aimi/cli-path)")")/skills/git-worktree/scripts/worktree-manager.sh; if [ ! -x "$WORKTREE_MGR" ]; then WORKTREE_MGR=""; fi; fi
 if echo "$COMMAND" | grep -qE '^if \[ -z "\$WORKTREE_MGR" \] && \[ -f \.aimi/cli-path \]; then WORKTREE_MGR=\$\(dirname "\$\(dirname "\$\(cat \.aimi/cli-path\)"\)"\)/skills/git-worktree/scripts/worktree-manager\.sh; if \[ ! -x "\$WORKTREE_MGR" \]; then WORKTREE_MGR=""; fi; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 13: AIMI_CLI fail-loud guard ---
+# Approves the exact guard line the Per-Call Resolution pattern emits:
+#   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+# Matched as a LITERAL, never as a wildcard over the ${VAR:?word} word. That is
+# deliberate: `word` in ${VAR:?word} IS expanded when VAR is unset, so a pattern
+# admitting arbitrary text there would auto-approve command substitution.
+if echo "$COMMAND" | grep -qE '^: "\$\{AIMI_CLI:\?AIMI_CLI is empty — re-resolve via cat ~/\.config/aimi/cli-path in this Bash call\}"$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 14: WORKTREE_MGR fail-loud guard ---
+# Same literal-only rule as Pattern 13 above.
+if echo "$COMMAND" | grep -qE '^: "\$\{WORKTREE_MGR:\?WORKTREE_MGR is empty — re-resolve via cat ~/\.config/aimi/worktree-path in this Bash call\}"$'; then
   echo "$ALLOW"
   exit 0
 fi

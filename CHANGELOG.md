@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.123.2] - 2026-08-31
+
+### Fixed
+
+- **`auto-approve-cli.sh` speaks the contract of the event it is registered
+  on.** It is wired on `PreToolUse`/`Bash`, but from its first commit
+  (`e3506c9`, 2026-02-26) it emitted `hookEventName: "PermissionRequest"` with a
+  `decision: {behavior: "allow"}` object. `PermissionRequest` is a real hook
+  event — other plugins register it as its own key — but this plugin registers
+  it nowhere, and `PreToolUse` decides through
+  `hookSpecificOutput.permissionDecision` (`allow|deny|ask`), which is also the
+  shape `hook_utils.deny()` already emits for the sibling `PreToolUse` guards in
+  the same directory. The hook therefore approved nothing for six months. The
+  payload now names `PreToolUse` and carries `permissionDecision`.
+- **The resolution patterns match the text the commands actually emit.** A
+  second, independent defect, and on its own also enough to approve nothing. On
+  2026-05-15 the Per-Call Resolution gained quoted paths and a
+  `|| cat <legacy>` fallback (`018bf6e`) while the hook learned only the new
+  cache path (`b4f5768`), not the new shape. Six families stopped matching: the
+  Layer 0 guard, which grew from two conditions to five; the per-call cache read
+  on both `AIMI_CLI` and `WORKTREE_MGR`; that read's `if [ -z ... ]`-wrapped
+  variant, which no pattern could reach because it opens with `if` rather than
+  an assignment; the Layer 2 cache write, which gained an `_aimi_cfg` temporary
+  and an `mkdir -p`; and the `${VAR:?...}` fail-loud guard, which never had a
+  pattern at all. Nothing is removed — every previously accepted spelling still
+  matches — and the added patterns stay anchored and enumerate their accepted
+  forms rather than widening. The fail-loud guard is matched as a full literal
+  on purpose: the word in `${VAR:?word}` *is* expanded when the variable is
+  unset, so admitting arbitrary text there would auto-approve command
+  substitution.
+- **`deepen.md` writes its resolution preamble on one line**, like the other
+  130 sites. It was the only one split across three lines with backslash
+  continuations, which an anchored single-line pattern cannot match however the
+  hook is written.
+
+### Added
+
+- **`hooks/tests/test_auto_approve_cli.py`** — the hook had no coverage at all,
+  which is why two defects sat in it undisturbed. Two of its cases carry the
+  weight. `test_the_allow_payload_names_the_event_the_hook_is_registered_on`
+  reads `hooks.json`, finds the event the script is wired to, and requires the
+  emitted `hookEventName` and decision key to belong to that event — the check
+  whose absence let a payload for the wrong event survive six months, since
+  every test one could write about the script's stdout stays true no matter
+  which event's shape that stdout belongs to. `test_every_resolution_line_in_
+  commands_is_approved` derives its corpus from `commands/**/*.md` rather than
+  carrying a copy of the current preamble, because a hardcoded fixture would
+  drift alongside the hook, agree with it, and confirm nothing. Adversarial
+  cases pin the narrowness the hook depends on: command substitution inside a
+  `${VAR:?word}` word, reads and writes redirected outside the config
+  directory, and trailing chained commands. Both defects are verified to be
+  caught — restoring either one alone turns the suite red.
+
 ## [1.123.1] - 2026-08-28
 
 One issue — #129 — closed by a one-character correction and the release that
