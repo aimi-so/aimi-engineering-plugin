@@ -2123,7 +2123,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   {
     'title': '<string, max 200 chars>',
     'description': '<user story format: As a [role], I want [feature] so that [benefit]; max 500 chars>',
-    'acceptanceCriteria': ['<string, each max 5000 chars; must include Typecheck passes>'],
+    'acceptanceCriteria': ['<string, each max 5000 chars; must assert the project's own type/syntax check passes>'],
     'status': 'pending',
     'priority': <integer, sequential tiebreaker>,
     'dependsOn': ['outline:NN', ...],
@@ -2152,6 +2152,17 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   project before running anything (skills/story-executor/SKILL.md step
   0). Do NOT prefix it with 'cd <project> &&' — that resolves to
   <project>/<project> and fails.
+
+  IMPORTANT — verify coverage:
+  'implementation.verify' must execute every check the story's
+  'acceptanceCriteria' assert. When a criterion asserts something
+  'verify' does not run, there are exactly two ways to resolve it:
+  extend 'verify' to cover it, or drop the assertion from
+  'acceptanceCriteria' — never leave a criterion that nothing executes.
+  State this rule without naming any runner, because it has to hold for
+  a criterion written in plain prose that names no command at all ("the
+  lint passes"). A criterion that only a human can confirm does not
+  belong in 'verify' — route it to 'gate' instead.
 
   IMPORTANT — dependsOn encoding:
   Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
@@ -2853,7 +2864,7 @@ Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `typ
       "id": "US-NNN (required, zero-padded, regex: ^US-[0-9]{3}[a-z]?$)",
       "title": "string (required, max 200 chars)",
       "description": "string (required, max 500 chars, user story format)",
-      "acceptanceCriteria": ["string[] (required, each max 5000 chars, must include 'Typecheck passes')"],
+      "acceptanceCriteria": ["string[] (required, each max 5000 chars, must assert the project's own type/syntax check passes)"],
       "priority": "number (required, sequential integers, tiebreaker for same-depth stories)",
       "status": "pending (required, always 'pending' for new stories)",
       "dependsOn": ["US-NNN (required, array of story IDs, empty [] for root stories)"],
@@ -2958,7 +2969,7 @@ Specific obligations:
 - [ ] Every story `id` uses `US-NNN` zero-padded format (`US-001`, `US-002`, ...) — not `US-1`, `S1`, `TASK-1`, or any other format (assigned by story-merge)
 - [ ] Each story completable in one agent iteration
 - [ ] Stories ordered by capability dependency (capabilities that unlock other capabilities come first; vertical slices, not horizontal layers)
-- [ ] Every story has "Typecheck passes" as criterion
+- [ ] Every story asserts the project's own type/syntax check passes as a criterion
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] `dependsOn` arrays are valid: no circular dependencies, no self-references, all referenced IDs exist (validated by story-merge)
 - [ ] No story depends on a story that depends on it (DAG validation — performed by story-merge)
