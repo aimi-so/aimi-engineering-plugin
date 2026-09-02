@@ -76,6 +76,14 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
 
+## Verify coverage
+
+`implementation.verify` must execute every check the story's `acceptanceCriteria` assert. When a criterion asserts something `verify` does not run, there are exactly two ways to resolve it: extend `verify` to cover it, or drop the assertion from `acceptanceCriteria` — never leave a criterion that nothing executes. State this rule without naming any runner, because it has to hold for a criterion written in plain prose that names no command at all ("the lint passes") — that is the class no parser can ever reach, and the reason this rule has to be applied by you, the author, rather than caught downstream.
+
+A criterion that only a human can confirm does not belong in `verify` — route it to `gate` instead. Without this distinction, an author who cannot express a criterion as a command invents one that doesn't actually check what the criterion asserts.
+
+This is the same principle as the Typecheck rule below, applied generally: because that criterion is itself adapted to the project's language, the `verify` command that satisfies it must be adapted too. Extending `verify` to match a language-specific criterion isn't a special case — it's this rule.
+
 ## dependsOn encoding
 
 - Use `outline:NN` tokens (zero-padded, matching the outline `idx`).
@@ -89,7 +97,7 @@ Write `implementation.verify` as if it already runs from the right directory, be
 - **Size**: the story must be completable in ONE agent iteration (one context window).
 - **Description format**: "As a [specific role], I want [feature] so that [benefit]" — role names the actor, never just "user".
 - **First AC is user-observable**: at least one acceptance criterion must describe an end-to-end behavior visible to the cited role. Put it first. Mechanical criteria (typecheck, tests pass) come after.
-- **Typecheck**: every story includes `"Typecheck passes"` as an acceptance criterion. For non-typed projects (bash-only), interpret this as `bash -n` syntactic check.
+- **Typecheck**: the story's acceptance criteria must assert that the project's own type or syntax check passes — that project-specific check is the requirement. `"Typecheck passes"` (typed projects) and `bash -n` (non-typed, bash-only projects) are examples of how to phrase it, not the mandate itself.
 
 ## Verification strategy
 
