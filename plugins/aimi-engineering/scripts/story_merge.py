@@ -173,6 +173,13 @@ def _implementation_approach(story):
     return implementation.get("approach")
 
 
+def _implementation_verify(story):
+    implementation = story.get("implementation")
+    if _falsy(implementation):
+        return None
+    return implementation.get("verify")
+
+
 def die(message, code=1):
     sys.stderr.write(message + "\n")
     sys.exit(code)
@@ -778,6 +785,141 @@ def orphan_symbol_findings(stories):
         if len(unreferenced) == len(symbols):
             findings.append({"id": story["id"], "symbols": symbols})
     return findings
+
+
+def _read_repo_text(root, name):
+    try:
+        with open(os.path.join(root, name), "r", encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+_MAKEFILE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)")
+_BACKTICK_SPAN_RE = re.compile(r"`([^`\n]+)`")
+
+
+def repo_command_vocabulary(root):
+    """The commands `root`'s own tooling actually exposes: package.json
+    `scripts` keys, Makefile targets, and the canonical runner a Cargo.toml,
+    pyproject.toml or go.mod implies. DERIVED from the repository, never a
+    fixed runner list -- a fixed list is wrong on the next repository, and
+    wrong in the direction that manufactures false confidence (see
+    verify_coverage_findings below).
+
+    Returns None -- never an empty set -- when none of those five files
+    exists at `root`. None is the CANNOT-DETERMINE-THE-VOCABULARY state; an
+    empty set would claim "this repo's tooling runs nothing," which is a
+    finding about the repo, not an admission this function found nothing to
+    read.
+    """
+    vocabulary = set()
+    found_a_source = False
+
+    package_json = _read_repo_text(root, "package.json")
+    if package_json is not None:
+        found_a_source = True
+        try:
+            scripts = json.loads(package_json).get("scripts")
+        except (ValueError, AttributeError):
+            scripts = None
+        if isinstance(scripts, dict):
+            for name in scripts:
+                if isinstance(name, str) and name != "":
+                    vocabulary.add("npm run " + name)
+            if "test" in scripts:
+                vocabulary.add("npm test")
+
+    makefile = _read_repo_text(root, "Makefile")
+    if makefile is not None:
+        found_a_source = True
+        for match in _MAKEFILE_TARGET_RE.finditer(makefile):
+            target = match.group(1)
+            if target != ".PHONY":
+                vocabulary.add("make " + target)
+
+    if _read_repo_text(root, "Cargo.toml") is not None:
+        found_a_source = True
+        vocabulary |= {"cargo test", "cargo build", "cargo check"}
+
+    if _read_repo_text(root, "pyproject.toml") is not None:
+        found_a_source = True
+        vocabulary |= {"pytest", "python -m pytest", "python3 -m pytest"}
+
+    if _read_repo_text(root, "go.mod") is not None:
+        found_a_source = True
+        vocabulary |= {"go test", "go build", "go vet"}
+
+    return vocabulary if found_a_source else None
+
+
+def _cited_commands(text):
+    """Backtick-delimited spans in `text` -- the generic, vocabulary-independent
+    signal that prose NAMES a specific command, as opposed to describing intent
+    ("tests pass" vs "`npm test` passes"). Used on the acceptanceCriteria side
+    only: a plain substring search for a vocabulary term would also fire on
+    "npm test" spelled out inside an unrelated sentence.
+    """
+    return {span.strip() for span in _BACKTICK_SPAN_RE.findall(text) if span.strip()}
+
+
+def verify_coverage_findings(stories, project_root):
+    """Phase 4.3: a story whose acceptanceCriteria cite (in backticks) a
+    repo-vocabulary command that implementation.verify's own text never runs.
+
+    Mirrors orphan_symbol_findings' shape and pipeline position (~:732)
+    rather than a parallel mechanism: per-story, warning-only, folded into
+    the same metadata.smellWarnings sweep by main().
+
+    The vocabulary is looked up per story's OWN project group (group_key),
+    rooted under project_root -- the same routing key resolve_axis and the
+    PROJECT writer already group by -- so a multi-repo plan checks each story
+    against its own repository's tooling, never a sibling's.
+
+    Returns (findings, undetermined_story_ids, clean_story_ids). A story that
+    cites nothing lands in none of the three -- there is nothing to evaluate.
+    A story that cites something lands in exactly one: `findings` when a cited
+    command is missing from verify, `undetermined_story_ids` when its group's
+    vocabulary could not be derived at all, `clean_story_ids` when every cited
+    command was found. The second list is the CANNOT-DETERMINE state
+    constraint 3 requires kept distinct from CHECKED-AND-CLEAN (the third
+    list): folding an undetermined story into "nothing to report" would be
+    exactly the false confidence this split exists to prevent.
+    """
+    vocabulary_cache = {}
+    findings = []
+    undetermined_story_ids = []
+    clean_story_ids = []
+
+    for story in stories:
+        criteria_text = _join(" ", _list(story.get("acceptanceCriteria")))
+        cited = _cited_commands(criteria_text)
+        if not cited:
+            continue  # nothing this story cites -- neither state applies
+
+        group = group_key(story.get("project"))
+        if group not in vocabulary_cache:
+            group_root = project_root if group is None else os.path.join(project_root, group)
+            vocabulary_cache[group] = repo_command_vocabulary(group_root)
+        vocabulary = vocabulary_cache[group]
+
+        if vocabulary is None:
+            undetermined_story_ids.append(story["id"])
+            continue
+
+        lowered_vocabulary = {v.lower() for v in vocabulary}
+        asserted = sorted(cmd for cmd in cited if cmd.lower() in lowered_vocabulary)
+        if not asserted:
+            continue
+
+        verify_text = _cat(_implementation_verify(story)).lower()
+        missing = [cmd for cmd in asserted if cmd.lower() not in verify_text]
+        if missing:
+            findings.append({"id": story["id"], "commands": missing})
+        else:
+            clean_story_ids.append(story["id"])
+
+    return findings, undetermined_story_ids, clean_story_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1645,6 +1787,49 @@ def main(argv):
                 for finding in orphans
             ],
         )
+
+    # Phase 4.3 is a warning in BOTH modes too, same character as 4.2. Its own
+    # CANNOT-DETERMINE-THE-VOCABULARY state is reported separately from a
+    # divergence AND from CHECKED-AND-CLEAN -- three distinct outcomes, never
+    # collapsed into one another. project_root mirrors PROJECT_ROOT, which
+    # find_aimi_root() has already cd'd aimi-cli.sh into by the time it invokes
+    # this script; the env var is read directly (rather than added as a flag)
+    # because nothing here needs it confined -- it only ever opens a handful of
+    # well-known top-level filenames, never a document-sourced path.
+    project_root = os.environ.get("PROJECT_ROOT") or os.getcwd()
+    verify_coverage, verify_coverage_undetermined, verify_coverage_clean = (
+        verify_coverage_findings(stories, project_root)
+    )
+    if verify_coverage:
+        warn_list(
+            "Warning: story-merge: Phase 4.3 verify-coverage smell detected (--agent-mode:"
+            " proceeding):"
+            if agent_mode
+            else "Warning: story-merge: Phase 4.3 verify-coverage smell detected (heuristic;"
+            " verify before proceeding):",
+            [
+                "  Story "
+                + finding["id"]
+                + ": asserts a command implementation.verify does not run: "
+                + _join(", ", finding["commands"])
+                for finding in verify_coverage
+            ],
+        )
+    if verify_coverage_undetermined:
+        sys.stderr.write(
+            "Warning: story-merge: Phase 4.3 verify-coverage VOCABULARY UNDETERMINED for "
+            + _join(", ", verify_coverage_undetermined)
+            + " (no package.json, Makefile, Cargo.toml, pyproject.toml or go.mod found for"
+            + " that story's project; its cited command(s) were not evaluated -- do not read"
+            + " this as CHECKED-AND-CLEAN)\n"
+        )
+    if verify_coverage_clean:
+        sys.stderr.write(
+            "story-merge: Phase 4.3 verify-coverage CHECKED-AND-CLEAN for "
+            + _join(", ", verify_coverage_clean)
+            + "\n"
+        )
+
     # Surfaced to the orchestrator's Step 5 report through metadata.smellWarnings;
     # the writers inject the field only when non-empty.
     smells = [
@@ -1655,6 +1840,14 @@ def main(argv):
             "message": "introduces symbols no sibling story references",
         }
         for finding in orphans
+    ] + [
+        {
+            "type": "verify-coverage",
+            "storyId": finding["id"],
+            "commands": finding["commands"],
+            "message": "asserts a command implementation.verify does not run",
+        }
+        for finding in verify_coverage
     ]
 
     # Nothing is recomputed here -- this only dispatches on the answer resolve_axis
