@@ -5,10 +5,16 @@
 # test-command-blocks.sh needs to pull every ```bash fence out of commands/**/*.md
 # to run its static checks. capture-command-block-jq.sh needs the exact same
 # blocks, addressed the exact same way, to find the jq invocations inside them.
-# Forking a second extractor for the second caller is how the two definitions
-# drift apart — one gets a fix the other doesn't, and nobody notices until a
-# block one of them sees and the other doesn't causes a false negative. This
-# file is sourced by both, so there is exactly one extract_blocks to maintain.
+# aimi-cli.sh's measure-command-file verb needs those same fence boundaries a
+# third time, to say how many of a markdown file's bytes are prose and how many
+# are fenced code. Forking a second extractor for any one caller is how the
+# definitions drift apart — one gets a fix the others don't, and nobody notices
+# until a block one of them sees and another doesn't causes a false negative.
+# The third caller's hand-rolled predecessor is the worked example: an awk
+# written on the spot for a roadmap measurement, anchored at the start of the
+# line, never matched an INDENTED fence and reported 45 bash blocks in plan.md
+# where there were 50. This file is sourced by all three, so there is exactly
+# one extract_blocks to maintain.
 #
 # ADDRESSING (unchanged from the sole prior definition)
 #
@@ -25,47 +31,142 @@
 #
 # CONTRACT WITH THE CALLER
 #
-# extract_blocks() reads $COMMANDS_DIR and $WORK_DIR, writes one file per bash
-# block under $BLOCKS_DIR (named "<4-digit-id>.sh", created if missing), and
-# writes $INDEX as a TSV of `id \t relpath \t startline \t heading`. All four
-# variables are globals the caller must set before calling; this file defines
-# no defaults for them, on purpose, so a caller that forgets one fails loudly
-# on an empty path rather than silently writing into the wrong place.
-extract_blocks() {
-  mkdir -p "$BLOCKS_DIR"
-  cat > "$WORK_DIR/extract.awk" <<'AWK'
+# extract_blocks() has two forms. They run the same awk over the same rules;
+# only where the answer goes differs.
+#
+#   extract_blocks                       (the directory form, unchanged)
+#     Reads $COMMANDS_DIR and $WORK_DIR, writes one file per bash block under
+#     $BLOCKS_DIR (named "<4-digit-id>.sh", created if missing), and writes
+#     $INDEX as a TSV of `id \t relpath \t startline \t heading`. All four
+#     variables are globals the caller must set before calling; this file
+#     defines no defaults for them, on purpose, so a caller that forgets one
+#     fails loudly on an empty path rather than silently writing into the
+#     wrong place.
+#
+#   extract_blocks FILE...               (the listing form)
+#     Writes nothing anywhere — no block files, no index, no temporary awk
+#     program — and streams a TSV report over the given files to stdout:
+#
+#       BLOCK \t id \t relpath \t startline \t heading
+#         One per bash block, in file order, carrying the same four fields the
+#         directory form writes to $INDEX. Counting these lines and reading
+#         SUMMARY's bash_fences field are the same measurement by construction:
+#         one `nblk++` produces both.
+#
+#       SUMMARY bytes lines prose_bytes fence_bytes bash_fence_bytes
+#               fences bash_fences last_line_in_fence last_line_in_bash_fence
+#         One line, last, totalled over every FILE given. Nine integers
+#         separated by single spaces — NOT tabs, and the difference is a rule
+#         rather than a taste. A BLOCK line carries a markdown heading, which
+#         is free text that can hold a space, so it needs a delimiter that text
+#         cannot contain and uses the same tab $INDEX does. Every SUMMARY field
+#         is a number, so a plain `read` splitting on default whitespace is
+#         enough, and the caller never has to reassign IFS to take it apart.
+#
+#         `fences` counts TOP-LEVEL fences only — a fence opened inside another
+#         fence is content of the outer one, the same rule that keeps a ```bash
+#         nested in a pseudo-code fence out of the extracted blocks — and
+#         `bash_fences` is the subset of those whose info string is exactly
+#         `bash`. `fence_bytes` spans each top-level fence from its opening
+#         line through its closing line inclusive, `bash_fence_bytes` is that
+#         same span for the bash subset, and `prose_bytes` is everything else,
+#         so prose_bytes + fence_bytes == bytes.
+#
+#         A line costs its own length plus one for the newline awk stripped, so
+#         a file whose final line carries no newline measures one byte over.
+#         The two trailing flags say which bucket that last line landed in, so
+#         a caller holding the file's real size can put the difference back
+#         where it belongs rather than breaking the partition.
+#
+#     $COMMANDS_DIR is honoured if set (relpaths are reported relative to it)
+#     and simply not needed if it is not; the other three globals are untouched.
+
+# The awk program, written down once. The directory form spills it to
+# $WORK_DIR/extract.awk and passes it with -f, exactly as it always did; the
+# listing form passes the same text as awk's program operand so it can run
+# without a scratch directory. Neither has its own copy of these rules.
+_command_blocks_awk() {
+  cat <<'AWK'
 function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-BEGIN { nblk = 0 }
+BEGIN {
+  nblk = 0; nfence = 0
+  bytes = 0; lines = 0; fencebytes = 0; bashfencebytes = 0
+  lastfence = 0; lastbash = 0
+}
 FNR == 1 {
   infence = 0; isbash = 0; heading = "(preamble)"; delete hseen
-  rel = FILENAME; sub(ROOT "/", "", rel)
+  rel = FILENAME; if (ROOT != "") sub(ROOT "/", "", rel)
 }
 {
+  # The newline awk stripped is this line's, so charge it here. LC_ALL=C on the
+  # listing invocation is what makes length() count bytes and not characters —
+  # a heading with one accented word would otherwise measure short.
+  linebytes = length($0) + 1
+  bytes += linebytes
+  lines++
+  lastfence = 0; lastbash = 0
+
   probe = $0; sub(/^[ \t]+/, "", probe)
   if (probe ~ /^```/) {
     ind = match($0, /[^ \t]/) - 1
     info = probe; sub(/^`+/, "", info); info = trim(info)
     if (infence == 0) {
-      infence = 1; openind = ind; isbash = (info == "bash")
+      infence = 1; openind = ind; isbash = (info == "bash"); nfence++
+      fencebytes += linebytes; lastfence = 1
       if (isbash) {
+        bashfencebytes += linebytes; lastbash = 1
         nblk++; id = sprintf("%04d", nblk); hseen[heading]++
-        outf = OUTDIR "/" id ".sh"
-        printf "%s\t%s\t%d\t%s (block %d)\n", id, rel, FNR + 1, heading, hseen[heading]
-        printf "" > outf
+        if (LIST) {
+          printf "BLOCK\t%s\t%s\t%d\t%s (block %d)\n", id, rel, FNR + 1, heading, hseen[heading]
+        } else {
+          outf = OUTDIR "/" id ".sh"
+          printf "%s\t%s\t%d\t%s (block %d)\n", id, rel, FNR + 1, heading, hseen[heading]
+          printf "" > outf
+        }
       }
       next
     }
     if (info == "" && ind <= openind) {
-      infence = 0; if (isbash) close(outf); isbash = 0; next
+      fencebytes += linebytes; lastfence = 1
+      if (isbash) { bashfencebytes += linebytes; lastbash = 1; if (!LIST) close(outf) }
+      infence = 0; isbash = 0; next
     }
   }
-  if (infence == 1) { if (isbash) print $0 >> outf; next }
+  if (infence == 1) {
+    fencebytes += linebytes; lastfence = 1
+    if (isbash) { bashfencebytes += linebytes; lastbash = 1; if (!LIST) print $0 >> outf }
+    next
+  }
   if (probe ~ /^#{1,6}[ \t]/) { h = probe; sub(/^#+[ \t]*/, "", h); heading = trim(h) }
 }
-END { if (infence == 1) printf "warning: unclosed fence in %s\n", rel > "/dev/stderr" }
+END {
+  if (infence == 1) printf "warning: unclosed fence in %s\n", rel > "/dev/stderr"
+  if (LIST) {
+    printf "SUMMARY %d %d %d %d %d %d %d %d %d\n", \
+      bytes, lines, bytes - fencebytes, fencebytes, bashfencebytes, \
+      nfence, nblk, lastfence, lastbash
+  }
+}
 AWK
+}
+
+# The listing form's body, split out so the directory form below stays the
+# short, unchanged thing it was.
+_list_command_blocks() {
+  LC_ALL=C awk -v OUTDIR="" -v ROOT="${COMMANDS_DIR:-}" -v LIST=1 \
+    "$(_command_blocks_awk)" "$@"
+}
+
+extract_blocks() {
+  if [ "$#" -gt 0 ]; then
+    _list_command_blocks "$@"
+    return
+  fi
+
+  mkdir -p "$BLOCKS_DIR"
+  _command_blocks_awk > "$WORK_DIR/extract.awk"
 
   # shellcheck disable=SC2046
-  awk -v OUTDIR="$BLOCKS_DIR" -v ROOT="$COMMANDS_DIR" -f "$WORK_DIR/extract.awk" \
+  awk -v OUTDIR="$BLOCKS_DIR" -v ROOT="$COMMANDS_DIR" -v LIST=0 -f "$WORK_DIR/extract.awk" \
     $(find "$COMMANDS_DIR" -name '*.md' | sort) > "$INDEX"
 }

@@ -203,6 +203,16 @@ _aimi_models_py() {
   _aimi_script_py models.py
 }
 
+# Same again, for the one SHELL library that sits beside this script:
+# lib/extract-command-blocks.sh, the single fence parser measure-command-file
+# borrows from test-command-blocks.sh. _aimi_script_py's name says "py" but its
+# body only joins this script's own directory to a relative name, and
+# re-deriving that directory here is the exact duplication splitting the
+# resolver out was meant to stop.
+_aimi_blocks_lib() {
+  _aimi_script_py lib/extract-command-blocks.sh
+}
+
 # python3 for a models READER, or the verb's own documented fallback.
 # Usage: if ! _models_python3_or_degrade <verb> <what-it-falls-back-to>; then ...
 #
@@ -14440,6 +14450,130 @@ cmd_estimate_payload() {
     }'
 }
 
+# Usage: measure-command-file <path>
+#
+# Report one markdown file's structural size as JSON: how many bytes and lines
+# it has, how many of those bytes are prose and how many are inside a fence,
+# and how many fences there are — in total, and of those how many are ```bash.
+#
+#   {bytes, lines, prose_bytes, fence_bytes, bash_fence_bytes, fences, bash_fences}
+#
+# NOTHING HERE PARSES A FENCE. The parse is lib/extract-command-blocks.sh's
+# extract_blocks() in its listing form — the same awk test-command-blocks.sh
+# and capture-command-block-jq.sh already run — and this function only adds up
+# what it reports. That reuse is the entire point of the verb rather than an
+# implementation detail of it: the measurement this replaces was an awk written
+# on the spot for a roadmap, never reviewed and never tested, and because it
+# was anchored at the start of the line it silently skipped every INDENTED
+# fence and reported 45 bash blocks in plan.md where the shared parser finds
+# 50. A wrong number that becomes a planning input is worse than no number. A
+# second fence parser in this tree is how that comes back, so there is not one.
+#
+# The file need not live under commands/. The measurement is structural and
+# nothing in it reads the directory the path is in.
+#
+# `fences` counts TOP-LEVEL fences: a fence opened inside another fence is
+# content of the outer one, the same rule that keeps a ```bash nested in
+# execute.md's pseudo-code fence out of the extracted blocks. `bash_fences` is
+# the subset whose info string is exactly `bash`, `bash_fence_bytes` likewise a
+# subset of `fence_bytes`, and `prose_bytes + fence_bytes == bytes` always —
+# including for a file whose last line carries no trailing newline, which the
+# extractor's two tail flags exist to let this reconcile.
+cmd_measure_command_file() {
+  local file_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh measure-command-file <path>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -n "$file_path" ]; then
+          echo "Error: measure-command-file: one path at a time (unexpected: $1)" >&2
+          exit 1
+        fi
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ]; then
+    echo "Usage: aimi-cli.sh measure-command-file <path>" >&2
+    exit 1
+  fi
+
+  # Confinement FIRST, before this path is stat'd, opened or handed to awk.
+  # It arrived as a CLI ARGUMENT, which makes validate_path_in_project the sole
+  # authority over it — no second check is written beside it, here or anywhere.
+  validate_path_in_project "$file_path"
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: measure-command-file: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  local blocks_lib
+  blocks_lib=$(_aimi_blocks_lib)
+  if [ ! -f "$blocks_lib" ]; then
+    echo "Error: measure-command-file: block-extraction library not found: $blocks_lib" >&2
+    exit 1
+  fi
+  # shellcheck source=lib/extract-command-blocks.sh
+  . "$blocks_lib"
+
+  local summary
+  summary=$(extract_blocks "$file_path" | grep '^SUMMARY' | head -1) || summary=""
+  if [ -z "$summary" ]; then
+    echo "Error: measure-command-file: the extractor reported no summary for $file_path" >&2
+    exit 1
+  fi
+
+  # Nine integers separated by spaces, so the default IFS reads them and this
+  # function reassigns nothing. That is the extractor's side of the same rule
+  # test_no_delimiter_survives_anywhere pins for the models readers: a record
+  # crossing a process boundary is a string, and a delimiter that any field
+  # could contain is a truncation waiting to happen. Numbers cannot contain a
+  # space; a markdown heading can, which is why the BLOCK lines this ignores
+  # are tab-separated and this one is not.
+  local tag bytes lines prose fence bash_fence fences bash_fences last_fence last_bash
+  read -r tag bytes lines prose fence bash_fence fences bash_fences \
+    last_fence last_bash <<< "$summary"
+
+  # awk charges every record one newline, so a file whose last line carries
+  # none measures exactly one byte over. Reconcile against the real size and
+  # put the difference back in the bucket that last line was counted in, so
+  # prose_bytes + fence_bytes == bytes survives a file with no final newline
+  # rather than reporting a partition that does not add up.
+  local real_bytes residue
+  real_bytes=$(_file_size_bytes "$file_path")
+  residue=$((real_bytes - bytes))
+  if [ "$residue" -ne 0 ] && [ "$last_fence" = "1" ]; then
+    fence=$((fence + residue))
+    [ "$last_bash" = "1" ] && bash_fence=$((bash_fence + residue))
+  fi
+  prose=$((real_bytes - fence))
+
+  jq -n \
+    --argjson bytes "$real_bytes" \
+    --argjson lines "$lines" \
+    --argjson prose "$prose" \
+    --argjson fence "$fence" \
+    --argjson bashFence "$bash_fence" \
+    --argjson fences "$fences" \
+    --argjson bashFences "$bash_fences" \
+    '{
+      bytes: $bytes,
+      lines: $lines,
+      prose_bytes: $prose,
+      fence_bytes: $fence,
+      bash_fence_bytes: $bashFence,
+      fences: $fences,
+      bash_fences: $bashFences
+    }'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -15319,6 +15453,23 @@ COMMANDS:
                               phase along a semantic seam in the roadmap or trimming scope.
                               Exits 0 for any valid input (even over budget); exits 1 only
                               when --outline is missing or a given path does not exist.
+    measure-command-file <path>
+                              Structural size of one markdown file, as
+                              {bytes, lines, prose_bytes, fence_bytes, bash_fence_bytes,
+                               fences, bash_fences}.
+                              The fence parse is lib/extract-command-blocks.sh's
+                              extract_blocks() -- the same one test-command-blocks.sh
+                              runs -- so a measurement written here can never disagree
+                              with the blocks that suite sees. fences counts top-level
+                              fences (one nested inside another is content of the outer);
+                              bash_fences is the subset whose info string is exactly bash;
+                              prose_bytes + fence_bytes == bytes.
+                              Works on any markdown file, not only commands/ -- the
+                              measurement is structural. Path confinement is the same
+                              validate_path_in_project every path ARGUMENT crosses, run
+                              before the file is opened. Exits 1 on a missing path
+                              argument, a file that does not exist, or a path outside
+                              the project root.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -15504,6 +15655,7 @@ main() {
     phase-overlap)         shift; cmd_phase_overlap "$@" ;;
     roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     estimate-payload)      shift; cmd_estimate_payload "$@" ;;
+    measure-command-file)  shift; cmd_measure_command_file "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2
