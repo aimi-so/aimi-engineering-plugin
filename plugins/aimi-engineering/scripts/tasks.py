@@ -1664,6 +1664,11 @@ def _to_entries(value, owner):
 
 
 CITATION = re.compile(r'"([^"]+)" \(DesignSpec § ([0-9]+\.[0-9]+) L([0-9]+)\)')
+# A `path:line` anchor inside an acceptanceCriteria, for R16 below. The
+# extension list is what makes it an anchor at all: a bare `foo:12` is a ratio,
+# a timestamp or a namespace far more often than it is a file and a line, and a
+# matcher without the extension would warn about all three.
+LINE_ANCHOR = re.compile(r"[A-Za-z0-9_./-]+\.(?:md|py|sh|js|ts|json):[0-9]+")
 BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
 URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
 SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
@@ -1790,6 +1795,27 @@ def _grep_lines(text, pattern):
     return pattern.findall(text)
 
 
+def _line_anchors(text):
+    """Every `path:line` anchor in one acceptanceCriteria, DesignSpec citations
+    excluded, in first-seen order.
+
+    THE EXCLUSION IS PART OF THE RULE, not a refinement bolted on after it.
+    CITATION above already captures an `L([0-9]+)` group that the R2/R3/R4 walk
+    binds to `_line_number` and never reads: a DesignSpec citation is validated
+    by its LITERAL against its SECTION, and the line it names is not consulted.
+    The code reached the conclusion this rule exists to enforce long before the
+    rule did, and recorded it by throwing the capture away. So a citation whose
+    quoted literal happens to name a file and a line is the one anchor in the
+    file already answered for by content, and a naive matcher would fire on
+    exactly that. Blanking every citation span before the scan says it once.
+    """
+    seen = []
+    for anchor in LINE_ANCHOR.findall(CITATION.sub(" ", text)):
+        if anchor not in seen:
+            seen.append(anchor)
+    return seen
+
+
 def _endpoints(doc):
     backend = jq_index(jq_index(doc, "metadata", ""), "backendSpec", ".metadata")
     endpoints = jq_index(backend, "endpoints", ".metadata.backendSpec")
@@ -1810,6 +1836,11 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     `fields` is the metadata row the caller already read, and R1 has already
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
+
+    R16 IS THE ONE RULE HERE BASH NEVER RAN. It is appended after R15 and reads
+    the `warn` channel only, so nothing above it moves; its own comment carries
+    why it warns instead of erroring, why it is last, and why it is defensive
+    where every rule above it is faithful.
     """
     errors = []
 
@@ -1887,6 +1918,45 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             tasks_file + ": " + story_id + " verification.url \"" + bad_url
             + "\" contains characters outside the allowed charset"
         )
+
+    # R16 -- acceptanceCriteria anchored to a line number. A WARNING, never an
+    # error: `errors` is what makes validate-tasks exit 1, and a line number is
+    # fragile rather than invalid, so promoting this would refuse plans that
+    # pass today. It is also why the rule lives here and not in
+    # validate_stories, which returns {valid, errors} with no warn channel at
+    # all -- giving it one would move a golden corpus this rule has no business
+    # moving.
+    #
+    # Last in the function on purpose, and defensive on purpose. Every scan
+    # above can abort (see this function's docstring), so a rule appended here
+    # can never move an abort earlier than the port recorded it; and R15 has
+    # already indexed every story by the time this runs, so a story that is not
+    # an object still aborts exactly where it did. What is left -- an
+    # acceptanceCriteria that is a number, a criterion that is not a string --
+    # is skipped rather than refused, because a warning must not be the thing
+    # that turns a document the port accepts into one it rejects.
+    for doc in docs:
+        for story in _stories(doc):
+            criteria = jq_index(story, "acceptanceCriteria", ".userStories[]")
+            if isinstance(criteria, dict):
+                criteria = list(criteria.values())
+            if not isinstance(criteria, list):
+                continue
+            anchors = []
+            for criterion in criteria:
+                if not isinstance(criterion, str):
+                    continue
+                for anchor in _line_anchors(criterion):
+                    if anchor not in anchors:
+                        anchors.append(anchor)
+            if anchors:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": acceptanceCriteria cites a line number: "
+                    + ", ".join(anchors)
+                    + " — the tree moves and the anchor does not"
+                )
 
     return errors
 
