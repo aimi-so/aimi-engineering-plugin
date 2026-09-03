@@ -1626,6 +1626,130 @@ def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
     assert actual["stderr"] == ""
 
 
+_ABSENT = object()
+
+
+def _replay_implementation(implementation, tmp_path, files=None):
+    """One story through the real CLI, carrying `implementation` as given.
+
+    R17's own replay, built here for the reason _replay_line_anchor is built
+    here: bash never ran this rule either, so there is no jq recording to
+    replay, and adding one to `validate_tasks_cases` would be recording the
+    Python. schemaVersion 3.3 is load-bearing for the same reason too -- R1
+    returns before validate_tasks on anything older, so the warning would never
+    fire and the test would pass on nothing.
+
+    THESE THREE CASES ARE THE ONLY COVERAGE R17 HAS, and that is a measured
+    claim rather than a cautious one: not one of the 121 recordings in
+    `validate_tasks_cases` carries an `implementation` object at all, so the
+    corpus cannot reach this rule even once. `_ABSENT` is a sentinel because
+    `None` is a value the schema allows and the absent case has to be distinct
+    from it. `files` seeds real files under PROJECT_ROOT, which is how a case
+    says "this directory exists" -- the rule asks about the PARENT, so a
+    fixture only ever has to create a sibling of the path under test.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    if implementation is not _ABSENT:
+        story["implementation"] = implementation
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": files or {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_story_with_no_implementation_reaches_r17_and_says_nothing(tmp_path):
+    """`implementation` is optional in schema v3.3, so absent is not a finding.
+
+    The story still reaches the rule -- R17 iterates every story unconditionally
+    and it is the jq_type guard, not a pre-filter, that ends this one. Silence
+    on both channels is the assertion, because a warning here would fire on the
+    majority of every tasks file the plugin has ever written.
+    """
+    actual = _replay_implementation(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_implementation_that_is_a_string_is_stopped_by_the_type_guard(tmp_path):
+    """The guard's own test, and it is shown to be load-bearing, not assumed.
+
+    The second assertion is the point: reading `.files` off this same scalar
+    WITHOUT the guard raises, and MalformedTasks out of validate_tasks is an
+    abort of the whole run -- exit 1 on a document that is merely unusual. That
+    is the regression the comment beside .project in validate_stories records,
+    reproduced here against the real function rather than restated in prose.
+    """
+    scalar = "isto e uma string, nao um objeto"
+    actual = _replay_implementation(scalar, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+    with pytest.raises(T.MalformedTasks):
+        T.jq_index(scalar, "files", ".userStories[].implementation")
+
+
+def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(tmp_path):
+    """R17's warning half, plus the half that keeps it from passing on nothing.
+
+    The same story shape is run twice and only the path changes: `src/` exists
+    because the fixture seeded a sibling into it, `nao/existe/` does not. One
+    warns, one is silent, so the rule is shown to discriminate rather than to
+    fire on every path it is handed.
+
+    The FILE is missing in both runs. That is the rule's whole design -- a story
+    that creates `src/novo.py` is the ordinary case, and checking the file
+    instead of its parent would refuse every scaffolding story in the corpus.
+
+    The verdict stays `valid` and the exit stays 0: this reaches `warn`, never
+    `errors`, because a plan may legitimately describe a directory it is about
+    to create and refusing that would be worse than not checking at all.
+    """
+    seeded = {"src/existente.py": "# um vizinho, so para criar src/\n"}
+
+    quiet = _replay_implementation(
+        {"files": ["src/novo.py"], "approach": "a", "verify": "true"}, tmp_path, seeded
+    )
+    assert quiet["exit"] == 0
+    assert quiet["stderr"] == "", "the file is absent too -- only the parent is checked"
+
+    loud = _replay_implementation(
+        {"files": ["nao/existe/de/jeito/nenhum/x.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        seeded,
+    )
+    assert loud["exit"] == 0
+    assert loud["stdout"] == '{"valid": true, "errors": []}\n', "a warning, never an error"
+    assert loud["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert loud["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "implementation.files names a directory that does not exist: "
+        "nao/existe/de/jeito/nenhum/x.py"
+        " — the file may be new, the directory it lands in may not\n"
+    )
+
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
@@ -3061,7 +3185,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "os.unlink(handle.name)",
         "os.unlink(path)",
     ]
-    # Thirty-five os.path calls, and the module still names no path of its own
+    # Thirty-seven os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
     # are confined_spec_path resolving and comparing, three arrived with
@@ -3077,7 +3201,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # base directory, PROJECT_ROOT, the archive directory and the tasks-file
     # list are all bash's answers, handed in as flags or as arguments.
     #
-    # The last six arrived with list-known-gaps and they are the first that
+    # The next six arrived with list-known-gaps and they are the first that
     # name a DIRECTORY of their own: "known-gaps", "tasks" and "archive", each
     # joined onto the --aimi-dir bash handed in, plus one join and one isdir()
     # in the bounded listing that walks them. That is a real widening and it is
@@ -3086,9 +3210,18 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # argument -- and what changed is that a leaf name below one now is. A
     # SEVENTH such name, or any of these three moving off --aimi-dir, is the
     # thing to argue about.
-    assert code.count("os.path.") == 35
+    #
+    # The last two arrived with R17 and they name NOTHING of their own: a
+    # dirname() and an isdir() over whatever confined_spec_path already
+    # resolved, which is PROJECT_ROOT concatenated with a string the document
+    # supplied. So the count moves while the rule this comment is about does
+    # not -- R17 reads a directory the tasks file named, never one tasks.py
+    # chose. It is also the second isdir() in the module, and the first that
+    # asks whether a path the plan CITES is real rather than whether one the
+    # CLI walks is.
+    assert code.count("os.path.") == 37
     assert code.count("os.path.isfile(") == 7
-    assert code.count("os.path.isdir(") == 1
+    assert code.count("os.path.isdir(") == 2
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
