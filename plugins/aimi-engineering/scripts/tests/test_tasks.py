@@ -3337,6 +3337,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "status",
         "metadata",
         "verification-report",
+        "verify-probe",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -3929,3 +3930,237 @@ def test_a_missing_branchname_is_still_the_word_null():
         assert SESSION[label]["state_after"]["current-branch"] == "null\n", label
     assert T.document_line([{"metadata": {}}], "metadata", "branchName") == "null"
     assert T.document_scalar([{"metadata": {}}], "branchName") == ""
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: which of a verify's assertions already passed
+# ---------------------------------------------------------------------------
+#
+# NO GOLDEN BLOCK, and there could not be one: this verb had no jq predecessor
+# to capture, so nothing here is evidence that a port changed nothing. What it
+# asserts instead is the two properties the verb exists for -- that a segment
+# which already passes is reported as not discriminating, and that a separator
+# inside a quoted string is not a separator -- plus the two the decomposition
+# must never violate, which are that nothing is eval'd and that a failure
+# branch is never run.
+
+
+def _probe(tmp_path, verify, files=(), cwd=None):
+    """A one-story project whose story carries `verify`, probed through the CLI.
+
+    `files` are created relative to the project root before the run, and `cwd`
+    names the directory to invoke from -- the two things the probe's answer
+    depends on besides the verify text itself.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    for name in files:
+        target = os.path.join(root, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("marker\n")
+    story = {
+        "id": "US-001",
+        "title": "s",
+        "description": "d",
+        "acceptanceCriteria": ["x"],
+        "priority": 1,
+        "status": "pending",
+        "dependsOn": [],
+    }
+    if verify is not None:
+        story["implementation"] = {"verify": verify}
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"title": "t", "branchName": "b"},
+        "userStories": [story],
+    }
+    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    proc = subprocess.run(
+        ["bash", CLI, "verify-probe", "US-001", "--tasks-file", tasks_file],
+        cwd=os.path.join(root, cwd) if cwd else root,
+        env=_isolated_env(base),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return root, json.loads(proc.stdout)
+
+
+def test_an_absent_or_empty_verify_probes_to_an_empty_array(tmp_path):
+    """`implementation` is optional in schema v3.3 and a story is allowed to
+    carry no verify. Three shapes of nothing, one answer, and never a refusal --
+    a caller that had to tell "no verify" from "the verb broke" would end up
+    reimplementing the check it delegated."""
+    for verify in (None, "", "   \n\n  "):
+        _, probed = _probe(tmp_path, verify)
+        assert probed == [], repr(verify)
+
+
+def test_three_segments_where_only_the_first_already_passes(tmp_path):
+    """The shape of the case this verb was built from: a verify whose first
+    assertion holds before a line is written and whose remaining two do not.
+
+    The script as a whole FAILS here, which is exactly why the pre-run at the
+    script level says nothing -- and under `set -e` it would stop at the second
+    segment, so the third never runs at all.
+    """
+    _, probed = _probe(
+        tmp_path,
+        "set -euo pipefail\n"
+        "test -f ja-existe.txt\n"
+        "test -f ainda-nao.txt\n"
+        "grep -q 'ainda-nao' ja-existe.txt\n",
+        files=("ja-existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == [
+        "test -f ja-existe.txt",
+        "test -f ainda-nao.txt",
+        "grep -q 'ainda-nao' ja-existe.txt",
+    ]
+    assert [entry["discriminates"] for entry in probed] == [False, True, True]
+    assert len([e for e in probed if not e["discriminates"]]) == 1
+    assert probed[0]["exit"] == 0 and probed[1]["exit"] != 0
+
+
+def test_a_separator_inside_quotes_does_not_split_a_segment():
+    """The whole reason this is a scanner and not a `split`. Every one of these
+    holds a `;`, an `&&` or a `||` that belongs to the STRING, and a naive cut
+    would hand bash four fragments none of which parse."""
+    for text in (
+        "echo 'a;b && c || d'",
+        'echo "a;b && c || d"',
+        "grep -q 'x;y' file.txt",
+        "awk '/a/{print;exit} /b/{next}' file.txt",
+        "echo $(printf 'a;b')",
+        "echo `printf 'a;b'`",
+    ):
+        assert [s for _, s in T.verify_segments(text)] == [text], text
+
+
+def test_a_group_a_subshell_and_a_compound_command_each_stay_one_segment():
+    """`{ ...; }`, `( ...; )` and `if ...; then ...; fi` are single commands, so
+    cutting inside one produces a fragment that is a syntax error rather than an
+    assertion. `${VAR}` and `${x#y}` must not be mistaken for the first of
+    those, which is why the brace and the `#` are only special at word start."""
+    for text in (
+        "{ echo a; echo b; }",
+        "( cd x; echo b )",
+        "if test -f a; then echo yes; fi",
+        "for f in a b; do echo $f; done",
+        'echo "${VAR}" && echo "${x#y}"',
+    ):
+        segments = [s for _, s in T.verify_segments(text)]
+        assert segments == [text] or segments == text.split(" && "), text
+
+
+def test_comments_and_set_lines_and_assignments_are_never_reported(tmp_path):
+    """AC: a segment that is only `set -e` or an assignment does not appear.
+
+    A comment does not either -- it would otherwise become a segment that runs
+    as `# ...`, exits 0, and is reported as an assertion that already passes,
+    which is the exact false positive this verb exists to avoid producing.
+    """
+    _, probed = _probe(
+        tmp_path,
+        "set -euo pipefail\n"
+        "# a comment holding a ; and an && and a ||\n"
+        "F=existe.txt\n"
+        "export G=existe.txt\n"
+        "test -f \"$F\"\n",
+        files=("existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == ['test -f "$F"']
+    assert probed[0]["discriminates"] is False, "the assignment was carried, not lost"
+
+
+def test_an_assignment_is_carried_into_every_assertion_after_it(tmp_path):
+    """Without the prelude this is the failure mode that would make the verb
+    useless on real verifies: `S=<path>` then `grep -q x "$S"` would run with an
+    empty `$S`, fail for that reason alone, and be reported as discriminating --
+    hiding the very assertion the story wants surfaced."""
+    _, probed = _probe(
+        tmp_path,
+        'S=doc.md\ngrep -q marker "$S"\ngrep -q ausente "$S"\n',
+        files=("doc.md",),
+    )
+    assert [entry["exit"] for entry in probed] == [0, 1]
+    assert [entry["discriminates"] for entry in probed] == [False, True]
+
+
+def test_the_operand_after_a_double_pipe_is_neither_run_nor_reported(tmp_path):
+    """`check || { echo FAIL; exit 1; }` is ONE assertion with a failure branch.
+
+    The branch runs only when the check has already failed, so its exit status
+    says nothing about the tree -- and running it standalone is the one
+    decomposition here with teeth. `|| mkdir` proves it by consequence rather
+    than by opinion: the directory must not exist afterwards.
+    """
+    root, probed = _probe(
+        tmp_path,
+        "test -f existe.txt || { echo 'FAIL; really'; exit 1; }\n"
+        "test -d criado || mkdir criado\n",
+        files=("existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == [
+        "test -f existe.txt",
+        "test -d criado",
+    ]
+    assert not os.path.exists(os.path.join(root, "criado")), "a failure branch ran"
+
+
+def test_the_operand_after_a_double_ampersand_is_a_further_assertion():
+    """The opposite case, and the reason the separator is carried at all rather
+    than `||` simply being dropped from the cut list: what follows `&&` is
+    reached only because the thing before it passed, so it IS an assertion."""
+    parsed = T.verify_segments("test -f a && test -f b")
+    assert parsed == [("", "test -f a"), ("&&", "test -f b")]
+    assert T.verify_segments("test -f a || test -f b") == [
+        ("", "test -f a"),
+        ("||", "test -f b"),
+    ]
+
+
+def test_the_segments_run_where_the_CALLER_stood_not_at_the_project_root(tmp_path):
+    """find_aimi_root cds to the root holding .aimi/ before any verb runs, and
+    probing there would measure the main checkout while the executor's own
+    verify measures the worktree it cd'd into at step 0c. A probe that reports
+    on a different tree than the check it is probing is worse than no probe."""
+    _, from_root = _probe(tmp_path, "test -f so-aqui.txt\n", files=("sub/so-aqui.txt",))
+    assert from_root[0]["discriminates"] is True
+    _, from_sub = _probe(
+        tmp_path, "test -f so-aqui.txt\n", files=("sub/so-aqui.txt",), cwd="sub"
+    )
+    assert from_sub[0]["discriminates"] is False
+
+
+def test_the_probe_wrapper_crosses_once_takes_no_lock_and_runs_the_same_gates():
+    """Bash keeps the argument, its format, which file is current and whether
+    the story is in it -- and adds exactly one thing, the caller's directory.
+    Nothing here reads the document, and a reader takes no lock."""
+    body = _executable(dict(_wrappers())["cmd_verify_probe"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    for kept in ("validate_story_id", "validate_path_in_project", "get_tasks_file",
+                 "validate_story_exists", "check_python3"):
+        assert kept in body, kept
+    assert 'AIMI_INVOCATION_DIR:-$PWD' in body
+
+
+def test_nothing_in_the_decomposition_reaches_eval():
+    """AC: the parser respects quotes rather than asking a shell to split for
+    it. `eval` on a verify string would run the whole script the probe is
+    supposed to be taking apart -- once per segment."""
+    source = "\n".join(
+        line
+        for line in _code().split("\n")
+        if not line.lstrip().startswith("#")
+    )
+    start = source.index("def verify_segments")
+    end = source.index("def op_verify_probe")
+    assert "eval" not in source[start:end]

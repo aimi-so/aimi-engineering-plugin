@@ -36,6 +36,14 @@ resolve_path() {
 find_aimi_root() {
   local dir
   dir=$(pwd)
+  # The directory the caller was standing in, captured BEFORE the cd below.
+  # verify-probe runs a story's verify segments here rather than at
+  # PROJECT_ROOT, because that is where the executor runs the verify itself:
+  # step 0c cds to WORKTREE_PATH (or PROJECT_PATH) and step 4 runs the verify
+  # from there. Probing at PROJECT_ROOT would measure the main checkout while
+  # the real run measures the worktree -- a probe that reports on a different
+  # tree than the check it is probing is worse than no probe.
+  AIMI_INVOCATION_DIR="$dir"
   while true; do
     if [ -d "$dir/.aimi" ]; then
       cd "$dir"
@@ -1567,6 +1575,51 @@ cmd_get_story_context() {
   python3 "$(_aimi_tasks_py)" get-story-context \
     --tasks-file "$tasks_file" --story-id "$story_id" \
     --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
+}
+
+# Probe a story's implementation.verify ONE ASSERTION AT A TIME.
+#
+# The executor's pre-run answers "does this whole verify already pass before
+# the work?". This answers the finer question the `set -e` in front of most
+# verifies makes unanswerable: WHICH of its assertions already pass. Prints a
+# JSON array of {segment, exit, discriminates}; an absent or empty verify is an
+# empty array at exit 0.
+#
+# The same five gates every other tasks verb runs, and the same one crossing --
+# the decomposition, the per-segment run and the shape are tasks.py's. The only
+# thing bash adds is the working directory, and it adds it because
+# find_aimi_root's cd has already moved the process by the time any verb runs:
+# AIMI_INVOCATION_DIR is the caller's own cwd, captured before that cd. It is
+# not run through validate_path_in_project, because it is not an argument -- it
+# is this process's own starting directory, and find_aimi_root walked UP from
+# it to reach a root, so it is a descendant of one by construction.
+#
+# No lock: this reads the document and writes nothing to it.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+cmd_verify_probe() {
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" verify-probe \
+    --tasks-file "$tasks_file" --story-id "$story_id" \
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}"
 }
 
 # Mark a story as in-progress
@@ -14658,6 +14711,15 @@ COMMANDS:
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
+    verify-probe <id> [--tasks-file <path>]
+                              Run a story's implementation.verify ONE ASSERTION AT A TIME and
+                              report which ones already pass. Output: a JSON array of
+                              {segment, exit, discriminates}; discriminates is false for an
+                              assertion that passed, i.e. one that does not tell the
+                              before-state from the after-state. Segments run in the CALLER's
+                              directory, in order, carrying the verify's own variable
+                              assignments; `set` lines, comments and assignments are not
+                              reported. An absent or empty verify is [] at exit 0.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -15618,6 +15680,7 @@ main() {
     get-branch)        shift; cmd_get_branch "$@" ;;
     get-story)         shift; cmd_get_story "$@" ;;
     get-story-context) shift; cmd_get_story_context "$@" ;;
+    verify-probe)      shift; cmd_verify_probe "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;

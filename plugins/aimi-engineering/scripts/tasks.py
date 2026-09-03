@@ -140,6 +140,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -3876,6 +3877,380 @@ def op_research_paths(argv):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# verify-probe -- vacuity at the ASSERTION level, not at the script's
+# ---------------------------------------------------------------------------
+#
+# The story-executor already runs a story's implementation.verify once before
+# implementing anything, and warns when that pre-run exits ZERO: a check that
+# passes before the work proves nothing about the work. That warning is at the
+# granularity of the SCRIPT. Under `set -e` a verify stops at its first failing
+# assertion, so every assertion after it never ran at all, and one that would
+# have passed vacuously is invisible. The case this was built from had four
+# assertions of which two already passed -- one a guardrail by design, one dead
+# weight -- and the script still exited non-zero on the second, so the
+# script-level pre-run would have said nothing.
+#
+# This verb answers the other question: which INDIVIDUAL assertions already
+# pass. It decomposes the verify, runs each piece on its own, and reports the
+# exit status of each. `discriminates` is false for exactly the pieces that
+# already pass -- the ones a reader should look at.
+
+# The keywords that open and close a compound command. While one is open no
+# separator inside it splits, so an `if ... ; then ... ; fi` stays ONE segment
+# and runs as the unit its author wrote. Splitting it would hand bash the
+# fragment `if cmd; then`, which is a syntax error -- reported as exit 2, so it
+# could never be mistaken for dead weight, but noise all the same.
+_VERIFY_OPENERS = ("if", "for", "while", "until", "case", "select")
+_VERIFY_CLOSERS = ("fi", "done", "esac")
+
+# `NAME=`, `NAME[i]=` and `NAME+=`, anchored: what makes a word an assignment
+# rather than a command.
+_VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
+
+# The words that may precede an assignment and still leave it an assignment.
+_VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
+
+# A verify is allowed to be a whole test suite, so this is generous. A segment
+# that outlives it is reported at 124 -- `timeout`'s own status -- which reads
+# as discriminating, the safe direction: a probe must never invent dead weight.
+_VERIFY_TIMEOUT = 600
+
+
+def _verify_at_word_start(buf):
+    """True when the next character begins a WORD rather than continuing one.
+
+    Reads backwards over blanks in what has been accumulated so far. It is what
+    tells `{` the group opener from the `{` of `${VAR}`, `#` the comment from
+    the `#` of `${x#y}`, and the keyword `if` from the tail of `notif`.
+    """
+    i = len(buf) - 1
+    while i >= 0 and buf[i] in " \t":
+        i -= 1
+    return i < 0 or buf[i] in ";&|(){}\n<>"
+
+
+def verify_segments(text):
+    """A verify script cut into its top-level segments, each paired with the
+    separator that INTRODUCED it -- "" for the first and for anything after a
+    `;` or a newline, "&&", or "||".
+
+    Cuts on `;`, `&&`, `||` and newline, and on nothing else -- a pipeline is
+    ONE command and `|` never splits. A separator inside single quotes, double
+    quotes, a `$(...)` or backtick substitution, a `{ ...; }` group, a `(...)`
+    subshell or a compound command is not a separator at all. Comments are
+    dropped whole, so a `#` line never becomes a segment that trivially passes.
+
+    THE SEPARATOR IS CARRIED because `||` means something the other three do
+    not: what follows it is the failure branch of the segment before it, which
+    is why probe_verify neither runs nor reports one. See its docstring.
+
+    IT IS A SCANNER, NOT AN EVALUATOR. Nothing here is expanded and nothing is
+    handed to `eval` to be split; the quoting state is tracked character by
+    character, which is the only way a separator inside a quoted string can be
+    told from one between two commands without running the string first.
+    """
+    segments = []
+    buf = []
+    pending = [""]
+    quote = None
+    backtick = False
+    parens = 0
+    braces = 0
+    keywords = 0
+    i = 0
+    n = len(text)
+
+    def flush(next_separator=""):
+        raw = "".join(buf).strip()
+        del buf[:]
+        if raw:
+            segments.append((pending[0], raw))
+        pending[0] = next_separator if raw else pending[0]
+
+    while i < n:
+        ch = text[i]
+
+        if quote is not None:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            # Backslash-newline is a line continuation: it JOINS two lines, so
+            # taking both characters here is what stops the newline splitting.
+            buf.append(ch)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "`":
+            backtick = not backtick
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "#" and not backtick and _verify_at_word_start(buf):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+
+        if text.startswith("$(", i):
+            parens += 1
+            buf.append("$(")
+            i += 2
+            continue
+
+        if ch == "(":
+            parens += 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == ")":
+            if parens:
+                parens -= 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "{" and _verify_at_word_start(buf):
+            braces += 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "}" and _verify_at_word_start(buf):
+            if braces:
+                braces -= 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if (ch.isalpha() or ch == "_") and _verify_at_word_start(buf):
+            j = i
+            while j < n and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            word = text[i:j]
+            if word in _VERIFY_OPENERS:
+                keywords += 1
+            elif word in _VERIFY_CLOSERS and keywords:
+                keywords -= 1
+            buf.append(word)
+            i = j
+            continue
+
+        top = quote is None and not backtick and not parens and not braces and not keywords
+
+        if text.startswith("&&", i) or text.startswith("||", i):
+            if top:
+                flush(text[i : i + 2])
+            else:
+                buf.append(text[i : i + 2])
+            i += 2
+            continue
+
+        if ch == ";" or ch == "\n":
+            if top:
+                flush()
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    flush()
+    return segments
+
+
+def verify_words(segment):
+    """One segment's words, split on unquoted blanks and nothing else.
+
+    Same scanner discipline as verify_segments and for the same reason: this is
+    what tells `PROBE=$(cmd a b)` -- one word -- from `FOO=bar cmd`, two.
+    """
+    words = []
+    buf = []
+    quote = None
+    backtick = False
+    depth = 0
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote is not None:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                buf.append(segment[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(segment[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "`":
+            backtick = not backtick
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            if depth:
+                depth -= 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in " \t\n" and not depth and not backtick:
+            if buf:
+                words.append("".join(buf))
+                del buf[:]
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        words.append("".join(buf))
+    return words
+
+
+def verify_asserts_nothing(segment):
+    """True for a segment that cannot be an assertion: a `set` builtin, or a
+    plain variable assignment.
+
+    Both are real parts of a verify and neither claims anything about the tree,
+    so reporting either as an assertion that "already passes" would be noise --
+    and the assignments are worse than noise, because they always pass.
+    """
+    words = verify_words(segment)
+    if not words:
+        return True
+    if words[0] == "set":
+        return True
+    if words[0] in _VERIFY_DECLARATORS:
+        return all(w.startswith("-") or _VERIFY_ASSIGN.match(w) for w in words[1:])
+    return len(words) == 1 and bool(_VERIFY_ASSIGN.match(words[0]))
+
+
+def probe_verify(text, cwd):
+    """Every assertion in `text`, run on its own in `cwd`, with its exit status.
+
+    THE ASSIGNMENTS ARE CARRIED, THE ASSERTIONS ARE NOT. A verify names its own
+    paths -- `S=path/to/SKILL.md`, then `grep -q x "$S"` -- so an assertion run
+    with no context would see an empty `$S`, fail for that reason alone, and be
+    reported as discriminating when it is the very thing this verb exists to
+    expose. Each assertion is therefore prefixed with the assignments that
+    preceded it, and with nothing else: no earlier assertion's exit status and
+    no `set -e`, which is exactly what stops the run at the first failure in
+    the real script and hides everything after it.
+
+    The cost of that choice is that an assignment whose value comes from a
+    command substitution runs once per assertion after it. Verify scripts
+    assign paths and captured output, so this is cheap in practice, and the
+    alternative -- one shell for the whole script with each assertion in a
+    subshell -- buys that back by making every exit status depend on parsing a
+    marker out of a stream the assertions themselves write to.
+
+    Output is discarded. What the caller gets is the status, because that is
+    what `discriminates` is computed from and a probe that echoed a whole test
+    suite's output would bury its own answer.
+
+    THE OPERAND AFTER `||` IS NOT AN ASSERTION and is neither run nor reported.
+    `grep -q X f || { echo FAIL; exit 1; }` is one check with a failure branch,
+    not two checks: the branch runs only when the check has already failed, its
+    own exit status says nothing about the tree, and running it on its own is
+    the one decomposition here with teeth -- `[ -d x ] || mkdir x` would create
+    a directory the real script never would. The operand after `&&` is the
+    opposite case and IS run: it is a further assertion, reached only because
+    the one before it passed.
+    """
+    results = []
+    prelude = []
+    for separator, segment in verify_segments(text):
+        if separator == "||":
+            continue
+        if verify_asserts_nothing(segment):
+            words = verify_words(segment)
+            if words and words[0] != "set":
+                prelude.append(segment)
+            continue
+        try:
+            completed = subprocess.run(
+                ["bash", "-c", "\n".join(prelude + [segment])],
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_VERIFY_TIMEOUT,
+            )
+            status = completed.returncode
+        except subprocess.TimeoutExpired:
+            status = 124  # `timeout`'s own status for a command that outlived it
+        except OSError as err:
+            status = 127  # no bash, or no such cwd -- "command not found"
+            del err
+        results.append(
+            {"segment": segment, "exit": status, "discriminates": status != 0}
+        )
+    return results
+
+
+def op_verify_probe(argv):
+    """The story bash already proved exists -- validate_story_id and
+    validate_story_exists both ran before this process started.
+
+    An absent or empty verify is an EMPTY ARRAY at exit 0, never a refusal:
+    `implementation` is optional in schema v3.3 and a story is allowed to carry
+    no verify at all. That is the same treatment the executor's step 1.5 gives
+    the absent case, and a caller that has to tell "no verify" from "the verb
+    broke" would just reimplement the check it delegated.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    cwd = _flag(argv, "--cwd")
+    if not path or story_id is None:
+        die("Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> [--cwd <dir>]")
+    text = ""
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if isinstance(verify, str) and verify.strip():
+                text = verify
+                break
+        if text:
+            break
+    _emit(probe_verify(text, cwd or os.getcwd()))
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -3909,6 +4284,7 @@ _OPS = {
     "archive-task": op_archive_task,
     "init-session": op_init_session,
     "get-branch": op_get_branch,
+    "verify-probe": op_verify_probe,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }
