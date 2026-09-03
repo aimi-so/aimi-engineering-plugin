@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.125.0] - 2026-09-03
+
+Three bodies of work that had accumulated unreleased on one branch. The thread
+running through them: a check that runs, exits zero, and measures something
+disconnected from what it claims is indistinguishable from a check that works.
+
+### Added
+
+- **`measure-command-file <path>`** — returns `{bytes, lines, prose_bytes,
+  fence_bytes, bash_fence_bytes, fences, bash_fences}` for a command file,
+  computed by the same fence parser `test-command-blocks.sh` already uses. There
+  is still exactly one fence parser in the tree; the verb sums what it reports
+  rather than parsing anything itself. A hand-rolled `awk` had been counting 45
+  bash fences in `plan.md` where the shared parser counts 50.
+- **`verify-probe <story-id>`** — splits a story's `implementation.verify` into
+  top-level segments and runs each in isolation, reporting
+  `{segment, exit, discriminates}`. Settings such as `set -euo pipefail` are
+  skipped, being configuration rather than assertions. Most verifies open with
+  `set -e`, so the script stops at its first failing assertion and every
+  assertion after it never runs — meaning a verify that exits non-zero can still
+  carry assertions that would have passed before a line was written. The
+  script-level pre-run says nothing about those.
+- **`list-known-gaps [--feature <slug>] [--since <date>]`** — reads
+  `.aimi/known-gaps/`, the corpus every story executor writes and no plan had
+  ever read back. It depends on no frontmatter: the files have none, and arrive
+  in three shapes (`KNOWN-GAP:` prefixed, `KNOWN-GAP (US-NNN):` prefixed, and
+  bare prose). A file whose feature cannot be resolved yields an entry with a
+  null feature rather than being dropped.
+- **`prior_planning_gaps` in `/aimi:plan`** — the gaps above are injected into
+  the story expander's prompt as a sanitized DATA block, tag-escaped exactly as
+  the existing `research_file` blocks are, and the expander gained a section
+  saying what to do with them.
+- **A `measure` block convention in the three research agents** — every
+  repository figure now arrives with the shell command that produced it and that
+  command's literal output; a figure with no block is marked `UNVERIFIED`.
+  `/aimi:plan` Phase 1.6 re-executes each block and escalates a divergence
+  through the conflict path that already existed. Because those blocks are
+  executed against agent-authored text, `commands/references/sanitization.md`
+  gained a normative read-only allowlist, matched on the leading word of every
+  pipeline segment, with shell constructs that could smuggle a command past it
+  refused as shapes before the allowlist is consulted.
+- **The question every new gate must answer**, in
+  `commands/references/context-budget.md`: does what this check measures bear on
+  what it claims? It carries the four measured cases that motivated it, and
+  documents the three distinct verification concepts (`acceptanceCriteria`,
+  `implementation.verify`, `verification.strategy`) without renaming any field.
+- **`test-command-size.sh`** — a per-file byte budget for `commands/**/*.md`,
+  enforced as a ratchet in both directions: a listed file that grows past its
+  budget fails, and one that shrinks below it fails too, so the commit that
+  shrinks a file must lower its number in the same diff.
+- **A pre-run of `implementation.verify`** in the story executor, before any
+  work exists. A zero exit means the check cannot tell the before-state from the
+  after-state; it warns and never blocks, because a story re-executed over
+  partial work can legitimately pass that early run.
+
+### Changed
+
+- **The story executor runs `story.implementation.verify` as written**, from the
+  working directory step 0c established, and a non-zero exit fails the story. It
+  previously ran a hardcoded `npx tsc --noEmit`, which named a tool this
+  repository does not have.
+- **The story expander must make `verify` cover what the criteria assert.** A
+  criterion naming a check the verify never runs is the defect this closes.
+- **`/aimi:plan` requires the project's own typecheck**, rather than mandating
+  the literal string `Typecheck passes` regardless of whether the project has
+  such a command.
+- **The canonical single-line CLI resolution form is auto-approved by the hook**,
+  and `commands/references/cli-path-resolution.md` defines it once as Per-Call
+  Resolution.
+
+### Fixed
+
+- **`story-merge` warns when a criterion asserts a check the verify never runs**
+  (`verify-coverage`), reporting the story ids it could not determine separately
+  from the ones it cleared.
+
+
 ## [1.124.0] - 2026-08-31
 
 ### Added
