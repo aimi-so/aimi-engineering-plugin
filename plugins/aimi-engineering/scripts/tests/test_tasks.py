@@ -1551,6 +1551,81 @@ def test_every_one_of_the_fifteen_rules_has_a_case_that_trips_it_and_one_that_do
     assert len(_vt_errors("url-duas-ruins")) == 2
 
 
+def _replay_line_anchor(criterion, tmp_path):
+    """One story, one criterion, through the real CLI.
+
+    Built here rather than read out of the golden because R16 is the one rule in
+    validate_tasks bash never ran -- there is no jq recording of it to replay,
+    and adding one to `validate_tasks_cases` would be recording the Python,
+    which is the one thing that file must never hold. schemaVersion 3.3 is
+    load-bearing: R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [
+            {
+                "id": "US-001",
+                "title": "Story US-001",
+                "description": "As a user, I want US-001.",
+                "acceptanceCriteria": [criterion],
+                "status": "pending",
+                "priority": 1,
+                "dependsOn": [],
+                "wave": 0,
+            }
+        ],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_line_numbered_anchor_in_an_acceptance_criterion_warns_exactly_once(tmp_path):
+    """R16's warning half, and the channel it uses is the assertion.
+
+    It names the anchor, and it reaches `warn` rather than `errors`: the verdict
+    stays valid and the exit status stays 0. That is the whole point of the rule
+    living in validate_tasks -- a line number is fragile, not invalid, and an
+    error here would refuse plans that pass today.
+    """
+    actual = _replay_line_anchor("o bloco em commands/execute.md:2766 precisa mudar", tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "acceptanceCriteria cites a line number: commands/execute.md:2766"
+        " — the tree moves and the anchor does not\n"
+    )
+
+
+def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
+    """The exclusion, asserted from both sides so it cannot pass vacuously.
+
+    LINE_ANCHOR on its own DOES fire on this string -- the first assertion says
+    so -- and the rule still emits nothing, because R2/R3/R4 already validate a
+    citation by its literal against its section and bind the `L(...)` capture to
+    a `_line_number` nothing reads. Warning here would be warning about the one
+    anchor in the file that is checked by content.
+    """
+    citation = '"o alvo em commands/execute.md:2766" (DesignSpec § 2.1 L2766)'
+    assert T.LINE_ANCHOR.search(citation), "a matcher without the exclusion fires on it"
+    actual = _replay_line_anchor(citation, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
