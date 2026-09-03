@@ -282,11 +282,39 @@ Structure your findings as:
 
 ## Structured Findings Format
 
-Every claim — Key Insight, Relevance, Recommendation, or Critical Pattern — in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms; no bare assertions:
+Every claim — Key Insight, Relevance, Recommendation, or Critical Pattern — in the findings body (not the pointer-block return in the Output Contract above, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly three forms; no bare assertions:
 
 1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text from the solution file, kept brief) plus a locatable citation:
    > "<verbatim quoted text>" — `file:line` (e.g. `.aimi/solutions/performance-issues/n-plus-one-fix.md:42`)
 2. **Inferred claim** — when the insight is your own generalization across multiple solution files rather than something one file states, tag it inline with `[INFERRED]` immediately after the claim.
+3. **Measured figure** — a number about this repository (a count, a byte size, a
+   percentage) is a **third** form, and neither of the two above satisfies it.
+   State the figure, then immediately below it a ` ```measure ` block holding the
+   shell command that produced it and that command's literal output:
+
+```measure
+$ grep -c '^## ' commands/plan.md
+131
+```
+
+   The number cited in the prose must be that literal output, character for
+   character. Any figure with no `measure` block — including one you reached by
+   arithmetic over two other figures, which is the case that most often goes
+   wrong — is marked `UNVERIFIED` inline, in the body, immediately after the
+   number. Do not omit the figure and do not soften it; mark it.
+
+   The command must pass the read-only allowlist in
+   `commands/references/sanitization.md` § *Measure-Block Execution Allowlist*:
+   one command whose every pipeline segment leads with `grep`, `wc`, `find`,
+   `ls`, `awk`, `jq`, `stat`, or `git ls-files|log|show`, and no `;`, `&&`,
+   backtick, or `$(…)`. `/aimi:plan` Phase 1.6 **re-runs** every block and
+   escalates a mismatch to the user; a block it has to refuse costs its figure
+   the check, and that figure becomes `UNVERIFIED` too.
+
+   When a figure is corrected after this file is written, record the correction
+   in a `## Verified` section at the end of the file rather than editing the
+   body — Phase 1.6 reads that section with precedence, so the fix survives the
+   file being reused later via `metadata.researchPaths`.
 
 ## Efficiency Guidelines
 
