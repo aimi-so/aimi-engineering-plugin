@@ -1837,10 +1837,10 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 IS THE ONE RULE HERE BASH NEVER RAN. It is appended after R15 and reads
-    the `warn` channel only, so nothing above it moves; its own comment carries
-    why it warns instead of erroring, why it is last, and why it is defensive
-    where every rule above it is faithful.
+    R16 AND R17 ARE THE RULES HERE BASH NEVER RAN. Both are appended below R15
+    and reach the `warn` channel only, so nothing above them moves; each one's
+    own comment carries why it warns instead of erroring, why it sits where it
+    sits, and why it is defensive where every rule above it is faithful.
     """
     errors = []
 
@@ -1927,11 +1927,11 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     # all -- giving it one would move a golden corpus this rule has no business
     # moving.
     #
-    # Last in the function on purpose, and defensive on purpose. Every scan
-    # above can abort (see this function's docstring), so a rule appended here
-    # can never move an abort earlier than the port recorded it; and R15 has
-    # already indexed every story by the time this runs, so a story that is not
-    # an object still aborts exactly where it did. What is left -- an
+    # Below every rule that can abort, on purpose, and defensive on purpose.
+    # Every scan above can abort (see this function's docstring), so a rule
+    # appended here can never move an abort earlier than the port recorded it;
+    # and R15 has already indexed every story by the time this runs, so a story
+    # that is not an object still aborts exactly where it did. What is left -- an
     # acceptanceCriteria that is a number, a criterion that is not a string --
     # is skipped rather than refused, because a warning must not be the thing
     # that turns a document the port accepts into one it rejects.
@@ -1956,6 +1956,58 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ": acceptanceCriteria cites a line number: "
                     + ", ".join(anchors)
                     + " — the tree moves and the anchor does not"
+                )
+
+    # R17 -- implementation.files naming a directory that is not there. A
+    # WARNING for R16's reason and, additionally, for one of its own: a plan is
+    # written before the tree it describes exists, so a path that cannot be
+    # opened today is a question to the author, not a verdict on the document.
+    #
+    # THE PARENT DIRECTORY IS WHAT IS CHECKED, NEVER THE FILE. A story whose
+    # whole job is to create a file is the ordinary case, so requiring the file
+    # would refuse every scaffolding story in the corpus -- the exact opposite
+    # of what a reality check is for. Requiring the directory still catches the
+    # failure that motivated the rule: a plan naming a tree nobody can open.
+    #
+    # It sits BELOW R16 for a measurable reason rather than a stylistic one.
+    # Warnings are compared byte for byte by the golden corpus, so a rule
+    # inserted ABOVE R16 would reorder the stderr of any document that trips
+    # both, while one appended below it can only ever add lines after the last
+    # one already recorded. Nothing above moves, in either channel.
+    #
+    # `implementation` is read ONLY once jq_type says "object". That guard is
+    # not defensive habit -- it is the removed cd-prefix rule's regression
+    # written down, and validate_stories carries the account of it beside
+    # .project rather than this comment repeating it.
+    #
+    # Confinement goes through confined_spec_path because that is the one place
+    # a document-sourced path is resolved against PROJECT_ROOT; a path that
+    # escapes warns for the same reason a missing directory does, since neither
+    # names a directory that exists UNDER the project root.
+    for doc in docs:
+        for story in _stories(doc):
+            implementation = jq_index(story, "implementation", ".userStories[]")
+            if jq_type(implementation) != "object":
+                continue
+            files = jq_index(implementation, "files", ".userStories[].implementation")
+            if not isinstance(files, list):
+                continue
+            unopenable = []
+            for entry in files:
+                if not isinstance(entry, str):
+                    continue
+                path, inside = confined_spec_path(project_root, entry)
+                if inside and os.path.isdir(os.path.dirname(path)):
+                    continue
+                if entry not in unopenable:
+                    unopenable.append(entry)
+            if unopenable:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": implementation.files names a directory that does not exist: "
+                    + ", ".join(unopenable)
+                    + " — the file may be new, the directory it lands in may not"
                 )
 
     return errors
