@@ -1995,7 +1995,7 @@ def _named_lines(values):
 # parses. The measurement is in op_get_story_context's docstring, beside the
 # code it measures.
 #
-# THREE RULES CHANGED HERE ON PURPOSE, and the golden file's
+# FOUR RULES CHANGED HERE ON PURPOSE, and the golden file's
 # `_comment_story_context` states each one beside what it cost:
 #
 #   1. The cap counts BYTES. `${#skill_content}` counted bytes under LC_ALL=C
@@ -2013,6 +2013,13 @@ def _named_lines(values):
 #      warnings stay on stderr where they were, but a caller running this verb
 #      with `2>/dev/null` -- which a JSON-parsing caller reasonably does -- could
 #      not previously tell a hydrated skill set from a halved one.
+#   4. `metadata` is PROJECTED, not copied whole. The payload used to carry the
+#      document's entire metadata object into every spawn; the projection keeps
+#      the keys STORY_CONTEXT_METADATA_KEYS names -- the ones with a measured
+#      reader in the story-executor -- and drops the rest, `decisions` first
+#      among them. The constant and the grep that produced it sit beside
+#      op_get_story_context; the golden's story_context_cases moved with the
+#      rule, in the rule's own commit.
 #
 # Everything else is the bash reproduced, aborts included, and the abort classes
 # are named in the golden comment rather than reproduced: there is no shell
@@ -3033,6 +3040,64 @@ def op_validate_tasks(argv):
     return 1
 
 
+# The `metadata` keys this payload's ONE consumer actually reads. DERIVED BY
+# MEASUREMENT, NOT FROM THE PROSE -- skills/story-executor/SKILL.md describes
+# fields in running text that it never reads, so the list below comes from the
+# reads themselves:
+#
+#     grep -rhoE 'metadata\.[a-zA-Z]+' \
+#         plugins/aimi-engineering/skills/story-executor/ | sort -u
+#
+# On 3 September 2026, over SKILL.md and both files under references/, that
+# printed exactly three -- metadata.designBundle (2 occurrences),
+# metadata.designTokens (1) and metadata.prototypePaths (9). Re-run it rather
+# than trusting this comment; a key that gains a reader has to gain a line here
+# in the same commit, or the reader silently gets null.
+#
+# The story-executor skill is the whole consumer list, and that is measured too:
+# commands/execute.md and commands/next.md read metadata from the tasks FILE
+# through other verbs, never out of this payload.
+#
+# WHAT THIS DROPS IS THE POINT. metadata.decisions is the largest block a plan
+# writes -- one object per resolved question, each carrying the question's own
+# prose -- and nothing in the executor has ever read it, so it travelled in
+# every spawn of every story for nothing.
+STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths")
+
+
+def projected_metadata(metadata):
+    """`.metadata` narrowed to STORY_CONTEXT_METADATA_KEYS, in the document's
+    own key order.
+
+    PRESENCE decides, not truthiness. A key the document carries as null is
+    projected as null, because `designBundle: null` and no designBundle at all
+    are different documents and bundle-null records the first of them. A key the
+    document does not carry stays absent: emitting it as null would hand every
+    consumer a key to test for and would make the payload claim the document
+    said something it did not.
+
+    A document with no metadata at all is unchanged -- `null` in, `null` out,
+    the same answer metadata-ausente and metadata-null already record. Anything
+    else that is neither dict nor None is returned as it arrived rather than
+    refused here: design_context has already indexed `.metadata` by the time
+    this runs, so a metadata that is a string aborted there (metadata-string),
+    and inventing a second refusal for an unreachable shape would be a new rule
+    wearing a projection's clothes.
+
+    A caller that reads a key no longer projected gets jq's null, not an error:
+    `.metadata.maxConcurrency` on `{}` is null exactly as it is on a document
+    with no metadata, which is what keeps this narrowing from breaking a reader
+    nobody has found yet.
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in STORY_CONTEXT_METADATA_KEYS
+    }
+
+
 def op_get_story_context(argv):
     """One crossing, no lock, and the assembly order bash ran in.
 
@@ -3101,7 +3166,7 @@ def op_get_story_context(argv):
         _emit(
             {
                 "story": story,
-                "metadata": jq_index(first, "metadata"),
+                "metadata": projected_metadata(jq_index(first, "metadata")),
                 "skills": skills,
                 "designContext": context,
                 "skillsDropped": dropped,
