@@ -1622,6 +1622,51 @@ cmd_verify_probe() {
     --cwd "${AIMI_INVOCATION_DIR:-$PWD}"
 }
 
+# List every planning defect a previous executor recorded in .aimi/known-gaps/.
+#
+# Those files are the only diagnosis this pipeline produces for free, and until
+# now nothing read them back: /aimi:plan rediscovered a defect weeks after an
+# executor had already written it down. This verb is the reader.
+#
+# NOT a tasks.json verb despite living in tasks.py: it reads a sibling
+# directory of the same .aimi/ root and takes no --tasks-file at all. It is
+# there because that is where the .aimi/ document rules live, and putting a
+# second parser beside it would be the duplication the port removed.
+#
+# No lock and no path confinement: --feature and --since are filter strings,
+# not paths, and the ONE path involved is "$AIMI_DIR/known-gaps", which is
+# find_aimi_root's own export rather than an argument. validate_path_in_project
+# rules arguments; there is no argument here for it to rule.
+#
+# Flags: --feature <name> (exact match), --since <YYYY-MM-DD> (inclusive)
+cmd_list_known_gaps() {
+  local feature="" since=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        shift
+        feature="${1:-}"
+        ;;
+      --since)
+        shift
+        since="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  check_python3
+  local args=(list-known-gaps --aimi-dir "$AIMI_DIR")
+  [ -n "$feature" ] && args+=(--feature "$feature")
+  [ -n "$since" ] && args+=(--since "$since")
+  python3 "$(_aimi_tasks_py)" "${args[@]}"
+}
+
 # Mark a story as in-progress
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
@@ -14720,6 +14765,16 @@ COMMANDS:
                               directory, in order, carrying the verify's own variable
                               assignments; `set` lines, comments and assignments are not
                               reported. An absent or empty verify is [] at exit 0.
+    list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
+                              Read every planning defect a previous executor recorded in
+                              .aimi/known-gaps/ and print them as a JSON array of
+                              {date, storyId, feature, text, file}. Needs no frontmatter:
+                              a `KNOWN-GAP:` line, a `KNOWN-GAP (US-NNN):` line and a file
+                              of bare prose all parse, and EVERY file yields at least one
+                              entry. feature comes from the file name's slug, else from the
+                              tasks file planned on the same date, else null -- never
+                              dropped. Both filters are exact; --since drops a dated-less
+                              entry.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -15681,6 +15736,7 @@ main() {
     get-story)         shift; cmd_get_story "$@" ;;
     get-story-context) shift; cmd_get_story_context "$@" ;;
     verify-probe)      shift; cmd_verify_probe "$@" ;;
+    list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;

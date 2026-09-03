@@ -2752,16 +2752,26 @@ def test_tasks_py_takes_no_lock_of_its_own():
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     """One writer, and the writer is atomic.
 
-    open() appears four times and ALL FOUR are read mode. The second arrived
+    open() appears six times and ALL SIX are read mode. The second arrived
     with validate-tasks, the one verb that reads a file other than the tasks
     file -- the DesignSpec or BusinessSpec named in metadata.designBundle,
     discovered after the crossing and therefore unreachable from bash's own
     confinement. The third and fourth arrived with get-story-context for the
     same reason: a SKILL.md under the skills base directory bash resolved, and
     the brainstorm named by metadata.brainstormPath. Each is read-only and each
-    is scoped to its own call site, which is what this asserts: a FIFTH open, or
-    any of these four in a writing mode, is a new capability and has to be
+    is scoped to its own call site, which is what this asserts: a SEVENTH open,
+    or any of these six in a writing mode, is a new capability and has to be
     argued for rather than appear.
+
+    The fifth and sixth arrived TOGETHER with list-known-gaps, and they are the
+    first two that open a file this module was not handed a path to: a gap file
+    the verb found by listing .aimi/known-gaps/, and a tasks document it found
+    listing .aimi/tasks and .aimi/archive to resolve that gap's feature. Both
+    are reads, both fail silently to a null answer rather than to a refusal,
+    and both are bounded -- the listing that produces them stops two
+    directories down and never uses a recursive traversal helper, because the
+    test above bans every one of them by name and that ban is worth more than
+    the four lines it costs to avoid.
 
     The single BYTE-writing path is write_docs_atomically, a NamedTemporaryFile
     in the TARGET's own directory followed by os.replace -- never a
@@ -2777,12 +2787,13 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     in it and has to change this test to arrive.
     """
     code = _code()
-    assert code.count("open(") == 4
+    assert code.count("open(") == 6
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 4
+    assert 'open(full, "r", encoding="utf-8")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 6
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -2801,7 +2812,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "os.unlink(handle.name)",
         "os.unlink(path)",
     ]
-    # Twenty-nine os.path calls, and the module still names no path of its own
+    # Thirty-five os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
     # are confined_spec_path resolving and comparing, three arrived with
@@ -2816,8 +2827,19 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # arrived as an argument or was concatenated onto one that did -- the skills
     # base directory, PROJECT_ROOT, the archive directory and the tasks-file
     # list are all bash's answers, handed in as flags or as arguments.
-    assert code.count("os.path.") == 29
+    #
+    # The last six arrived with list-known-gaps and they are the first that
+    # name a DIRECTORY of their own: "known-gaps", "tasks" and "archive", each
+    # joined onto the --aimi-dir bash handed in, plus one join and one isdir()
+    # in the bounded listing that walks them. That is a real widening and it is
+    # written down rather than absorbed: the rule those three still keep is the
+    # one this comment is about -- no path is named that is not rooted in an
+    # argument -- and what changed is that a leaf name below one now is. A
+    # SEVENTH such name, or any of these three moving off --aimi-dir, is the
+    # thing to argue about.
+    assert code.count("os.path.") == 35
     assert code.count("os.path.isfile(") == 7
+    assert code.count("os.path.isdir(") == 1
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
@@ -3338,6 +3360,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "metadata",
         "verification-report",
         "verify-probe",
+        "list-known-gaps",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -4164,3 +4187,264 @@ def test_nothing_in_the_decomposition_reaches_eval():
     start = source.index("def verify_segments")
     end = source.index("def op_verify_probe")
     assert "eval" not in source[start:end]
+
+
+# ---------------------------------------------------------------------------
+# list-known-gaps: the corpus every executor writes and no plan has read
+# ---------------------------------------------------------------------------
+#
+# NO GOLDEN BLOCK, for verify-probe's reason: there was no jq predecessor to
+# capture. What these assert instead is the one property the verb exists for --
+# that NOTHING is dropped. Every other rule here is downstream of it: the three
+# body shapes all parse because a parser that knew only the prefixed form would
+# lose two thirds of the real corpus, and an unresolved feature is null rather
+# than a discarded file for the same reason.
+
+
+def _gaps(tmp_path, gaps, tasks=(), archive=(), flags=()):
+    """A project whose .aimi/ holds `gaps` (name -> body) and the tasks
+    documents the feature index resolves a date from.
+
+    `tasks` and `archive` are (relative path, document) pairs written under
+    .aimi/tasks/ and .aimi/archive/ -- both are walked, because a gap written
+    in July belongs to a feature whose tasks file was archived weeks ago.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    gaps_dir = os.path.join(root, ".aimi", "known-gaps")
+    os.makedirs(gaps_dir, exist_ok=True)
+    for name, body in gaps.items():
+        with open(os.path.join(gaps_dir, name), "w", encoding="utf-8") as handle:
+            handle.write(body)
+    for where, entries in ((("tasks",), tasks), (("archive",), archive)):
+        for relative, document in entries:
+            target = os.path.join(root, ".aimi", *where, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                json.dump(document, handle)
+    proc = subprocess.run(
+        ["bash", CLI, "list-known-gaps", *flags],
+        cwd=root,
+        env=_isolated_env(base),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_THREE_SHAPES = {
+    "2026-07-30-US-003.md": "KNOWN-GAP: bash -c wrapping\nKNOWN-GAP: subshells\n",
+    "2026-08-16-US-001.md": 'KNOWN-GAP (US-003): "Typecheck passes" has no counterpart here.\n',
+    "2026-07-26-US-001.md": "Both gaps the worker reported were already addressed.\n",
+}
+
+
+def test_all_three_body_shapes_parse_and_no_file_yields_nothing(tmp_path):
+    """The corpus has no frontmatter anywhere -- which is why the frontmatter-
+    first learnings researcher cannot see it -- and comes in three forms:
+    `KNOWN-GAP:`, `KNOWN-GAP (US-NNN):`, and bare prose with no prefix at all.
+
+    Twenty of the thirty-two real files are the bare form. Recognising only the
+    prefixed one would silently drop two thirds of the corpus, which is the very
+    defect this verb exists to close, so the floor asserted here is the one the
+    story's own verify measures against the directory: at least one entry per
+    file."""
+    entries = _gaps(tmp_path, _THREE_SHAPES)
+    assert {entry["file"] for entry in entries} == set(_THREE_SHAPES)
+    assert len(entries) >= len(_THREE_SHAPES)
+    texts = {entry["file"]: entry["text"] for entry in entries if entry["file"] != "2026-07-30-US-003.md"}
+    assert texts["2026-08-16-US-001.md"] == '"Typecheck passes" has no counterpart here.'
+    assert texts["2026-07-26-US-001.md"].startswith("Both gaps the worker reported")
+    assert [e["text"] for e in entries if e["file"] == "2026-07-30-US-003.md"] == [
+        "bash -c wrapping",
+        "subshells",
+    ]
+
+
+def test_a_hard_wrapped_gap_stays_one_entry_and_keeps_its_lines(tmp_path):
+    """A KNOWN-GAP line opens a block and everything after it joins that block
+    until the next one opens. The bodies carry tables, fences and indented
+    lists, so the text is kept verbatim below the prefix rather than re-flowed:
+    this file is the only copy of the record that exists."""
+    body = (
+        "KNOWN-GAP (US-004): adding a verb to tasks.py means registering it in\n"
+        "test_every_op_is_named_after_the_verb_that_calls_it.\n"
+        "\n"
+        "    indented evidence\n"
+        "KNOWN-GAP (US-004): two executors died on an API server error.\n"
+    )
+    entries = _gaps(tmp_path, {"2026-09-03-US-004.md": body})
+    assert len(entries) == 2
+    assert entries[0]["text"].split("\n") == [
+        "adding a verb to tasks.py means registering it in",
+        "test_every_op_is_named_after_the_verb_that_calls_it.",
+        "",
+        "    indented evidence",
+    ]
+    assert entries[1]["text"] == "two executors died on an API server error."
+
+
+def test_prose_before_the_first_prefix_is_an_entry_rather_than_a_loss(tmp_path):
+    """No file in the corpus has such a preamble today. The rule is here so the
+    first one that does is not dropped -- dropping it is the failure mode."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-08-07-US-003.md": "context nobody prefixed\nKNOWN-GAP: the prefixed one\n"},
+    )
+    assert [entry["text"] for entry in entries] == [
+        "context nobody prefixed",
+        "the prefixed one",
+    ]
+
+
+def test_the_parenthetical_story_id_wins_over_the_file_name(tmp_path):
+    """2026-08-16-US-001.md really does carry gaps about US-002 and US-003: the
+    US-001 executor recorded what it found about its siblings. The
+    parenthetical is the more specific attribution for that entry, and the file
+    name is the fallback for a line that carries none."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-16-US-001.md": (
+                "KNOWN-GAP: mine\n"
+                "KNOWN-GAP (US-002): my sibling's\n"
+                "KNOWN-GAP (not-a-story): malformed, so the file name stands\n"
+            )
+        },
+    )
+    assert [entry["storyId"] for entry in entries] == ["US-001", "US-002", "US-001"]
+
+
+def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path):
+    """Both real slug shapes: one with a story id before it, one with no story
+    id at all. The second resolves storyId to null and is still an entry."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-04-US-006-roadmap-amend-no-git-trace.md": "a\n",
+            "2026-08-04-verify-creates-excludes-miss-this-repo.md": "b\n",
+        },
+    )
+    resolved = {entry["file"]: (entry["storyId"], entry["feature"]) for entry in entries}
+    assert resolved["2026-08-04-US-006-roadmap-amend-no-git-trace.md"] == (
+        "US-006",
+        "roadmap-amend-no-git-trace",
+    )
+    assert resolved["2026-08-04-verify-creates-excludes-miss-this-repo.md"] == (
+        None,
+        "verify-creates-excludes-miss-this-repo",
+    )
+
+
+def _dated(created_at):
+    return {"schemaVersion": "3.3", "metadata": {"title": "t", "createdAt": created_at}}
+
+
+def test_the_feature_comes_from_the_tasks_file_planned_on_the_same_date(tmp_path):
+    """Two sources, because the corpus needs both: a flat archived file names
+    its date and feature in its own name, and a phase-layout file names neither
+    -- its feature is the directory under tasks/ and its date is
+    metadata.createdAt."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-08-08-US-002.md": "a\n", "2026-09-03-US-004.md": "b\n"},
+        tasks=[
+            (
+                os.path.join("pipeline-audit", "phase-1-x", "pipeline-audit-phase-1-tasks.json"),
+                _dated("2026-09-03"),
+            )
+        ],
+        archive=[("2026-08-08-identity-contract-tasks.json", _dated("2026-08-08"))],
+    )
+    resolved = {entry["file"]: entry["feature"] for entry in entries}
+    assert resolved["2026-08-08-US-002.md"] == "identity-contract"
+    assert resolved["2026-09-03-US-004.md"] == "pipeline-audit"
+
+
+def test_a_feature_that_does_not_resolve_is_null_rather_than_a_dropped_file(tmp_path):
+    """Two ways to fail to resolve, one answer. A date nothing was planned on,
+    and a date carrying TWO features -- where picking one would attribute a gap
+    to a feature it was never about. Neither drops the file: discarding it is
+    the defect this verb was built to fix."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-07-26-US-001.md": "ambiguous\n", "2026-08-16-US-001.md": "nothing planned\n"},
+        archive=[
+            ("2026-07-26-comunicacao-simples-tasks.json", _dated("2026-07-26")),
+            ("2026-07-26-open-pr-base-branch-detection-tasks.json", _dated("2026-07-26")),
+        ],
+    )
+    assert [entry["feature"] for entry in entries] == [None, None]
+    assert {entry["file"] for entry in entries} == {
+        "2026-07-26-US-001.md",
+        "2026-08-16-US-001.md",
+    }
+
+
+def test_the_feature_filter_is_exact_and_leaves_the_unresolved_out(tmp_path):
+    """--feature is what plan.md Phase 1.7b passes to scope the block to the
+    feature being planned. An entry whose feature is null is not a member of
+    any feature, so it is not a member of this one either."""
+    gaps = {"2026-09-03-US-004.md": "belongs\n", "2026-08-16-US-001.md": "unresolved\n"}
+    tasks = [
+        (
+            os.path.join("pipeline-audit", "phase-1-x", "pipeline-audit-phase-1-tasks.json"),
+            _dated("2026-09-03"),
+        )
+    ]
+    scoped = _gaps(tmp_path, gaps, tasks=tasks, flags=("--feature", "pipeline-audit"))
+    assert [entry["file"] for entry in scoped] == ["2026-09-03-US-004.md"]
+    assert _gaps(tmp_path, gaps, tasks=tasks, flags=("--feature", "nao-existe")) == []
+    assert len(_gaps(tmp_path, gaps, tasks=tasks)) == 2
+
+
+def test_since_is_inclusive_and_an_entry_with_no_date_cannot_answer_it(tmp_path):
+    """A file whose name carries no date has no date to compare, and inventing
+    one for it is the guess this parser refuses everywhere else."""
+    gaps = {
+        "2026-07-30-US-003.md": "old\n",
+        "2026-08-16-US-001.md": "on the boundary\n",
+        "sem-data.md": "undated\n",
+    }
+    assert len(_gaps(tmp_path, gaps)) == 3
+    since = _gaps(tmp_path, gaps, flags=("--since", "2026-08-16"))
+    assert [entry["file"] for entry in since] == ["2026-08-16-US-001.md"]
+
+
+def test_an_absent_directory_is_an_empty_array_and_never_a_refusal(tmp_path):
+    """A repository that has never recorded a gap is the normal early state,
+    and /aimi:plan reads this on every run: a non-zero exit here would turn "no
+    gaps yet" into a planning failure."""
+    assert _gaps(tmp_path, {}) == []
+
+
+def test_only_md_files_are_gaps(tmp_path):
+    """.aimi/known-gaps/ also holds two *.pre.json roadmap snapshots, saved
+    beside the record that explains them. They are evidence, not gaps."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-04-US-006-roadmap-amend-no-git-trace.md": "the record\n",
+            "2026-08-04-US-006-roadmap.pre.json": '{"phases": []}\n',
+        },
+    )
+    assert [entry["file"] for entry in entries] == [
+        "2026-08-04-US-006-roadmap-amend-no-git-trace.md"
+    ]
+
+
+def test_the_known_gaps_wrapper_crosses_once_takes_no_lock_and_opens_no_file():
+    """Bash keeps the flags and adds AIMI_DIR, find_aimi_root's own export.
+
+    NO validate_path_in_project, and that is the rule rather than an omission:
+    it governs a path arriving as an ARGUMENT, and this verb takes none --
+    --feature and --since are filter strings. A fresh path check here would be
+    the third confinement authority root CLAUDE.md forbids."""
+    body = _executable(dict(_wrappers())["cmd_list_known_gaps"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    assert "check_python3" in body
+    assert '--aimi-dir "$AIMI_DIR"' in body

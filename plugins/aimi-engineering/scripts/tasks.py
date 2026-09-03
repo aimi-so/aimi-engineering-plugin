@@ -4251,6 +4251,277 @@ def op_verify_probe(argv):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# list-known-gaps -- the corpus the executors write and no plan has ever read
+# ---------------------------------------------------------------------------
+#
+# Every executor that hits a planning defect writes it to .aimi/known-gaps/ and
+# nothing downstream reads it back, so the same defect is rediscovered a few
+# weeks later by the next plan. This verb is the reader half.
+#
+# THE PARSER OWES ITS SHAPE TO THE CORPUS, not to a format anyone declared.
+# There is no frontmatter anywhere in it -- which is why
+# aimi-learnings-researcher, grep-first on frontmatter fields, cannot see these
+# files at all -- and the bodies come in three forms measured on 2026-09-03:
+# lines prefixed `KNOWN-GAP:`, lines prefixed `KNOWN-GAP (US-NNN):`, and bare
+# prose carrying no prefix at all (20 of the 32 files). The bare-prose files are
+# gaps too. A parser that recognised only the prefixed form would silently drop
+# two thirds of the corpus, which is the same class of defect this verb exists
+# to close, so EVERY file yields at least one entry -- the verify counts the
+# files on disk at run time and asserts exactly that.
+
+# `YYYY-MM-DD`, then an optional `US-NNN`, then an optional slug:
+# 2026-07-26-US-001.md, 2026-08-04-US-006-roadmap-amend-no-git-trace.md and
+# 2026-08-04-verify-creates-excludes-miss-this-repo.md (no story id at all) are
+# all real names in the corpus and all three have to parse.
+_GAP_FILENAME = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:-(?P<story>US-\d+))?"
+    r"(?:-(?P<slug>.+))?"
+    r"\.md$"
+)
+
+# The two prefix shapes, as one pattern. The leading `[-*+]` allowance is for a
+# gap written as a markdown bullet: none in the corpus today, and cheap enough
+# that the first one costs nothing.
+_GAP_PREFIX = re.compile(
+    r"^\s*(?:[-*+]\s+)?KNOWN-GAP\s*(?:\(\s*(?P<story>[^)]*?)\s*\))?\s*:\s?"
+)
+
+_GAP_STORY_ID = re.compile(r"^US-\d+$")
+
+# A dated tasks file: `2026-08-08-identity-contract-tasks.json` names both its
+# date and its feature, so the index below never has to open it.
+_TASKS_FILENAME = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<feature>.+)-tasks\.json$"
+)
+
+# `forge-abstraction-phase-1.2-tasks.json` is one phase of the
+# `forge-abstraction` feature, not a feature called `forge-abstraction-phase-1.2`.
+_TASKS_PHASE_SUFFIX = re.compile(r"-phase-[0-9][0-9.]*$")
+
+_TASKS_SUFFIX = "-tasks.json"
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _created_at(path):
+    """metadata.createdAt of a tasks file, or None for anything unreadable.
+
+    SILENT on every failure, deliberately: this runs over whatever happens to
+    sit in .aimi/archive/, a directory nothing validates, and one malformed
+    document there must not take down a verb whose whole job is to avoid
+    dropping things. A file it cannot read costs one unresolved feature, which
+    the entry already has a representation for.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.JSONDecoder().raw_decode(handle.read().lstrip())[0]
+    except (OSError, ValueError):
+        return None
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    created = metadata.get("createdAt") if isinstance(metadata, dict) else None
+    if isinstance(created, str) and _ISO_DATE.match(created[:10]):
+        return created[:10]
+    return None
+
+
+# `.aimi/tasks/` is two directories deep at its deepest -- a phase file lives at
+# `<feature>/<phase-dir>/<feature>-phase-N-tasks.json` and a flat file sits at
+# the top -- and `.aimi/archive/` is flat. Nothing below is scanned.
+_TASKS_SCAN_DEPTH = 2
+
+
+def _listdir(path):
+    """sorted(os.listdir), and an EMPTY list for anything unreadable.
+
+    Same silence _created_at keeps, for the same reason: this walks whatever
+    happens to be in .aimi/, and a directory it cannot read costs one
+    unresolved feature rather than a dead verb.
+    """
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _tasks_documents(base):
+    """(feature-from-directory or None, file name, path) for every tasks file
+    at most _TASKS_SCAN_DEPTH directories under `base`.
+
+    DELIBERATELY NOT os.walk. This file bans every recursive traversal helper
+    by name -- test_the_archive_verb_owns_no_recursive_delete_anywhere_in_the_file
+    -- because an unbounded walk is what a recursive delete needs, and the one
+    verb here that can destroy a user's files sits in the same module. The ban
+    is worth more than the four lines it costs to read the two shapes the
+    layout actually has.
+
+    The feature carried down is the FIRST directory below `base`, so a phase
+    file two levels deep still answers `pipeline-audit` rather than the phase
+    directory it sits in.
+    """
+    frontier = [(base, None, 0)]
+    while frontier:
+        directory, feature, depth = frontier.pop(0)
+        for name in _listdir(directory):
+            full = os.path.join(directory, name)
+            if os.path.isdir(full):
+                if depth < _TASKS_SCAN_DEPTH:
+                    frontier.append((full, feature or name, depth + 1))
+            elif name.endswith(_TASKS_SUFFIX):
+                yield feature, name, full
+
+
+def tasks_feature_index(aimi_dir):
+    """date -> feature, for the dates where exactly ONE feature was planned.
+
+    Both `.aimi/tasks` and `.aimi/archive` are read, because a gap written in
+    July belongs to a feature whose tasks file was archived weeks ago: an index
+    over the live directory alone would resolve almost nothing.
+
+    A date that carries TWO features resolves to nothing rather than to a
+    guess. Picking one would attribute a gap to a feature it was never about,
+    and a wrong `feature` is worse than a null one -- the null is visible to the
+    reader and to the --feature filter, the wrong one is not.
+    """
+    seen = {}
+    for base in (os.path.join(aimi_dir, "tasks"), os.path.join(aimi_dir, "archive")):
+        for feature, name, full in _tasks_documents(base):
+            matched = _TASKS_FILENAME.match(name)
+            date = matched.group("date") if matched else None
+            if feature is None:
+                # A phase layout puts the feature in the directory name; a flat
+                # one puts it in the file name.
+                feature = (
+                    matched.group("feature")
+                    if matched
+                    else _TASKS_PHASE_SUFFIX.sub("", name[: -len(_TASKS_SUFFIX)])
+                )
+            if date is None:
+                date = _created_at(full)
+            if date:
+                seen.setdefault(date, set()).add(feature)
+    return {date: features.pop() for date, features in seen.items() if len(features) == 1}
+
+
+def gap_blocks(body):
+    """One file's body cut into (storyId-or-None, text) entries.
+
+    A `KNOWN-GAP` line opens a block and every line after it joins that block
+    until the next one opens, so a gap hard-wrapped across five lines stays one
+    entry. Text is kept VERBATIM below the prefix -- these bodies carry tables,
+    code fences and indented lists, and re-flowing them would damage the only
+    copy of a record that exists nowhere else.
+
+    Anything standing BEFORE the first `KNOWN-GAP` line becomes its own entry.
+    No file in the corpus has such a preamble today; the rule is here so the
+    first one that does is not dropped, which is the whole failure mode.
+
+    A body with no prefix anywhere is one entry -- that is the bare-prose form,
+    two thirds of the corpus. An empty file is still one entry, because the
+    per-file floor is what the verify measures.
+    """
+    preamble = []
+    blocks = []
+    for line in body.split("\n"):
+        matched = _GAP_PREFIX.match(line)
+        if matched:
+            story = matched.group("story")
+            blocks.append(
+                (
+                    story if story and _GAP_STORY_ID.match(story) else None,
+                    [line[matched.end():]],
+                )
+            )
+        elif blocks:
+            blocks[-1][1].append(line)
+        else:
+            preamble.append(line)
+
+    entries = []
+    if "".join(preamble).strip():
+        entries.append((None, "\n".join(preamble).strip()))
+    for story, lines in blocks:
+        entries.append((story, "\n".join(lines).strip()))
+    return entries or [(None, body.strip())]
+
+
+def known_gap_entries(aimi_dir, feature=None, since=None):
+    """Every gap in .aimi/known-gaps/, oldest file first.
+
+    `feature` comes from the file name's own slug when it has one and from the
+    tasks file planned on the same date when it does not. A file that resolves
+    to neither enters the result with a NULL feature rather than being
+    discarded -- discarding it would repeat the defect this verb exists to fix.
+
+    Both filters are exact. `--since` drops an entry whose date is null: an
+    entry with no date cannot answer "on or after", and inventing an answer for
+    it is the guess this parser refuses everywhere else.
+    """
+    gaps_dir = os.path.join(aimi_dir, "known-gaps")
+    try:
+        names = sorted(name for name in os.listdir(gaps_dir) if name.endswith(".md"))
+    except OSError:
+        return []
+
+    index = None
+    entries = []
+    for name in names:
+        matched = _GAP_FILENAME.match(name)
+        date = matched.group("date") if matched else None
+        file_story = matched.group("story") if matched else None
+        entry_feature = matched.group("slug") if matched else None
+        if entry_feature is None and date is not None:
+            if index is None:
+                # Built at most once per run, and only when some file actually
+                # needs it: the walk opens tasks documents, and the common case
+                # is a corpus whose names already carry their slug.
+                index = tasks_feature_index(aimi_dir)
+            entry_feature = index.get(date)
+        full = os.path.join(gaps_dir, name)
+        try:
+            with open(full, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except OSError:
+            body = ""
+        for story, text in gap_blocks(body):
+            entries.append(
+                {
+                    "date": date,
+                    "storyId": story or file_story,
+                    "feature": entry_feature,
+                    "text": text,
+                    "file": name,
+                }
+            )
+
+    if feature is not None:
+        entries = [entry for entry in entries if entry["feature"] == feature]
+    if since is not None:
+        entries = [
+            entry
+            for entry in entries
+            if entry["date"] is not None and entry["date"] >= since
+        ]
+    return entries
+
+
+def op_list_known_gaps(argv):
+    """A JSON array, EMPTY when the directory is absent -- never a refusal.
+
+    A repository that has never recorded a gap is the normal early state, and
+    /aimi:plan reads this on every run: a non-zero exit there would turn "no
+    gaps yet" into a planning failure.
+    """
+    aimi_dir = _flag(argv, "--aimi-dir")
+    if not aimi_dir:
+        die("Usage: tasks.py list-known-gaps --aimi-dir <path> [--feature <f>] [--since <YYYY-MM-DD>]")
+    _emit(
+        known_gap_entries(aimi_dir, _flag(argv, "--feature"), _flag(argv, "--since"))
+    )
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -4285,6 +4556,7 @@ _OPS = {
     "init-session": op_init_session,
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
+    "list-known-gaps": op_list_known_gaps,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }
