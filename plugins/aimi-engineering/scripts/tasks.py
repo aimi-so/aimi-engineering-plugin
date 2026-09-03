@@ -140,6 +140,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -3876,6 +3877,651 @@ def op_research_paths(argv):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# verify-probe -- vacuity at the ASSERTION level, not at the script's
+# ---------------------------------------------------------------------------
+#
+# The story-executor already runs a story's implementation.verify once before
+# implementing anything, and warns when that pre-run exits ZERO: a check that
+# passes before the work proves nothing about the work. That warning is at the
+# granularity of the SCRIPT. Under `set -e` a verify stops at its first failing
+# assertion, so every assertion after it never ran at all, and one that would
+# have passed vacuously is invisible. The case this was built from had four
+# assertions of which two already passed -- one a guardrail by design, one dead
+# weight -- and the script still exited non-zero on the second, so the
+# script-level pre-run would have said nothing.
+#
+# This verb answers the other question: which INDIVIDUAL assertions already
+# pass. It decomposes the verify, runs each piece on its own, and reports the
+# exit status of each. `discriminates` is false for exactly the pieces that
+# already pass -- the ones a reader should look at.
+
+# The keywords that open and close a compound command. While one is open no
+# separator inside it splits, so an `if ... ; then ... ; fi` stays ONE segment
+# and runs as the unit its author wrote. Splitting it would hand bash the
+# fragment `if cmd; then`, which is a syntax error -- reported as exit 2, so it
+# could never be mistaken for dead weight, but noise all the same.
+_VERIFY_OPENERS = ("if", "for", "while", "until", "case", "select")
+_VERIFY_CLOSERS = ("fi", "done", "esac")
+
+# `NAME=`, `NAME[i]=` and `NAME+=`, anchored: what makes a word an assignment
+# rather than a command.
+_VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
+
+# The words that may precede an assignment and still leave it an assignment.
+_VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
+
+# A verify is allowed to be a whole test suite, so this is generous. A segment
+# that outlives it is reported at 124 -- `timeout`'s own status -- which reads
+# as discriminating, the safe direction: a probe must never invent dead weight.
+_VERIFY_TIMEOUT = 600
+
+
+def _verify_at_word_start(buf):
+    """True when the next character begins a WORD rather than continuing one.
+
+    Reads backwards over blanks in what has been accumulated so far. It is what
+    tells `{` the group opener from the `{` of `${VAR}`, `#` the comment from
+    the `#` of `${x#y}`, and the keyword `if` from the tail of `notif`.
+    """
+    i = len(buf) - 1
+    while i >= 0 and buf[i] in " \t":
+        i -= 1
+    return i < 0 or buf[i] in ";&|(){}\n<>"
+
+
+def verify_segments(text):
+    """A verify script cut into its top-level segments, each paired with the
+    separator that INTRODUCED it -- "" for the first and for anything after a
+    `;` or a newline, "&&", or "||".
+
+    Cuts on `;`, `&&`, `||` and newline, and on nothing else -- a pipeline is
+    ONE command and `|` never splits. A separator inside single quotes, double
+    quotes, a `$(...)` or backtick substitution, a `{ ...; }` group, a `(...)`
+    subshell or a compound command is not a separator at all. Comments are
+    dropped whole, so a `#` line never becomes a segment that trivially passes.
+
+    THE SEPARATOR IS CARRIED because `||` means something the other three do
+    not: what follows it is the failure branch of the segment before it, which
+    is why probe_verify neither runs nor reports one. See its docstring.
+
+    IT IS A SCANNER, NOT AN EVALUATOR. Nothing here is expanded and nothing is
+    handed to `eval` to be split; the quoting state is tracked character by
+    character, which is the only way a separator inside a quoted string can be
+    told from one between two commands without running the string first.
+    """
+    segments = []
+    buf = []
+    pending = [""]
+    quote = None
+    backtick = False
+    parens = 0
+    braces = 0
+    keywords = 0
+    i = 0
+    n = len(text)
+
+    def flush(next_separator=""):
+        raw = "".join(buf).strip()
+        del buf[:]
+        if raw:
+            segments.append((pending[0], raw))
+        pending[0] = next_separator if raw else pending[0]
+
+    while i < n:
+        ch = text[i]
+
+        if quote is not None:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+
+        if ch == "\\" and i + 1 < n:
+            # Backslash-newline is a line continuation: it JOINS two lines, so
+            # taking both characters here is what stops the newline splitting.
+            buf.append(ch)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "`":
+            backtick = not backtick
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "#" and not backtick and _verify_at_word_start(buf):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+
+        if text.startswith("$(", i):
+            parens += 1
+            buf.append("$(")
+            i += 2
+            continue
+
+        if ch == "(":
+            parens += 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == ")":
+            if parens:
+                parens -= 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "{" and _verify_at_word_start(buf):
+            braces += 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "}" and _verify_at_word_start(buf):
+            if braces:
+                braces -= 1
+            buf.append(ch)
+            i += 1
+            continue
+
+        if (ch.isalpha() or ch == "_") and _verify_at_word_start(buf):
+            j = i
+            while j < n and (text[j].isalnum() or text[j] == "_"):
+                j += 1
+            word = text[i:j]
+            if word in _VERIFY_OPENERS:
+                keywords += 1
+            elif word in _VERIFY_CLOSERS and keywords:
+                keywords -= 1
+            buf.append(word)
+            i = j
+            continue
+
+        top = quote is None and not backtick and not parens and not braces and not keywords
+
+        if text.startswith("&&", i) or text.startswith("||", i):
+            if top:
+                flush(text[i : i + 2])
+            else:
+                buf.append(text[i : i + 2])
+            i += 2
+            continue
+
+        if ch == ";" or ch == "\n":
+            if top:
+                flush()
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    flush()
+    return segments
+
+
+def verify_words(segment):
+    """One segment's words, split on unquoted blanks and nothing else.
+
+    Same scanner discipline as verify_segments and for the same reason: this is
+    what tells `PROBE=$(cmd a b)` -- one word -- from `FOO=bar cmd`, two.
+    """
+    words = []
+    buf = []
+    quote = None
+    backtick = False
+    depth = 0
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote is not None:
+            buf.append(ch)
+            if quote == '"' and ch == "\\" and i + 1 < n:
+                buf.append(segment[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(ch)
+            buf.append(segment[i + 1])
+            i += 2
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "`":
+            backtick = not backtick
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ")":
+            if depth:
+                depth -= 1
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in " \t\n" and not depth and not backtick:
+            if buf:
+                words.append("".join(buf))
+                del buf[:]
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        words.append("".join(buf))
+    return words
+
+
+def verify_asserts_nothing(segment):
+    """True for a segment that cannot be an assertion: a `set` builtin, or a
+    plain variable assignment.
+
+    Both are real parts of a verify and neither claims anything about the tree,
+    so reporting either as an assertion that "already passes" would be noise --
+    and the assignments are worse than noise, because they always pass.
+    """
+    words = verify_words(segment)
+    if not words:
+        return True
+    if words[0] == "set":
+        return True
+    if words[0] in _VERIFY_DECLARATORS:
+        return all(w.startswith("-") or _VERIFY_ASSIGN.match(w) for w in words[1:])
+    return len(words) == 1 and bool(_VERIFY_ASSIGN.match(words[0]))
+
+
+def probe_verify(text, cwd):
+    """Every assertion in `text`, run on its own in `cwd`, with its exit status.
+
+    THE ASSIGNMENTS ARE CARRIED, THE ASSERTIONS ARE NOT. A verify names its own
+    paths -- `S=path/to/SKILL.md`, then `grep -q x "$S"` -- so an assertion run
+    with no context would see an empty `$S`, fail for that reason alone, and be
+    reported as discriminating when it is the very thing this verb exists to
+    expose. Each assertion is therefore prefixed with the assignments that
+    preceded it, and with nothing else: no earlier assertion's exit status and
+    no `set -e`, which is exactly what stops the run at the first failure in
+    the real script and hides everything after it.
+
+    The cost of that choice is that an assignment whose value comes from a
+    command substitution runs once per assertion after it. Verify scripts
+    assign paths and captured output, so this is cheap in practice, and the
+    alternative -- one shell for the whole script with each assertion in a
+    subshell -- buys that back by making every exit status depend on parsing a
+    marker out of a stream the assertions themselves write to.
+
+    Output is discarded. What the caller gets is the status, because that is
+    what `discriminates` is computed from and a probe that echoed a whole test
+    suite's output would bury its own answer.
+
+    THE OPERAND AFTER `||` IS NOT AN ASSERTION and is neither run nor reported.
+    `grep -q X f || { echo FAIL; exit 1; }` is one check with a failure branch,
+    not two checks: the branch runs only when the check has already failed, its
+    own exit status says nothing about the tree, and running it on its own is
+    the one decomposition here with teeth -- `[ -d x ] || mkdir x` would create
+    a directory the real script never would. The operand after `&&` is the
+    opposite case and IS run: it is a further assertion, reached only because
+    the one before it passed.
+    """
+    results = []
+    prelude = []
+    for separator, segment in verify_segments(text):
+        if separator == "||":
+            continue
+        if verify_asserts_nothing(segment):
+            words = verify_words(segment)
+            if words and words[0] != "set":
+                prelude.append(segment)
+            continue
+        try:
+            completed = subprocess.run(
+                ["bash", "-c", "\n".join(prelude + [segment])],
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_VERIFY_TIMEOUT,
+            )
+            status = completed.returncode
+        except subprocess.TimeoutExpired:
+            status = 124  # `timeout`'s own status for a command that outlived it
+        except OSError as err:
+            status = 127  # no bash, or no such cwd -- "command not found"
+            del err
+        results.append(
+            {"segment": segment, "exit": status, "discriminates": status != 0}
+        )
+    return results
+
+
+def op_verify_probe(argv):
+    """The story bash already proved exists -- validate_story_id and
+    validate_story_exists both ran before this process started.
+
+    An absent or empty verify is an EMPTY ARRAY at exit 0, never a refusal:
+    `implementation` is optional in schema v3.3 and a story is allowed to carry
+    no verify at all. That is the same treatment the executor's step 1.5 gives
+    the absent case, and a caller that has to tell "no verify" from "the verb
+    broke" would just reimplement the check it delegated.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    cwd = _flag(argv, "--cwd")
+    if not path or story_id is None:
+        die("Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> [--cwd <dir>]")
+    text = ""
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if isinstance(verify, str) and verify.strip():
+                text = verify
+                break
+        if text:
+            break
+    _emit(probe_verify(text, cwd or os.getcwd()))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# list-known-gaps -- the corpus the executors write and no plan has ever read
+# ---------------------------------------------------------------------------
+#
+# Every executor that hits a planning defect writes it to .aimi/known-gaps/ and
+# nothing downstream reads it back, so the same defect is rediscovered a few
+# weeks later by the next plan. This verb is the reader half.
+#
+# THE PARSER OWES ITS SHAPE TO THE CORPUS, not to a format anyone declared.
+# There is no frontmatter anywhere in it -- which is why
+# aimi-learnings-researcher, grep-first on frontmatter fields, cannot see these
+# files at all -- and the bodies come in three forms measured on 2026-09-03:
+# lines prefixed `KNOWN-GAP:`, lines prefixed `KNOWN-GAP (US-NNN):`, and bare
+# prose carrying no prefix at all (20 of the 32 files). The bare-prose files are
+# gaps too. A parser that recognised only the prefixed form would silently drop
+# two thirds of the corpus, which is the same class of defect this verb exists
+# to close, so EVERY file yields at least one entry -- the verify counts the
+# files on disk at run time and asserts exactly that.
+
+# `YYYY-MM-DD`, then an optional `US-NNN`, then an optional slug:
+# 2026-07-26-US-001.md, 2026-08-04-US-006-roadmap-amend-no-git-trace.md and
+# 2026-08-04-verify-creates-excludes-miss-this-repo.md (no story id at all) are
+# all real names in the corpus and all three have to parse.
+_GAP_FILENAME = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:-(?P<story>US-\d+))?"
+    r"(?:-(?P<slug>.+))?"
+    r"\.md$"
+)
+
+# The two prefix shapes, as one pattern. The leading `[-*+]` allowance is for a
+# gap written as a markdown bullet: none in the corpus today, and cheap enough
+# that the first one costs nothing.
+_GAP_PREFIX = re.compile(
+    r"^\s*(?:[-*+]\s+)?KNOWN-GAP\s*(?:\(\s*(?P<story>[^)]*?)\s*\))?\s*:\s?"
+)
+
+_GAP_STORY_ID = re.compile(r"^US-\d+$")
+
+# A dated tasks file: `2026-08-08-identity-contract-tasks.json` names both its
+# date and its feature, so the index below never has to open it.
+_TASKS_FILENAME = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<feature>.+)-tasks\.json$"
+)
+
+# `forge-abstraction-phase-1.2-tasks.json` is one phase of the
+# `forge-abstraction` feature, not a feature called `forge-abstraction-phase-1.2`.
+_TASKS_PHASE_SUFFIX = re.compile(r"-phase-[0-9][0-9.]*$")
+
+_TASKS_SUFFIX = "-tasks.json"
+
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _created_at(path):
+    """metadata.createdAt of a tasks file, or None for anything unreadable.
+
+    SILENT on every failure, deliberately: this runs over whatever happens to
+    sit in .aimi/archive/, a directory nothing validates, and one malformed
+    document there must not take down a verb whose whole job is to avoid
+    dropping things. A file it cannot read costs one unresolved feature, which
+    the entry already has a representation for.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.JSONDecoder().raw_decode(handle.read().lstrip())[0]
+    except (OSError, ValueError):
+        return None
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    created = metadata.get("createdAt") if isinstance(metadata, dict) else None
+    if isinstance(created, str) and _ISO_DATE.match(created[:10]):
+        return created[:10]
+    return None
+
+
+# `.aimi/tasks/` is two directories deep at its deepest -- a phase file lives at
+# `<feature>/<phase-dir>/<feature>-phase-N-tasks.json` and a flat file sits at
+# the top -- and `.aimi/archive/` is flat. Nothing below is scanned.
+_TASKS_SCAN_DEPTH = 2
+
+
+def _listdir(path):
+    """sorted(os.listdir), and an EMPTY list for anything unreadable.
+
+    Same silence _created_at keeps, for the same reason: this walks whatever
+    happens to be in .aimi/, and a directory it cannot read costs one
+    unresolved feature rather than a dead verb.
+    """
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _tasks_documents(base):
+    """(feature-from-directory or None, file name, path) for every tasks file
+    at most _TASKS_SCAN_DEPTH directories under `base`.
+
+    DELIBERATELY NOT os.walk. This file bans every recursive traversal helper
+    by name -- test_the_archive_verb_owns_no_recursive_delete_anywhere_in_the_file
+    -- because an unbounded walk is what a recursive delete needs, and the one
+    verb here that can destroy a user's files sits in the same module. The ban
+    is worth more than the four lines it costs to read the two shapes the
+    layout actually has.
+
+    The feature carried down is the FIRST directory below `base`, so a phase
+    file two levels deep still answers `pipeline-audit` rather than the phase
+    directory it sits in.
+    """
+    frontier = [(base, None, 0)]
+    while frontier:
+        directory, feature, depth = frontier.pop(0)
+        for name in _listdir(directory):
+            full = os.path.join(directory, name)
+            if os.path.isdir(full):
+                if depth < _TASKS_SCAN_DEPTH:
+                    frontier.append((full, feature or name, depth + 1))
+            elif name.endswith(_TASKS_SUFFIX):
+                yield feature, name, full
+
+
+def tasks_feature_index(aimi_dir):
+    """date -> feature, for the dates where exactly ONE feature was planned.
+
+    Both `.aimi/tasks` and `.aimi/archive` are read, because a gap written in
+    July belongs to a feature whose tasks file was archived weeks ago: an index
+    over the live directory alone would resolve almost nothing.
+
+    A date that carries TWO features resolves to nothing rather than to a
+    guess. Picking one would attribute a gap to a feature it was never about,
+    and a wrong `feature` is worse than a null one -- the null is visible to the
+    reader and to the --feature filter, the wrong one is not.
+    """
+    seen = {}
+    for base in (os.path.join(aimi_dir, "tasks"), os.path.join(aimi_dir, "archive")):
+        for feature, name, full in _tasks_documents(base):
+            matched = _TASKS_FILENAME.match(name)
+            date = matched.group("date") if matched else None
+            if feature is None:
+                # A phase layout puts the feature in the directory name; a flat
+                # one puts it in the file name.
+                feature = (
+                    matched.group("feature")
+                    if matched
+                    else _TASKS_PHASE_SUFFIX.sub("", name[: -len(_TASKS_SUFFIX)])
+                )
+            if date is None:
+                date = _created_at(full)
+            if date:
+                seen.setdefault(date, set()).add(feature)
+    return {date: features.pop() for date, features in seen.items() if len(features) == 1}
+
+
+def gap_blocks(body):
+    """One file's body cut into (storyId-or-None, text) entries.
+
+    A `KNOWN-GAP` line opens a block and every line after it joins that block
+    until the next one opens, so a gap hard-wrapped across five lines stays one
+    entry. Text is kept VERBATIM below the prefix -- these bodies carry tables,
+    code fences and indented lists, and re-flowing them would damage the only
+    copy of a record that exists nowhere else.
+
+    Anything standing BEFORE the first `KNOWN-GAP` line becomes its own entry.
+    No file in the corpus has such a preamble today; the rule is here so the
+    first one that does is not dropped, which is the whole failure mode.
+
+    A body with no prefix anywhere is one entry -- that is the bare-prose form,
+    two thirds of the corpus. An empty file is still one entry, because the
+    per-file floor is what the verify measures.
+    """
+    preamble = []
+    blocks = []
+    for line in body.split("\n"):
+        matched = _GAP_PREFIX.match(line)
+        if matched:
+            story = matched.group("story")
+            blocks.append(
+                (
+                    story if story and _GAP_STORY_ID.match(story) else None,
+                    [line[matched.end():]],
+                )
+            )
+        elif blocks:
+            blocks[-1][1].append(line)
+        else:
+            preamble.append(line)
+
+    entries = []
+    if "".join(preamble).strip():
+        entries.append((None, "\n".join(preamble).strip()))
+    for story, lines in blocks:
+        entries.append((story, "\n".join(lines).strip()))
+    return entries or [(None, body.strip())]
+
+
+def known_gap_entries(aimi_dir, feature=None, since=None):
+    """Every gap in .aimi/known-gaps/, oldest file first.
+
+    `feature` comes from the file name's own slug when it has one and from the
+    tasks file planned on the same date when it does not. A file that resolves
+    to neither enters the result with a NULL feature rather than being
+    discarded -- discarding it would repeat the defect this verb exists to fix.
+
+    Both filters are exact. `--since` drops an entry whose date is null: an
+    entry with no date cannot answer "on or after", and inventing an answer for
+    it is the guess this parser refuses everywhere else.
+    """
+    gaps_dir = os.path.join(aimi_dir, "known-gaps")
+    try:
+        names = sorted(name for name in os.listdir(gaps_dir) if name.endswith(".md"))
+    except OSError:
+        return []
+
+    index = None
+    entries = []
+    for name in names:
+        matched = _GAP_FILENAME.match(name)
+        date = matched.group("date") if matched else None
+        file_story = matched.group("story") if matched else None
+        entry_feature = matched.group("slug") if matched else None
+        if entry_feature is None and date is not None:
+            if index is None:
+                # Built at most once per run, and only when some file actually
+                # needs it: the walk opens tasks documents, and the common case
+                # is a corpus whose names already carry their slug.
+                index = tasks_feature_index(aimi_dir)
+            entry_feature = index.get(date)
+        full = os.path.join(gaps_dir, name)
+        try:
+            with open(full, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except OSError:
+            body = ""
+        for story, text in gap_blocks(body):
+            entries.append(
+                {
+                    "date": date,
+                    "storyId": story or file_story,
+                    "feature": entry_feature,
+                    "text": text,
+                    "file": name,
+                }
+            )
+
+    if feature is not None:
+        entries = [entry for entry in entries if entry["feature"] == feature]
+    if since is not None:
+        entries = [
+            entry
+            for entry in entries
+            if entry["date"] is not None and entry["date"] >= since
+        ]
+    return entries
+
+
+def op_list_known_gaps(argv):
+    """A JSON array, EMPTY when the directory is absent -- never a refusal.
+
+    A repository that has never recorded a gap is the normal early state, and
+    /aimi:plan reads this on every run: a non-zero exit there would turn "no
+    gaps yet" into a planning failure.
+    """
+    aimi_dir = _flag(argv, "--aimi-dir")
+    if not aimi_dir:
+        die("Usage: tasks.py list-known-gaps --aimi-dir <path> [--feature <f>] [--since <YYYY-MM-DD>]")
+    _emit(
+        known_gap_entries(aimi_dir, _flag(argv, "--feature"), _flag(argv, "--since"))
+    )
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -3909,6 +4555,8 @@ _OPS = {
     "archive-task": op_archive_task,
     "init-session": op_init_session,
     "get-branch": op_get_branch,
+    "verify-probe": op_verify_probe,
+    "list-known-gaps": op_list_known_gaps,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }

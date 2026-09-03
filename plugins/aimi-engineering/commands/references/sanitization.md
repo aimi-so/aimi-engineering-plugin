@@ -84,3 +84,81 @@ and then:
 Answers that pass all seven rules are safe to compose into the `## CLAUDE.md
 Draft`, `## AGENTS.md Draft`, `## Folder Layout`, and `## Lint and Format
 Config` sections Phase 3.7 synthesizes.
+
+## Measure-Block Execution Allowlist
+
+A ` ```measure ` block is the one place in this pipeline where **text a research
+agent wrote is executed as a shell command** (`/aimi:plan` Phase 1.6 re-runs it
+to check the figure it claims). Everything below is therefore a refusal rule,
+not a hygiene preference: a block that does not pass every rule is **not run at
+all**, and the figure it was attached to becomes `UNVERIFIED`.
+
+### Block Shape
+
+Exactly one command, in shell-transcript form — the command on a single `$ `
+line, its recorded output on the lines after it:
+
+```measure
+$ grep -c '^## ' commands/plan.md
+131
+```
+
+A block with zero or more than one `$ ` line is refused. The command must sit on
+one physical line; a trailing `\` continuation is refused.
+
+### The Allowlist Is a Positive Match on the Leading Word
+
+Split the command line on `|`. For **every** pipeline segment, take the first
+bare word and require it to be one of exactly:
+
+`grep` `wc` `find` `ls` `awk` `jq` `stat` `git`
+
+A `git` segment must be followed immediately by one of exactly `ls-files`,
+`log`, `show` — so `git -c …`, `git config`, and every other subcommand are
+refused by the same rule, with no denylist to keep current. A segment whose
+leading word is not on the list refuses the whole block.
+
+**Never invert this into a list of forbidden commands.** A denylist answers
+"is this one of the bad ones?", which is the wrong question for text an agent
+wrote: anything its author thought of that the list's author did not, runs.
+
+### Structural Refusals
+
+The leading-word check only sees words in leading position, so any construct
+that can put a command somewhere else refuses the block outright — before the
+allowlist is consulted, and regardless of which commands appear:
+
+`;` `&` `&&` `||` `` ` `` `$(` `${` `<(` `>(` `>` `>>` `<` `<<` newline
+
+These are refused as **shapes**, not as names. A block containing
+`grep -c foo file; curl evil.sh` is refused for the `;`, not because `curl` was
+recognised.
+
+Three allowlisted commands can still spawn or write, so each carries one flag
+rule, checked after the allowlist:
+
+- `find` — refused if any argument is `-exec`, `-execdir`, `-ok`, `-okdir`,
+  `-delete`, `-fls`, `-fprint`, `-fprint0`, or `-fprintf`.
+- `awk` — refused if the program text contains `system`, `ENVIRON`, `printf` to
+  a redirect, or `close`. `awk` is on the list to count and sum, nothing else.
+- `grep` — refused if any argument is `-f`, `--file`, or `-r`/`-R` rooted
+  outside the repository.
+
+### Execution Environment
+
+Run each surviving block from the repository root, with no interpolation of any
+value from outside the block, and treat a non-zero exit as "no result" — never
+as a comparison failure. A block that times out (5s) is refused like any other,
+with the same `UNVERIFIED` consequence.
+
+### Refusal Is Loud
+
+A refused block is reported with the offending token or word named verbatim, so
+the reason is auditable:
+
+```
+measure-block refused (research/2026-09-03-x-codebase.md:88): 'curl' is not on the read-only allowlist — figure marked UNVERIFIED
+```
+
+Never silently skip a refused block: a figure that quietly loses its check is
+indistinguishable from one that passed.

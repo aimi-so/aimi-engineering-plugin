@@ -19,6 +19,7 @@ set -uo pipefail
 #   - Archive Task Tests
 #   - Research Lookup Tests
 #   - Extract Sections Tests
+#   - Measure Command File Tests
 #   - Research GC Tests
 #   - Interactivity Mode Detection Tests
 #   - resolve-models Tests
@@ -1550,6 +1551,149 @@ RESEOF
   rm -f "$symlink_target" "$symlink_path"
 
   rm -rf "$es_dir"
+}
+
+# measure-command-file: the structural size of one markdown file.
+#
+# THE FIXTURE IS THE TEST. Its five top-level fences are chosen so that a
+# parser with the defect this verb exists to prevent gets a DIFFERENT answer:
+#
+#   - one ```bash at column 0                    -> a bash fence
+#   - one ```bash indented under a numbered step -> a bash fence, and the one
+#     an awk anchored at ^``` misses. That miss is not hypothetical: it is how
+#     a roadmap input came to say plan.md had 45 bash blocks when the shared
+#     extractor finds 50, and it is the reason this verb exists at all.
+#   - a plain fence and a ```json fence          -> fences, not bash fences
+#   - a plain fence with a DEEPER-indented ```bash inside it -> ONE fence, and
+#     not a bash one. The nested opener is content of the outer fence, the same
+#     rule that keeps execute.md's pseudo-code out of the extracted blocks.
+#
+# So fences == 5 and bash_fences == 2, and an anchored parser would say 1.
+# The equality against extract_blocks' own BLOCK lines is asserted separately
+# and is the criterion the story names -- a literal count alone would freeze
+# whatever this file happens to do rather than tie it to the shared parser.
+#
+# The fixture is deliberately NOT under a commands/ directory: the measurement
+# is structural and must not care where the file lives.
+test_measure_command_file() {
+  echo ""
+  echo "=== Testing measure-command-file subcommand ==="
+
+  local mcf_dir
+  mcf_dir=$(mktemp -d)
+  mkdir -p "$mcf_dir/.aimi"
+
+  local md="$mcf_dir/notes.md"
+  cat > "$md" << 'MCFEOF'
+# Title
+
+Prose before anything fenced.
+
+```bash
+echo "column zero"
+```
+
+## A Section
+
+1. A step whose fence is indented under the list item:
+
+   ```bash
+   echo "indented — invisible to an awk anchored at the start of the line"
+   ```
+
+2. A step with no fence.
+
+```
+plain fence, no info string
+```
+
+```json
+{"not": "bash"}
+```
+
+### Pseudo-code
+
+```
+outer pseudo-code fence
+  ```bash
+  echo "nested, and content of the outer fence rather than a fence of its own"
+  ```
+still inside the outer fence
+```
+
+Trailing prose.
+MCFEOF
+
+  local stdout stderr_out exit_code
+  pushd "$mcf_dir" >/dev/null
+  stdout=$("$CLI" measure-command-file "$md" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "measure-command-file: exits 0 on a readable markdown file"
+  assert_eq "5" "$(printf '%s' "$stdout" | jq -r '.fences')" \
+    "measure-command-file: counts every top-level fence, and a nested one as content"
+  assert_eq "2" "$(printf '%s' "$stdout" | jq -r '.bash_fences')" \
+    "measure-command-file: counts the indented bash fence an anchored awk misses"
+
+  # The story's actual criterion: the verb's count IS the shared extractor's
+  # count, compared against the lib rather than against a literal.
+  local lib_blocks
+  lib_blocks=$(bash -c "source '$SCRIPT_DIR/lib/extract-command-blocks.sh'; extract_blocks '$md' 2>/dev/null | grep -c '^BLOCK'")
+  assert_eq "$lib_blocks" "$(printf '%s' "$stdout" | jq -r '.bash_fences')" \
+    "measure-command-file: bash_fences equals extract_blocks' own block count"
+
+  local real_bytes real_lines
+  real_bytes=$(wc -c < "$md" | tr -d ' ')
+  real_lines=$(wc -l < "$md" | tr -d ' ')
+  assert_eq "$real_bytes" "$(printf '%s' "$stdout" | jq -r '.bytes')" \
+    "measure-command-file: bytes is the file's real size"
+  assert_eq "$real_lines" "$(printf '%s' "$stdout" | jq -r '.lines')" \
+    "measure-command-file: lines is the file's real line count"
+  assert_eq "$real_bytes" "$(printf '%s' "$stdout" | jq -r '.prose_bytes + .fence_bytes')" \
+    "measure-command-file: prose and fence bytes partition the whole file"
+  assert_eq "true" "$(printf '%s' "$stdout" | jq -r '.bash_fence_bytes > 0 and .bash_fence_bytes < .fence_bytes')" \
+    "measure-command-file: bash fence bytes are a proper subset of fence bytes"
+
+  # A file whose last line carries no newline: awk charges it one anyway, so
+  # the partition only survives because the verb reconciles against the real
+  # size. One fence, unterminated content, no trailing newline.
+  local nonl="$mcf_dir/no-final-newline.md"
+  printf '# H\n\n```bash\necho hi\n```\ntail with no newline' > "$nonl"
+  pushd "$mcf_dir" >/dev/null
+  stdout=$("$CLI" measure-command-file "$nonl" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "measure-command-file: exits 0 on a file with no final newline"
+  assert_eq "$(wc -c < "$nonl" | tr -d ' ')" "$(printf '%s' "$stdout" | jq -r '.bytes')" \
+    "measure-command-file: a missing final newline does not inflate bytes"
+  assert_eq "$(wc -c < "$nonl" | tr -d ' ')" "$(printf '%s' "$stdout" | jq -r '.prose_bytes + .fence_bytes')" \
+    "measure-command-file: the partition still adds up without a final newline"
+
+  # Path confinement: the same validate_path_in_project every path ARGUMENT
+  # crosses, and it must run before the file is opened.
+  local outside_file
+  outside_file="$(dirname "$mcf_dir")/mcf-outside-$$.md"
+  printf '# outside\n' > "$outside_file"
+  pushd "$mcf_dir" >/dev/null
+  stderr_out=$("$CLI" measure-command-file "$outside_file" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  rm -f "$outside_file"
+  assert_exit_code "1" "$exit_code" "measure-command-file: a path outside the project root is refused"
+  assert_contains "escapes project root" "$stderr_out" \
+    "measure-command-file: the refusal names the confinement rule"
+
+  pushd "$mcf_dir" >/dev/null
+  stderr_out=$("$CLI" measure-command-file "$mcf_dir/does-not-exist.md" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "1" "$exit_code" "measure-command-file: a missing file exits non-zero"
+  assert_contains "File not found" "$stderr_out" "measure-command-file: a missing file says so on stderr"
+
+  pushd "$mcf_dir" >/dev/null
+  stderr_out=$("$CLI" measure-command-file 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "1" "$exit_code" "measure-command-file: no path argument exits non-zero"
+  assert_contains "Usage:" "$stderr_out" "measure-command-file: no path argument prints usage"
+
+  rm -rf "$mcf_dir"
 }
 
 # The archivable predicate and research-gc's referenced-set walk, whose jq left
@@ -7771,6 +7915,11 @@ main() {
   echo ""
   echo "--- Extract Sections Tests ---"
   test_extract_sections
+
+  # measure-command-file tests — own isolated temp dir, own .aimi/ root
+  echo ""
+  echo "--- Measure Command File Tests ---"
+  test_measure_command_file
 
   # Research-gc tests — each creates its own isolated temp dir
   echo ""
