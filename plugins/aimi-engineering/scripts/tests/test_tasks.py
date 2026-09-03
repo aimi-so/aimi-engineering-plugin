@@ -34,6 +34,17 @@ engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
 
+A FOURTH rule then changed and it is the only one that MOVED this block rather
+than being absorbed by a table or a strip: `metadata` is now projected onto the
+keys with a measured reader (tasks.py's STORY_CONTEXT_METADATA_KEYS) instead of
+copied whole, so 43 of the 45 non-empty recordings lost the keys nothing reads.
+They were not recaptured and not regenerated: each recorded payload was
+re-parsed, its metadata narrowed by the new rule and the rest re-rendered by the
+same writer, after that writer was shown to reproduce all 45 byte for byte
+first. `_comment_story_context` states it beside what it cost, and the
+assertions live under "DECISION 4" below -- including the one the corpus cannot
+make, because no fixture in it ever carried a `metadata.decisions`.
+
 `validate_tasks_cases` carries two fields the others have no use for: `files`,
 the spec fixtures written inside the project root, and `outside`, the ones
 written one directory ABOVE it. The second exists for two recordings alone, and
@@ -2055,6 +2066,169 @@ def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
     actual, _ = _context_stdout("skills-tres", tmp_path)
     assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
     assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# DECISION 4: metadata is projected, not copied whole
+# ---------------------------------------------------------------------------
+#
+# The corpus MOVED for this rule -- 43 of its 45 non-empty recordings lost the
+# metadata keys nothing reads -- and `_comment_story_context` says how. What the
+# corpus cannot say is the thing that motivated the change: no fixture in it has
+# ever carried a `metadata.decisions`, so the assertion that discriminates is
+# hand-written here, against a document written for it.
+
+
+def _synthetic_context_case(metadata):
+    """One story and the given metadata, in the shape _replay_context rebuilds.
+
+    Reuses the replay machinery rather than a second runner, so these tests go
+    through the same bash wrapper, the same crossing and the same argv the 57
+    recordings do -- the projection is asserted on the payload a story executor
+    would actually receive, not on projected_metadata() called directly.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [{
+            "id": "US-001", "title": "Story US-001",
+            "description": "As a user, I want US-001.",
+            "acceptanceCriteria": ["Typecheck passes"], "status": "pending",
+            "priority": 1, "dependsOn": [], "wave": 0,
+        }],
+    }
+    return {
+        "args": ["get-story-context", "US-001"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, indent=2) + "\n",
+            "files": {}, "repeat": {}, "state": {}, "plugin_dir": True, "env": {},
+        },
+    }
+
+
+def _projected(metadata, tmp_path):
+    actual = _replay_context(_synthetic_context_case(metadata), tmp_path)
+    assert actual["exit"] == 0, actual["stderr"]
+    return json.loads(actual["stdout"])["metadata"]
+
+
+def test_decisions_stops_travelling_and_a_key_with_a_reader_survives(tmp_path):
+    """DECISION 4, and the one assertion that discriminates this story's change.
+
+    metadata.decisions is the largest block a plan writes -- one object per
+    resolved question, carrying that question's own prose -- and it was copied
+    into the first payload of every spawned story executor, none of which has
+    ever read it. prototypePaths sits in the same object and IS read, nine times
+    in SKILL.md, so a projection that dropped both would be a regression wearing
+    this story's name: both halves are asserted here, on one document.
+    """
+    metadata = _projected({
+        "branchName": "x/y",
+        "maxConcurrency": 3,
+        "decisions": [{"anchor": "a", "source": "b", "text": "c", "resolution": "d"}],
+        "prototypePaths": ["p.html"],
+    }, tmp_path)
+    assert "decisions" not in metadata, "the block that motivated the projection"
+    assert metadata["prototypePaths"] == ["p.html"], "a key WITH a reader survives"
+    assert metadata == {"prototypePaths": ["p.html"]}
+
+
+def test_the_projection_keeps_the_documents_own_key_order(tmp_path):
+    """Payload SHAPE is the contract here (this is parsed by an agent), and the
+    three keys are projected in the order the DOCUMENT wrote them, not in the
+    order the constant lists them."""
+    metadata = _projected({
+        "prototypePaths": ["p.html"],
+        "branchName": "x/y",
+        "designTokens": {"color": "#fff"},
+        "decisions": [],
+        "designBundle": {"root": ".aimi/design/b"},
+    }, tmp_path)
+    assert list(metadata) == ["prototypePaths", "designTokens", "designBundle"]
+
+
+def test_a_key_the_document_omits_does_not_become_null(tmp_path):
+    """PRESENCE, not truthiness, in both directions.
+
+    A projected key the document never wrote is absent, because inventing it as
+    null would make the payload claim the document said something it did not --
+    and a consumer that has to tell "absent" from "null" is one that will get it
+    wrong. A projected key the document wrote AS null survives as null, for the
+    same reason read the other way: `designBundle: null` is a real value, and
+    bundle-null records a document that carries it.
+    """
+    assert _projected({"prototypePaths": ["p.html"]}, tmp_path / "one") == {
+        "prototypePaths": ["p.html"]
+    }
+    assert _projected({"designBundle": None}, tmp_path / "two") == {"designBundle": None}
+
+
+def test_a_document_with_no_metadata_answers_exactly_what_it_did_before(tmp_path):
+    """`null`, not `{}` and not an omitted key -- unchanged by the projection.
+
+    metadata-ausente and metadata-null are the two recordings the move did NOT
+    touch, and the reason is a contract rather than an accident: a document that
+    carries no metadata says nothing, which is not the same statement as "every
+    projected key was missing". Both are replayed here so the pair is asserted
+    rather than inferred from the diff.
+    """
+    for label in ("metadata-ausente", "metadata-null"):
+        _, payload = _context_stdout(label, tmp_path / label)
+        assert payload["metadata"] is None, label
+        assert '"metadata": null' in CONTEXT[label]["stdout"], label + ": recorded too"
+
+    # And the key a caller still reaches for is jq's null either way, which is
+    # what keeps the narrowing from breaking a reader nobody has found yet.
+    assert _projected({"maxConcurrency": 3}, tmp_path / "narrowed") == {}
+
+
+def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
+    """The constant is the single place the set is written down.
+
+    The grep that produced it lives in the comment beside it in tasks.py rather
+    than in an assertion here, deliberately: skills/story-executor/SKILL.md is
+    owned by another story in this same wave, and a test that grepped a file
+    being edited beside it would go red for a reason that has nothing to do with
+    this rule. Re-run the grep the comment records when a reader is added.
+    """
+    assert T.STORY_CONTEXT_METADATA_KEYS == (
+        "designBundle", "designTokens", "prototypePaths"
+    )
+    assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
+
+
+def test_the_moved_recordings_carry_no_key_the_projection_would_drop():
+    """The corpus's own half of decision 4, over all 45 non-empty recordings.
+
+    The move was mechanical -- each recorded payload re-parsed, its metadata
+    narrowed, the rest re-rendered byte for byte -- so the property to check
+    afterwards is that nothing survived it that the live rule would remove. A
+    recording that still carried `branchName` would mean the replay test is
+    comparing the new code against a recording of the old rule.
+    """
+    seen = 0
+    for case in CONTEXT.values():
+        for payload in _payloads(case["stdout"]):
+            metadata = payload["metadata"]
+            if metadata is None:
+                continue
+            assert set(metadata) <= set(T.STORY_CONTEXT_METADATA_KEYS), case["label"]
+            seen += 1
+    assert seen, "the corpus has payloads with a metadata object"
+
+
+def _payloads(stdout):
+    """The recorded stdout's JSON values -- id-duplicado holds two."""
+    decoder = json.JSONDecoder()
+    index, values = 0, []
+    while True:
+        while index < len(stdout) and stdout[index] in " \n\t\r":
+            index += 1
+        if index >= len(stdout):
+            return values
+        value, index = decoder.raw_decode(stdout, index)
+        values.append(value)
 
 
 def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
