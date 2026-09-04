@@ -53,7 +53,7 @@ references/visual-variants.md	26960
 next.md	21750
 references/cli-path-resolution.md	24710
 review.md	21665
-references/scope-contexts.md	18915
+references/scope-contexts.md	20079
 deepen.md	18029
 
 skills/story-executor/SKILL.md	43086

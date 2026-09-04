@@ -4787,7 +4787,7 @@ test_verify_creates_row_f_doc_file_verified_by_path() {
 
 test_verify_creates_doc_identity_bypasses_exclusions() {
   echo ""
-  echo "=== verify-creates: a documentation identity searches docs too (exclusions bypassed for that entry) ==="
+  echo "=== verify-creates: a documentation identity searches docs too, but a mention does not close it ==="
 
   local dir out
   dir=$(_vc_repo "vc-doc-bypass")
@@ -4800,11 +4800,48 @@ test_verify_creates_doc_identity_bypasses_exclusions() {
   _vc_run "vc-doc-bypass" "$dir" "doc bypass"
   out="$VC_OUT"
 
-  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc bypass: doc identity verifies from a docs hit"
+  # INVERTED DELIBERATELY, and the fixture is unchanged: the docs/ exclusion is
+  # still off for a doc identity -- that is what finding docs/plano.md at all
+  # proves, and it is what this test was written for. What changed is the
+  # verdict. A file writing the string "README.md" is a file that MENTIONS the
+  # page; only a tracked path proves the page. So the text branch answers
+  # "unconfirmed" here, and row F above still answers "verified" by path.
+  assert_eq "unconfirmed" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc bypass: a mention does not close a doc identity"
   assert_eq "text" "$(printf '%s' "$out" | jq -r '.[0].method')" "doc bypass: method is text"
   assert_contains "docs/plano.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "doc bypass: evidence names the docs hit"
 
   rm -rf ".aimi/tasks/vc-doc-bypass" "$dir"
+}
+
+test_verify_creates_meta_documents_stay_excluded_for_a_doc_identity() {
+  echo ""
+  echo "=== verify-creates: a doc identity named ONLY by a meta-document does not close ==="
+
+  # The floor under the bypass above. README, CHANGELOG, CLAUDE.md and AGENTS.md
+  # exist to CITE other files by name, so they match nearly any identity and
+  # announce work rather than being it. Both fixtures below would have closed
+  # this phase while the bypass turned the WHOLE exclusion list off.
+  #
+  # "missing" rather than "unconfirmed" proves BOTH patterns at once: the
+  # anchored CHANGELOG.md and, through the "*/" companion, the nested
+  # plugins/aimi/CLAUDE.md. Leave either one searchable and its hit reaches the
+  # text branch, and the verdict is "unconfirmed" instead.
+  local dir out
+  dir=$(_vc_repo "vc-doc-meta")
+  mkdir -p "$dir/plugins/aimi" "$dir/src"
+  echo "- adicionado docs/api.md" > "$dir/CHANGELOG.md"
+  echo "veja docs/api.md" > "$dir/plugins/aimi/CLAUDE.md"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-doc-meta" 'docs/api.md|API reference'
+  _vc_run "vc-doc-meta" "$dir" "doc meta"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc meta: a meta-document mention is not the page"
+  assert_contains "CHANGELOG.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "doc meta: evidence names what was found and rejected"
+
+  rm -rf ".aimi/tasks/vc-doc-meta" "$dir"
 }
 
 test_verify_creates_row_g_file_verified_by_path() {
@@ -8268,6 +8305,7 @@ main() {
   test_verify_creates_row_e_todo_marker_only_is_missing
   test_verify_creates_row_f_doc_file_verified_by_path
   test_verify_creates_doc_identity_bypasses_exclusions
+  test_verify_creates_meta_documents_stay_excluded_for_a_doc_identity
   test_verify_creates_row_g_file_verified_by_path
   test_verify_creates_row_h_tests_only_is_missing_and_git_never_128
   test_verify_creates_exclusions_use_long_form_only

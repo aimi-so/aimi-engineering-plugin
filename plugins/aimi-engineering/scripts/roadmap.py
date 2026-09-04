@@ -1001,6 +1001,33 @@ VERIFY_CREATES_EXCLUDES = [
     ":(exclude)*/__tests__/*",
 ]
 
+# What survives the bypass when the identity names documentation ITSELF.
+#
+# Bypassing the whole list above was too much. Those four meta-documents exist
+# to CITE other files by name -- a README's file map, a CHANGELOG's entry, the
+# two agent-instruction files -- so they match nearly any identity and prove
+# nothing about the named artifact existing. Measured at phase 2's close: with
+# the list fully off, an identity whose ONLY hit is its own CHANGELOG line
+# closes the phase on the announcement of the work rather than the work.
+#
+# The rest of the list stays off, which is what the bypass exists to give: for a
+# doc identity, a hit under docs/ IS the artifact.
+#
+# Each pattern twice, for the reason the comment above already gives about
+# "docs/*": default pathspec matching is anchored at the search root, so a lone
+# "CLAUDE.md" would miss plugins/aimi-engineering/CLAUDE.md. README* and
+# CHANGELOG* carry the same anchor and get the same companion.
+DOC_IDENTITY_EXCLUDES = [
+    ":(exclude)README*",
+    ":(exclude)*/README*",
+    ":(exclude)CHANGELOG*",
+    ":(exclude)*/CHANGELOG*",
+    ":(exclude)CLAUDE.md",
+    ":(exclude)*/CLAUDE.md",
+    ":(exclude)AGENTS.md",
+    ":(exclude)*/AGENTS.md",
+]
+
 # The tracked-files caveat, stated in every "missing" verdict so the caller
 # reports the limit instead of silently owning it.
 VERIFY_CREATES_TRACKED_NOTE = (
@@ -1035,7 +1062,15 @@ def is_doc_identity(identity):
     """True when the identity names documentation ITSELF.
 
     For those, a hit under docs/ IS the artifact rather than a mention of it, so
-    the exclusion list is bypassed for that one entry.
+    the exclusion list narrows to DOC_IDENTITY_EXCLUDES for that one entry --
+    it is no longer turned off whole, because four meta-documents cite every
+    other file by name and would match anything.
+
+    Narrowing the exclusions is only half of it. A text hit does not CLOSE a doc
+    identity either: it reports "unconfirmed", because finding the string
+    "docs/api.md" somewhere in the tree says a file mentions that page, not that
+    the page exists. Step 1 answers that, and step 1 is the only step that
+    returns "verified" for one of these.
     """
     return (
         identity.startswith("docs/")
@@ -1043,6 +1078,56 @@ def is_doc_identity(identity):
         or "/docs/" in identity
         or "/doc/" in identity
         or identity.endswith((".md", ".rst", ".adoc", ".txt"))
+    )
+
+
+def is_bare_name_identity(search):
+    """True when the searched token is a bare NAME rather than a path.
+
+    No "/" and no ".", so "baseRef" and "list-known-gaps" are bare while
+    "plugins/aimi-engineering/scripts/roadmap.py", "docs/api.md" and an
+    endpoint's already-stripped "/api/notifications" are not. This is the one
+    shape that can only ever resolve through the text search, which is why it is
+    the one whose evidence gets a second look below.
+    """
+    return bool(search) and "/" not in search and "." not in search
+
+
+def _norm_repo_path(path):
+    """A git-grep path and an implementation.files entry, made comparable.
+
+    Both are repo-relative already; only a "./" prefix and a trailing "/" differ
+    in practice. Normalizing here keeps the comparison EXACT -- substring
+    containment is the defect this whole story exists to remove, and it would be
+    absurd to reintroduce it in the check that catches it.
+    """
+    path = path.strip()
+    if path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def _unowned_bare_name_warning(identity, search, kept, hit_files, phase_files):
+    """The advisory line for a bare name verified against nobody's file, or "".
+
+    Never a refusal: the same warn_list channel judge_phases got, for the same
+    reason -- the verdict this questions is usually right. It is the exact shape
+    that approved "baseRef" against a forge adapter's `--arg baseRefName`, in a
+    file no story of that phase declared touching, so the evidence is worth
+    naming even though a bare name legitimately resolves in code no story listed.
+
+    Silent when the phase declared no files at all. With nothing to compare
+    against, "outside the declared set" is not a fact anyone measured.
+    """
+    if not phase_files or not is_bare_name_identity(search):
+        return ""
+    if any(_norm_repo_path(hit) in phase_files for hit in hit_files):
+        return ""
+    return (
+        'identity "' + identity + '" verified by text, but all '
+        + str(len(hit_files)) + " matching line(s) fall outside the files this "
+        "phase's stories declared -- first at " + kept + ". A bare name matches "
+        "any identifier that contains it as a whole word."
     )
 
 
@@ -1063,13 +1148,22 @@ def _verdict(identity, status, method, evidence, git_status):
     }
 
 
-def verify_creates_one(directory, identity):
+def verify_creates_one(directory, identity, phase_files=None, warnings=None):
     """Verify ONE creates identity against <directory>'s tracked files.
 
-    Always returns a verdict: "missing" or "error" is data, not failure.
+    Always returns a verdict: "missing", "unconfirmed" or "error" is data, not
+    failure. "unconfirmed" is reached only by a doc identity that resolved
+    through the text search -- see is_doc_identity for why a mention is not a
+    page.
+
     gitStatus is the HIGHEST exit status any git invocation returned for this
     entry -- 0 or 1 in normal operation, above 1 only on tool failure, and that
     is the line between "the phase did not build it" and "we could not look".
+
+    `phase_files` (a set of normalized implementation.files[] paths) and
+    `warnings` (a list this appends to) drive the bare-name advisory, and both
+    default to off: a caller that passes neither gets exactly the verdicts it
+    got before, on stdout, with nothing on stderr.
     """
     git_max = 0
     if not identity:
@@ -1139,12 +1233,31 @@ def verify_creates_one(directory, identity):
     searched_note = ' (searched "' + search + '")' if search != identity else ""
 
     # --- Step 3: text search over tracked source ----------------------------
-    if is_doc_identity(identity):
-        grep_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
-    else:
-        grep_out, rc = _git(
-            directory, "grep", "-n", "-I", "-F", "-e", search, "--", *VERIFY_CREATES_EXCLUDES
-        )
+    #
+    # "-w" is load-bearing, not tidiness. Without it a match INSIDE a longer
+    # identifier counts: measured at phase 2's close, the identity "baseRef"
+    # matched 37 lines, every one of them the substring inside the forge
+    # adapter's "--arg baseRefName" -- a GitHub pull-request field with no
+    # relation to the metadata.baseRef the phase had promised. With "-w" it
+    # matches zero. The three bare verb names phase 1 declared
+    # (list-known-gaps, verify-probe, measure-command-file) keep matching, and
+    # so does every identity kind scope-contexts.md documents: "parseList<T>",
+    # "queue:emails" and a stripped "/api/notifications" all begin and end at a
+    # non-word character, which is exactly what -w tests.
+    #
+    # One residue closes as a side effect, recorded here so nobody reads it as
+    # an accident: an identity of a bare ":" used to verify by text, because
+    # `grep -F ':'` finds a colon in any source file. Under -w it matches
+    # nothing. The write-time alphanumeric rule still owns that case; this is a
+    # second net under it, not a replacement.
+    #
+    # One branch, two pathspec sets -- the two used to be an if/else in which one
+    # arm passed no "--" at all, and that arm is what turned the whole exclusion
+    # list off for a doc identity.
+    excludes = DOC_IDENTITY_EXCLUDES if is_doc_identity(identity) else VERIFY_CREATES_EXCLUDES
+    grep_out, rc = _git(
+        directory, "grep", "-n", "-I", "-F", "-w", "-e", search, "--", *excludes
+    )
     git_max = max(git_max, rc)
     if rc > 1:
         return _verdict(
@@ -1157,8 +1270,15 @@ def verify_creates_one(directory, identity):
         )
 
     # --- Step 4: drop marker-only comment lines -----------------------------
+    #
+    # This no longer stops at the first surviving line. The advisory below asks
+    # whether EVERY match falls outside the declared files, and a loop that
+    # stopped at the first one could not answer that. `first_marker` is unmoved
+    # by the change: it is read only on the path where `kept` stayed empty, and
+    # on that path there was never a line to break at.
     kept = ""
     first_marker = ""
+    hit_files = []
     for line in grep_out.split("\n"):
         if not line:
             continue
@@ -1168,10 +1288,32 @@ def verify_creates_one(directory, identity):
             if not first_marker:
                 first_marker = hit_file + ":" + hit_num
             continue
-        kept = hit_file + ":" + hit_num
-        break
+        if not kept:
+            kept = hit_file + ":" + hit_num
+        hit_files.append(hit_file)
 
     if kept:
+        # A doc identity gets no "verified" from here. Its search deliberately
+        # runs OVER documentation, so a hit says some file writes the page's
+        # name -- which is what a table of contents does. Only the tracked path
+        # of step 1 proves the page itself, and step 1 is untouched: a real
+        # documentation phase whose file is committed still verifies there.
+        if is_doc_identity(identity):
+            return _verdict(
+                identity,
+                "unconfirmed",
+                "text",
+                "mentioned in tracked source: " + kept + searched_note
+                + " — a documentation identity is confirmed by its own tracked "
+                "path, not by a mention of its name. " + VERIFY_CREATES_TRACKED_NOTE,
+                git_max,
+            )
+        if warnings is not None:
+            advisory = _unowned_bare_name_warning(
+                identity, search, kept, hit_files, phase_files
+            )
+            if advisory:
+                warnings.append(advisory)
         return _verdict(
             identity, "verified", "text", "tracked source: " + kept + searched_note, git_max
         )
@@ -1184,7 +1326,7 @@ def verify_creates_one(directory, identity):
             + ": TODO/FIXME marker comment, not an implementation."
         )
     else:
-        all_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
+        all_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-w", "-e", search)
         git_max = max(git_max, rc)
         if rc > 1:
             return _verdict(
@@ -2607,6 +2749,37 @@ def op_amend_write(argv):
     return 0
 
 
+def _phase_declared_files(roadmap_path, doc, phase):
+    """The implementation.files[] this phase's own stories declared, normalized.
+
+    Built from the ONE path every other reader in this file builds --
+    <feature_dir>/<dir>/<feature>-phase-<id>-tasks.json, the same derivation
+    has_work_map uses -- and empty whenever there is nothing to read.
+
+    Empty is the SAFE answer and the reason this returns a set rather than
+    raising: it turns the bare-name advisory OFF. A phase /aimi:plan has not
+    expanded yet, a split phase whose stories live in sibling files this name
+    does not reach, an unreadable document -- in all three nobody has measured
+    what the phase declared, and an advisory that fires against an unknown is an
+    advisory people learn to skip.
+    """
+    feature = doc.get("feature") if isinstance(doc, dict) else None
+    if not isinstance(feature, str) or not feature:
+        return set()
+    tasks_path = (
+        os.path.dirname(roadmap_path) + "/" + _tsv(phase.get("dir")) + "/"
+        + feature + "-phase-" + _jq_raw(phase.get("id")) + "-tasks.json"
+    )
+    tasks = _read_tasks(tasks_path)
+    if tasks is None:
+        return set()
+    return {
+        _norm_repo_path(entry)
+        for entry in overlap_files(tasks)
+        if isinstance(entry, str) and entry.strip()
+    }
+
+
 def op_verify_creates(argv):
     """One process for the whole phase. The bash it replaces spent two git and
     two jq per identity -- one jq only to build the verdict, another only to
@@ -2625,10 +2798,22 @@ def op_verify_creates(argv):
 
     # The identity is read from its own field: there is no split left to
     # re-derive here, which is what this schema change was for.
+    #
+    # stderr carries the advisory, stdout the verdicts, and the two never mix:
+    # every caller of this verb parses stdout as JSON, so an advisory written
+    # there would break the parse it is trying to inform.
+    phase_files = _phase_declared_files(path, doc, phase)
+    warnings = []
     verdicts = [
-        verify_creates_one(directory, entry["identity"])
+        verify_creates_one(directory, entry["identity"], phase_files, warnings)
         for entry in contract_entries(phase, "creates")
     ]
+    if warnings:
+        warn_list(
+            "Warning: creates identity verified by text against a file no story "
+            "of this phase declared:",
+            warnings,
+        )
     json.dump(verdicts, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
