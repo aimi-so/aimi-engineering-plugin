@@ -14453,20 +14453,17 @@ cmd_roadmap_write_handoff() {
 }
 
 # ============================================================================
-# write-review — persist a phase's design review to disk
+# write-review — persist a review to disk
 # ============================================================================
 # A review that exists only in the transcript of the session that produced it
 # is not a review: the next session, the next reader and the PR that cites it
 # all arrive after that transcript is gone. This verb is the one path that puts
-# one on disk, at .aimi/reviews/<feature>-phase-<N>.md.
+# one on disk.
 #
 # Three deliberate differences from roadmap-write-handoff, its nearest sibling:
 #
-#   1. It requires no roadmap.json. A review is written ABOUT a phase, not
-#      derived FROM one -- nothing here reads a stored phase -- so demanding a
-#      roadmap would refuse the flat single-scope-context layout for no gain.
-#      --feature and --phase are validated as a filename would be (the same two
-#      helpers every roadmap verb uses), and that is the whole of what they are.
+#   1. It requires no roadmap.json. A review is written ABOUT an execution, not
+#      derived FROM one -- nothing here reads a stored phase.
 #   2. The body is written VERBATIM, not through rm_sanitize. The handoff's
 #      fields are bullets re-read as structured contract text; a review is a
 #      markdown document, and backticks and code fences are its content rather
@@ -14477,6 +14474,22 @@ cmd_roadmap_write_handoff() {
 #      one whole document or the other, never half of one -- the same reasoning
 #      write_aimi_models_config states for models.json, and for the same reason:
 #      nothing else writes this file.
+#
+# TWO NAMING MODES, chosen by which flags arrived. A phase execution HAS a
+# feature and a phase -- --feature and --phase name the file exactly as before,
+# at .aimi/reviews/<feature>-phase-<N>.md, validated as a filename would be
+# (the same two helpers every roadmap verb uses). A flat (non-phase) execution
+# has neither of those things -- there is no roadmap, no feature slug, no phase
+# id to name a file with -- so it derives the review's name from what a flat
+# execution DOES have: the basename of its own active tasks file. Inventing a
+# feature/phase pair for a layout that has none would point the review at a
+# phase that does not exist; deriving from the tasks file basename names it
+# after something that genuinely identifies this run instead.
+#
+# A single flag with no partner is refused rather than guessed: --phase alone
+# cannot borrow --feature's flat-mode meaning, and --feature alone cannot
+# invent a phase number, so half a pair is treated as a mistake rather than as
+# "flat mode plus a hint".
 #
 # The path is confined by validate_path_in_project, the standing authority over
 # every path arriving as a CLI ARGUMENT -- no second check is invented here.
@@ -14495,12 +14508,23 @@ cmd_write_review() {
     shift
   done
 
-  _roadmap_validate_feature "$feature" "write-review"
-  _roadmap_validate_phase_id "$phase_id" "write-review"
-
   local reviews_dir review_path
   reviews_dir="$AIMI_DIR/reviews"
-  review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+
+  if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+    if [ -z "$feature" ] || [ -z "$phase_id" ]; then
+      echo "Error: write-review: --feature and --phase must be given together, or neither at all (flat mode) -- got one without the other" >&2
+      exit 1
+    fi
+    _roadmap_validate_feature "$feature" "write-review"
+    _roadmap_validate_phase_id "$phase_id" "write-review"
+    review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+  else
+    local tasks_file
+    tasks_file=$(get_tasks_file) || exit 1
+    review_path="$reviews_dir/$(basename "$tasks_file" .json).md"
+  fi
+
   validate_path_in_project "$review_path"
 
   local body
@@ -15892,19 +15916,26 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
-    write-review --feature <slug> --phase <N>
-                              Read a phase's design review as markdown on stdin
-                              and atomically write it to
-                              .aimi/reviews/<slug>-phase-<N>.md, so the review
-                              outlives the session that produced it. The body is
-                              stored verbatim -- backticks and code fences are a
+    write-review [--feature <slug> --phase <N>]
+                              Read a review as markdown on stdin and atomically
+                              write it to disk, so the review outlives the
+                              session that produced it. With --feature and
+                              --phase (a phase execution), writes to
+                              .aimi/reviews/<slug>-phase-<N>.md. With neither
+                              flag (a flat execution, which has no feature/phase
+                              pair to name a file with), writes to
+                              .aimi/reviews/<active tasks file's basename>.md
+                              instead -- one flag without its partner is
+                              refused rather than guessed. The body is stored
+                              verbatim -- backticks and code fences are a
                               review's content, not something to strip -- and an
                               empty stdin is refused rather than written. Needs
-                              no roadmap.json: a review is written about a phase,
-                              not derived from one. Re-running replaces the file.
-                              This is the only path that may create or overwrite
-                              it -- direct Write/Edit tool calls on anything under
-                              .aimi/reviews/ are blocked by guard-runtime-state.py.
+                              no roadmap.json: a review is written about an
+                              execution, not derived from one. Re-running
+                              replaces the file. This is the only path that may
+                              create or overwrite it -- direct Write/Edit tool
+                              calls on anything under .aimi/reviews/ are blocked
+                              by guard-runtime-state.py.
     roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
