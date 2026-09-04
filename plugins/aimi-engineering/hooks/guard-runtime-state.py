@@ -110,6 +110,7 @@ def main(tool_input: dict) -> None:
 
     if aimi_dir is not None:
         state_dir = (aimi_dir / "state").resolve()
+        reviews_dir = (aimi_dir / "reviews").resolve()
         tasks_dir = (aimi_dir / "tasks").resolve()
         lock_file = aimi_dir / ".execute.lock"
 
@@ -117,6 +118,29 @@ def main(tool_input: dict) -> None:
         try:
             target.relative_to(state_dir)
             _deny_path(str(target), "State files reflect live runtime")
+        except ValueError:
+            pass
+
+        # Always-blocked: any path inside .aimi/reviews/ (recursive)
+        #
+        # Non-zero on purpose, matching the golden corpus above rather than the
+        # four denies that exit 0.  Both are real PreToolUse deny protocols and
+        # _deny_path prints the same permissionDecision JSON either way, so the
+        # stdout signal here is byte-identical to the others; the exit status is
+        # added on top.  It is added because a caller that reads the status
+        # rather than the JSON -- `guard ... && echo allowed`, which is exactly
+        # how this block's own regression check reads it -- would take a 0 for
+        # permission to write, and this file has one writer: `aimi-cli
+        # write-review`.
+        try:
+            target.relative_to(reviews_dir)
+            _deny_path(
+                str(target),
+                "Phase reviews are written by aimi-cli so they outlive the "
+                "session that produced them. Pipe the markdown instead: "
+                "aimi-cli write-review --feature <slug> --phase <N>",
+                exit_code=2,
+            )
         except ValueError:
             pass
 

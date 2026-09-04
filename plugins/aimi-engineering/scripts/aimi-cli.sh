@@ -14140,6 +14140,75 @@ cmd_roadmap_write_handoff() {
 }
 
 # ============================================================================
+# write-review — persist a phase's design review to disk
+# ============================================================================
+# A review that exists only in the transcript of the session that produced it
+# is not a review: the next session, the next reader and the PR that cites it
+# all arrive after that transcript is gone. This verb is the one path that puts
+# one on disk, at .aimi/reviews/<feature>-phase-<N>.md.
+#
+# Three deliberate differences from roadmap-write-handoff, its nearest sibling:
+#
+#   1. It requires no roadmap.json. A review is written ABOUT a phase, not
+#      derived FROM one -- nothing here reads a stored phase -- so demanding a
+#      roadmap would refuse the flat single-scope-context layout for no gain.
+#      --feature and --phase are validated as a filename would be (the same two
+#      helpers every roadmap verb uses), and that is the whole of what they are.
+#   2. The body is written VERBATIM, not through rm_sanitize. The handoff's
+#      fields are bullets re-read as structured contract text; a review is a
+#      markdown document, and backticks and code fences are its content rather
+#      than an injection vector to strip. "Write in one invocation, read in
+#      another, get the same content back" is this verb's entire contract, and a
+#      sanitizer would quietly break it for exactly the reviews worth keeping.
+#   3. It takes no lock. mktemp-then-mv is what makes a concurrent reader see
+#      one whole document or the other, never half of one -- the same reasoning
+#      write_aimi_models_config states for models.json, and for the same reason:
+#      nothing else writes this file.
+#
+# The path is confined by validate_path_in_project, the standing authority over
+# every path arriving as a CLI ARGUMENT -- no second check is invented here.
+cmd_write_review() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: write-review: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature" "write-review"
+  _roadmap_validate_phase_id "$phase_id" "write-review"
+
+  local reviews_dir review_path
+  reviews_dir="$AIMI_DIR/reviews"
+  review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+  validate_path_in_project "$review_path"
+
+  local body
+  body=$(cat)
+  if [ -z "$body" ]; then
+    # Refusing beats writing an empty file: a zero-byte review reads on disk
+    # exactly like a review that was never written, and the caller who piped
+    # nothing here would never learn which of the two happened.
+    echo "Error: write-review: nothing was read from stdin — refusing to write an empty review" >&2
+    exit 1
+  fi
+
+  mkdir -p "$reviews_dir"
+  local tmp_file
+  tmp_file=$(mktemp "${review_path}.XXXXXX")
+  printf '%s\n' "$body" > "$tmp_file" && mv "$tmp_file" "$review_path"
+
+  jq -n --arg path "$review_path" '{review: $path}'
+}
+
+# ============================================================================
 # Contract Validation Subcommands (validate-contracts, roadmap-sweep)
 # ============================================================================
 # Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
@@ -15510,6 +15579,19 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
+    write-review --feature <slug> --phase <N>
+                              Read a phase's design review as markdown on stdin
+                              and atomically write it to
+                              .aimi/reviews/<slug>-phase-<N>.md, so the review
+                              outlives the session that produced it. The body is
+                              stored verbatim -- backticks and code fences are a
+                              review's content, not something to strip -- and an
+                              empty stdin is refused rather than written. Needs
+                              no roadmap.json: a review is written about a phase,
+                              not derived from one. Re-running replaces the file.
+                              This is the only path that may create or overwrite
+                              it -- direct Write/Edit tool calls on anything under
+                              .aimi/reviews/ are blocked by guard-runtime-state.py.
     roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
@@ -15769,6 +15851,7 @@ main() {
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
+    write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;
     phase-overlap)         shift; cmd_phase_overlap "$@" ;;
