@@ -290,6 +290,22 @@ create_worktree() {
   # the ORDERING is what makes that safe: the executor reads story context at
   # step 0, while the worktree still has no .aimi/, and runs the verify only
   # at step 4 -- so the mkdir arrives after the read it would have broken.
+  #
+  # THE TEST THAT HOLDS THIS DOWN IS NAMED HERE ON PURPOSE, so the explanation
+  # and its proof can each be found from the other:
+  # test_worktree_project_root_resolution, in
+  # plugins/aimi-engineering/scripts/test-aimi-cli-part1-core.sh, section
+  # "PROJECT_ROOT-From-A-Worktree Tests" (spelled from the repository root: the
+  # scripts/ directory this file sits in is a different one). It builds a
+  # throwaway repository plus one worktree of its own and
+  # runs the same get-story-context twice against the same tasks file: with no
+  # .aimi/ in the worktree it resolves, with .aimi/ it is refused, and the
+  # refusal names the worktree as the project root. So the cost of the mkdir
+  # this comment talks you out of is measured, not merely asserted in prose
+  # here. Add the mkdir and those assertions go red; decide the rule should
+  # change and change it there in the same commit -- an explanation with no
+  # test ages alone, and a test its explanation does not name is unfindable
+  # from the one place anyone stands while about to break it.
 
   echo -e "${GREEN}✓ Worktree created successfully!${NC}"
   _emit_worktree_sentinels "$worktree_path"
