@@ -411,6 +411,99 @@ def test_runtime_guard_bypass_env(tmp_path, monkeypatch):
     assert output.strip() == "" or "deny" not in output
 
 
+def _reviews_dir(root: Path) -> Path:
+    """Create .aimi/reviews/ under *root* and return it."""
+    reviews = root / ".aimi" / "reviews"
+    reviews.mkdir(parents=True, exist_ok=True)
+    return reviews
+
+
+def test_runtime_guard_blocks_review(tmp_path, monkeypatch):
+    """A Write to .aimi/reviews/<feature>-phase-<N>.md is denied.
+
+    The JSON on stdout is the assertion that discriminates: a check on the exit
+    status alone passes against a guard that crashed, and against one that
+    denied some entirely different path.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    target = _reviews_dir(tmp_path) / "my-feature-phase-3.md"
+    target.touch()
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    result = _parse_deny_output(output)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+    message = result["hookSpecificOutput"]["userMessage"]
+    assert str(target) in message
+    # Naming the one writer is the point: a guard that only refuses is a guard
+    # that gets worked around.
+    assert "aimi-cli write-review --feature <slug> --phase <N>" in message
+
+    # Non-zero as well, matching the golden corpus block rather than the four
+    # denies that exit 0 -- a caller reading the status rather than the JSON
+    # would otherwise take a 0 for permission to write.
+    assert exit_code == 2
+
+
+def test_runtime_guard_blocks_review_subdirectory(tmp_path, monkeypatch):
+    """The block is recursive: .aimi/reviews/ is owned whole, not one filename."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    nested = _reviews_dir(tmp_path) / "archive"
+    nested.mkdir()
+    target = nested / "old-phase-1.md"
+    target.touch()
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    assert exit_code == 2
+    assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_runtime_guard_allows_review_lookalike_sibling(tmp_path, monkeypatch):
+    """A sibling directory whose name merely starts with 'reviews' stays allowed.
+
+    This is the assertion that discriminates: without it the guard could block
+    every path under .aimi/ -- or every path at all -- and still pass the two
+    tests above.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    _reviews_dir(tmp_path)
+    lookalike = tmp_path / ".aimi" / "reviews-draft"
+    lookalike.mkdir()
+    target = lookalike / "my-feature-phase-3.md"
+    target.touch()
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    assert exit_code == 0
+    assert output.strip() == "" or "deny" not in output
+
+
+def test_runtime_guard_bypass_env_allows_review(tmp_path, monkeypatch):
+    """AIMI_RUNTIME_STATE_GUARD=off releases the review block like every other."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("AIMI_RUNTIME_STATE_GUARD", "off")
+    monkeypatch.chdir(tmp_path)
+
+    target = _reviews_dir(tmp_path) / "my-feature-phase-3.md"
+    target.touch()
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    assert exit_code == 0
+    assert output.strip() == "" or "deny" not in output
+
+
 def _golden_corpus_path(root: Path) -> Path:
     """Create the golden corpus at a plausible checkout path under *root*.
 

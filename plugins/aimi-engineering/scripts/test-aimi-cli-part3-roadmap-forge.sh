@@ -24,6 +24,7 @@ set -uo pipefail
 #   - Contract Validation Tests (US-003)
 #   - verify-creates Tests (US-001)
 #   - Phase Completion Tests (US-011)
+#   - write-review Tests (phase 3 US-009)
 #   - Detect Forge Tests (US-001)
 #   - Forge Contract Tests (US-002)
 #   - forge-auth-status / forge-repo-info Tests (US-003)
@@ -3695,6 +3696,123 @@ test_roadmap_write_handoff_enables_validate_contracts_delivery() {
   assert_eq "true" "$valid" "validate-contracts: valid is true"
 
   rm -rf ".aimi/tasks/$feature"
+}
+
+# ---------------------------------------------------------------------------
+# write-review Tests (phase 3 US-009)
+# ---------------------------------------------------------------------------
+# The verb exists because a design review that lives only in the transcript of
+# the session that produced it is not a review. So the assertion that matters
+# is not "the command exited 0" -- it is "write in one invocation, read in a
+# SECOND one, get the same bytes back", which is what a later session, a later
+# reader and a PR citation all actually do.
+
+# Remove only this suite's own review files, never the whole directory: a real
+# project's .aimi/reviews/ holds reviews a developer wants to keep, and the
+# tests run in whatever tree the suite was started from.
+_wr_cleanup() {
+  local feature="$1"
+  rm -f "$AIMI_DIR/reviews/${feature}-phase-"*.md
+  rmdir "$AIMI_DIR/reviews" 2>/dev/null || true
+}
+
+test_write_review_survives_the_session() {
+  echo ""
+  echo "=== write-review: written in one invocation, read back whole in another ==="
+
+  local feature="wr-roundtrip"
+  _wr_cleanup "$feature"
+
+  # A review's own markdown, including the two constructs the handoff writer's
+  # sanitizer would strip. Here they are content: a review that cannot quote
+  # code is not worth persisting.
+  local md
+  md=$(printf '# Review of phase 3\n\nThe hot path is fine:\n\n```bash\nprintf %%s "$body" > "$tmp"\n```\n\nSee `cmd_write_review` for the rest.')
+
+  local output exit_code
+  output=$(printf '%s' "$md" | "$CLI" write-review --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review: exits 0"
+
+  local review_path reported_path
+  review_path="$AIMI_DIR/reviews/${feature}-phase-3.md"
+  reported_path=$(printf '%s' "$output" | jq -r '.review')
+  assert_contains "$review_path" "$reported_path" "write-review: reports the review path it wrote"
+  assert_eq "true" "$([ -f "$review_path" ] && echo true || echo false)" "write-review: the review exists on disk"
+
+  # THE story's assertion: a separate process reads back what a prior process
+  # wrote. Compared whole rather than by substring -- a substring match passes
+  # against a writer that dropped everything else.
+  local readback
+  readback=$(cat "$review_path")
+  assert_eq "$md" "$readback" "write-review: the second invocation reads back the same content"
+
+  # Named separately from the whole-content compare above so a future change
+  # that loosens that compare cannot silently start sanitizing a review body.
+  assert_contains '`cmd_write_review`' "$readback" "write-review: backticks and code fences are stored verbatim"
+
+  # Re-reviewing a phase replaces the file rather than appending to it.
+  printf '# Second look\n' | "$CLI" write-review --feature "$feature" --phase 3 >/dev/null
+  local rewritten
+  rewritten=$(cat "$review_path")
+  assert_eq "# Second look" "$rewritten" "write-review: a re-run replaces the review instead of appending"
+
+  _wr_cleanup "$feature"
+}
+
+test_write_review_refuses_before_it_writes() {
+  echo ""
+  echo "=== write-review: every refusal happens before anything reaches disk ==="
+
+  local feature="wr-refusals"
+  _wr_cleanup "$feature"
+
+  local out exit_code
+  out=$(printf 'x\n' | "$CLI" write-review --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses a missing --feature"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase "one" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses a non-numeric --phase"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase 3 --oops 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses an unknown flag"
+
+  # A traversing feature never reaches validate_path_in_project: the feature
+  # regex is a single path component, so the escape dies one gate earlier. The
+  # assertion that discriminates is the second one -- an exit 1 alone would also
+  # be produced by a verb that wrote the file and then failed.
+  out=$(printf 'x\n' | "$CLI" write-review --feature "../../etc" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses a --feature that is not a single path component"
+  assert_eq "false" "$([ -d "$AIMI_DIR/reviews" ] && echo true || echo false)" "write-review: a refused feature created no reviews directory"
+
+  # Empty stdin is refused rather than written: a zero-byte review reads on disk
+  # exactly like a review nobody ever wrote.
+  out=$("$CLI" write-review --feature "$feature" --phase 3 </dev/null 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses empty stdin"
+  assert_contains "refusing to write an empty review" "$out" "write-review: says why it refused the empty body"
+  assert_eq "false" "$([ -f "$AIMI_DIR/reviews/${feature}-phase-3.md" ] && echo true || echo false)" "write-review: an empty body wrote no file"
+
+  _wr_cleanup "$feature"
+}
+
+test_write_review_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== write-review: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "write-review --feature <slug> --phase <N>" "$help_out" "help: documents write-review with its flags"
+  assert_contains ".aimi/reviews/<slug>-phase-<N>.md" "$help_out" "help: names the path write-review writes"
+
+  # The dispatcher must route it: an unrouted verb answers "Unknown command".
+  local dispatch_out
+  dispatch_out=$("$CLI" write-review --feature "wr-dispatch" --phase 1 </dev/null 2>&1) || true
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: write-review is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: write-review is routed"
+    ((TESTS_PASSED++))
+  fi
 }
 
 # normalize-status and status field regression tests (US-003)
@@ -8331,6 +8449,14 @@ main() {
   test_roadmap_set_status_verification_failed_reachable_and_retryable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
+
+  # write-review: the verb that puts a phase's design review on disk, so it
+  # outlives the session that produced it (phase 3 US-009).
+  echo ""
+  echo "--- write-review Tests (phase 3 US-009) ---"
+  test_write_review_survives_the_session
+  test_write_review_refuses_before_it_writes
+  test_write_review_registered_in_help_and_dispatcher
 
   # Detect Forge Tests (US-001) -- the foundational contract every later
   # forge-* verb in this phase consumes verbatim
