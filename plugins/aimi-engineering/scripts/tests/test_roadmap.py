@@ -3068,3 +3068,410 @@ def test_the_three_readers_of_the_terminal_rule_agree():
     assert 'select((.status? // "pending") != "completed")]' not in source, (
         "the pre-#112 predicate is back: split-detect is counting skipped as pending again"
     )
+
+
+# ---------------------------------------------------------------------------
+# The completed gate reads the phase's own tasks file (issue #135)
+#
+# Before this, closing a phase checked that handoff.md existed on disk and
+# opened no tasks file at all. pipeline-audit's phase 1 reached "completed"
+# with all five of its stories still at verification.status "pending" and
+# nothing said a word -- the defect this roadmap reproduced in itself.
+#
+# Both sides are asserted throughout, and that is not padding: a gate that
+# only ever refuses would pass every refusal test here while wedging every
+# phase in the repository, which is a worse failure than the one it fixes.
+# ---------------------------------------------------------------------------
+
+_GATE_PHASE = {
+    "id": 1, "name": "P1", "goal": "g", "slug": "p1", "dir": "phase-1",
+    "status": "in_progress", "dependsOn": [], "branch": None, "notes": None,
+    "successCriteria": [], "creates": [], "needs": [], "areas": [], "claim": None,
+}
+
+
+def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feature="gate"):
+    """A roadmap with one in_progress phase, its own tasks file, and a handoff.
+
+    `tasks=False` writes no tasks file at all -- the shape every phase had
+    before this gate existed, and the one it must still close.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    phase_dir = os.path.join(feature_dir, "phase-1")
+    os.makedirs(phase_dir, exist_ok=True)
+
+    roadmap = {
+        "roadmapVersion": "2.0", "feature": feature,
+        "createdAt": "2020-01-01T00:00:00Z", "brainstormPath": None,
+        "phases": [dict(_GATE_PHASE)],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+
+    if tasks:
+        doc = {"userStories": stories}
+        if smells is not None:
+            doc["metadata"] = {"smellWarnings": smells}
+        with open(
+            os.path.join(phase_dir, feature + "-phase-1-tasks.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(doc, handle)
+    if handoff:
+        with open(os.path.join(phase_dir, "handoff.md"), "w", encoding="utf-8") as handle:
+            handle.write("# handoff\n")
+
+    return root, _fixture_env(base), feature
+
+
+def _close(root, env, feature="gate", force=False):
+    argv = ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-set-status",
+            "--feature", feature, "--phase", "1", "--status", "completed"]
+    if force:
+        argv.append("--force")
+    return subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=120, env=env)
+
+
+def _stored_status(root, feature="gate"):
+    path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)["phases"][0]["status"]
+
+
+def _story(sid, status):
+    return {"id": sid, "status": "completed", "verification": {"strategy": "test", "status": status}}
+
+
+def test_a_phase_nobody_judged_is_refused_and_every_pending_story_is_named(tmp_path):
+    """The refusal names each offending story rather than reporting a count: the
+    fix is per-story, so a count would send the reader back to the file to work
+    out which ones. The judged stories must NOT appear -- an error listing every
+    story in the phase names nothing."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed"),
+        _story("US-002", "pending"),
+        _story("US-003", "pending"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1, proc.stdout
+    assert proc.stdout == ""
+    assert "US-002" in proc.stderr and "US-003" in proc.stderr
+    assert "US-001" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress", "a refusal writes nothing"
+
+
+def test_a_phase_with_an_empty_pending_partition_closes_exactly_as_it_did(tmp_path):
+    """The side that must keep working, and the reason it is asserted at all:
+    without it this gate could wedge every phase in the repository and still
+    pass the refusal test above. Same stdout contract as before the gate."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed"),
+        _story("US-002", "failed"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"phase": 1, "from": "in_progress", "to": "completed"}
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_skipped_passes_because_it_records_that_somebody_looked(tmp_path):
+    """The distinction the gate is built on. `skipped` is what the story
+    executor is told to record when agent-browser is not installed; refusing it
+    would wedge every phase holding a visual story on a host without a browser,
+    which is a louder version of the failure this gate exists to fix."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "skipped")])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_story_that_declared_no_verification_never_enters_the_partition(tmp_path):
+    """Scoped to the object branch, so every phase whose stories predate the
+    field still closes. The partition counts what was declared and not judged,
+    never what was never declared."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-002", "status": "skipped"},
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_force_overrides_the_transition_graph_and_not_this_gate(tmp_path):
+    """The same reading --force already gets against the handoff precondition.
+    --force is the flag people reach for when a phase is stuck for an unrelated
+    reason; letting it silence this one would reopen the blind close through the
+    side door."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "pending")])
+    proc = _close(root, env, feature, force=True)
+    assert proc.returncode == 1
+    assert "US-001" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_the_handoff_precondition_still_reports_first(tmp_path):
+    """Order matters for the reader, not for correctness: the cheaper physical
+    check keeps its own wording, so every existing assertion about it still
+    describes what a caller sees."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "pending")], handoff=False)
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "no handoff.md found at" in proc.stderr
+    assert "US-001" not in proc.stderr
+
+
+def test_an_unacknowledged_verify_coverage_smell_blocks_the_close(tmp_path):
+    """The consumer that smell never had. story-merge has written it into
+    metadata.smellWarnings since issue #134's US-004 and nothing read it back --
+    a warning that reaches no decision is the same defect as an unjudged
+    verification wearing a different name."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_story("US-001", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-001",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "verify-coverage" in proc.stderr and "US-001" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_only_the_json_literal_true_acknowledges_a_smell(tmp_path):
+    """An acknowledgement that can be produced by accident acknowledges nothing,
+    so the check is `is not True` rather than falsiness. Every near-miss below
+    leaves the entry unacknowledged; only `true` clears it."""
+    for value in ("true", 1, [], {"acknowledged": True}, "yes"):
+        assert R._unacknowledged_verify_coverage(
+            {"metadata": {"smellWarnings": [
+                {"type": "verify-coverage", "storyId": "US-001", "acknowledged": value}
+            ]}}
+        ), repr(value)
+    assert R._unacknowledged_verify_coverage(
+        {"metadata": {"smellWarnings": [
+            {"type": "verify-coverage", "storyId": "US-001", "acknowledged": True}
+        ]}}
+    ) == []
+    # A sibling smell of another type is never this gate's business.
+    assert R._unacknowledged_verify_coverage(
+        {"metadata": {"smellWarnings": [{"type": "orphan-symbol", "storyId": "US-001"}]}}
+    ) == []
+    # And an absent or wrongly-shaped field reads as no smells, never an error:
+    # story-merge writes it only when it found something.
+    for doc in ({}, {"metadata": None}, {"metadata": {}}, {"metadata": {"smellWarnings": "x"}}):
+        assert R._unacknowledged_verify_coverage(doc) == []
+
+
+def test_an_acknowledged_smell_lets_the_phase_close(tmp_path):
+    """The other side of the same predicate, for the same reason as the pending
+    partition's: a gate with no way through is not a gate."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_story("US-001", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-001",
+            "commands": ["bun run typecheck"], "acknowledged": True,
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+@pytest.mark.parametrize("write_tasks,body", [
+    (False, None),
+    (True, "{ not json"),
+    (True, "null"),
+    (True, '{"userStories": "not a list"}'),
+])
+def test_the_gate_degrades_to_no_refusal_when_it_cannot_measure(tmp_path, write_tasks, body):
+    """Every unreadable shape closes, and that direction is deliberate. A phase
+    /aimi:plan has not expanded, a split phase whose stories live in sibling
+    files this name does not reach, a document that will not parse -- in none of
+    them has anybody MEASURED that a verification went unjudged, and a gate that
+    refuses on an unknown is one people learn to route around."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+    if write_tasks:
+        path = os.path.join(
+            root, ".aimi", "tasks", feature, "phase-1", feature + "-phase-1-tasks.json"
+        )
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_roadmap_with_no_feature_slug_builds_no_path_to_miss_against():
+    """_phase_tasks_path returns None rather than a name nothing writes. A path
+    with an empty component would always miss, and a gate that always misses is
+    off while looking like it is on."""
+    phase = dict(_GATE_PHASE)
+    assert R._phase_tasks_path("/f/roadmap.json", {"feature": "gate"}, phase) == (
+        "/f/phase-1/gate-phase-1-tasks.json"
+    )
+    for doc in ({}, {"feature": ""}, {"feature": None}, {"feature": 7}, []):
+        assert R._phase_tasks_path("/f/roadmap.json", doc, phase) is None, repr(doc)
+
+
+def test_the_pending_partition_is_tasks_pys_and_is_not_recomputed_here(tmp_path):
+    """The rule belongs to tasks.json and lives in tasks.py; a second copy here
+    is the "second opinion" this module's header forbids. Asserted by running
+    both over one adversarial document and requiring them to name the same
+    stories -- a re-implementation would have to reproduce every shape below,
+    including the near-misses ("Pending", a null status, a string verification,
+    no verification at all) that are exactly what a second copy gets wrong.
+    """
+    import tasks as T
+
+    stories = [
+        {"id": "US-001", "status": "completed", "verification": {"status": "pending"}},
+        {"id": "US-002", "status": "completed", "verification": {"status": "Pending"}},
+        {"id": "US-003", "status": "completed", "verification": {"status": None}},
+        {"id": "US-004", "status": "completed", "verification": "pending"},
+        {"id": "US-005", "status": "completed"},
+        {"id": "US-006", "status": "completed",
+         "verification": {"strategy": "visual", "status": "pending"}},
+    ]
+    assert T.verification_report({"userStories": stories})["pending"] == ["US-001", "US-006"]
+
+    root, _env, feature = _gate_fixture(tmp_path, stories)
+    roadmap_path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    tasks_path, lines = R._completed_gate_refusals(roadmap_path, doc, 1)
+    assert [line.strip().split(":", 1)[0] for line in lines] == ["US-001", "US-006"]
+    assert tasks_path.endswith(feature + "-phase-1-tasks.json")
+
+
+# ---------------------------------------------------------------------------
+# The gate asks only about work that was done
+#
+# cascade-skip writes {status: "skipped", notes: ...} and never touches
+# verification.status, so every story it skips keeps the "pending" it was born
+# with. Skipped is terminal, so count-pending reaches zero and the phase tries
+# to close -- and an unscoped gate refuses, which means any phase carrying one
+# failed story could never be closed. The failure path is the last place that
+# can afford a new trap, so the scope is asserted from both ends here.
+# ---------------------------------------------------------------------------
+
+
+def _cascade_skipped(sid, dep):
+    """What cascade-skip actually leaves behind, copied from a real run rather
+    than imagined: the story status moves, the verification status does not."""
+    return {
+        "id": sid, "status": "skipped", "dependsOn": [dep],
+        "notes": "Skipped: dependency failed - " + dep,
+        "verification": {"strategy": "test", "status": "pending"},
+    }
+
+
+def test_a_cascade_skipped_story_does_not_wedge_the_phase(tmp_path):
+    """THE REGRESSION THIS SECTION EXISTS FOR. Fails against the first cut of
+    this gate, which refused any non-empty pending partition: the phase below
+    is the ordinary shape of a phase that had a failure, and it must still be
+    closeable."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        {"id": "US-001", "status": "failed",
+         "verification": {"strategy": "test", "status": "failed"}},
+        _cascade_skipped("US-002", "US-001"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_the_genuine_pending_still_blocks_beside_a_cascade_skipped_one(tmp_path):
+    """The discrimination that makes the test above mean something. One story
+    completed and unjudged, one skipped and unjudged, in ONE file: the refusal
+    must name the first and not the second. A scope that had merely been
+    loosened into "any pending is fine" passes the test above and fails here."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "pending"),
+        _cascade_skipped("US-002", "US-003"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-001" in proc.stderr
+    assert "US-002" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+@pytest.mark.parametrize("status", ["skipped", "failed", "in_progress", "pending", None])
+def test_no_story_but_a_completed_one_is_ever_asked_for_a_verdict(tmp_path, status):
+    """The scope stated as a rule rather than as one case. A verification judges
+    work that was done, so a story that did not complete -- for any reason, or
+    with no status recorded at all -- is never what this gate is about."""
+    story = {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}}
+    if status is not None:
+        story["status"] = status
+    root, env, feature = _gate_fixture(tmp_path, [story])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_smell_against_a_skipped_story_does_not_wedge_it_either(tmp_path):
+    """Both predicates take the same scope. Fixing only the pending partition
+    would leave the identical wedge open for a phase whose skipped story also
+    carries a smell -- the same bug, half fixed."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_cascade_skipped("US-002", "US-001")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+    # And the same smell against a story that DID complete still blocks.
+    root, env, feature = _gate_fixture(
+        tmp_path / "second",
+        [_story("US-002", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-002" in proc.stderr
+
+
+def test_completed_story_ids_reads_the_shapes_story_statuses_reads():
+    """Same shape handling as _story_statuses, degrading rather than raising --
+    an id list this could not build must mean "ask nobody for a verdict", never
+    a crash inside a verb that is holding a lock."""
+    assert R._completed_story_ids({"userStories": [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-002", "status": "skipped"},
+        None,
+        {"id": "US-003"},
+    ]}) == ["US-001"]
+    # userStories as an object yields its values, exactly as jq's .[] does.
+    assert R._completed_story_ids(
+        {"userStories": {"a": {"id": "US-001", "status": "completed"}}}
+    ) == ["US-001"]
+    for doc in ({}, {"userStories": None}, {"userStories": "x"}, [], None):
+        assert R._completed_story_ids(doc) == [], repr(doc)
+
+
+def test_an_unhashable_story_id_is_compared_rather_than_hashed():
+    """Ids come out of a document, so they need not be strings and need not be
+    hashable. The intersection uses jq's == -- the same comparison
+    verification_report matched the "pending" literal with -- so a hand-edited
+    list id refuses to close rather than raising TypeError inside the lock."""
+    import tasks as T
+
+    doc = {"userStories": [{"id": ["US-001"], "status": "completed",
+                            "verification": {"status": "pending"}}]}
+    assert T.verification_report(doc)["pending"] == [["US-001"]]
+    assert R._completed_story_ids(doc) == [["US-001"]]
