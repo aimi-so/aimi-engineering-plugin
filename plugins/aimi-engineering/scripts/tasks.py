@@ -2580,18 +2580,53 @@ def _report_url(verification):
     return url if isinstance(url, str) else ""
 
 
+def _report_status(verification):
+    """The `status` a visual story reports through verification-report, and
+    the same value the `pending` partition is decided on -- one reading of
+    `.verification.status`, not two.
+
+    Collapses like `_report_project` rather than `_report_url`: a STRING
+    passes through unchanged, every other shape -- absent, null, a number, an
+    array -- reports as `None`. The empty string is a string and survives as
+    one. `None` is the honest answer here because the whole point of the
+    partition beside this field is telling "declared and not looked at" apart
+    from "never declared": defaulting an absent status to "pending" would make
+    a `visual` entry claim a status the `pending` list, which matches the
+    LITERAL only, refuses to count -- two halves of one report disagreeing
+    about the same story.
+    """
+    status = jq_index(verification, "status", STORY + ".verification")
+    return status if isinstance(status, str) else None
+
+
 def verification_report(doc):
     """One document read answering the three questions ten separate jq
     programs used to open the tasks file for: which stories carry a visual
-    verification strategy (each with its own already-normalized `project` and
-    `url`, see `_report_project`/`_report_url` above), and how the old
-    `type != "object"` malformed scan partitions into the shapes
-    normalize-verification actually repairs and the shapes it does not.
+    verification strategy (each with its own already-normalized `project`,
+    `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
+    above), and how the old `type != "object"` malformed scan partitions into
+    the shapes normalize-verification actually repairs and the shapes it does
+    not -- plus one question no jq program ever asked: which stories declared
+    a verification nobody has looked at yet.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
     filtering it by `project`, taking its length, or reading its first entry
-    is projecting from ONE read rather than opening a second one.
+    is projecting from ONE read rather than opening a second one. Its `status`
+    is the one field the old scan left a caller to reopen the file for: an
+    entry carrying `id`, `project` and `url` alone cannot say whether the
+    visual check passed, which is the second read this verb exists to remove.
+
+    `pending` is the ids of every story whose `verification.status` is the
+    LITERAL "pending", whatever its strategy -- the stories a phase declared a
+    verification for and nobody has judged. Two boundaries make it usable as a
+    completed-gate input rather than a tripwire. It is scoped to the object
+    branch, so a story with NO verification object never enters: the partition
+    counts what was declared and not looked at, never what was never declared,
+    and the other reading would fail every legacy phase whose stories predate
+    the field. And it matches on the literal alone, via the same `jq_equal`
+    the strategy test uses, so no non-string shape can drift in through a
+    default.
 
     The malformed partition reuses `_verification_migrated`'s own predicate
     (`isinstance(verification, str)`) rather than restating it, so the two
@@ -2603,6 +2638,7 @@ def verification_report(doc):
     split is new.
     """
     visual = []
+    pending = []
     repairable = []
     unrepairable = []
     for story in _stories(doc):
@@ -2610,6 +2646,9 @@ def verification_report(doc):
         verification = jq_index(story, "verification", STORY)
         vtype = jq_type(verification)
         if vtype == "object":
+            status = _report_status(verification)
+            if jq_equal(status, "pending"):
+                pending.append(story_id)
             strategy = jq_index(verification, "strategy", STORY + ".verification")
             if jq_equal(strategy, "visual"):
                 visual.append(
@@ -2617,12 +2656,14 @@ def verification_report(doc):
                         "id": story_id,
                         "project": _report_project(story),
                         "url": _report_url(verification),
+                        "status": status,
                     }
                 )
         elif vtype != "null":
             (repairable if vtype == "string" else unrepairable).append(story_id)
     return {
         "visual": visual,
+        "pending": pending,
         "malformed": {"repairable": repairable, "unrepairable": unrepairable},
     }
 
