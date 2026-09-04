@@ -799,6 +799,50 @@ def test_marker_line_recognises_the_comment_syntaxes_it_claims():
     assert not R.is_marker_line("// TODOS is a different word")
 
 
+def test_comment_line_is_the_wider_question_under_the_marker_one():
+    """Every marker line is a comment line; the reverse is what this rule adds.
+
+    The four markers were never the point -- they were the only comments anyone
+    had gotten around to naming. A comment with no marker at all describes the
+    artifact just as much as one with a TODO in it, and the caller keeps asking
+    the marker question first only because "the work is still owed" is a more
+    useful thing to print than "somebody wrote this name down".
+    """
+    for line in ("// TODO: x", "# FIXME x", "-- XXX x", " * HACK x", "<!-- TODO x"):
+        assert R.is_comment_line(line), line
+    for line in (
+        "# o simbolo parseThing e o que esta story descreve",
+        "// parseThing() is called from here",
+        "-- the notifications table, described",
+        "  * a block-comment continuation line",
+        "/* an opener */",
+        "<!-- an html note -->",
+    ):
+        assert R.is_comment_line(line), line
+
+
+def test_the_three_code_shapes_that_start_like_a_comment_are_not_swallowed():
+    """The whole cost of widening past the markers, paid here.
+
+    "#", "--" and "*" each open a comment in one language and a real declaration
+    or operator in another, so each is required to be followed by whitespace or
+    end of line. A "#define" that DECLARES the identity is exactly the artifact
+    this verb exists to find, and swallowing it would trade one false verdict
+    for another.
+    """
+    for line in (
+        "#define parseThing(x) ((x) + 1)",
+        "#include <stdio.h>",
+        "#ifdef parseThing",
+        "--count;",
+        "*ptr = parseThing();",
+        "#!/usr/bin/env python3",
+        "export function parseList<T>(raw: string): T[] {",
+        "CREATE TABLE notifications (id INTEGER PRIMARY KEY);",
+    ):
+        assert not R.is_comment_line(line), line
+
+
 def test_the_endpoint_strip_is_exactly_one_space_then_slash():
     """verify-creates strips a leading method token so the search hits the route
     real code writes. Two spaces is not that shape -- and the writer refuses it
@@ -1083,6 +1127,80 @@ def test_the_advisory_reaches_stderr_and_leaves_stdout_parseable(tmp_path):
     )
     assert quiet.returncode == 0, quiet.stderr
     assert quiet.stderr == "", quiet.stderr
+
+
+def test_a_comment_about_the_work_does_not_close_the_phase(tmp_path):
+    """THE DEFECT, reproduced from the tree it was measured against.
+
+    src/nota.py says the symbol is what the story describes and that it does not
+    exist here; before this rule that sentence verified parseThing by text, at
+    src/nota.py:1. It closed two verifications in phase 3 of this roadmap, both
+    times on comments an author had written to explain the very defect.
+    """
+    repo = _git_repo(tmp_path, {
+        "src/nota.py": "# o simbolo parseThing e o que esta story descreve, "
+                       "mas nao existe aqui\n",
+        "src/real.py": "def realThing():\n    return 1\n",
+    })
+    prose = R.verify_creates_one(repo, "parseThing")
+    assert prose["status"] == "unconfirmed", prose
+    assert prose["method"] == "text", prose
+    assert "src/nota.py:1" in prose["evidence"], prose
+    assert "not the artifact" in prose["evidence"], prose
+
+    # GUARDRAIL: real code on the same commit still verifies by text. A filter
+    # that took this with it would be too wide, and the six method=text cases in
+    # golden_from_jq say the same thing about the recorded corpus.
+    real = R.verify_creates_one(repo, "realThing")
+    assert real["status"] == "verified", real
+    assert real["method"] == "text", real
+
+
+def test_one_real_line_outranks_any_number_of_comments(tmp_path):
+    """The rule is about an identity whose ONLY evidence is prose. A phase that
+    both built the artifact and wrote about it is a phase that built it, and the
+    evidence names the code rather than whichever file sorted first."""
+    repo = _git_repo(tmp_path, {
+        "src/aaa_note.py": "# parseThing will live in parse.py\n",
+        "src/parse.py": "def parseThing():\n    return 1\n",
+    })
+    verdict = R.verify_creates_one(repo, "parseThing")
+    assert verdict["status"] == "verified", verdict
+    assert "src/parse.py:1" in verdict["evidence"], verdict
+
+
+def test_a_path_identity_never_reaches_the_comment_filter(tmp_path):
+    """GUARDRAIL: only the textual path narrows. Step 1 returns before any line
+    is read, so a tracked file whose every line is a comment still verifies --
+    the file IS the artifact, and nothing in it is being read as evidence."""
+    repo = _git_repo(tmp_path, {"src/notes.py": "# nothing but prose in here\n"})
+    verdict = R.verify_creates_one(repo, "src/notes.py")
+    assert verdict["status"] == "verified", verdict
+    assert verdict["method"] == "path", verdict
+
+
+def test_a_todo_still_outranks_an_ordinary_comment_in_the_report(tmp_path):
+    """The two questions are asked in order, and the order is the reason the
+    marker verdict survives this change. A TODO says the work is owed, which is
+    worth printing; demoting it to "mentioned" would lose that."""
+    repo = _git_repo(tmp_path, {"src/todo.ts": "// TODO: marker_only_symbol\n"})
+    verdict = R.verify_creates_one(repo, "marker_only_symbol")
+    assert verdict["status"] == "missing", verdict
+    assert "TODO/FIXME marker comment" in verdict["evidence"], verdict
+
+
+def test_a_comment_only_identity_is_not_flagged_by_the_bare_name_advisory(tmp_path):
+    """The advisory questions a "verified" verdict against nobody's file. An
+    unconfirmed one is already being reported as undelivered, so a second doubt
+    on top of it would only add noise to a line nobody disputes."""
+    repo = _git_repo(tmp_path, {
+        "src/nota.py": "# baseRef is described here and built nowhere\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    warnings = []
+    verdict = R.verify_creates_one(repo, "baseRef", {"src/owned.ts"}, warnings)
+    assert verdict["status"] == "unconfirmed", verdict
+    assert warnings == [], warnings
 
 
 # ---------------------------------------------------------------------------
