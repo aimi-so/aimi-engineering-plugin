@@ -1001,6 +1001,33 @@ VERIFY_CREATES_EXCLUDES = [
     ":(exclude)*/__tests__/*",
 ]
 
+# What survives the bypass when the identity names documentation ITSELF.
+#
+# Bypassing the whole list above was too much. Those four meta-documents exist
+# to CITE other files by name -- a README's file map, a CHANGELOG's entry, the
+# two agent-instruction files -- so they match nearly any identity and prove
+# nothing about the named artifact existing. Measured at phase 2's close: with
+# the list fully off, an identity whose ONLY hit is its own CHANGELOG line
+# closes the phase on the announcement of the work rather than the work.
+#
+# The rest of the list stays off, which is what the bypass exists to give: for a
+# doc identity, a hit under docs/ IS the artifact.
+#
+# Each pattern twice, for the reason the comment above already gives about
+# "docs/*": default pathspec matching is anchored at the search root, so a lone
+# "CLAUDE.md" would miss plugins/aimi-engineering/CLAUDE.md. README* and
+# CHANGELOG* carry the same anchor and get the same companion.
+DOC_IDENTITY_EXCLUDES = [
+    ":(exclude)README*",
+    ":(exclude)*/README*",
+    ":(exclude)CHANGELOG*",
+    ":(exclude)*/CHANGELOG*",
+    ":(exclude)CLAUDE.md",
+    ":(exclude)*/CLAUDE.md",
+    ":(exclude)AGENTS.md",
+    ":(exclude)*/AGENTS.md",
+]
+
 # The tracked-files caveat, stated in every "missing" verdict so the caller
 # reports the limit instead of silently owning it.
 VERIFY_CREATES_TRACKED_NOTE = (
@@ -1035,7 +1062,15 @@ def is_doc_identity(identity):
     """True when the identity names documentation ITSELF.
 
     For those, a hit under docs/ IS the artifact rather than a mention of it, so
-    the exclusion list is bypassed for that one entry.
+    the exclusion list narrows to DOC_IDENTITY_EXCLUDES for that one entry --
+    it is no longer turned off whole, because four meta-documents cite every
+    other file by name and would match anything.
+
+    Narrowing the exclusions is only half of it. A text hit does not CLOSE a doc
+    identity either: it reports "unconfirmed", because finding the string
+    "docs/api.md" somewhere in the tree says a file mentions that page, not that
+    the page exists. Step 1 answers that, and step 1 is the only step that
+    returns "verified" for one of these.
     """
     return (
         identity.startswith("docs/")
@@ -1043,6 +1078,56 @@ def is_doc_identity(identity):
         or "/docs/" in identity
         or "/doc/" in identity
         or identity.endswith((".md", ".rst", ".adoc", ".txt"))
+    )
+
+
+def is_bare_name_identity(search):
+    """True when the searched token is a bare NAME rather than a path.
+
+    No "/" and no ".", so "baseRef" and "list-known-gaps" are bare while
+    "plugins/aimi-engineering/scripts/roadmap.py", "docs/api.md" and an
+    endpoint's already-stripped "/api/notifications" are not. This is the one
+    shape that can only ever resolve through the text search, which is why it is
+    the one whose evidence gets a second look below.
+    """
+    return bool(search) and "/" not in search and "." not in search
+
+
+def _norm_repo_path(path):
+    """A git-grep path and an implementation.files entry, made comparable.
+
+    Both are repo-relative already; only a "./" prefix and a trailing "/" differ
+    in practice. Normalizing here keeps the comparison EXACT -- substring
+    containment is the defect this whole story exists to remove, and it would be
+    absurd to reintroduce it in the check that catches it.
+    """
+    path = path.strip()
+    if path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/")
+
+
+def _unowned_bare_name_warning(identity, search, kept, hit_files, phase_files):
+    """The advisory line for a bare name verified against nobody's file, or "".
+
+    Never a refusal: the same warn_list channel judge_phases got, for the same
+    reason -- the verdict this questions is usually right. It is the exact shape
+    that approved "baseRef" against a forge adapter's `--arg baseRefName`, in a
+    file no story of that phase declared touching, so the evidence is worth
+    naming even though a bare name legitimately resolves in code no story listed.
+
+    Silent when the phase declared no files at all. With nothing to compare
+    against, "outside the declared set" is not a fact anyone measured.
+    """
+    if not phase_files or not is_bare_name_identity(search):
+        return ""
+    if any(_norm_repo_path(hit) in phase_files for hit in hit_files):
+        return ""
+    return (
+        'identity "' + identity + '" verified by text, but all '
+        + str(len(hit_files)) + " matching line(s) fall outside the files this "
+        "phase's stories declared -- first at " + kept + ". A bare name matches "
+        "any identifier that contains it as a whole word."
     )
 
 
@@ -1063,13 +1148,22 @@ def _verdict(identity, status, method, evidence, git_status):
     }
 
 
-def verify_creates_one(directory, identity):
+def verify_creates_one(directory, identity, phase_files=None, warnings=None):
     """Verify ONE creates identity against <directory>'s tracked files.
 
-    Always returns a verdict: "missing" or "error" is data, not failure.
+    Always returns a verdict: "missing", "unconfirmed" or "error" is data, not
+    failure. "unconfirmed" is reached only by a doc identity that resolved
+    through the text search -- see is_doc_identity for why a mention is not a
+    page.
+
     gitStatus is the HIGHEST exit status any git invocation returned for this
     entry -- 0 or 1 in normal operation, above 1 only on tool failure, and that
     is the line between "the phase did not build it" and "we could not look".
+
+    `phase_files` (a set of normalized implementation.files[] paths) and
+    `warnings` (a list this appends to) drive the bare-name advisory, and both
+    default to off: a caller that passes neither gets exactly the verdicts it
+    got before, on stdout, with nothing on stderr.
     """
     git_max = 0
     if not identity:
@@ -1139,12 +1233,31 @@ def verify_creates_one(directory, identity):
     searched_note = ' (searched "' + search + '")' if search != identity else ""
 
     # --- Step 3: text search over tracked source ----------------------------
-    if is_doc_identity(identity):
-        grep_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
-    else:
-        grep_out, rc = _git(
-            directory, "grep", "-n", "-I", "-F", "-e", search, "--", *VERIFY_CREATES_EXCLUDES
-        )
+    #
+    # "-w" is load-bearing, not tidiness. Without it a match INSIDE a longer
+    # identifier counts: measured at phase 2's close, the identity "baseRef"
+    # matched 37 lines, every one of them the substring inside the forge
+    # adapter's "--arg baseRefName" -- a GitHub pull-request field with no
+    # relation to the metadata.baseRef the phase had promised. With "-w" it
+    # matches zero. The three bare verb names phase 1 declared
+    # (list-known-gaps, verify-probe, measure-command-file) keep matching, and
+    # so does every identity kind scope-contexts.md documents: "parseList<T>",
+    # "queue:emails" and a stripped "/api/notifications" all begin and end at a
+    # non-word character, which is exactly what -w tests.
+    #
+    # One residue closes as a side effect, recorded here so nobody reads it as
+    # an accident: an identity of a bare ":" used to verify by text, because
+    # `grep -F ':'` finds a colon in any source file. Under -w it matches
+    # nothing. The write-time alphanumeric rule still owns that case; this is a
+    # second net under it, not a replacement.
+    #
+    # One branch, two pathspec sets -- the two used to be an if/else in which one
+    # arm passed no "--" at all, and that arm is what turned the whole exclusion
+    # list off for a doc identity.
+    excludes = DOC_IDENTITY_EXCLUDES if is_doc_identity(identity) else VERIFY_CREATES_EXCLUDES
+    grep_out, rc = _git(
+        directory, "grep", "-n", "-I", "-F", "-w", "-e", search, "--", *excludes
+    )
     git_max = max(git_max, rc)
     if rc > 1:
         return _verdict(
@@ -1157,8 +1270,15 @@ def verify_creates_one(directory, identity):
         )
 
     # --- Step 4: drop marker-only comment lines -----------------------------
+    #
+    # This no longer stops at the first surviving line. The advisory below asks
+    # whether EVERY match falls outside the declared files, and a loop that
+    # stopped at the first one could not answer that. `first_marker` is unmoved
+    # by the change: it is read only on the path where `kept` stayed empty, and
+    # on that path there was never a line to break at.
     kept = ""
     first_marker = ""
+    hit_files = []
     for line in grep_out.split("\n"):
         if not line:
             continue
@@ -1168,10 +1288,32 @@ def verify_creates_one(directory, identity):
             if not first_marker:
                 first_marker = hit_file + ":" + hit_num
             continue
-        kept = hit_file + ":" + hit_num
-        break
+        if not kept:
+            kept = hit_file + ":" + hit_num
+        hit_files.append(hit_file)
 
     if kept:
+        # A doc identity gets no "verified" from here. Its search deliberately
+        # runs OVER documentation, so a hit says some file writes the page's
+        # name -- which is what a table of contents does. Only the tracked path
+        # of step 1 proves the page itself, and step 1 is untouched: a real
+        # documentation phase whose file is committed still verifies there.
+        if is_doc_identity(identity):
+            return _verdict(
+                identity,
+                "unconfirmed",
+                "text",
+                "mentioned in tracked source: " + kept + searched_note
+                + " — a documentation identity is confirmed by its own tracked "
+                "path, not by a mention of its name. " + VERIFY_CREATES_TRACKED_NOTE,
+                git_max,
+            )
+        if warnings is not None:
+            advisory = _unowned_bare_name_warning(
+                identity, search, kept, hit_files, phase_files
+            )
+            if advisory:
+                warnings.append(advisory)
         return _verdict(
             identity, "verified", "text", "tracked source: " + kept + searched_note, git_max
         )
@@ -1184,7 +1326,7 @@ def verify_creates_one(directory, identity):
             + ": TODO/FIXME marker comment, not an implementation."
         )
     else:
-        all_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-e", search)
+        all_out, rc = _git(directory, "grep", "-n", "-I", "-F", "-w", "-e", search)
         git_max = max(git_max, rc)
         if rc > 1:
             return _verdict(
@@ -2607,6 +2749,57 @@ def op_amend_write(argv):
     return 0
 
 
+def _phase_tasks_path(roadmap_path, doc, phase):
+    """<feature_dir>/<dir>/<feature>-phase-<id>-tasks.json, or None when the
+    roadmap carries no feature slug to build it from.
+
+    The one derivation every reader of a phase's OWN tasks file goes through,
+    so a third spelling of it cannot appear without this function changing.
+    op_reconcile still spells it inline -- it is the recording the golden
+    lifecycle capture was taken against and is left byte-for-byte alone --
+    but both readers added since come through here.
+
+    Returning None rather than a path with an empty component is the whole
+    point of the feature check: `.../<dir>/-phase-1-tasks.json` is a name
+    nothing writes, so it would always miss, and a gate that always misses is
+    a gate that is off while looking like it is on.
+    """
+    feature = doc.get("feature") if isinstance(doc, dict) else None
+    if not isinstance(feature, str) or not feature:
+        return None
+    return (
+        os.path.dirname(roadmap_path) + "/" + _tsv(phase.get("dir")) + "/"
+        + feature + "-phase-" + _jq_raw(phase.get("id")) + "-tasks.json"
+    )
+
+
+def _phase_declared_files(roadmap_path, doc, phase):
+    """The implementation.files[] this phase's own stories declared, normalized.
+
+    Built from the ONE path every other reader in this file builds --
+    <feature_dir>/<dir>/<feature>-phase-<id>-tasks.json, the same derivation
+    has_work_map uses -- and empty whenever there is nothing to read.
+
+    Empty is the SAFE answer and the reason this returns a set rather than
+    raising: it turns the bare-name advisory OFF. A phase /aimi:plan has not
+    expanded yet, a split phase whose stories live in sibling files this name
+    does not reach, an unreadable document -- in all three nobody has measured
+    what the phase declared, and an advisory that fires against an unknown is an
+    advisory people learn to skip.
+    """
+    tasks_path = _phase_tasks_path(roadmap_path, doc, phase)
+    if tasks_path is None:
+        return set()
+    tasks = _read_tasks(tasks_path)
+    if tasks is None:
+        return set()
+    return {
+        _norm_repo_path(entry)
+        for entry in overlap_files(tasks)
+        if isinstance(entry, str) and entry.strip()
+    }
+
+
 def op_verify_creates(argv):
     """One process for the whole phase. The bash it replaces spent two git and
     two jq per identity -- one jq only to build the verdict, another only to
@@ -2625,10 +2818,22 @@ def op_verify_creates(argv):
 
     # The identity is read from its own field: there is no split left to
     # re-derive here, which is what this schema change was for.
+    #
+    # stderr carries the advisory, stdout the verdicts, and the two never mix:
+    # every caller of this verb parses stdout as JSON, so an advisory written
+    # there would break the parse it is trying to inform.
+    phase_files = _phase_declared_files(path, doc, phase)
+    warnings = []
     verdicts = [
-        verify_creates_one(directory, entry["identity"])
+        verify_creates_one(directory, entry["identity"], phase_files, warnings)
         for entry in contract_entries(phase, "creates")
     ]
+    if warnings:
+        warn_list(
+            "Warning: creates identity verified by text against a file no story "
+            "of this phase declared:",
+            warnings,
+        )
     json.dump(verdicts, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
@@ -3032,6 +3237,207 @@ def op_list_archivable_phases(argv):
     return 0
 
 
+VERIFICATION_GATE_NOTE = (
+    "Record a judgment for each story -- `aimi-cli.sh update-field <id> "
+    "verification.status <passed|failed|skipped> --tasks-file <the file above>` "
+    "-- and acknowledge each smell by adding \"acknowledged\": true beside its "
+    "entry in metadata.smellWarnings. \"skipped\" is a real answer and passes: "
+    "it records that somebody looked and chose not to verify. \"pending\" "
+    "records that nobody looked."
+)
+
+
+def _completed_story_ids(tasks):
+    """The ids of the stories that actually finished, in document order.
+
+    The completed gate asks one question -- was the work that was done also
+    judged -- so the set of stories it can ask it ABOUT is the set that did
+    work. A story that never ran has nothing to verify, and demanding a
+    verdict for it is a demand nobody can satisfy honestly.
+
+    "completed" rather than "not skipped", and the difference is the whole
+    fix. cascade-skip writes `{status: "skipped", notes: ...}` and does not
+    touch `verification.status`, so every story it skips keeps the "pending"
+    it was born with. Scoping to completed also covers "failed",
+    "in_progress" and a story with no status at all, none of which is work
+    somebody could have verified either -- and none of which can reach this
+    gate in the normal flow anyway, because ground_truth answers
+    verification_failed for a failed story and count-pending keeps a phase
+    with an unfinished one from ever trying to close.
+
+    Shape handling is _story_statuses': userStories as an object yields its
+    values, a null story contributes nothing, and anything else reads as no
+    stories at all -- degrading rather than raising, like every other read in
+    this gate.
+    """
+    stories = tasks.get("userStories") if isinstance(tasks, dict) else None
+    if isinstance(stories, dict):
+        stories = list(stories.values())
+    if not isinstance(stories, list):
+        return []
+    return [
+        story.get("id")
+        for story in stories
+        if isinstance(story, dict) and story.get("status") == "completed"
+    ]
+
+
+def _unacknowledged_verify_coverage(tasks):
+    """The `verify-coverage` smell entries nobody has signed off on.
+
+    story-merge's Phase 4.3 writes these into `metadata.smellWarnings` when a
+    story's acceptance criteria assert a command its own `implementation.verify`
+    never runs -- and until this gate, NOTHING read them back. The smell was
+    printed once to a stderr nobody keeps and persisted into a field with no
+    consumer, which is the same defect as an unjudged verification wearing a
+    different name: a warning that reaches no decision.
+
+    `acknowledged` is checked with `is not True` rather than falsiness, so only
+    the JSON literal `true` clears an entry. The string "true", the number 1
+    and a nested object all leave it unacknowledged -- the same literal-only
+    discipline verification_report's own `pending` partition applies to the
+    status it matches on, and for the same reason: an acknowledgement that can
+    be produced by accident acknowledges nothing.
+
+    Anything that is not a list of objects reads as no smells at all. This
+    field is optional and absent from every tasks file story-merge found
+    nothing in, so its absence must not be an error.
+    """
+    metadata = tasks.get("metadata") if isinstance(tasks, dict) else None
+    warnings = metadata.get("smellWarnings") if isinstance(metadata, dict) else None
+    if not isinstance(warnings, list):
+        return []
+    return [
+        entry
+        for entry in warnings
+        if isinstance(entry, dict)
+        and entry.get("type") == "verify-coverage"
+        and entry.get("acknowledged") is not True
+    ]
+
+
+def _completed_gate_refusals(roadmap_path, doc, phase_id):
+    """(tasks file, why a phase may not close yet) -- one line per offending
+    story, and an empty list when it may close.
+
+    The path comes back beside the lines rather than being re-derived by the
+    caller: it is the file this verdict was measured against, the reader needs
+    it to act on any of the lines, and deriving it twice is how the two spellings
+    of a path drift apart.
+
+    THE DEFECT THIS CLOSES, which this very roadmap reproduced in itself:
+    pipeline-audit's phase 1 reached `completed` with all five of its stories
+    still carrying `verification.status: "pending"`, and nothing said a word.
+    Until now the completed gate opened no tasks file at all -- it checked that
+    handoff.md existed on disk and stopped there -- so "the work is described"
+    was the whole test and "somebody judged the work" was never asked.
+
+    Two predicates, both read out of ONE document, and BOTH scoped to the
+    stories that actually completed (see _completed_story_ids):
+
+      * the `pending` partition verification-report returns -- the ids whose
+        `verification.status` is the literal "pending", the stories a phase
+        declared a verification for and nobody has judged;
+      * the `verify-coverage` smell entries carrying no `acknowledged: true`.
+
+    ONE RULE DECIDES BOTH: a verification judges work that was done, so only a
+    story whose own `status` is "completed" can be asked for a verdict. The
+    scope is not a softening bolted onto the first predicate -- it is what the
+    gate always meant, and applying it to only one of the two would leave the
+    same wedge open for a phase whose skipped story also carries a smell.
+
+    WITHOUT THAT SCOPE THIS GATE WEDGES THE FAILURE PATH, measured rather than
+    argued: cascade-skip writes `{status: "skipped", notes: ...}` and never
+    touches `verification.status`, so a story it skips stays at "pending"
+    forever. Since skipped is terminal, count-pending reaches zero, the phase
+    tries to close, and an unscoped gate refuses -- meaning any phase with one
+    failed story could never be closed at all. cascade-skip is automatic; no
+    human chose to leave that verification unjudged, and the failure path is
+    the last place that can afford a new trap.
+
+    `verification.status` "skipped" PASSES for a completed story too, and that
+    distinction is the design rather than an omission. It is the honest degrade
+    of somebody who looked and decided not to verify -- the answer the story
+    executor is told to record when agent-browser is not installed. A gate that
+    refused it would wedge every phase holding a visual story on any host
+    without a browser. Note the two different "skipped" this paragraph and the
+    one above it are about: a STORY's status, and a story's VERIFICATION
+    status. They are separate fields and only the second is a judgment.
+
+    verification_report is IMPORTED rather than restated. The partition rule --
+    scoped to the object branch so a story with no verification never enters,
+    matched on the literal so no default can drift in -- is tasks.json's rule
+    and belongs to tasks.py; a second copy here is exactly the "second opinion"
+    this module's header forbids. The import is deferred into the call because
+    tasks.py imports roadmap.py at ITS module scope: a top-level import here
+    would close that cycle and leave whichever module loaded second reading a
+    half-initialized first. By the time a verb runs, both are fully loaded.
+
+    EVERY unreadable shape degrades to "no refusal", and that direction is
+    deliberate. A phase /aimi:plan has not expanded, a split phase whose stories
+    live in sibling files this name does not reach, a document that will not
+    parse, a tasks file this verb cannot make sense of -- in none of them has
+    anybody MEASURED that a verification went unjudged, and a gate that refuses
+    on an unknown is a gate people learn to route around with --force. The
+    refusal fires only on a partition that is non-empty, which is the same
+    reason _phase_declared_files returns an empty set rather than raising.
+
+    THE TASKS FILE IS READ WITHOUT ITS OWN LOCK, ON PURPOSE. bash already holds
+    roadmap.json's; taking a second one here would be the first place in this
+    codebase where two of these locks are held at once, and a lock ordering that
+    exists in one function is an ordering the next caller can invert. There is
+    nothing to buy with it: every tasks.py writer replaces the document whole
+    (mktemp then rename), so an unlocked reader sees one complete version or
+    another, never half of one. What it costs is that a story marked between
+    this read and the roadmap write makes the verdict one instant stale --
+    exactly the window os.path.isfile(handoff) above has always had, and benign
+    in both directions, since a refusal writes nothing and is retried by
+    re-running the verb.
+    """
+    phase = next(
+        (p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None
+    )
+    if phase is None:
+        return None, []
+    tasks_path = _phase_tasks_path(roadmap_path, doc, phase)
+    if tasks_path is None:
+        return None, []
+    tasks = _read_tasks(tasks_path)
+    if tasks is None:
+        return tasks_path, []
+
+    from tasks import MalformedTasks, jq_equal, verification_report
+
+    try:
+        pending = verification_report(tasks).get("pending") or []
+    except MalformedTasks:
+        return tasks_path, []
+
+    # jq's ==, not Python's, and not a set: a story id is whatever the document
+    # holds, which need not be hashable and need not be a string. This is the
+    # same comparison verification_report matched the "pending" literal with,
+    # so the two halves of one verdict cannot disagree about what an id is.
+    done = _completed_story_ids(tasks)
+
+    def did_work(story_id):
+        return any(jq_equal(story_id, finished) for finished in done)
+
+    lines = [
+        "  " + _tsv(story_id) + ': verification.status is still the literal "pending"'
+        for story_id in pending
+        if did_work(story_id)
+    ]
+    lines += [
+        "  "
+        + _tsv(entry.get("storyId"))
+        + ": verify-coverage smell is not acknowledged -- "
+        + _tsv(entry.get("message") or "asserts a command implementation.verify does not run")
+        for entry in _unacknowledged_verify_coverage(tasks)
+        if did_work(entry.get("storyId"))
+    ]
+    return tasks_path, lines
+
+
 def op_set_status(argv):
     """The locked read-modify-write. Bash holds the lock and has already refused
     every argument it can judge on its own, so what is left here needs the
@@ -3092,6 +3498,25 @@ def op_set_status(argv):
                 + " cannot transition to completed -- no handoff.md found at "
                 + handoff
                 + ". Write it first with roadmap-write-handoff."
+            )
+
+        # The second half of the same precondition, and --force does not reach
+        # this one either. handoff.md proves the phase was DESCRIBED; this
+        # proves it was JUDGED. Both are physical facts about what is on disk
+        # rather than orderings to be overridden, and --force stays what its own
+        # error message says it is: an override of the transition graph. Letting
+        # it silence this gate would reopen the blind close through the side
+        # door, because --force is the flag people already reach for when a
+        # phase is stuck for an unrelated reason.
+        tasks_path, refusals = _completed_gate_refusals(path, doc, phase_id)
+        if refusals:
+            _die_list(
+                "Error: roadmap-set-status: phase "
+                + phase_raw
+                + " cannot transition to completed -- "
+                + tasks_path
+                + " declares a verification nobody has judged:",
+                refusals + ["", VERIFICATION_GATE_NOTE],
             )
 
     # Completing a phase also releases its claim in the same atomic write -- no

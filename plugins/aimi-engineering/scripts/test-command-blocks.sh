@@ -137,16 +137,28 @@ assert_no_findings() {
 # Baseline
 #
 # Format, one finding per line, tab-separated:
-#   <check> \t <relative command path> \t <key>
-# where <check> is syntax|portability|loop-scope|unassigned and <key> is the
-# enclosing heading (syntax, portability) or the variable name (loop-scope,
-# unassigned). Lines starting with # and blank lines are ignored.
+#   <check> \t <path> \t <key> \t # <reason>
+# where <check> is syntax|portability|loop-scope|unassigned|argument-gate and
+# <key> is the enclosing heading (syntax, portability) or the variable name
+# (loop-scope, unassigned). A path with no prefix is relative to commands/; a
+# `skills/`-prefixed one is relative to the plugin directory, the same two
+# roots the extractor reports against. Lines starting with # and blank lines
+# are ignored.
+#
+# The fourth field is REQUIRED and is stripped here before matching, so a key
+# is compared on its first three fields exactly as it always was. It is a
+# field rather than a comment line above the entry because a comment above is
+# free to describe the entry below it and then stop being true of it -- one
+# line per entry, on the entry, is the only shape that cannot drift. The
+# sections below still carry the prose that explains a whole class; the field
+# says what THIS line is, so that "someone looked" is a per-line promise and
+# the baseline cannot quietly become a deposit.
 # ---------------------------------------------------------------------------
 BASELINE_KEYS=""
 
 load_baseline() {
   [ -f "$BASELINE_FILE" ] || return 0
-  BASELINE_KEYS="$(grep -vE '^[[:space:]]*(#|$)' "$BASELINE_FILE" || true)"
+  BASELINE_KEYS="$(grep -vE '^[[:space:]]*(#|$)' "$BASELINE_FILE" | sed $'s/\t#.*$//' || true)"
 }
 
 is_baselined() { case $'\n'"$BASELINE_KEYS"$'\n' in *$'\n'"$1"$'\n'*) return 0 ;; esac; return 1; }
@@ -1344,7 +1356,7 @@ check_baseline_current() {
 }
 
 main() {
-  echo "Extracting bash-fenced blocks from commands/..."
+  echo "Extracting bash-fenced blocks from commands/ and skills/..."
   extract_blocks
   scan_blocks
   load_baseline
@@ -1353,7 +1365,7 @@ main() {
   local nblocks nfiles
   nblocks="$(wc -l < "$INDEX" | tr -d ' ')"
   nfiles="$(cut -f2 "$INDEX" | sort -u | wc -l | tr -d ' ')"
-  echo "  $nblocks blocks across $nfiles command files"
+  echo "  $nblocks blocks across $nfiles executed markdown files"
   echo ""
 
   echo "--- Extraction Sanity ---"

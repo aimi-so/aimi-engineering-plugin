@@ -2580,18 +2580,53 @@ def _report_url(verification):
     return url if isinstance(url, str) else ""
 
 
+def _report_status(verification):
+    """The `status` a visual story reports through verification-report, and
+    the same value the `pending` partition is decided on -- one reading of
+    `.verification.status`, not two.
+
+    Collapses like `_report_project` rather than `_report_url`: a STRING
+    passes through unchanged, every other shape -- absent, null, a number, an
+    array -- reports as `None`. The empty string is a string and survives as
+    one. `None` is the honest answer here because the whole point of the
+    partition beside this field is telling "declared and not looked at" apart
+    from "never declared": defaulting an absent status to "pending" would make
+    a `visual` entry claim a status the `pending` list, which matches the
+    LITERAL only, refuses to count -- two halves of one report disagreeing
+    about the same story.
+    """
+    status = jq_index(verification, "status", STORY + ".verification")
+    return status if isinstance(status, str) else None
+
+
 def verification_report(doc):
     """One document read answering the three questions ten separate jq
     programs used to open the tasks file for: which stories carry a visual
-    verification strategy (each with its own already-normalized `project` and
-    `url`, see `_report_project`/`_report_url` above), and how the old
-    `type != "object"` malformed scan partitions into the shapes
-    normalize-verification actually repairs and the shapes it does not.
+    verification strategy (each with its own already-normalized `project`,
+    `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
+    above), and how the old `type != "object"` malformed scan partitions into
+    the shapes normalize-verification actually repairs and the shapes it does
+    not -- plus one question no jq program ever asked: which stories declared
+    a verification nobody has looked at yet.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
     filtering it by `project`, taking its length, or reading its first entry
-    is projecting from ONE read rather than opening a second one.
+    is projecting from ONE read rather than opening a second one. Its `status`
+    is the one field the old scan left a caller to reopen the file for: an
+    entry carrying `id`, `project` and `url` alone cannot say whether the
+    visual check passed, which is the second read this verb exists to remove.
+
+    `pending` is the ids of every story whose `verification.status` is the
+    LITERAL "pending", whatever its strategy -- the stories a phase declared a
+    verification for and nobody has judged. Two boundaries make it usable as a
+    completed-gate input rather than a tripwire. It is scoped to the object
+    branch, so a story with NO verification object never enters: the partition
+    counts what was declared and not looked at, never what was never declared,
+    and the other reading would fail every legacy phase whose stories predate
+    the field. And it matches on the literal alone, via the same `jq_equal`
+    the strategy test uses, so no non-string shape can drift in through a
+    default.
 
     The malformed partition reuses `_verification_migrated`'s own predicate
     (`isinstance(verification, str)`) rather than restating it, so the two
@@ -2603,6 +2638,7 @@ def verification_report(doc):
     split is new.
     """
     visual = []
+    pending = []
     repairable = []
     unrepairable = []
     for story in _stories(doc):
@@ -2610,6 +2646,9 @@ def verification_report(doc):
         verification = jq_index(story, "verification", STORY)
         vtype = jq_type(verification)
         if vtype == "object":
+            status = _report_status(verification)
+            if jq_equal(status, "pending"):
+                pending.append(story_id)
             strategy = jq_index(verification, "strategy", STORY + ".verification")
             if jq_equal(strategy, "visual"):
                 visual.append(
@@ -2617,12 +2656,14 @@ def verification_report(doc):
                         "id": story_id,
                         "project": _report_project(story),
                         "url": _report_url(verification),
+                        "status": status,
                     }
                 )
         elif vtype != "null":
             (repairable if vtype == "string" else unrepairable).append(story_id)
     return {
         "visual": visual,
+        "pending": pending,
         "malformed": {"repairable": repairable, "unrepairable": unrepairable},
     }
 
@@ -4447,15 +4488,20 @@ def op_verify_probe(argv):
 # weeks later by the next plan. This verb is the reader half.
 #
 # THE PARSER OWES ITS SHAPE TO THE CORPUS, not to a format anyone declared.
-# There is no frontmatter anywhere in it -- which is why
-# aimi-learnings-researcher, grep-first on frontmatter fields, cannot see these
-# files at all -- and the bodies come in three forms measured on 2026-09-03:
-# lines prefixed `KNOWN-GAP:`, lines prefixed `KNOWN-GAP (US-NNN):`, and bare
-# prose carrying no prefix at all (20 of the 32 files). The bare-prose files are
-# gaps too. A parser that recognised only the prefixed form would silently drop
-# two thirds of the corpus, which is the same class of defect this verb exists
-# to close, so EVERY file yields at least one entry -- the verify counts the
-# files on disk at run time and asserts exactly that.
+# The 32 files measured on 2026-09-03 carried no frontmatter at all -- which is
+# why aimi-learnings-researcher, grep-first on frontmatter fields, could not see
+# them -- and their bodies come in three forms: lines prefixed `KNOWN-GAP:`,
+# lines prefixed `KNOWN-GAP (US-NNN):`, and bare prose carrying no prefix at all
+# (20 of the 32 files). The bare-prose files are gaps too. A parser that
+# recognised only the prefixed form would silently drop two thirds of the
+# corpus, which is the same class of defect this verb exists to close, so EVERY
+# file yields at least one entry -- the verify counts the files on disk at run
+# time and asserts exactly that.
+#
+# A `feature:` frontmatter key is read as of 2026-09-04, and it is the one part
+# of this format that was declared rather than measured. See `gap_frontmatter`
+# for why the file name could not carry that job alone, and
+# `known_gap_entries` for the precedence order it sits at the top of.
 
 # `YYYY-MM-DD`, then an optional `US-NNN`, then an optional slug:
 # 2026-07-26-US-001.md, 2026-08-04-US-006-roadmap-amend-no-git-trace.md and
@@ -4591,6 +4637,66 @@ def tasks_feature_index(aimi_dir):
     return {date: features.pop() for date, features in seen.items() if len(features) == 1}
 
 
+# One frontmatter line. Deliberately not a YAML parser: the block this reads
+# holds scalar keys and nothing else, and pulling in a dependency to read three
+# lines would make a verb that must never fail depend on one being installed.
+_GAP_FRONTMATTER_LINE = re.compile(
+    r"^(?P<key>[A-Za-z][A-Za-z0-9_-]*)\s*:\s*(?P<value>.*)$"
+)
+
+
+def gap_frontmatter(body):
+    """(declared keys, the body below the block) for a leading `---` fence.
+
+    THIS IS THE ONE PART OF THE FORMAT THAT WAS DECLARED RATHER THAN MEASURED,
+    and the reason is that the file NAME cannot carry it. Deriving the feature
+    from `<date>-US-NNN-<slug>.md` reads the slug as a feature, and the slug is
+    where an author puts a description: `--feature pipeline-audit` returned 10
+    entries of 95 at the close of phase 2 and 10 of 118 when this was written
+    on 2026-09-04, because the files that mattered were named `...-phase2.md`,
+    `...-golden-compara-stderr.md`, `...-worktree-nasceu-de-main.md`. None of
+    those is a feature. The corpus grows, so take the number again rather than
+    quoting either of these; what does not change is the 10.
+
+    A stricter naming rule cannot fix it either -- that name admits exactly ONE
+    file per story, date and feature, and the corpus already holds two US-004
+    files written on the same day. Renaming them to carry the feature collides
+    and loses one. So the feature is declared inside the file, where two files
+    may declare the same one.
+
+    The match is deliberately narrow. The block must open on the VERY FIRST
+    line, close on a later `---`, and every line between the two must be blank
+    or `key: value`. Anything else is returned untouched as body: a gap file is
+    the only copy of the record it holds, and mis-reading prose as metadata
+    would delete evidence to gain a guess. An unterminated fence is prose too.
+
+    A `KNOWN-GAP` line inside the fence disqualifies the whole block for the
+    same reason, and it needs its own clause because `KNOWN-GAP: text` IS a
+    `key: value` pair by the shape rule above. It is the one pair that can
+    never be metadata: consuming it would drop the record itself.
+    """
+    lines = body.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}, body
+    fields = {}
+    for position in range(1, len(lines)):
+        line = lines[position]
+        if line.strip() == "---":
+            return fields, "\n".join(lines[position + 1:])
+        if not line.strip():
+            continue
+        if _GAP_PREFIX.match(line):
+            return {}, body
+        matched = _GAP_FRONTMATTER_LINE.match(line)
+        if not matched:
+            return {}, body
+        value = matched.group("value").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1].strip()
+        fields[matched.group("key")] = value
+    return {}, body
+
+
 def gap_blocks(body):
     """One file's body cut into (storyId-or-None, text) entries.
 
@@ -4636,10 +4742,20 @@ def gap_blocks(body):
 def known_gap_entries(aimi_dir, feature=None, since=None):
     """Every gap in .aimi/known-gaps/, oldest file first.
 
-    `feature` comes from the file name's own slug when it has one and from the
-    tasks file planned on the same date when it does not. A file that resolves
-    to neither enters the result with a NULL feature rather than being
-    discarded -- discarding it would repeat the defect this verb exists to fix.
+    `feature` resolves in three steps, and the order is the whole point:
+
+    1. The file's own `feature:` frontmatter key. A gap that DECLARES its
+       feature is believed over anything derived, even when the two disagree --
+       a name is a guess and a declaration is not.
+    2. The file name's own slug. THIS IS NOT DEPRECATED: 49 of the files on
+       disk carry no frontmatter, none of them will retroactively gain one, and
+       a fallback that stopped answering for them would drop the corpus this
+       verb was built to stop dropping.
+    3. The tasks file planned on the same date.
+
+    A file that resolves to none of the three enters the result with a NULL
+    feature rather than being discarded -- discarding it would repeat the
+    defect this verb exists to fix, and step 1 does not revoke that rule.
 
     Both filters are exact. `--since` drops an entry whose date is null: an
     entry with no date cannot answer "on or after", and inventing an answer for
@@ -4657,7 +4773,22 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
         matched = _GAP_FILENAME.match(name)
         date = matched.group("date") if matched else None
         file_story = matched.group("story") if matched else None
-        entry_feature = matched.group("slug") if matched else None
+        full = os.path.join(gaps_dir, name)
+        try:
+            with open(full, "r", encoding="utf-8") as handle:
+                body = handle.read()
+        except OSError:
+            body = ""
+        # The read moved ABOVE the feature resolution when frontmatter became
+        # the first source: the declaration lives in the file, so the file has
+        # to be open before the question can be answered. The body handed to
+        # gap_blocks is what remains BELOW the fence -- a frontmatter block left
+        # in place would surface as a preamble entry of its own, which is the
+        # bare-prose rule doing exactly the right thing to the wrong input.
+        declared, body = gap_frontmatter(body)
+        entry_feature = declared.get("feature") or None
+        if entry_feature is None:
+            entry_feature = matched.group("slug") if matched else None
         if entry_feature is None and date is not None:
             if index is None:
                 # Built at most once per run, and only when some file actually
@@ -4665,12 +4796,6 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
                 # is a corpus whose names already carry their slug.
                 index = tasks_feature_index(aimi_dir)
             entry_feature = index.get(date)
-        full = os.path.join(gaps_dir, name)
-        try:
-            with open(full, "r", encoding="utf-8") as handle:
-                body = handle.read()
-        except OSError:
-            body = ""
         for story, text in gap_blocks(body):
             entries.append(
                 {

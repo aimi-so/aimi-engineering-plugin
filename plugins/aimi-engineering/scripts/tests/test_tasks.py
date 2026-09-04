@@ -3496,10 +3496,15 @@ def test_verification_report_url_matches_story_01s_object_fixtures():
     with_url = json.loads(_CB_CASES["site-023"]["verification-object-with-url"]["input"])
     no_url = json.loads(_CB_CASES["site-023"]["verification-object-no-url"]["input"])
     assert T.verification_report(with_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": "http://localhost:4000/y"}
+        {
+            "id": "US-001",
+            "project": None,
+            "url": "http://localhost:4000/y",
+            "status": "pending",
+        }
     ]
     assert T.verification_report(no_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": ""}
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
     ]
 
 
@@ -3559,7 +3564,9 @@ def test_verification_report_closes_the_array_valued_project_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_closes_the_non_string_url_hazard():
@@ -3582,7 +3589,9 @@ def test_verification_report_closes_the_non_string_url_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_passes_a_string_project_through_unchanged():
@@ -3599,7 +3608,14 @@ def test_verification_report_passes_a_string_project_through_unchanged():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": "apps/web", "url": "http://x/y"}]
+    assert report["visual"] == [
+        {
+            "id": "US-001",
+            "project": "apps/web",
+            "url": "http://x/y",
+            "status": "pending",
+        }
+    ]
 
 
 def test_verification_report_ignores_a_well_formed_non_visual_object():
@@ -3612,7 +3628,119 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         ]
     }
     report = T.verification_report(doc)
-    assert report == {"visual": [], "malformed": {"repairable": [], "unrepairable": []}}
+    assert report == {
+        "visual": [],
+        # non-visual, but its verification WAS declared and nobody looked at
+        # it -- the pending partition is scoped by status, never by strategy.
+        "pending": ["US-001"],
+        "malformed": {"repairable": [], "unrepairable": []},
+    }
+
+
+def test_pending_names_every_declared_status_whatever_the_strategy():
+    """The partition is scoped by `.verification.status`, not by strategy: a
+    test story and a visual story left at "pending" both enter, in document
+    order, and a story someone HAS judged -- passed, failed, skipped -- does
+    not. There is no recorded jq site to replay this against; no command-layer
+    program ever asked this question, which is why the completed gate had
+    nothing to read."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": "pending"}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "passed"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": "failed"}},
+            {"id": "US-005", "verification": {"strategy": "test", "status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-001", "US-002"]
+
+
+def test_pending_excludes_a_story_that_declared_no_verification_at_all():
+    """The boundary the partition exists inside: absent and null verifications
+    are NOT pending. They are the shape every legacy phase is made of -- the
+    stories written before the field existed -- and counting them would fail
+    each of those phases at its completed gate for a verification nobody ever
+    promised. Only the object branch is reached; `_status_defaulted`'s
+    `//= "pending"` is about a STORY's own status and has no counterpart here.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001"},
+            {"id": "US-002", "verification": None},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "pending"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-003"]
+
+
+def test_pending_matches_the_literal_and_never_a_near_miss():
+    """`jq_equal(status, "pending")` -- the same total-order comparison the
+    strategy test uses, so a boolean, a number or an array named where a
+    status belongs is not "pending" by Python's own looser rules either. The
+    malformed partition never sees these: the verification itself is a
+    well-formed object, only its `status` is not a string."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "Pending"}},
+            {"id": "US-002", "verification": {"strategy": "test", "status": ["pending"]}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": True}},
+            {"id": "US-004", "verification": {"strategy": "test", "status": ""}},
+            {"id": "US-005", "verification": {"strategy": "test"}},
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["pending"] == []
+    assert report["malformed"] == {"repairable": [], "unrepairable": []}
+
+
+def test_a_visual_entrys_status_reports_what_was_declared_and_collapses_the_rest():
+    """The field a caller wanting "did the visual check pass?" used to reopen
+    the file for. A string passes through (`passed` here, and the empty string
+    survives as itself); every other shape -- absent, null, an array --
+    collapses to `None`, the same divergence `_report_project` makes, so no
+    entry can claim a status the `pending` list refuses to count."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "visual", "status": "passed"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": ""}},
+            {"id": "US-003", "verification": {"strategy": "visual"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": None}},
+            {"id": "US-005", "verification": {"strategy": "visual", "status": ["a"]}},
+        ]
+    }
+    assert [entry["status"] for entry in T.verification_report(doc)["visual"]] == [
+        "passed",
+        "",
+        None,
+        None,
+        None,
+    ]
+
+
+@pytest.mark.parametrize("fixture", _CB_FIXTURES)
+def test_pending_stays_inside_the_object_branch_across_story_01s_corpus(fixture):
+    """The two new partitions read against every fixture story 01 recorded,
+    rather than against hand-written documents alone: whatever a fixture
+    holds, a `pending` id always belongs to a story whose verification is an
+    OBJECT carrying the literal, and never to one of the malformed ids the
+    same run reports. Nothing here regenerates a recording -- the corpus is
+    read for its INPUTS, and the verdict is this verb's own."""
+    if fixture == "malformed-document":
+        pytest.skip("unparseable JSON -- read_docs' refusal, not this verb's")
+    doc = json.loads(_CB_CASES["site-001"][fixture]["input"])
+    if fixture == "userstories-absent":
+        with pytest.raises(T.MalformedTasks):
+            T.verification_report(doc)
+        return
+    report = T.verification_report(doc)
+    by_id = {story.get("id"): story for story in doc["userStories"]}
+    for story_id in report["pending"]:
+        verification = by_id[story_id]["verification"]
+        assert isinstance(verification, dict)
+        assert verification.get("status") == "pending"
+    malformed = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
+    assert malformed.isdisjoint(report["pending"])
 
 
 # ---------------------------------------------------------------------------
@@ -4699,9 +4827,136 @@ def test_the_parenthetical_story_id_wins_over_the_file_name(tmp_path):
     assert [entry["storyId"] for entry in entries] == ["US-001", "US-002", "US-001"]
 
 
+def test_a_declared_feature_beats_the_slug_the_name_would_have_guessed(tmp_path):
+    """The measurement this rule exists for: at the close of phase 2,
+    `--feature pipeline-audit` returned 10 of 95 entries, because the files
+    that mattered were named `...-phase2.md`, `...-golden-compara-stderr.md`
+    and `...-worktree-nasceu-de-main.md`. Every one of those slugs is a
+    DESCRIPTION of the gap sitting where the name had room for one, and no
+    reader can tell the two apart from the name alone.
+
+    The two sources are made to CONTRADICT here rather than merely to coexist:
+    a file named `...-slug-errado.md` declaring `feature: pipeline-audit` must
+    answer the declaration. A test where they agree passes against the old
+    derivation too and would prove nothing."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-002-slug-errado.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: o executor nao commitou.\n"
+            )
+        },
+    )
+    assert [entry["feature"] for entry in entries] == ["pipeline-audit"]
+    # The fence is metadata, not prose: left in the body it would surface as a
+    # preamble entry of its own -- the bare-prose rule doing exactly the right
+    # thing to the wrong input -- and the gap would arrive with a sibling that
+    # says `---`.
+    assert [entry["text"] for entry in entries] == ["o executor nao commitou."]
+
+
+def test_the_declaration_is_what_scopes_the_filter_two_files_one_day_one_story(
+    tmp_path,
+):
+    """Why this is frontmatter and not a stricter naming rule.
+    `<date>-US-NNN-<feature>.md` admits ONE file per story, date and feature,
+    and the corpus already holds two US-004 files written on the same day.
+    Renaming both to carry the feature collides and loses one; declaring it
+    inside them lets both say `pipeline-audit` and both be returned."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-004-verify-testou-exit-code.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: exit code nao carrega o deny.\n"
+            ),
+            "2026-09-04-US-004-golden-compara-stderr.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: o golden compara stderr.\n"
+            ),
+        },
+        flags=("--feature", "pipeline-audit"),
+    )
+    assert len(entries) == 2
+    assert {entry["file"] for entry in entries} == {
+        "2026-09-04-US-004-verify-testou-exit-code.md",
+        "2026-09-04-US-004-golden-compara-stderr.md",
+    }
+
+
+def test_only_a_well_formed_leading_fence_is_metadata_and_the_rest_is_evidence(
+    tmp_path,
+):
+    """A gap file is the only copy of the record it holds, so the fence match
+    is narrow on purpose: three near-misses stay prose and keep every byte.
+
+    An unterminated fence, a fence that does not open on the very first line,
+    and a block carrying a line that is not `key: value` are all bodies that
+    merely begin with a horizontal rule. Each keeps the slug the name gives it
+    -- the fallback, still answering."""
+    gaps = {
+        "2026-09-04-US-001-sem-fecho.md": "---\nfeature: declarada\nKNOWN-GAP: a.\n",
+        "2026-09-04-US-002-nao-na-primeira-linha.md": (
+            "preambulo\n---\nfeature: declarada\n---\nKNOWN-GAP: b.\n"
+        ),
+        "2026-09-04-US-003-nao-e-par-chave-valor.md": (
+            "---\nfeature: declarada\numa frase solta\n---\nKNOWN-GAP: c.\n"
+        ),
+    }
+    entries = _gaps(tmp_path, gaps)
+    resolved = {entry["file"]: entry["feature"] for entry in entries}
+    assert resolved == {
+        "2026-09-04-US-001-sem-fecho.md": "sem-fecho",
+        "2026-09-04-US-002-nao-na-primeira-linha.md": "nao-na-primeira-linha",
+        "2026-09-04-US-003-nao-e-par-chave-valor.md": "nao-e-par-chave-valor",
+    }
+    assert "---" in "\n".join(entry["text"] for entry in entries)
+
+
+def test_a_known_gap_line_inside_the_fence_is_the_record_and_never_metadata(
+    tmp_path,
+):
+    """`KNOWN-GAP: text` IS a `key: value` pair by the shape rule, so it is the
+    one pair that needs a clause of its own: consumed as metadata it would take
+    the record with it and leave a file whose gap had vanished. The whole block
+    is disqualified instead, and the slug answers -- losing a declaration is
+    recoverable, losing the gap is not."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-007-fence-com-gap.md": (
+                "---\nfeature: pipeline-audit\nKNOWN-GAP: o registro em si.\n---\ndepois\n"
+            )
+        },
+    )
+    assert any("o registro em si." in entry["text"] for entry in entries)
+    assert [entry["feature"] for entry in entries] == ["fence-com-gap"] * len(entries)
+
+
+def test_a_frontmatter_naming_no_feature_falls_through_to_null_not_to_a_drop(
+    tmp_path,
+):
+    """Two files whose only difference is whether the fence carries the key.
+    Neither has a slug and neither has a tasks file to resolve a date against,
+    so both land on the SAME null -- the rule phase 1 wrote, which declaring a
+    feature elsewhere in the block does not revoke. The fence is still stripped
+    from the body in both, because it is metadata whatever keys it holds."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-005.md": "---\nautor: quem escreveu\n---\nKNOWN-GAP: a.\n",
+            "2026-09-04-US-006.md": "KNOWN-GAP: b.\n",
+        },
+    )
+    assert [entry["feature"] for entry in entries] == [None, None]
+    assert [entry["text"] for entry in entries] == ["a.", "b."]
+
+
 def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path):
     """Both real slug shapes: one with a story id before it, one with no story
-    id at all. The second resolves storyId to null and is still an entry."""
+    id at all. The second resolves storyId to null and is still an entry.
+
+    This is the FALLBACK and it is not deprecated: 49 files on disk carry no
+    frontmatter, none of them will retroactively gain one, and a fallback that
+    stopped answering for them would drop the corpus the verb exists to keep."""
     entries = _gaps(
         tmp_path,
         {

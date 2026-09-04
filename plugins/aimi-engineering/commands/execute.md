@@ -118,7 +118,7 @@ After each wave (and in Post-Loop safety cleanup), for each unique `project_root
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 cd [project_root]
 $WORKTREE_MGR list
 # For each worktree matching "[branchName]-US-*":
@@ -467,7 +467,7 @@ SPLIT_PLAN_EOF
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
 SPLIT_EXECUTION_MODE=$(jq -r '.metadata.execution // "inline"' \
@@ -605,7 +605,7 @@ SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 SPLIT_PLAN_EOF
 )
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 while IFS= read -r record; do
   [ -n "$record" ] || continue
   SPLIT_ROOT=$(printf '%s' "$record" | jq -r '.root')
@@ -1463,7 +1463,7 @@ An empty result (a phase, or an active split file, whose `userStories` array is 
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 cd "$AIMI_ROOT"
 BASE_BRANCH="[the value Step 0's Parse --base Override echoed, or empty when --base was absent]"
 
@@ -1617,7 +1617,7 @@ Then, for each plan line whose second field is `true`, delegate to **Bootstrap a
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 while IFS=$'\t' read -r GROUP_TOPLEVEL GROUP_HAS_VISUAL; do
   [ -n "$GROUP_TOPLEVEL" ] || continue
   [ "$GROUP_HAS_VISUAL" = "true" ] || continue
@@ -1761,7 +1761,7 @@ SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 SPLIT_PLAN_EOF
 )
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 while IFS= read -r member; do
   [ -n "$member" ] || continue
   SPLIT_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
@@ -1814,7 +1814,7 @@ Then iterate `$SPLIT_SERVER_PLAN` — one delegation per line, never one delegat
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 while IFS=$'\t' read -r EXEC_ROOT EXEC_BRANCH GROUP_HAS_VISUAL; do
   [ -n "$EXEC_ROOT" ] || continue
   [ "$GROUP_HAS_VISUAL" = "true" ] || continue
@@ -1920,7 +1920,7 @@ One `merge-all` call **per participating repository** — never one call listing
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
@@ -1990,7 +1990,7 @@ This is the same `merge-all ... --into` primitive Step 4's own wave loop already
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
@@ -2103,7 +2103,7 @@ Only reached once **every** repository's `merge-all` call above has succeeded. I
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 SPLIT_PLAN=$(cat <<'SPLIT_PLAN_EOF'
 [paste Derive and Validate Split Branch Names' printed SPLIT_PLAN here, verbatim — one JSON record per line]
 SPLIT_PLAN_EOF
@@ -2192,6 +2192,34 @@ Container for [branchName] ready — branched from [CONTAINER_BASE] ([CONTAINER_
 ```
 
 Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
+
+#### Plan Base Freshness (advisory)
+
+`metadata.baseRef` is the 40-character SHA `/aimi:plan` recorded for the commit this file's stories were planned against (see `commands/plan.md`'s metadata contract, which writes it per file and states plainly that comparing it against the branch an executor actually starts from belongs to whoever consumes it). Nothing ever has. This is that consumer.
+
+The question it answers is whether the tree moved between planning and execution, and the answer is an **advisory** in every case. A plan written against an older commit is ordinary — the branch it targeted simply advanced — so the useful thing is to say it once, here, where the reader can weigh it, and never to refuse a run over it.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PLAN_BASE_REF=$($AIMI_CLI metadata --tasks-file "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null | jq -r '.baseRef // empty')
+if [ -n "$PLAN_BASE_REF" ]; then
+  # git merge-base --is-ancestor <metadata.baseRef> <container base>: exit 0
+  # means the recorded plan base is reachable from the base this container was
+  # actually cut from — the plan is behind, but on the same line of history.
+  if git -C "$AIMI_ROOT" merge-base --is-ancestor "$PLAN_BASE_REF" "$CONTAINER_BASE" 2>/dev/null; then
+    echo "Plan base $PLAN_BASE_REF is reachable from $CONTAINER_BASE."
+  else
+    echo "advisory: the plan was written against $PLAN_BASE_REF, which is NOT reachable from this container's base $CONTAINER_BASE — plan and container stand on different trees. Stories may cite code that is not here, or miss code that is. Not a blocker."
+  fi
+fi
+```
+
+`$AIMI_CLI metadata --tasks-file` is a verb call rather than a raw open of the tasks file: the flag exists, and the verb returns the whole `metadata` object with `baseRef` among its keys. `// empty` is what keeps an absent key silent — the field is optional and every file planned before it existed has none, so a missing `baseRef` must print nothing at all rather than the word `null`.
+
+A `baseRef` this repository does not have — a plan made in a clone whose commits were never pushed, or a history since rewritten — exits non-zero exactly as a genuine divergence does, and lands in the same advisory line. The conflation is deliberate: to the reader both mean the one thing worth saying, which is that the recorded base is not on the path this run stands on.
+
+**In phase mode** the same check belongs once per participating group, inside **Create Phase Containers Per Project Group** above, with `--tasks-file "$PHASE_TASKS_PATH"` and `git -C "$GROUP_TOPLEVEL"` in place of `$AIMI_ROOT` — so each repository's plan base is compared against the base of the container that repository just got, never against a sibling's.
 
 ### Main Repo Branch Setup
 
@@ -2560,7 +2588,7 @@ command -v agent-browser
 
   ```bash
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
   if [ "$VISUAL_GROUP_KEY" = "DEFAULT" ]; then
     VISUAL_GROUP_ROOT="$AIMI_ROOT"
   else
@@ -2580,7 +2608,7 @@ command -v agent-browser
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
   WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
   BRANCH_NAME=$($AIMI_CLI metadata | jq -r '.branchName')
   if [ "[VISUAL_GROUP_KEY]" = "DEFAULT" ]; then
     cd "$AIMI_ROOT"
@@ -2616,6 +2644,30 @@ CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populate
 WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else (AIMI_ROOT + "/" + TASKS_PATH)
 
 while true:
+    # ========================================
+    # RE-POINT THE CLI — TOP OF THE WAVE, NEVER MID-WAVE
+    # ========================================
+    # Step 0 resolves $AIMI_CLI once, at the start of the run, and nothing in
+    # this loop has ever revisited it. A wave loop outlives that resolution:
+    # a `cleanup-versions` run in another session prunes the cache directory
+    # this run's path points into, and every later call answers "No such file
+    # or directory" through a path that was correct when it was written.
+    #
+    # The POSITION is the load-bearing part, not the call. The same --fix run
+    # between spawn and merge is what broke a mark-complete mid-wave: the
+    # cached path moved while N workers already held the old one, so the
+    # orchestrator wrote through a CLI its own workers had never seen. Here,
+    # between the last merge of wave N and the first spawn of wave N+1,
+    # nothing is in flight and a re-point can strand no one. Do not move this
+    # call further down for symmetry with anything.
+    #
+    # Every Bash call in this file re-reads $AIMI_CLI from the cache --fix
+    # rewrites (Step 0's Per-Call Resolution note), so the repointing reaches
+    # the next call on its own; nothing is reassigned here. Read `status` and
+    # not the exit code alone — `unknown` exits 0 and means no plugin is
+    # installed at all (see cli-path-resolution.md's Version Check table).
+    $AIMI_CLI check-version --quiet --fix
+
     # Check remaining work
     pending = $AIMI_CLI count-pending --tasks-file [WAVE_TASKS_FILE]
     if pending == 0: break
@@ -2761,12 +2813,72 @@ while true:
 
             # cd to this group's execution root (see Execution Context above)
             cd [worktree_cwd]
-            $WORKTREE_MGR create [worktree_name] --from [worktree_base]
+            create_output = $WORKTREE_MGR create [worktree_name] --from [worktree_base]
 
-            worktree_path = [path from output]
+            # ========================================
+            # READ BOTH CREATE SENTINELS — OR FAIL THE STORY HERE
+            # ========================================
+            # worktree-manager.sh's create emits two unprefixed lines on BOTH
+            # of its branches, fresh creation and silent reuse alike:
+            #     WORKTREE_PATH=<absolute path>
+            #     WORKTREE_BASE=<full 40-char sha of the new tree's own HEAD>
+            # Take the LAST occurrence of each: the fresh-creation branch
+            # prints a `cd <path>` hint after them, and everything else create
+            # writes is ANSI-coloured progress text carrying neither prefix.
+            # The sha is deliberately full-length — an abbreviated one is
+            # ambiguous exactly when two bases are close enough to confuse.
+            worktree_path = value of the last WORKTREE_PATH= line in create_output
+            worktree_base_sha = value of the last WORKTREE_BASE= line in create_output
+
+            # Either sentinel missing is a FAILURE OF THIS STORY, decided
+            # BEFORE the executor is spawned. There is no useful recovery
+            # after that point: by the time a wrong tree announces itself the
+            # work is already written onto it. The usual cause is a
+            # worktree-manager.sh predating the sentinels, which is a host
+            # problem and not this story's — say so and stop.
+            if worktree_path is absent or worktree_base_sha is absent:
+                $AIMI_CLI mark-failed [full_story.id] "Worktree create emitted no WORKTREE_PATH/WORKTREE_BASE sentinel" --tasks-file [WAVE_TASKS_FILE]
+                $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                Report: "[full_story.id] failed: create printed no WORKTREE_PATH/WORKTREE_BASE (worktree-manager.sh too old?). Dependent stories cascade-skipped."
+                drop full_story from full_stories, do not spawn it, continue with the next story
+
+            # ========================================
+            # THE TREE MUST STAND ON THE BASE WE ASKED FOR
+            # ========================================
+            # base_sha[group_key] is this group's EXEC_BRANCH HEAD, captured
+            # above before any worktree was cut — the base every story in this
+            # wave is meant to stand on. worktree_base_sha is what the tree
+            # ACTUALLY stands on. Divergence is a FAILURE, not a warning.
+            #
+            # Measured, in this repository's own phase 2: a story worktree cut
+            # from main instead of from its phase branch announced nothing at
+            # creation. It surfaced three levels downstream as a CLI verb
+            # answering "Unknown command", a pytest suite short by the phase's
+            # own new cases, and a golden file still holding the previous
+            # value — three symptoms pointing at three different places, none
+            # of them at the base. This comparison is what turns that into one
+            # line, before a single file is written.
+            #
+            # Equality is the fresh-creation case. The one other ACCEPTED
+            # shape is a reused worktree that already carries commits of its
+            # own: a story that committed and then failed keeps both worktree
+            # and branch (see the merge-conflict cleanup below), so a re-run
+            # legitimately finds a tree AHEAD of the base. Accept exactly that
+            # — base_sha[group_key] reachable from worktree_base_sha — and
+            # nothing else. A tree cut from a different branch fails this,
+            # which is the whole point; a strict equality test would instead
+            # fail every resumed run, and a check that cries wolf on the
+            # normal path is a check someone deletes.
+            if worktree_base_sha != base_sha[group_key] and not (git -C [worktree_path] merge-base --is-ancestor [base_sha[group_key]] [worktree_base_sha]):
+                $AIMI_CLI mark-failed [full_story.id] "Worktree base [worktree_base_sha] does not descend from [base_sha[group_key]]" --tasks-file [WAVE_TASKS_FILE]
+                $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                Report: "[full_story.id] failed: worktree stands on [worktree_base_sha], expected [EXEC_BRANCH[group_key]] at [base_sha[group_key]]. Dependent stories cascade-skipped."
+                drop full_story from full_stories, do not spawn it, continue with the next story
+
             all_worktrees[full_story.id] = {
                 worktree_name: worktree_name,
                 worktree_path: worktree_path,
+                worktree_base_sha: worktree_base_sha,
                 group_key: group_key
             }
 
@@ -2881,14 +2993,86 @@ while true:
         else:
             verified_stories.append(full_story)
 
-    # Move no-commit stories to failed
+    # ========================================
+    # COMMIT RESCUE — BEFORE mark-failed, AND ONLY ON THE SUBSET
+    # ========================================
+    # A story that reached here reported ok and left a dirty tree with no
+    # commit on it. That is a mechanics defect, not a bad story: the work
+    # exists and the only thing missing is the `git commit` the executor owed.
+    # Failing it discards a finished implementation and cascade-skips
+    # everything downstream of it, which is a far larger loss than the defect.
+    # This happened for real — a story in this very phase finished its work
+    # and returned without committing.
+    #
+    # THE SUBSET IS THE GUARD, and it is the only thing making this safe to do
+    # on someone else's behalf. `implementation.files` is what the planner said
+    # this story would touch. When every modified path is inside that list, the
+    # orchestrator knows exactly what it is committing and to which story it
+    # belongs. One path outside the list means the tree holds something nobody
+    # declared — a stray edit, a half-finished second concern, another story's
+    # leftovers — and the orchestrator has no basis to attribute it. That case
+    # takes the unchanged failure flow below; it is never rescued, never
+    # partially staged, and never trimmed down to the declared subset to make
+    # it fit.
+    rescued_stories = []
     for full_story in no_commit_stories:
+        wt = all_worktrees[full_story.id]
+        pre_rescue_head = git -C [wt.worktree_path] rev-parse HEAD
+
+        # 1. Is there anything to rescue? A clean tree means the executor wrote
+        #    nothing at all; the failure is real and stands.
+        dirty_paths = paths from `git -C [wt.worktree_path] status --porcelain`
+                      (both sides of a rename count as modified paths)
+        if dirty_paths is empty:
+            continue    # falls through to the failure flow below
+
+        # 2. The subset guard. `implementation.files` comes from the CLI, not
+        #    from a raw read of the tasks file — get-story-context is the same
+        #    verb the executor itself bootstraps with, so orchestrator and
+        #    worker read one document through one reader.
+        declared_files = $AIMI_CLI get-story-context [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                         → .story.implementation.files
+        # `implementation` is optional in schema v3.3. Absent or empty declares
+        # nothing, so nothing can be inside it — no list, no rescue. Do not
+        # read an absent list as "anything is allowed"; that inverts the guard.
+        if declared_files is absent or empty:
+            continue    # falls through to the failure flow below
+        if any path in dirty_paths is not in declared_files:
+            Report: "[full_story.id] not rescued — modified files outside implementation.files: [the offending paths]"
+            continue    # falls through to the failure flow below
+
+        # 3. Subset holds. Commit on the executor's behalf, staging the
+        #    modified declared paths BY NAME — never `-A`, never `.`, the same
+        #    rule the story executor itself follows.
+        cd [wt.worktree_path]
+        git add [each path in dirty_paths]
+        git commit -m "feat([full_story.id]): [full_story.title]" -m "Committed by the wave orchestrator: the executor finished the work and returned without committing it."
+
+        # 4. Trust the tree, not the exit code — a pre-commit hook can refuse
+        #    after `git commit` has already printed. If HEAD did not move, the
+        #    rescue did not happen and the story takes the failure flow.
+        rescued_head = git -C [wt.worktree_path] rev-parse HEAD
+        if rescued_head == pre_rescue_head:
+            Report: "[full_story.id] not rescued — the rescue commit did not land (hook refused?)"
+            continue    # falls through to the failure flow below
+
+        rescued_stories.append(full_story)
+        Report: "[full_story.id] rescued — executor left [len(dirty_paths)] modified file(s), all inside implementation.files; committed as [rescued_head]:"
+        Report: git -C [wt.worktree_path] show --stat --format= [rescued_head]
+
+    # Move the stories that were NOT rescued to failed
+    for full_story in no_commit_stories and not in rescued_stories:
         $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution" --tasks-file [WAVE_TASKS_FILE]
         $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
         Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
 
-    # Replace succeeded_stories with only verified ones (so merge-all skips no-commit stories)
-    succeeded_stories = verified_stories
+    # Replace succeeded_stories with the ones carrying a commit — verified by
+    # the worker itself, or rescued above. A rescued story is a SUCCESS from
+    # here on: it merges with the wave and reaches mark-complete like any
+    # other, because its work is on its branch exactly as if the executor had
+    # committed it. The rescue is reported so the human sees the diff someone
+    # else committed; it is not tracked as a separate story state.
+    succeeded_stories = verified_stories + rescued_stories
 
     # Handle failures first
     for full_story in failed_stories:
@@ -3040,7 +3224,7 @@ while true:
                             # deeper too.
                             ```bash
                             WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-                            : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                            : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
                             cd "$AIMI_ROOT"
                             STORY_TASKS_FILE="$PHASE_TASKS_PATH"
                             STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
@@ -3075,7 +3259,7 @@ while true:
                             else:
                                 ```bash
                                 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-                                : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+                                : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
                                 BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
                                 if [ "[group_key]" = "DEFAULT" ]; then
                                   cd "$AIMI_ROOT"
@@ -3518,7 +3702,14 @@ CV_EXIT_FAILURES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | select(.exi
 CV_EXIT_LINES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] | select(.exit != 0) | if $multi then "\(.group_key) (\(.dir)): verify-creates exited \(.exit) and produced no verdicts." else "verify-creates exited \(.exit) and produced no verdicts." end')
 ERROR_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "error")] | length')
 ERROR_CREATES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] as $r | ($r.verdicts[]? | select(.status == "error")) as $v | if $multi then "\($r.group_key): \($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" else "\($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" end')
-CV_RAW_MISSING_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "missing")] | length')
+# `unconfirmed` is counted here beside `missing` because both mean the same
+# thing to a reader: the artifact was not proven to exist. verify-creates
+# returns it for a documentation identity that resolved only through the text
+# search -- some tracked file writes the page's name, which is what a table of
+# contents does, and is not the page. Counting only `missing` here would let a
+# tooling-failed run report "0 further entries" while every doc identity in the
+# phase came back mention-only.
+CV_RAW_MISSING_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "missing" or .status == "unconfirmed")] | length')
 
 if [ "$CV_EXIT_FAILURES" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
   CV_BRANCH="tooling-failed"
@@ -3527,10 +3718,20 @@ else
   # it; missing only when EVERY repository reported it missing. This step
   # never runs on a set missing a repository's own verdicts — reached only
   # once every repository's own call is confirmed clean above.
-  CREATES_REPORT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s --argjson multi "$CV_MULTI" '(.[0].verdicts | map(.identity)) as $order | ([.[] as $r | $r.verdicts[] | {group_key: $r.group_key, identity, status, method, evidence, gitStatus}]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | ($grp | map(select(.status == "verified")) | sort_by(.group_key)) as $ver | if ($ver | length) > 0 then {identity: $id, status: "verified", method: $ver[0].method, evidence: $ver[0].evidence, gitStatus: $ver[0].gitStatus} else ($grp | sort_by(.group_key)) as $mis | (if $multi then ($mis | map("\(.group_key): \(.evidence)") | join("; ")) else $mis[0].evidence end) as $ev | {identity: $id, status: "missing", method: $mis[0].method, evidence: $ev, gitStatus: $mis[0].gitStatus} end ]')
+  CREATES_REPORT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s --argjson multi "$CV_MULTI" '(.[0].verdicts | map(.identity)) as $order | ([.[] as $r | $r.verdicts[] | {group_key: $r.group_key, identity, status, method, evidence, gitStatus}]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | ($grp | map(select(.status == "verified")) | sort_by(.group_key)) as $ver | ($grp | map(select(.status == "missing" or .status == "unconfirmed")) | sort_by(.group_key)) as $und | if ($ver | length) > 0 then {identity: $id, status: "verified", method: $ver[0].method, evidence: $ver[0].evidence, gitStatus: $ver[0].gitStatus} else (if ($und | length) > 0 then $und else ($grp | sort_by(.group_key)) end) as $mis | (if $multi then ($mis | map("\(.group_key): \(.evidence)") | join("; ")) else $mis[0].evidence end) as $ev | {identity: $id, status: "missing", method: $mis[0].method, evidence: $ev, gitStatus: $mis[0].gitStatus} end ]')
   VERIFIED_ARTIFACTS=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "verified") | "\(.identity) — \(.evidence)"')
   MISSING_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "missing") | "\(.identity) — \(.evidence)"')
   MISSING_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "missing")] | length')
+  # Which of those undelivered identities are undelivered because they were
+  # found ONLY as a mention. Derived from the RAW per-repository verdicts, not
+  # from CREATES_REPORT: the union deliberately collapses `unconfirmed` into
+  # `missing` so one branch handles both, and this is the one place that still
+  # needs to tell them apart -- for the report, never for the branch decision.
+  # An identity qualifies when no repository verified it and at least one
+  # reported it `unconfirmed`; an identity every repository reported `missing`
+  # does not, and neither does one some other repository verified.
+  MENTION_ONLY_CREATES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r '(.[0].verdicts | map(.identity)) as $order | ([.[] | .verdicts[]?]) as $flat | $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | select(($grp | map(.status) | index("verified")) == null) | select(($grp | map(.status) | index("unconfirmed")) != null) | $id')
+  MENTION_ONLY_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '(.[0].verdicts | map(.identity)) as $order | ([.[] | .verdicts[]?]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | select(($grp | map(.status) | index("verified")) == null) | select(($grp | map(.status) | index("unconfirmed")) != null) ] | length')
   if [ "$MISSING_COUNT" -gt 0 ]; then
     CV_BRANCH="missing"
   else
@@ -3538,13 +3739,15 @@ else
   fi
 fi
 
-printf 'creates-verification: branch=%s repos=%s exit_failures=%s error_count=%s missing_count=%s\n' \
-  "$CV_BRANCH" "$CV_REPO_COUNT" "$CV_EXIT_FAILURES" "$ERROR_COUNT" "${MISSING_COUNT:-0}"
-printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling exit failures ---\n%s\n--- tooling errors ---\n%s\n' \
-  "${VERIFIED_ARTIFACTS:-}" "${MISSING_CREATES:-}" "$CV_EXIT_LINES" "$ERROR_CREATES"
+printf 'creates-verification: branch=%s repos=%s exit_failures=%s error_count=%s missing_count=%s mention_only_count=%s\n' \
+  "$CV_BRANCH" "$CV_REPO_COUNT" "$CV_EXIT_FAILURES" "$ERROR_COUNT" "${MISSING_COUNT:-0}" "${MENTION_ONLY_COUNT:-0}"
+printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- mention only ---\n%s\n--- tooling exit failures ---\n%s\n--- tooling errors ---\n%s\n' \
+  "${VERIFIED_ARTIFACTS:-}" "${MISSING_CREATES:-}" "${MENTION_ONLY_CREATES:-}" "$CV_EXIT_LINES" "$ERROR_CREATES"
 ```
 
 Every value is still derived with a `jq` select on `.status` — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape) — now in two passes: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own **raw**, pre-union verdicts (so a tool failure is visible before any union is attempted), and `CREATES_REPORT`/`VERIFIED_ARTIFACTS`/`MISSING_CREATES`/`MISSING_COUNT` are computed from the **unioned** per-identity array, reached only once every repository's own call is confirmed clean. Each unioned verdict object keeps the existing shape, `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` (never `error` — an error anywhere already routed the phase to Verification tooling failed before this point), `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it, or, on a `missing`, what was found and rejected.
+
+**`verify-creates` returns a third verdict, `unconfirmed`, and this section treats it as NOT DELIVERED — the same branch as `missing`, on purpose.** It is what a documentation identity gets when it resolved only through the text search: some tracked file writes the string `docs/api.md`, which is what a table of contents does, and is not the page. Only that identity's own tracked path verifies it (`${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md` § What verification looks for). The union names it beside `missing` in its own `$und` binding rather than leaving it to the `else` that used to catch every non-`verified` status unnamed: a verdict handled only by a catch-all is a verdict nobody can see is handled, and this file's own vocabulary sentence claimed for three releases that `missing` was the only undelivered status there was. Its **evidence is carried through unchanged**, so the report says the artifact was found only by mention rather than not found at all — the whole difference between "nobody wrote this page" and "three files link to a page nobody wrote". The unioned `status` still reads `missing`, which is what keeps `MISSING_COUNT`, `MISSING_CREATES` and the branch decision below identical to what they were: one undelivered branch, not two. `MENTION_ONLY_CREATES`/`MENTION_ONLY_COUNT` are the one place that still tells the two apart, computed from the raw per-repository verdicts and used only by the report.
 
 `VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the winning repository's own `evidence` string as the location — never tagged with that repository's `group_key`, and never a concatenation of every repository that verified it: when more than one repository verifies the same identity, the location is the evidence from the first repository, in sorted `group_key` order, that verified it. Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `roadmap.py`'s `handoff_lists_artifact` substring-matches to resolve a downstream phase's `needs`.
 
@@ -3555,7 +3758,7 @@ Every value is still derived with a `jq` select on `.status` — jq is the loop,
 Read the `creates-verification:` line the Procedure block printed above.
 
 - `branch=tooling-failed` → **Verification tooling failed** below. No status transition. This fires when `CV_EXIT_FAILURES > 0` (at least one repository's own `verify-creates` call never ran) or `ERROR_COUNT > 0` (git broke while checking at least one identity in at least one repository) — decided before `MISSING_COUNT` is ever computed, so a single repository's tooling failure can never be silently read as that repository contributing zero verified identities to the union.
-- `branch=missing` → **On any missing entry** below. `verification_failed`.
+- `branch=missing` → **On any missing entry** below. `verification_failed`. An `unconfirmed` verdict routes here too, and is counted in `MISSING_COUNT` like any other undelivered entry — see the paragraph above for why the union collapses the two into one branch and where the distinction survives (`mention_only_count` on the same printed line, and the `--- mention only ---` block beneath it).
 - `branch=ok` → **Write Handoff**.
 
 Error entries are never part of `CREATES_REPORT`: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own raw verdicts, before the union step runs, and the union itself is reached only once `CV_EXIT_FAILURES` and `ERROR_COUNT` are both confirmed zero across every participating repository — so a tool failure in one repository can never be counted or reported as an undelivered artifact, and no repository's data is ever silently dropped from the union because a sibling repository's call failed.
@@ -3640,6 +3843,21 @@ line that was found and rejected. "Found and rejected ... documentation or test
 path" means the name exists only in prose or in a test — a mention of the work,
 not the work. "Found and rejected ... TODO/FIXME marker comment" means the code
 says the work is still owed.
+
+[if MENTION_ONLY_COUNT > 0:]
+[MENTION_ONLY_COUNT] of those entr(y|ies) came back as a MENTION, not as an
+absence — the name is written somewhere in tracked source, but the artifact
+it names was never found:
+
+[for each line of MENTION_ONLY_CREATES:]
+  - [line]
+
+For a documentation identity, a text hit is a link to the page, not the page.
+Confirm one of these by committing the file its identity names — the tracked
+path is the only thing that verifies it. If the identity is not documentation,
+it is named wrongly in `creates[]`: fix the entry with
+`$AIMI_CLI roadmap-amend-phase --feature [FEATURE] --phase [PHASE_ID]` rather
+than writing a file to satisfy the check.
 
 git ls-files and git grep see tracked (committed) files only, in every
 participating repository, so work that is written but committed nowhere in
@@ -3751,7 +3969,7 @@ PHASE_GROUP_COUNT=$(printf '%s\n' "$PHASE_GROUP_PROJECTS" | grep -c .)
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 PHASE_REPORT_LINES=""
 while IFS= read -r GROUP_PROJECT; do
   [ -n "$GROUP_PROJECT" ] || continue
@@ -4129,6 +4347,28 @@ Parse gate summary from status output:
 - `pending_verify_gates`: count of stories with gate.type == "verify" and gate.status == "pending"
 - `pending_decision_gates`: count of stories with gate.type == "decision" and gate.status == "pending"
 
+A gate is not the only thing that can still be open at this point. A story whose `verification.status` is still the literal `pending` declared a check nobody has judged — it is neither passed nor failed, and until this section it left no trace in the report at all, so a phase could close in silence with every one of its verifications unlooked-at. `verification-report`'s `pending` partition answers that from the same one read the malformed scan uses (see Step 0.7), scoped to the object branch so a story that never declared a verification never enters — the partition counts what was declared and not looked at, never what was never declared:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ "${PHASE_MODE:-false}" = true ]; then
+  COMPLETION_VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$PHASE_TASKS_PATH" 2>/dev/null)
+else
+  COMPLETION_VERIF_REPORT=$($AIMI_CLI verification-report 2>/dev/null)
+fi
+# `.pending // []` is deliberate, not defensive habit: a CLI predating this
+# partition answers {visual, malformed} with no `pending` key at all, and a
+# bare `.pending | length` would abort the whole completion report over a
+# section that is meant to be additive. An older CLI reports zero pending
+# verifications, which is exactly what it knew.
+PENDING_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.pending // [] | length' 2>/dev/null)
+PENDING_VERIF_IDS=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.pending // [] | join(", ")' 2>/dev/null)
+printf 'pending-verification: count=%s ids=%s\n' "${PENDING_VERIF_COUNT:-0}" "${PENDING_VERIF_IDS:-}"
+```
+
+In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
+
 ```
 ## Execution Complete
 
@@ -4160,6 +4400,22 @@ if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
 fi
 ```
 
+If `PENDING_VERIF_COUNT` > 0, append:
+```
+## Pending Verification
+
+[PENDING_VERIF_COUNT] stor(y|ies) declared a verification that has not been
+judged — not passed, not failed, still `pending`:
+
+  [PENDING_VERIF_IDS]
+
+These stories are complete as work and open as verification. Nothing here
+blocks the branch or the PR; it is named because the alternative is a phase
+that closes with its checks unlooked-at and says nothing about it.
+```
+
+If `PENDING_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `pending` partition reads as zero), omit the `## Pending Verification` section entirely.
+
 If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
 ```
 ## Design Review
@@ -4172,6 +4428,34 @@ For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
 ```
 
 If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
+
+**Persist that section, then name the file it was written to.** Until this step the design reviews existed only in the transcript: the reviewer agent ran per story in Step 4, its output was buffered, printed once here, and lost with the session — so a review nobody read in the hour it was printed was a review nobody could read at all. `write-review` writes it to `.aimi/reviews/<feature>-phase-<N>.md` under the same `mktemp`-then-`mv` discipline every other document writer in this CLI uses, and returns `{review: "<path>"}`. Run this when `DESIGN_REVIEW_BUFFERS` is non-empty **and** `PHASE_MODE=true` and `$PHASE_ID` is set — the verb takes a feature and a phase, and those are the only two values that name the file. Compose the whole section body first (every `### [story_id]: [entry.title]` block and its `[entry.output]`, in insertion order, exactly as printed above) and pipe it in one call: the path is derived from feature and phase alone, so one call per story would have every story overwrite the last and leave only the final review on disk.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+DESIGN_REVIEW_BODY=$(cat <<'DESIGN_REVIEW_EOF'
+[paste the composed ## Design Review section body here, verbatim — every
+### [story_id]: [entry.title] heading and its [entry.output], insertion order]
+DESIGN_REVIEW_EOF
+)
+DESIGN_REVIEW_JSON=$(printf '%s\n' "$DESIGN_REVIEW_BODY" | $AIMI_CLI write-review --feature "$FEATURE" --phase "$PHASE_ID") || DESIGN_REVIEW_JSON=""
+DESIGN_REVIEW_PATH=$(printf '%s' "$DESIGN_REVIEW_JSON" | jq -r '.review // empty' 2>/dev/null)
+printf 'design-review: %s\n' "${DESIGN_REVIEW_PATH:-<not written>}"
+```
+
+The heredoc delimiter is quoted, so review prose carrying `$`, backticks or `$(` reaches the verb as the bytes the reviewer wrote rather than as something this shell tries to expand. `|| DESIGN_REVIEW_JSON=""` is what keeps a refusal advisory: `write-review` refuses an empty stdin at exit 1 rather than leaving a zero-byte file that reads on disk exactly like a review that was never written, and a completion report is not the place to abort over a document that was already printed in full two paragraphs above.
+
+When `DESIGN_REVIEW_PATH` is non-empty, append the path to the `## Design Review` section as its last line, so the reader is told where the section they just read now lives:
+```
+
+Written to: [DESIGN_REVIEW_PATH]
+```
+
+When the write did not happen, say which of the two reasons applies rather than printing nothing:
+
+- **`PHASE_MODE=false`** (flat execution, no roadmap and so no `FEATURE`/`PHASE_ID` pair): append `Not written to disk — flat execution has no feature/phase pair to name a review file.` The verb is not called at all here; inventing a phase id to satisfy it would put a review under a phase that does not exist.
+- **The call ran and returned nothing** (`DESIGN_REVIEW_PATH` empty at exit): append `Not written to disk — write-review returned no path; the review above is the only copy.` Say it plainly; a reader who believes a file was written and finds none is worse off than one who was told the transcript is it.
 
 If `CONSOLE_BUFFER` is non-empty, append:
 ```

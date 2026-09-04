@@ -378,5 +378,27 @@ if echo "$COMMAND" | grep -qE '^: "\$\{WORKTREE_MGR:\?WORKTREE_MGR is empty — 
   exit 0
 fi
 
+# --- Pattern 14b: WORKTREE_MGR fail-loud guard, existence-checking form ---
+# Approves the guard line commands/ emits today: Pattern 14's `:?` guard, then
+# an existence test on the same variable.
+#
+#   : "${WORKTREE_MGR:?…}"; [ -x "$WORKTREE_MGR" ] || { echo "…" >&2; exit 1; }
+#
+# The second half is not decoration. `:?` fires only on an EMPTY variable, and
+# the failure it was written for is a NON-empty one naming a version directory
+# that has since been pruned -- $WORKTREE_MGR reads fine, the guard passes, and
+# the run continues against a path to nothing. Pattern 14 stays above for the
+# older single-statement spelling that older installs still carry.
+#
+# Kept as a full anchored literal for the same reason Pattern 13 states, and
+# for a second one: this shape is a valid prefix followed by a chained command,
+# which is exactly what test_adversarial_lines_are_refused' "valid-prefix-with-
+# a-chained-command" case checks. Anchoring both ends is what keeps a real
+# `; rm -rf /` after the same prefix refused.
+if echo "$COMMAND" | grep -qE '^: "\$\{WORKTREE_MGR:\?WORKTREE_MGR is empty — re-resolve via cat ~/\.config/aimi/worktree-path in this Bash call\}"; \[ -x "\$WORKTREE_MGR" \] \|\| \{ echo "WORKTREE_MGR is stale: \$WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; \}$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
 # --- Everything else — normal permission prompt ---
 exit 0

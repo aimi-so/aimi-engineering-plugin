@@ -75,6 +75,12 @@ source_cache_functions() {
   eval "$(sed -n '/^read_global_cli_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_worktree_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^read_global_worktree_cache()/,/^}/p' "$CLI")"
+  # cmd_prime_cache calls these two, so they have to be eval'd BEFORE it or a
+  # sourced prime-cache test gets "command not found" on stderr and a cache
+  # file that was never written -- the exact failure this helper's own header
+  # warns about.
+  eval "$(sed -n '/^_worktree_manager_beside()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_persist_worktree_pointer_for()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^cmd_prime_cache()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_aimi_models_config_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_aimi_models_prompt_marker_path()/,/^}/p' "$CLI")"

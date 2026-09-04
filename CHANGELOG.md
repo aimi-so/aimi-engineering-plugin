@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.127.0] - 2026-09-04
+
+Phase 3 of the pipeline audit: an executor no longer works against the wrong
+tree, finished work no longer becomes a failure for want of a commit, a phase no
+longer closes with a verification nobody judged, and the static analysis reaches
+the files it had never scanned.
+
+### Added
+
+- **A `pending` partition in `verification-report`** — the ids of every story
+  whose `verification.status` is the literal `pending`. It counts the literal and
+  nothing else: a story carrying no `verification` object at all is absent rather
+  than counted, because "declared and unlooked-at" and "never declared" are
+  different states and a gate conflating them would refuse every legacy phase.
+  Each `.visual[]` entry now carries its own `status` as well.
+- **A refusal in `roadmap-set-status --status completed`** when that partition is
+  non-empty, naming each story, and a second when a `verify-coverage` smell
+  carries no `acknowledged` beside it. The rule it applies is narrower than the
+  partition: only a story whose own `status` is `completed` can be asked for a
+  verdict, because a verification judges work that was done. That is what keeps a
+  cascade-skipped story — which the orchestrator produces automatically, leaving
+  its verification pending — from wedging a phase that legitimately closes.
+- **`WORKTREE_PATH=` and `WORKTREE_BASE=` sentinels** from `create_worktree`, on
+  both the fresh and the reuse branch, with every human-readable line unchanged.
+  The base is read from the worktree's own `HEAD` rather than from the `--from`
+  argument, so it reports what the tree actually stands on. `from_branch` no
+  longer defaults to the literal `main`.
+- **`write-review`** — a phase's design review written atomically to
+  `.aimi/reviews/<feature>-phase-<N>.md`, guard-protected like `handoff.md`, so
+  it survives the session that produced it.
+- **A writer for the worktree-manager pointer.** `write_global_worktree_cache`
+  had been defined, validated, and called by nothing; the file on disk existed
+  only because somebody wrote it by hand. It is now written by `check-version
+  --fix`, `cleanup-versions` and `prime-cache`, and the 24 sites that read it
+  check the path exists rather than only that the variable is non-empty — a
+  dangling path is exactly what made one `merge-all` exit 0 having merged
+  nothing.
+
+### Changed
+
+- **`verify-creates` anchors its textual search on word boundaries.** Without
+  `-w`, the identity `baseRef` matched inside `--arg baseRefName` in a forge
+  adapter and closed a phase on a field it had nothing to do with. A doc identity
+  now keeps the meta-document exclusions (`README*`, `CHANGELOG*`, `CLAUDE.md`,
+  `AGENTS.md`) instead of disabling the whole list, and a `method=text` verdict
+  over one reports `unconfirmed` rather than `verified`.
+- **The block analysis scans `skills/**/SKILL.md`.** Those files are executed
+  exactly like a command file and had no static analysis at all; the scan finds
+  56 blocks there where it found none.
+- **`known_gap_entries` reads a `feature` declared in frontmatter**, with the
+  filename slug kept as the fallback for the corpus that has none. Scoped reads
+  went from 10 entries to 23 against the same corpus.
+- **The completion report names what stayed open** — the pending partition, the
+  review file's path, and creates that were found only by mention.
+
+### Fixed
+
+- **A story's uncommitted work is no longer discarded.** When the tree is dirty
+  and every modified path is inside `implementation.files`, the orchestrator
+  commits on the executor's behalf instead of marking the story failed and
+  cascade-skipping its dependents. This was not hypothetical: it happened to a
+  story in this very phase.
+- **The worktree base is validated before an executor is spawned.** A missing
+  sentinel, or a base that is neither the container's `HEAD` nor an ancestor of
+  it, fails the story before any work is done rather than after.
+- **Direct writes to `golden_from_jq.json` are refused by the hook.** The corpus
+  is the evidence that the jq-to-Python port changed nothing; it may move by
+  decision, never by accident.
+
 ## [1.126.0] - 2026-09-04
 
 Phase 2 of the pipeline audit: every field a story carries now has both a writer

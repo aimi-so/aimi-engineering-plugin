@@ -26,6 +26,7 @@ set -uo pipefail
 #   - AIMI_PLUGIN_DIR Tests
 #   - Claude Code Host Detection Tests
 #   - Auto-Discovery Tests
+#   - PROJECT_ROOT-From-A-Worktree Tests
 #   - Global Cache Tests
 #   - XDG Cache Location Tests
 #   - prime-cache Tests
@@ -2190,6 +2191,144 @@ test_version_verbs_empty_plugin_cache_glob() {
 }
 
 # ----------------------------------------------------------------------------
+# The SECOND global pointer: ~/.config/aimi/worktree-path
+#
+# It had a reader everywhere and no writer anywhere. `_validate_cached_worktree_
+# path` validated it, `read_global_worktree_cache` read it, next.md and
+# container-execution.md re-read it at the top of every Bash call -- and
+# `write_global_worktree_cache` was called by nothing in production, so the file
+# on disk existed only where a human had written it by hand. That is how it came
+# to name a version the cli-path had already moved off: a `check-version --fix`
+# repointed cli-path at the new install, worktree-path stayed on the old one,
+# `cleanup-versions` then deleted the old one, and $WORKTREE_MGR became a path
+# to nothing while every guard around it still only asked whether the VARIABLE
+# was empty.
+#
+# These two tests assert the write side of that fix. The read side is the
+# `[ -x "$WORKTREE_MGR" ]` half of the guard in commands/, checked by
+# hooks/tests/test_auto_approve_cli.py's corpus scan.
+# ----------------------------------------------------------------------------
+
+# Like _make_cached_version, but also plants the worktree-manager.sh sibling a
+# real install carries. _make_cached_version deliberately does NOT -- every
+# fixture and every golden case built on it resolves no manager, which is why
+# adding these calls changed no recording in version_cache_cases.
+_make_cached_version_with_manager() {
+  local cache_root="$1" entry="$2" version="$3"
+  _make_cached_version "$cache_root" "$entry" "$version"
+  local mgr_dir="$cache_root/plugins/cache/$entry/aimi-engineering/$version/skills/git-worktree/scripts"
+  mkdir -p "$mgr_dir"
+  printf '#!/usr/bin/env bash\n' > "$mgr_dir/worktree-manager.sh"
+  chmod +x "$mgr_dir/worktree-manager.sh"
+}
+
+_cached_manager_path() {
+  printf '%s\n' "$1/plugins/cache/$2/aimi-engineering/$3/skills/git-worktree/scripts/worktree-manager.sh"
+}
+
+test_worktree_pointer_written_by_the_version_verbs() {
+  echo ""
+  echo "=== Testing the global worktree-path pointer is written and cured beside the cli-path ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local root cfg aimi_cfg mgr_old mgr_new
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  _make_cached_version_with_manager "$cfg" "abc123" "1.2.3"
+  mgr_old=$(_cached_manager_path "$cfg" "abc123" "1.2.3")
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: absent before the run -- this file used to have no writer at all"
+
+  # A stale state cli-path puts check-version on its `fixed` branch, the same
+  # fake-path idiom test_check_version_fix uses.
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_old" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: writes the worktree-path pointer for the install it resolved"
+
+  # The invariant itself, stated as an assertion rather than as a comment: both
+  # pointers name ONE install directory. Four dirnames strip
+  # skills/git-worktree/scripts/worktree-manager.sh, two strip
+  # scripts/aimi-cli.sh.
+  local cli_root mgr_root
+  cli_root=$(dirname "$(dirname "$(cat "$aimi_cfg/cli-path" 2>/dev/null)")")
+  mgr_root=$(dirname "$(dirname "$(dirname "$(dirname "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)")")")")
+  assert_eq "$cli_root" "$mgr_root" \
+    "check-version --fix: both global pointers name the same install directory"
+
+  # The recorded divergence, reproduced: a newer install appears, the pointer
+  # still names the old one, and --fix moves it.
+  _make_cached_version_with_manager "$cfg" "abc123" "1.3.0"
+  mgr_new=$(_cached_manager_path "$cfg" "abc123" "1.3.0")
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: cures a worktree-path left behind on an older version"
+
+  # cleanup-versions is where the dangle was produced -- it deletes the version
+  # the pointer used to name. Point it back at 1.2.3 first so the prune has
+  # something to invalidate.
+  printf '%s\n' "$mgr_old" > "$aimi_cfg/worktree-path"
+  _run_cleanup_versions_isolated "$cfg" "$aimi_cfg" > /dev/null
+
+  assert_eq "no" "$([ -e "$(dirname "$(dirname "$(dirname "$(dirname "$mgr_old")")")")" ] && echo yes || echo no)" \
+    "cleanup-versions: pruned the 1.2.3 directory the pointer named"
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "cleanup-versions: re-points worktree-path at the version it kept, not at the one it deleted"
+
+  # prime-cache, the third writer, on a config dir that has never been primed.
+  local fresh_aimi_cfg
+  fresh_aimi_cfg="$root/aimi-config-fresh"
+  mkdir -p "$fresh_aimi_cfg"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$fresh_aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$fresh_aimi_cfg/worktree-path" 2>/dev/null)" \
+    "prime-cache: primes the worktree pointer, not only the cli one"
+
+  rm -rf "$root"
+}
+
+test_worktree_pointer_needs_a_manager_beside_the_cli() {
+  echo ""
+  echo "=== Testing the worktree pointer is silent when the install carries no manager ==="
+
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  # _make_cached_version plants scripts/aimi-cli.sh and nothing else.
+  _make_cached_version "$cfg" "abc123" "1.2.3"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: nothing is persisted when no manager sits beside the resolved CLI"
+  # And the run really did happen -- the silence above is the manager's absence,
+  # not a verb that did nothing.
+  assert_eq "$cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh" \
+    "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "worktree-path: the same run still wrote cli-path, so the silence is the missing manager"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
 # check-version against a directory-source (locally-added marketplace) host
 # whose versioned plugin-cache glob is EMPTY.
 #
@@ -2646,6 +2785,127 @@ test_auto_discovery_not_found() {
   assert_contains ".aimi/ directory not found" "$output" "auto-discovery: error message mentions .aimi/ not found"
 
   rm -rf "$no_aimi_dir"
+}
+
+# ============================================================================
+# PROJECT_ROOT-From-A-Worktree Tests
+# ============================================================================
+#
+# THE RULE, IN ONE SENTENCE: find_aimi_root walks UP from the CWD and stops at
+# the FIRST directory that contains .aimi/. A worktree with no .aimi/ of its
+# own therefore resolves PROJECT_ROOT to the MAIN repository, and a
+# --tasks-file living in that repository is inside it. Create .aimi/ in the
+# worktree and the worktree itself becomes PROJECT_ROOT -- the main
+# repository's tasks file is then OUTSIDE it, and validate_path_in_project
+# refuses it. The path never changed; the root moved out from under it.
+#
+# WHY BOTH SIDES ARE ASSERTED. The regression this exists to catch does not
+# make the resolving case stop resolving -- it makes the refusing case start
+# refusing. A test pinning only the side that passes today would stay green
+# straight through it, so the second assertion is the entire point of the pair.
+#
+# ITS OTHER HALF IS A COMMENT, AND THEY CITE EACH OTHER ON PURPOSE.
+# create_worktree, in skills/git-worktree/scripts/worktree-manager.sh,
+# deliberately creates no .aimi/ in a worktree, and its comment names this
+# section. That comment is the only place someone stands while about to break
+# this: they are there to add the `mkdir -p "$worktree_path/.aimi"` this
+# measures the cost of. An explanation with no test ages alone; a test the
+# explanation does not name is unfindable from the one place it is needed.
+#
+# WHAT IT COST TO NOT HAVE THIS. Two phase-2 stories lost the per-assertion
+# half of executor step 1.5 to this and both filed the cause wrong -- they
+# recorded that a worktree cannot reach the main repository's tasks file at
+# all, when the measurement is that it reaches it perfectly until something
+# creates .aimi/ beside it.
+
+# Builds a throwaway repository standing in for a main checkout -- .aimi/tasks/
+# with one story in it -- plus one worktree of its own. .aimi/ stays untracked,
+# exactly as it is in the real repository (.gitignore:2), which is why
+# `git worktree add` never reproduces it and why side one below can exist.
+setup_worktree_project_root_fixture() {
+  WT_PR_MAIN=$(cd "$(mktemp -d)" && pwd -P)
+  WT_PR_TREE="$WT_PR_MAIN/.worktrees/probe"
+  WT_PR_TASKS="$WT_PR_MAIN/.aimi/tasks/2026-01-01-probe-tasks.json"
+
+  git init -q "$WT_PR_MAIN" >/dev/null 2>&1
+  mkdir -p "$WT_PR_MAIN/.aimi/tasks"
+  cat > "$WT_PR_TASKS" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Worktree PROJECT_ROOT probe",
+    "type": "feature",
+    "branchName": "feat/worktree-project-root-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["The story is readable from the main repository."],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  # The commit exists only so `git worktree add` has a revision to attach to.
+  # The identity is passed per-command rather than left to ambient config: a
+  # missing user.email would fail the commit, and the failure would surface
+  # three lines later as an unexplained `worktree add`.
+  echo "probe" > "$WT_PR_MAIN/README.md"
+  git -C "$WT_PR_MAIN" add README.md >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" \
+    -c user.email=test@example.com -c user.name="Test" \
+    commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" worktree add -q --detach "$WT_PR_TREE" HEAD >/dev/null 2>&1
+}
+
+teardown_worktree_project_root_fixture() {
+  git -C "$WT_PR_MAIN" worktree remove --force "$WT_PR_TREE" >/dev/null 2>&1
+  rm -rf "$WT_PR_MAIN"
+  unset WT_PR_MAIN
+  unset WT_PR_TREE
+  unset WT_PR_TASKS
+}
+
+test_worktree_project_root_resolution() {
+  echo ""
+  echo "=== Testing PROJECT_ROOT resolution from inside a worktree ==="
+
+  setup_worktree_project_root_fixture
+
+  local output exit_code
+
+  # --- Side one: the worktree has no .aimi/ of its own ---
+  # Every `cd` here is confined to a command substitution and guarded by the
+  # `&&` that follows it, and nothing in this test ever creates a directory
+  # relative to the CWD -- the mkdir below is absolute. A cd that failed can
+  # therefore only lose the assertion, never write .aimi/ somewhere it would
+  # then have to be found and removed.
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" \
+    "worktree PROJECT_ROOT: with NO .aimi/ in the worktree, find_aimi_root walks up past it to the main repository, so that repository's tasks file is inside PROJECT_ROOT and resolves"
+  assert_contains '"id": "US-001"' "$output" \
+    "worktree PROJECT_ROOT: the read really reached the main repository's tasks file — an exit 0 alone would not say that"
+
+  # --- Side two: the identical command, with .aimi/ created in the worktree ---
+  mkdir -p "$WT_PR_TREE/.aimi"
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" \
+    "worktree PROJECT_ROOT: creating .aimi/ IN the worktree makes find_aimi_root stop there instead of at the main repository, and the same tasks file is refused"
+  assert_contains "Path escapes project root" "$output" \
+    "worktree PROJECT_ROOT: the refusal is validate_path_in_project's, and it fires because PROJECT_ROOT moved — the path itself is byte-identical to side one's"
+  assert_contains "Project root: $WT_PR_TREE" "$output" \
+    "worktree PROJECT_ROOT: the root it reports IS the worktree, which is the causal claim itself — find_aimi_root stops at the FIRST directory holding .aimi/, so an .aimi/ here outranks the main repository's"
+
+  teardown_worktree_project_root_fixture
 }
 
 # ============================================================================
@@ -10279,6 +10539,8 @@ main() {
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
   test_cleanup_versions_sorts_on_version_segment
+  test_worktree_pointer_written_by_the_version_verbs
+  test_worktree_pointer_needs_a_manager_beside_the_cli
   test_resolve_skills_base_dir_picks_newest_version
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
@@ -10320,6 +10582,10 @@ main() {
   echo "--- Auto-Discovery Tests ---"
   test_auto_discovery_from_subdirectory
   test_auto_discovery_not_found
+
+  echo ""
+  echo "--- PROJECT_ROOT-From-A-Worktree Tests ---"
+  test_worktree_project_root_resolution
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
   # Unset AIMI_PLUGIN_DIR to test non-converter code paths
