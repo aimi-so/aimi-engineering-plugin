@@ -3157,7 +3157,12 @@ while true:
                 # --- Extract knownGaps: prefer result_json.knownGaps, fall back to commit trailers ---
                 # When result_payload_by_id[full_story.id].knownGaps is a non-empty array,
                 # use those entries (one line each). Otherwise, fall back to grepping
-                # KNOWN-GAP: trailers from the commit body for backward compat.
+                # KNOWN-GAP trailers from the commit body for backward compat. Two spellings
+                # are matched -- bare "KNOWN-GAP:" and "KNOWN-GAP (US-NNN):" with the story id
+                # folded in -- because a worker legitimately writes either one, and a
+                # single-spelling grep silently drops whichever it does not cover. Both stay
+                # anchored to line start so a KNOWN-GAP mention inside a paragraph is never
+                # extracted as if it were a trailer.
                 ```bash
                 mkdir -p .aimi/known-gaps
                 # Pseudo: prefer payload; fall back to commit grep
@@ -3165,7 +3170,7 @@ while true:
                 if [ -n "$payload_gaps" ] && [ "$payload_gaps" != "[]" ]; then
                   WORKER_GAPS=$(printf '%s\n' "$payload_gaps")
                 else
-                  WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP:' || true)
+                  WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP( \([^)]+\))?:' || true)
                 fi
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
