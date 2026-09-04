@@ -150,6 +150,153 @@ def test_the_golden_corpus_actually_exercises_the_judge():
         assert fragment in reasons, fragment + " is never exercised by the corpus"
 
 
+# ---------------------------------------------------------------------------
+# The advisory channel: a creates path whose parent directory is not there
+# ---------------------------------------------------------------------------
+#
+# Every verdict roadmap.py could reach used to be fatal, so this pair of tests
+# is really about the SHAPE of the new channel as much as its rule: the warning
+# case must return an empty fatal list (a phase that declares a directory it is
+# about to create still writes), and the bare-verb case must produce no stderr
+# at all (a warning that fires on correct usage is one nobody reads).
+
+
+def _fresh_roadmap_path(tmp_path, feature="feat"):
+    """<root>/.aimi/tasks/<feature>/roadmap.json, the layout the writers pass.
+
+    The file itself is never created: roadmap-init judges its payload before it
+    writes, so the advisory has to work off a path that is not yet on disk.
+    """
+    path = tmp_path / ".aimi" / "tasks" / feature / "roadmap.json"
+    path.parent.mkdir(parents=True)
+    return str(path)
+
+
+def test_judge_phases_warns_when_a_creates_path_has_no_parent_directory(tmp_path, capsys):
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 2,
+            "creates": [R.contract_entry("src/api/handlers.py", "the request handlers")],
+            "needs": [],
+        }
+    ]
+
+    # The fatal list stays empty: this is an advisory, so the phase still writes.
+    assert R.judge_phases(phases, path) == []
+
+    err = capsys.readouterr().err
+    assert 'phase 2: creates entry #1 "src/api/handlers.py"' in err
+    assert '"src/api" does not exist under ' + str(tmp_path) in err
+
+
+def test_a_bare_verb_name_identity_warns_nothing(tmp_path, capsys):
+    """The three names phase 1 of this very roadmap declared in its own creates.
+
+    A verb name is not a broken path, and warning on one would put the advisory
+    on top of the correct usage rather than the mistake it is for.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 1,
+            "creates": [
+                R.contract_entry(name, "a new aimi-cli verb")
+                for name in ("list-known-gaps", "verify-probe", "measure-command-file")
+            ],
+            "needs": [],
+        }
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_existing_parent_directory_warns_nothing(tmp_path, capsys):
+    path = _fresh_roadmap_path(tmp_path)
+    (tmp_path / "src" / "api").mkdir(parents=True)
+    phases = [
+        {"id": 3, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_endpoints_globbed_parents_and_needs_entries_are_not_judged(tmp_path, capsys):
+    """Three shapes that carry a slash and still name no testable directory.
+
+    A route's slash belongs to the route; a globbed parent names no one literal
+    directory; and needs[] points at what ANOTHER phase produces, which is
+    absent by design until that phase runs.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 4,
+            "creates": [
+                R.contract_entry("POST /api/v2/users", "the create-user route"),
+                R.contract_entry("db/*/migrations/*.sql", "the migrations"),
+            ],
+            "needs": [R.contract_entry("src/api/handlers.py", "from phase 2")],
+        }
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_advisory_is_silent_without_a_roadmap_path(tmp_path, capsys):
+    """op_judge_phases reads a phases array off stdin and knows no path.
+
+    It therefore has no root to measure against, and gets the pre-advisory
+    behaviour byte for byte rather than a guess at one.
+    """
+    phases = [
+        {"id": 5, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_a_roadmap_path_outside_any_dot_aimi_yields_no_root_and_no_advisory(tmp_path, capsys):
+    """None, not a directory some fixed number of levels up.
+
+    The anchor is the nearest ".aimi" ancestor precisely so a path of another
+    shape produces no advisory instead of one measured against the wrong tree.
+    """
+    stray = tmp_path / "elsewhere" / "roadmap.json"
+    stray.parent.mkdir(parents=True)
+    assert R._project_root_from_roadmap(str(stray)) is None
+    phases = [
+        {"id": 6, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases, str(stray)) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_entry_that_is_already_fatal_draws_no_second_advisory_line(tmp_path, capsys):
+    """A refusal and an advisory about the same entry is noise on top of a stop."""
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {"id": 7, "creates": [R.contract_entry("/etc/nope/passwd", "absolute")], "needs": []}
+    ]
+    assert len(R.judge_phases(phases, path)) == 1
+    assert capsys.readouterr().err == ""
+
+
+def test_die_list_is_warn_list_plus_the_exit(tmp_path, capsys):
+    """The pair mirrors story_merge.py's: one renderer, two exit behaviours.
+
+    Asserted rather than described, because the whole point of mirroring the
+    shape is that the two channels cannot drift in what a diagnostic looks like.
+    """
+    with pytest.raises(SystemExit) as raised:
+        R._die_list("Error: header:", ["line one", "line two"])
+    assert raised.value.code == 1
+    fatal = capsys.readouterr().err
+
+    R.warn_list("Error: header:", ["line one", "line two"])
+    assert capsys.readouterr().err == fatal
+
+
 def test_the_mutation_rule_went_with_the_thing_that_made_it_necessary():
     """It refused an entry whose STORED identity differed from the SUBMITTED one.
 
@@ -1841,6 +1988,65 @@ def test_judge_phases_is_silent_on_a_clean_roadmap():
     result = _run(["judge-phases"], stdin=phases)
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_init_write_advises_on_a_missing_parent_and_writes_the_phase_anyway(tmp_path):
+    """The advisory end to end: judge_phases has the rule, this proves the wiring.
+
+    Both halves matter and neither is visible from the function alone -- that
+    init-write is the caller that hands over its own roadmap path, and that a
+    phase declaring a directory it is about to create still lands on disk.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = json.dumps(
+        [
+            {
+                "id": 1,
+                "name": "one",
+                "goal": "build the api",
+                "slug": "",
+                "dir": "phase-1",
+                "status": "pending",
+                "dependsOn": [],
+                "creates": [R.contract_entry("src/api/handlers.py", "the handlers")],
+                "needs": [],
+                "claim": None,
+            }
+        ]
+    )
+    result = _run(["init-write", "--roadmap", path, "--feature", "feat"], stdin=phases)
+
+    assert result.returncode == 0
+    assert 'creates entry #1 "src/api/handlers.py"' in result.stderr
+    with open(path, encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["creates"][0]["identity"] == "src/api/handlers.py"
+
+
+def test_the_advisory_goes_to_stderr_so_the_json_report_on_stdout_still_parses(tmp_path):
+    """The report is a JSON document a caller parses; an advisory must not enter it."""
+    path = _fresh_roadmap_path(tmp_path, feature="other")
+    phases = json.dumps(
+        [
+            {
+                "id": 1,
+                "name": "one",
+                "goal": "build the api",
+                "slug": "",
+                "dir": "phase-1",
+                "status": "pending",
+                "dependsOn": [],
+                "creates": [R.contract_entry("src/api/handlers.py", "the handlers")],
+                "needs": [],
+                "claim": None,
+            }
+        ]
+    )
+    result = _run(["init-write", "--roadmap", path, "--feature", "other"], stdin=phases)
+
+    assert result.returncode == 0
+    assert result.stderr != ""
+    json.loads(result.stdout)
 
 
 def test_a_malformed_entry_stops_the_verb_with_one_stderr_line_and_no_traceback():
