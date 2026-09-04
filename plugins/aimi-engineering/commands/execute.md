@@ -2193,6 +2193,34 @@ Container for [branchName] ready — branched from [CONTAINER_BASE] ([CONTAINER_
 
 Because this subsection's own `$WORKTREE_MGR create` call is the branch-creating operation for this run, `### Main Repo Branch Setup` below is skipped whenever this subsection applies — see its skip condition.
 
+#### Plan Base Freshness (advisory)
+
+`metadata.baseRef` is the 40-character SHA `/aimi:plan` recorded for the commit this file's stories were planned against (see `commands/plan.md`'s metadata contract, which writes it per file and states plainly that comparing it against the branch an executor actually starts from belongs to whoever consumes it). Nothing ever has. This is that consumer.
+
+The question it answers is whether the tree moved between planning and execution, and the answer is an **advisory** in every case. A plan written against an older commit is ordinary — the branch it targeted simply advanced — so the useful thing is to say it once, here, where the reader can weigh it, and never to refuse a run over it.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PLAN_BASE_REF=$($AIMI_CLI metadata --tasks-file "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null | jq -r '.baseRef // empty')
+if [ -n "$PLAN_BASE_REF" ]; then
+  # git merge-base --is-ancestor <metadata.baseRef> <container base>: exit 0
+  # means the recorded plan base is reachable from the base this container was
+  # actually cut from — the plan is behind, but on the same line of history.
+  if git -C "$AIMI_ROOT" merge-base --is-ancestor "$PLAN_BASE_REF" "$CONTAINER_BASE" 2>/dev/null; then
+    echo "Plan base $PLAN_BASE_REF is reachable from $CONTAINER_BASE."
+  else
+    echo "advisory: the plan was written against $PLAN_BASE_REF, which is NOT reachable from this container's base $CONTAINER_BASE — plan and container stand on different trees. Stories may cite code that is not here, or miss code that is. Not a blocker."
+  fi
+fi
+```
+
+`$AIMI_CLI metadata --tasks-file` is a verb call rather than a raw open of the tasks file: the flag exists, and the verb returns the whole `metadata` object with `baseRef` among its keys. `// empty` is what keeps an absent key silent — the field is optional and every file planned before it existed has none, so a missing `baseRef` must print nothing at all rather than the word `null`.
+
+A `baseRef` this repository does not have — a plan made in a clone whose commits were never pushed, or a history since rewritten — exits non-zero exactly as a genuine divergence does, and lands in the same advisory line. The conflation is deliberate: to the reader both mean the one thing worth saying, which is that the recorded base is not on the path this run stands on.
+
+**In phase mode** the same check belongs once per participating group, inside **Create Phase Containers Per Project Group** above, with `--tasks-file "$PHASE_TASKS_PATH"` and `git -C "$GROUP_TOPLEVEL"` in place of `$AIMI_ROOT` — so each repository's plan base is compared against the base of the container that repository just got, never against a sibling's.
+
 ### Main Repo Branch Setup
 
 **Skip this step if `AIMI_ROOT_IS_GIT_REPO` is false, if `PHASE_MODE` is true, or if flat container mode applies (`PHASE_MODE=false` and `EXECUTION_MODE=container`, i.e. `CONTAINER_MODE=true`)** — see Multi-Repo Handling above for the first condition. In phase mode, the phase container's `$WORKTREE_MGR create` call in Step 1.7 is the only branch-creating operation for this phase; no `setup-branch` call runs against the main working tree, which is what keeps the Main Working Tree Untouched Invariant (see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD) true. In flat container mode, Flat Container Mode's own `$WORKTREE_MGR create` call above is likewise the only branch-creating operation for this run. When `EXECUTION_MODE` is `inline` or absent, this subsection runs byte-for-byte exactly as it does today — no observable change to the inline path.
@@ -2616,6 +2644,30 @@ CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populate
 WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else (AIMI_ROOT + "/" + TASKS_PATH)
 
 while true:
+    # ========================================
+    # RE-POINT THE CLI — TOP OF THE WAVE, NEVER MID-WAVE
+    # ========================================
+    # Step 0 resolves $AIMI_CLI once, at the start of the run, and nothing in
+    # this loop has ever revisited it. A wave loop outlives that resolution:
+    # a `cleanup-versions` run in another session prunes the cache directory
+    # this run's path points into, and every later call answers "No such file
+    # or directory" through a path that was correct when it was written.
+    #
+    # The POSITION is the load-bearing part, not the call. The same --fix run
+    # between spawn and merge is what broke a mark-complete mid-wave: the
+    # cached path moved while N workers already held the old one, so the
+    # orchestrator wrote through a CLI its own workers had never seen. Here,
+    # between the last merge of wave N and the first spawn of wave N+1,
+    # nothing is in flight and a re-point can strand no one. Do not move this
+    # call further down for symmetry with anything.
+    #
+    # Every Bash call in this file re-reads $AIMI_CLI from the cache --fix
+    # rewrites (Step 0's Per-Call Resolution note), so the repointing reaches
+    # the next call on its own; nothing is reassigned here. Read `status` and
+    # not the exit code alone — `unknown` exits 0 and means no plugin is
+    # installed at all (see cli-path-resolution.md's Version Check table).
+    $AIMI_CLI check-version --quiet --fix
+
     # Check remaining work
     pending = $AIMI_CLI count-pending --tasks-file [WAVE_TASKS_FILE]
     if pending == 0: break
@@ -2761,12 +2813,72 @@ while true:
 
             # cd to this group's execution root (see Execution Context above)
             cd [worktree_cwd]
-            $WORKTREE_MGR create [worktree_name] --from [worktree_base]
+            create_output = $WORKTREE_MGR create [worktree_name] --from [worktree_base]
 
-            worktree_path = [path from output]
+            # ========================================
+            # READ BOTH CREATE SENTINELS — OR FAIL THE STORY HERE
+            # ========================================
+            # worktree-manager.sh's create emits two unprefixed lines on BOTH
+            # of its branches, fresh creation and silent reuse alike:
+            #     WORKTREE_PATH=<absolute path>
+            #     WORKTREE_BASE=<full 40-char sha of the new tree's own HEAD>
+            # Take the LAST occurrence of each: the fresh-creation branch
+            # prints a `cd <path>` hint after them, and everything else create
+            # writes is ANSI-coloured progress text carrying neither prefix.
+            # The sha is deliberately full-length — an abbreviated one is
+            # ambiguous exactly when two bases are close enough to confuse.
+            worktree_path = value of the last WORKTREE_PATH= line in create_output
+            worktree_base_sha = value of the last WORKTREE_BASE= line in create_output
+
+            # Either sentinel missing is a FAILURE OF THIS STORY, decided
+            # BEFORE the executor is spawned. There is no useful recovery
+            # after that point: by the time a wrong tree announces itself the
+            # work is already written onto it. The usual cause is a
+            # worktree-manager.sh predating the sentinels, which is a host
+            # problem and not this story's — say so and stop.
+            if worktree_path is absent or worktree_base_sha is absent:
+                $AIMI_CLI mark-failed [full_story.id] "Worktree create emitted no WORKTREE_PATH/WORKTREE_BASE sentinel" --tasks-file [WAVE_TASKS_FILE]
+                $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                Report: "[full_story.id] failed: create printed no WORKTREE_PATH/WORKTREE_BASE (worktree-manager.sh too old?). Dependent stories cascade-skipped."
+                drop full_story from full_stories, do not spawn it, continue with the next story
+
+            # ========================================
+            # THE TREE MUST STAND ON THE BASE WE ASKED FOR
+            # ========================================
+            # base_sha[group_key] is this group's EXEC_BRANCH HEAD, captured
+            # above before any worktree was cut — the base every story in this
+            # wave is meant to stand on. worktree_base_sha is what the tree
+            # ACTUALLY stands on. Divergence is a FAILURE, not a warning.
+            #
+            # Measured, in this repository's own phase 2: a story worktree cut
+            # from main instead of from its phase branch announced nothing at
+            # creation. It surfaced three levels downstream as a CLI verb
+            # answering "Unknown command", a pytest suite short by the phase's
+            # own new cases, and a golden file still holding the previous
+            # value — three symptoms pointing at three different places, none
+            # of them at the base. This comparison is what turns that into one
+            # line, before a single file is written.
+            #
+            # Equality is the fresh-creation case. The one other ACCEPTED
+            # shape is a reused worktree that already carries commits of its
+            # own: a story that committed and then failed keeps both worktree
+            # and branch (see the merge-conflict cleanup below), so a re-run
+            # legitimately finds a tree AHEAD of the base. Accept exactly that
+            # — base_sha[group_key] reachable from worktree_base_sha — and
+            # nothing else. A tree cut from a different branch fails this,
+            # which is the whole point; a strict equality test would instead
+            # fail every resumed run, and a check that cries wolf on the
+            # normal path is a check someone deletes.
+            if worktree_base_sha != base_sha[group_key] and not (git -C [worktree_path] merge-base --is-ancestor [base_sha[group_key]] [worktree_base_sha]):
+                $AIMI_CLI mark-failed [full_story.id] "Worktree base [worktree_base_sha] does not descend from [base_sha[group_key]]" --tasks-file [WAVE_TASKS_FILE]
+                $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                Report: "[full_story.id] failed: worktree stands on [worktree_base_sha], expected [EXEC_BRANCH[group_key]] at [base_sha[group_key]]. Dependent stories cascade-skipped."
+                drop full_story from full_stories, do not spawn it, continue with the next story
+
             all_worktrees[full_story.id] = {
                 worktree_name: worktree_name,
                 worktree_path: worktree_path,
+                worktree_base_sha: worktree_base_sha,
                 group_key: group_key
             }
 
@@ -2881,14 +2993,86 @@ while true:
         else:
             verified_stories.append(full_story)
 
-    # Move no-commit stories to failed
+    # ========================================
+    # COMMIT RESCUE — BEFORE mark-failed, AND ONLY ON THE SUBSET
+    # ========================================
+    # A story that reached here reported ok and left a dirty tree with no
+    # commit on it. That is a mechanics defect, not a bad story: the work
+    # exists and the only thing missing is the `git commit` the executor owed.
+    # Failing it discards a finished implementation and cascade-skips
+    # everything downstream of it, which is a far larger loss than the defect.
+    # This happened for real — a story in this very phase finished its work
+    # and returned without committing.
+    #
+    # THE SUBSET IS THE GUARD, and it is the only thing making this safe to do
+    # on someone else's behalf. `implementation.files` is what the planner said
+    # this story would touch. When every modified path is inside that list, the
+    # orchestrator knows exactly what it is committing and to which story it
+    # belongs. One path outside the list means the tree holds something nobody
+    # declared — a stray edit, a half-finished second concern, another story's
+    # leftovers — and the orchestrator has no basis to attribute it. That case
+    # takes the unchanged failure flow below; it is never rescued, never
+    # partially staged, and never trimmed down to the declared subset to make
+    # it fit.
+    rescued_stories = []
     for full_story in no_commit_stories:
+        wt = all_worktrees[full_story.id]
+        pre_rescue_head = git -C [wt.worktree_path] rev-parse HEAD
+
+        # 1. Is there anything to rescue? A clean tree means the executor wrote
+        #    nothing at all; the failure is real and stands.
+        dirty_paths = paths from `git -C [wt.worktree_path] status --porcelain`
+                      (both sides of a rename count as modified paths)
+        if dirty_paths is empty:
+            continue    # falls through to the failure flow below
+
+        # 2. The subset guard. `implementation.files` comes from the CLI, not
+        #    from a raw read of the tasks file — get-story-context is the same
+        #    verb the executor itself bootstraps with, so orchestrator and
+        #    worker read one document through one reader.
+        declared_files = $AIMI_CLI get-story-context [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                         → .story.implementation.files
+        # `implementation` is optional in schema v3.3. Absent or empty declares
+        # nothing, so nothing can be inside it — no list, no rescue. Do not
+        # read an absent list as "anything is allowed"; that inverts the guard.
+        if declared_files is absent or empty:
+            continue    # falls through to the failure flow below
+        if any path in dirty_paths is not in declared_files:
+            Report: "[full_story.id] not rescued — modified files outside implementation.files: [the offending paths]"
+            continue    # falls through to the failure flow below
+
+        # 3. Subset holds. Commit on the executor's behalf, staging the
+        #    modified declared paths BY NAME — never `-A`, never `.`, the same
+        #    rule the story executor itself follows.
+        cd [wt.worktree_path]
+        git add [each path in dirty_paths]
+        git commit -m "feat([full_story.id]): [full_story.title]" -m "Committed by the wave orchestrator: the executor finished the work and returned without committing it."
+
+        # 4. Trust the tree, not the exit code — a pre-commit hook can refuse
+        #    after `git commit` has already printed. If HEAD did not move, the
+        #    rescue did not happen and the story takes the failure flow.
+        rescued_head = git -C [wt.worktree_path] rev-parse HEAD
+        if rescued_head == pre_rescue_head:
+            Report: "[full_story.id] not rescued — the rescue commit did not land (hook refused?)"
+            continue    # falls through to the failure flow below
+
+        rescued_stories.append(full_story)
+        Report: "[full_story.id] rescued — executor left [len(dirty_paths)] modified file(s), all inside implementation.files; committed as [rescued_head]:"
+        Report: git -C [wt.worktree_path] show --stat --format= [rescued_head]
+
+    # Move the stories that were NOT rescued to failed
+    for full_story in no_commit_stories and not in rescued_stories:
         $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution" --tasks-file [WAVE_TASKS_FILE]
         $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
         Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
 
-    # Replace succeeded_stories with only verified ones (so merge-all skips no-commit stories)
-    succeeded_stories = verified_stories
+    # Replace succeeded_stories with the ones carrying a commit — verified by
+    # the worker itself, or rescued above. A rescued story is a SUCCESS from
+    # here on: it merges with the wave and reaches mark-complete like any
+    # other, because its work is on its branch exactly as if the executor had
+    # committed it. The rescue is reported so the human sees the diff someone
+    # else committed; it is not tracked as a separate story state.
+    succeeded_stories = verified_stories + rescued_stories
 
     # Handle failures first
     for full_story in failed_stories:
