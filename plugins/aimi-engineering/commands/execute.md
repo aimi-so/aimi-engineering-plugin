@@ -2966,6 +2966,54 @@ while true:
     # --- Post-Wave Processing ---
 
     # ========================================
+    # STALLED EXECUTOR DETECTION — the executor that went idle
+    # ========================================
+    # This happened for real, twice in phase 1 of this feature: a spawned
+    # executor finished its work, ran its own verify suite, and went idle
+    # without ever emitting <result_json> and without running `git commit`.
+    # Both times the only way it surfaced was the orchestrator going and
+    # looking at `ps` / the agent roster by hand — nothing in this loop told
+    # anyone to. The fallback above (missing or malformed <result_json> —
+    # falling back to Task exit signal) presupposes the Task returned with
+    # SOMETHING usable; a stalled executor's Task call still returns in this
+    # same turn (every Task here is foreground — see "Spawn ALL workers"
+    # above), but its own exit signal says nothing about whether real work
+    # got left behind uncommitted, because it never looked.
+    #
+    # No clock, no liveness probe of the agent — this crosses three facts
+    # the loop already captures for every story with no valid result_json:
+    #   1. missing or malformed result_json (payload is None, from the loop above)
+    #   2. HEAD in the worktree is unchanged from base_sha (no commit landed)
+    #   3. the worktree is dirty (the executor wrote SOMETHING before going idle)
+    # All three together is a stalled story. Any one of them alone is not:
+    # (1) alone is the existing fallback, untouched, trusting Task's own
+    # signal; (2)+(3) without (1) is the ordinary ok-but-no-commit case the
+    # COMMIT VERIFICATION step below already walks through result_payload_by_id.
+    #
+    # Detection runs over EVERY story with no result_json, whichever bucket
+    # the fallback above placed it in — a stalled executor's own Task exit
+    # signal can read as a success (nothing errored, it just never reported)
+    # or as a failure (it ran out of turns going idle), and the fallback has
+    # no way to tell those apart. A stalled story found sitting in
+    # failed_stories is moved into succeeded_stories so it reaches the SAME
+    # commit-verification / commit-rescue pass below as every other
+    # no-commit story — this never adds a third resolution path, it only
+    # widens which stories reach the two that already exist.
+    stalled_story_ids = []
+    for full_story in (succeeded_stories + failed_stories):
+        if result_payload_by_id.get(full_story.id) is not None:
+            continue    # Task returned a valid block — not this case
+        wt = all_worktrees[full_story.id]
+        worktree_head = git -C [wt.worktree_path] rev-parse HEAD
+        tree_is_dirty = (`git -C [wt.worktree_path] status --porcelain` output is non-empty)
+        if worktree_head == base_sha[wt.group_key] and tree_is_dirty:
+            stalled_story_ids.append(full_story.id)
+            if full_story in failed_stories:
+                failed_stories.remove(full_story)
+                succeeded_stories.append(full_story)
+            Report: "[full_story.id] stalled — executor went idle without <result_json> and without committing (dirty tree, no new commit). Routing through commit verification / commit rescue below."
+
+    # ========================================
     # COMMIT VERIFICATION (parallel path)
     # ========================================
     # Prefer the commit SHA from result_payload_by_id[full_story.id].commit when
@@ -3057,14 +3105,16 @@ while true:
             continue    # falls through to the failure flow below
 
         rescued_stories.append(full_story)
-        Report: "[full_story.id] rescued — executor left [len(dirty_paths)] modified file(s), all inside implementation.files; committed as [rescued_head]:"
+        stalled_note = " (stalled executor — resolved by commit rescue)" if full_story.id in stalled_story_ids else ""
+        Report: "[full_story.id] rescued[stalled_note] — executor left [len(dirty_paths)] modified file(s), all inside implementation.files; committed as [rescued_head]:"
         Report: git -C [wt.worktree_path] show --stat --format= [rescued_head]
 
     # Move the stories that were NOT rescued to failed
     for full_story in no_commit_stories and not in rescued_stories:
         $AIMI_CLI mark-failed [full_story.id] "No commit detected after execution" --tasks-file [WAVE_TASKS_FILE]
         $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
-        Report: "[full_story.id] failed (no commit detected). Dependent stories cascade-skipped."
+        stalled_note = " (stalled executor — resolved by mark-failed + cascade-skip)" if full_story.id in stalled_story_ids else ""
+        Report: "[full_story.id] failed (no commit detected)[stalled_note]. Dependent stories cascade-skipped."
 
     # Replace succeeded_stories with the ones carrying a commit — verified by
     # the worker itself, or rescued above. A rescued story is a SUCCESS from
