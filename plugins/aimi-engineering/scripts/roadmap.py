@@ -1041,6 +1041,26 @@ _MARKER_LINE = re.compile(
     r"^[ \t]*(//+|#+|--+|\*+|/\*+|<!--)[ \t]*(TODO|FIXME|XXX|HACK)([^A-Za-z0-9_]|$)"
 )
 
+# The same comment openers, with the four markers dropped. _MARKER_LINE asks
+# whether a comment ANNOUNCES that the work is still owed; this asks the weaker
+# question underneath it -- whether the line is a comment at all -- because a
+# comment that merely describes the artifact is not the artifact either. That
+# gap is not hypothetical: measured against dc7834d, a line reading
+# "# o simbolo parseThing ... nao existe aqui" verified parseThing by text, and
+# in phase 3 of this roadmap the comments an author wrote to EXPLAIN this defect
+# became the evidence that the artifact they described existed.
+#
+# Three of the six openers are also the start of a legitimate CODE line, and
+# each is guarded by requiring whitespace or end-of-line after it rather than by
+# being left out:
+#   "#define parseThing(x)"  -- a C preprocessor directive DEFINES the symbol.
+#   "--count;"               -- a decrement.
+#   "*ptr = parseThing();"   -- a dereference.
+# "//", "/*" and "<!--" open a comment in every language that writes them and
+# need no guard. A "#!" shebang falls outside for the same reason as "#define":
+# it is an instruction to a program, not prose about one.
+_COMMENT_LINE = re.compile(r"^[ \t]*(?://|/\*|<!--|(?:\#+|--+|\*+)(?=[ \t]|$))")
+
 
 def _git(directory, *args):
     """Run git and return (stdout, returncode).
@@ -1138,6 +1158,25 @@ def is_marker_line(content):
     return _MARKER_LINE.search(content) is not None
 
 
+def is_comment_line(content):
+    """True when a matched line is a comment -- prose ABOUT the code, not code.
+
+    The question this answers is the one the word boundary answered for a
+    substring: is what was found the artifact, or a mention of it? A comment
+    naming an identity is a mention, whether or not it carries one of the four
+    markers is_marker_line looks for, so this is strictly the wider of the two
+    and the caller asks them in that order: a TODO says the work is owed, which
+    is a stronger statement than "somebody wrote this name down", and the
+    "missing" verdict that names the marker is worth keeping.
+
+    Deliberately about the LINE and not about what surrounds the identity on it.
+    "// parseThing() is called from here" is as much a mention as a sentence is,
+    and a rule that read the neighbouring punctuation would have called that one
+    code.
+    """
+    return _COMMENT_LINE.search(content) is not None
+
+
 def _verdict(identity, status, method, evidence, git_status):
     return {
         "identity": identity,
@@ -1152,9 +1191,11 @@ def verify_creates_one(directory, identity, phase_files=None, warnings=None):
     """Verify ONE creates identity against <directory>'s tracked files.
 
     Always returns a verdict: "missing", "unconfirmed" or "error" is data, not
-    failure. "unconfirmed" is reached only by a doc identity that resolved
-    through the text search -- see is_doc_identity for why a mention is not a
-    page.
+    failure. Two paths reach "unconfirmed", and they are the same statement made
+    about two different mentions: a doc identity that resolved through the text
+    search (see is_doc_identity for why a mention is not a page), and ANY
+    identity whose every surviving match is a comment line (see is_comment_line
+    for why a note about an artifact is not the artifact).
 
     gitStatus is the HIGHEST exit status any git invocation returned for this
     entry -- 0 or 1 in normal operation, above 1 only on tool failure, and that
@@ -1269,15 +1310,22 @@ def verify_creates_one(directory, identity, phase_files=None, warnings=None):
             git_max,
         )
 
-    # --- Step 4: drop marker-only comment lines -----------------------------
+    # --- Step 4: sort the hits into code, comment and marker ----------------
     #
     # This no longer stops at the first surviving line. The advisory below asks
     # whether EVERY match falls outside the declared files, and a loop that
     # stopped at the first one could not answer that. `first_marker` is unmoved
     # by the change: it is read only on the path where `kept` stayed empty, and
     # on that path there was never a line to break at.
+    #
+    # `first_comment` is the same idea one step weaker. A marker line is dropped
+    # outright -- it says the work is still owed, which is the opposite of
+    # evidence. An ordinary comment line is not dropped and not accepted either:
+    # it is remembered, so that an identity whose ONLY textual evidence is prose
+    # about it can be reported as mentioned rather than as built or as absent.
     kept = ""
     first_marker = ""
+    first_comment = ""
     hit_files = []
     for line in grep_out.split("\n"):
         if not line:
@@ -1287,6 +1335,10 @@ def verify_creates_one(directory, identity, phase_files=None, warnings=None):
         if is_marker_line(hit_content):
             if not first_marker:
                 first_marker = hit_file + ":" + hit_num
+            continue
+        if is_comment_line(hit_content):
+            if not first_comment:
+                first_comment = hit_file + ":" + hit_num
             continue
         if not kept:
             kept = hit_file + ":" + hit_num
@@ -1316,6 +1368,28 @@ def verify_creates_one(directory, identity, phase_files=None, warnings=None):
                 warnings.append(advisory)
         return _verdict(
             identity, "verified", "text", "tracked source: " + kept + searched_note, git_max
+        )
+
+    # --- Step 5: a comment about the work is not the work -------------------
+    #
+    # Reached only when no code line survived step 4, so a phase that actually
+    # built the artifact never arrives here: one real line outranks any number
+    # of comments. "unconfirmed" rather than "missing" because the two say
+    # genuinely different things to whoever reads the report -- "nobody wrote
+    # this" and "somebody wrote about it and then did not write it" are not the
+    # same failure -- and execute.md already routes unconfirmed to the same
+    # not-delivered branch as missing, so the distinction costs nothing at the
+    # gate and is visible in its mention-only block.
+    if first_comment:
+        return _verdict(
+            identity,
+            "unconfirmed",
+            "text",
+            "mentioned in a comment at " + first_comment + searched_note
+            + " — every tracked line naming this identity is a comment, and a "
+            "note about an artifact is not the artifact. "
+            + VERIFY_CREATES_TRACKED_NOTE,
+            git_max,
         )
 
     # --- Missing: name what was found and rejected, not just "not found" ----

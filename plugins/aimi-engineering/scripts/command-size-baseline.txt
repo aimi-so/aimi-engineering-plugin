@@ -43,7 +43,7 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	374006
+execute.md	374358
 plan.md	308591
 brainstorm.md	128637
 open-pr.md	58522
@@ -53,7 +53,7 @@ references/visual-variants.md	26960
 next.md	22176
 references/cli-path-resolution.md	27156
 review.md	21665
-references/scope-contexts.md	20079
+references/scope-contexts.md	20743
 deepen.md	18029
 
 skills/story-executor/SKILL.md	43086
