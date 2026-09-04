@@ -11,16 +11,29 @@ if str(_HOOKS_DIR) not in sys.path:
 
 from hook_utils import safe_hook, find_aimi_dir, deny  # noqa: E402
 
+# The jq -> Python golden corpus, matched by the last three path COMPONENTS
+# rather than an absolute path: the corpus lives outside any .aimi/, and an
+# absolute path would pin the guard to one tree and miss every worktree copy.
+# Comparing parts (not str.endswith) keeps "myscripts/tests/..." from matching.
+_GOLDEN_CORPUS_PARTS = ("scripts", "tests", "golden_from_jq.json")
 
-def _deny_path(path: str, reason: str) -> None:
+
+def _deny_path(path: str, reason: str, exit_code: int = 0) -> None:
     msg = (
         f"Direct edits to runtime state are blocked:\n"
         f"  {path}\n"
         f"This file is owned by the aimi runtime. {reason}.\n"
         f"Set AIMI_RUNTIME_STATE_GUARD=off to bypass intentionally."
     )
+    # A PreToolUse block is read two ways: the structured `permissionDecision:
+    # deny` on stdout with exit 0, or a non-zero exit whose reason is read off
+    # stderr.  Callers here use the first; one that asks for a non-zero status
+    # gets both, so the reason survives either reading instead of arriving as a
+    # bare refusal.  The default keeps every existing caller byte-identical.
     print(deny(msg))
-    sys.exit(0)
+    if exit_code != 0:
+        sys.stderr.write(msg + "\n")
+    sys.exit(exit_code)
 
 
 def _is_within(target: Path, container: Path) -> bool:
@@ -73,6 +86,23 @@ def main(tool_input: dict) -> None:
         _deny_path(str(target), "Telemetry log is append-only")
     except ValueError:
         pass
+
+    # Always-blocked: the jq -> Python golden corpus.  It sits with the two
+    # $HOME checks above rather than in the .aimi/ section below because it
+    # blocks unconditionally: the corpus is a repository file, so it must be
+    # refused before the .aimi/ walk-up that the rest of main() depends on.
+    if target.parts[-3:] == _GOLDEN_CORPUS_PARTS:
+        _deny_path(
+            str(target),
+            "This corpus was captured from the jq implementations before they "
+            "were deleted, so it is the evidence that the port changed nothing "
+            "-- regenerating it from today's Python would turn it into a "
+            "snapshot of whatever the code already does. Move it the way it has "
+            "always been moved: rewrite the generator or re-run the capture, in "
+            "the same commit as the rule change and with the reason in the "
+            "commit message, never by editing this file by hand",
+            exit_code=2,
+        )
 
     # Find .aimi/ directory by walking up from cwd.
     cwd = Path(os.getcwd()).resolve()
