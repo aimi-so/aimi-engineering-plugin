@@ -3496,10 +3496,15 @@ def test_verification_report_url_matches_story_01s_object_fixtures():
     with_url = json.loads(_CB_CASES["site-023"]["verification-object-with-url"]["input"])
     no_url = json.loads(_CB_CASES["site-023"]["verification-object-no-url"]["input"])
     assert T.verification_report(with_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": "http://localhost:4000/y"}
+        {
+            "id": "US-001",
+            "project": None,
+            "url": "http://localhost:4000/y",
+            "status": "pending",
+        }
     ]
     assert T.verification_report(no_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": ""}
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
     ]
 
 
@@ -3559,7 +3564,9 @@ def test_verification_report_closes_the_array_valued_project_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_closes_the_non_string_url_hazard():
@@ -3582,7 +3589,9 @@ def test_verification_report_closes_the_non_string_url_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_passes_a_string_project_through_unchanged():
@@ -3599,7 +3608,14 @@ def test_verification_report_passes_a_string_project_through_unchanged():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": "apps/web", "url": "http://x/y"}]
+    assert report["visual"] == [
+        {
+            "id": "US-001",
+            "project": "apps/web",
+            "url": "http://x/y",
+            "status": "pending",
+        }
+    ]
 
 
 def test_verification_report_ignores_a_well_formed_non_visual_object():
@@ -3612,7 +3628,119 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         ]
     }
     report = T.verification_report(doc)
-    assert report == {"visual": [], "malformed": {"repairable": [], "unrepairable": []}}
+    assert report == {
+        "visual": [],
+        # non-visual, but its verification WAS declared and nobody looked at
+        # it -- the pending partition is scoped by status, never by strategy.
+        "pending": ["US-001"],
+        "malformed": {"repairable": [], "unrepairable": []},
+    }
+
+
+def test_pending_names_every_declared_status_whatever_the_strategy():
+    """The partition is scoped by `.verification.status`, not by strategy: a
+    test story and a visual story left at "pending" both enter, in document
+    order, and a story someone HAS judged -- passed, failed, skipped -- does
+    not. There is no recorded jq site to replay this against; no command-layer
+    program ever asked this question, which is why the completed gate had
+    nothing to read."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": "pending"}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "passed"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": "failed"}},
+            {"id": "US-005", "verification": {"strategy": "test", "status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-001", "US-002"]
+
+
+def test_pending_excludes_a_story_that_declared_no_verification_at_all():
+    """The boundary the partition exists inside: absent and null verifications
+    are NOT pending. They are the shape every legacy phase is made of -- the
+    stories written before the field existed -- and counting them would fail
+    each of those phases at its completed gate for a verification nobody ever
+    promised. Only the object branch is reached; `_status_defaulted`'s
+    `//= "pending"` is about a STORY's own status and has no counterpart here.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001"},
+            {"id": "US-002", "verification": None},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "pending"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-003"]
+
+
+def test_pending_matches_the_literal_and_never_a_near_miss():
+    """`jq_equal(status, "pending")` -- the same total-order comparison the
+    strategy test uses, so a boolean, a number or an array named where a
+    status belongs is not "pending" by Python's own looser rules either. The
+    malformed partition never sees these: the verification itself is a
+    well-formed object, only its `status` is not a string."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "Pending"}},
+            {"id": "US-002", "verification": {"strategy": "test", "status": ["pending"]}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": True}},
+            {"id": "US-004", "verification": {"strategy": "test", "status": ""}},
+            {"id": "US-005", "verification": {"strategy": "test"}},
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["pending"] == []
+    assert report["malformed"] == {"repairable": [], "unrepairable": []}
+
+
+def test_a_visual_entrys_status_reports_what_was_declared_and_collapses_the_rest():
+    """The field a caller wanting "did the visual check pass?" used to reopen
+    the file for. A string passes through (`passed` here, and the empty string
+    survives as itself); every other shape -- absent, null, an array --
+    collapses to `None`, the same divergence `_report_project` makes, so no
+    entry can claim a status the `pending` list refuses to count."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "visual", "status": "passed"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": ""}},
+            {"id": "US-003", "verification": {"strategy": "visual"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": None}},
+            {"id": "US-005", "verification": {"strategy": "visual", "status": ["a"]}},
+        ]
+    }
+    assert [entry["status"] for entry in T.verification_report(doc)["visual"]] == [
+        "passed",
+        "",
+        None,
+        None,
+        None,
+    ]
+
+
+@pytest.mark.parametrize("fixture", _CB_FIXTURES)
+def test_pending_stays_inside_the_object_branch_across_story_01s_corpus(fixture):
+    """The two new partitions read against every fixture story 01 recorded,
+    rather than against hand-written documents alone: whatever a fixture
+    holds, a `pending` id always belongs to a story whose verification is an
+    OBJECT carrying the literal, and never to one of the malformed ids the
+    same run reports. Nothing here regenerates a recording -- the corpus is
+    read for its INPUTS, and the verdict is this verb's own."""
+    if fixture == "malformed-document":
+        pytest.skip("unparseable JSON -- read_docs' refusal, not this verb's")
+    doc = json.loads(_CB_CASES["site-001"][fixture]["input"])
+    if fixture == "userstories-absent":
+        with pytest.raises(T.MalformedTasks):
+            T.verification_report(doc)
+        return
+    report = T.verification_report(doc)
+    by_id = {story.get("id"): story for story in doc["userStories"]}
+    for story_id in report["pending"]:
+        verification = by_id[story_id]["verification"]
+        assert isinstance(verification, dict)
+        assert verification.get("status") == "pending"
+    malformed = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
+    assert malformed.isdisjoint(report["pending"])
 
 
 # ---------------------------------------------------------------------------
