@@ -31,7 +31,7 @@ Every entry inside a `<prior_planning_gaps>` block is a mistake **already made i
 
 Four shapes recur, and each maps to a field you are writing right now:
 
-- **A `verify` that cannot discriminate** — it passes before the work exists, or it resolves a tool from a path that is not the tree under test. Your `implementation.verify` must fail on the pre-change tree.
+- **A `verify` that cannot discriminate** — it passes before the work exists, or it resolves a tool from a path that is not the tree under test. Your `implementation.verify` must fail on the pre-change tree. The second half of that has already been paid for and is written up as a rule of its own: see "Verify measures the tree under test" below.
 - **An acceptance criterion nothing executes** — see "Verify coverage" above; a gap saying so is that rule being violated in a previous plan.
 - **A criterion citing a line number, a count or a filename the tree has since moved.** Prefer a symbol or a path you can name over a coordinate that goes stale.
 - **A mechanical criterion with no tool behind it in this repository** — "Typecheck passes" where no typechecker is installed. See the Typecheck rule above: name the project's OWN check.
@@ -89,6 +89,24 @@ Write exactly one JSON object to `outputPath`. Fields:
 ## Verify working directory
 
 Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
+
+## Verify measures the tree under test, never an installed copy
+
+A story that creates or changes an executable this repository *ships* must run **that tree's** copy of it. Resolve the tool the way an ordinary session does — from a global cache, from `PATH`, from a path an installer wrote into a shell profile — and the verify measures the copy already installed on the machine, which is a different checkout from the worktree the executor works in. The check then passes or fails for reasons that have nothing to do with the story, and a story that adds behaviour can never observe it.
+
+In this repository the shipped executable is `aimi-cli.sh` (the plugin-self-build case detected under "skills[] inference" below). So a story whose `implementation.files` touches `plugins/aimi-engineering/scripts/aimi-cli.sh` — or a module it dispatches into, such as `tasks.py` or `roadmap.py` — must bind the CLI in `implementation.verify` as
+
+```
+AIMI_CLI="$PWD/plugins/aimi-engineering/scripts/aimi-cli.sh"
+```
+
+and never as `AIMI_CLI=$(cat ~/.config/aimi/cli-path)`. Three mechanical reasons, each independent of the other two:
+
+- The global cache names the **installed** plugin. A verify reading it never opens the file the story just edited.
+- Waiting for the cache to catch up is waiting for something the CLI is written to prevent: `write_global_cli_cache` refuses **on purpose** to persist any path carrying a `.worktrees/` segment (a throwaway checkout would leave later sessions pointing at a file that has since been removed), so the executor's own copy is never cached, by design.
+- The path must be **absolute**, which is why `$PWD/` is in front of it. Invoked by a relative path, `aimi-cli.sh` resolves its sibling Python modules against the working directory it holds after `find_aimi_root`, and can load another checkout's modules while appearing to run the worktree's.
+
+Recorded from the failing side in `.aimi/known-gaps/2026-09-03-US-002.md`: two stories in that phase had their verify repaired mid-flight for exactly this, and the gap closes by noting the rule did not yet exist here — which is why it does now.
 
 ## Verify coverage
 
@@ -149,6 +167,12 @@ Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no
 Forbidden in `tasks[]` (validator at `aimi-cli.sh` rejects these): triple-backticks, `$(`, backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
 
 Omit `tasks` entirely (do NOT emit `"tasks": []`) only when fewer than 3 meaningful steps can be identified.
+
+**A new verb's registration in its invariant test is a `tasks[]` step, not something the executor is expected to discover.** In the plugin-self-build repository (same detection as "skills[] inference" above), a story that adds a verb to `plugins/aimi-engineering/scripts/tasks.py` MUST carry an explicit step naming the test by name — e.g. `"Register the new op name in test_every_op_is_named_after_the_verb_that_calls_it in scripts/tests/test_tasks.py"` — and the reason belongs beside it, in the step or in `implementation.approach`, because a step whose purpose is opaque is the one that gets skipped.
+
+The reason: that test asserts the module's full set of op names against a **literal** set, so an op absent from it fails the suite. The invariant it guards is that an op is named after the verb that calls it — `roadmap.py` needed a `_VERB_FOR_OP` translation table precisely because its op names drifted from its verb names, and a diagnostic then quoted a command nobody could run. `tasks.py` has no such table, and keeping the two names equal is exactly what makes one unnecessary; the literal set is the mechanism that keeps them equal.
+
+Recorded in `.aimi/known-gaps/2026-09-03-US-004.md`: nothing in that story's `tasks[]` said so, and pytest only reported it at the very end, after every line of the work had already been written.
 
 ## Mock-sync AC injection
 

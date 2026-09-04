@@ -1664,6 +1664,11 @@ def _to_entries(value, owner):
 
 
 CITATION = re.compile(r'"([^"]+)" \(DesignSpec § ([0-9]+\.[0-9]+) L([0-9]+)\)')
+# A `path:line` anchor inside an acceptanceCriteria, for R16 below. The
+# extension list is what makes it an anchor at all: a bare `foo:12` is a ratio,
+# a timestamp or a namespace far more often than it is a file and a line, and a
+# matcher without the extension would warn about all three.
+LINE_ANCHOR = re.compile(r"[A-Za-z0-9_./-]+\.(?:md|py|sh|js|ts|json):[0-9]+")
 BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
 URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
 SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
@@ -1790,6 +1795,27 @@ def _grep_lines(text, pattern):
     return pattern.findall(text)
 
 
+def _line_anchors(text):
+    """Every `path:line` anchor in one acceptanceCriteria, DesignSpec citations
+    excluded, in first-seen order.
+
+    THE EXCLUSION IS PART OF THE RULE, not a refinement bolted on after it.
+    CITATION above already captures an `L([0-9]+)` group that the R2/R3/R4 walk
+    binds to `_line_number` and never reads: a DesignSpec citation is validated
+    by its LITERAL against its SECTION, and the line it names is not consulted.
+    The code reached the conclusion this rule exists to enforce long before the
+    rule did, and recorded it by throwing the capture away. So a citation whose
+    quoted literal happens to name a file and a line is the one anchor in the
+    file already answered for by content, and a naive matcher would fire on
+    exactly that. Blanking every citation span before the scan says it once.
+    """
+    seen = []
+    for anchor in LINE_ANCHOR.findall(CITATION.sub(" ", text)):
+        if anchor not in seen:
+            seen.append(anchor)
+    return seen
+
+
 def _endpoints(doc):
     backend = jq_index(jq_index(doc, "metadata", ""), "backendSpec", ".metadata")
     endpoints = jq_index(backend, "endpoints", ".metadata.backendSpec")
@@ -1810,6 +1836,11 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     `fields` is the metadata row the caller already read, and R1 has already
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
+
+    R16 AND R17 ARE THE RULES HERE BASH NEVER RAN. Both are appended below R15
+    and reach the `warn` channel only, so nothing above them moves; each one's
+    own comment carries why it warns instead of erroring, why it sits where it
+    sits, and why it is defensive where every rule above it is faithful.
     """
     errors = []
 
@@ -1887,6 +1918,97 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             tasks_file + ": " + story_id + " verification.url \"" + bad_url
             + "\" contains characters outside the allowed charset"
         )
+
+    # R16 -- acceptanceCriteria anchored to a line number. A WARNING, never an
+    # error: `errors` is what makes validate-tasks exit 1, and a line number is
+    # fragile rather than invalid, so promoting this would refuse plans that
+    # pass today. It is also why the rule lives here and not in
+    # validate_stories, which returns {valid, errors} with no warn channel at
+    # all -- giving it one would move a golden corpus this rule has no business
+    # moving.
+    #
+    # Below every rule that can abort, on purpose, and defensive on purpose.
+    # Every scan above can abort (see this function's docstring), so a rule
+    # appended here can never move an abort earlier than the port recorded it;
+    # and R15 has already indexed every story by the time this runs, so a story
+    # that is not an object still aborts exactly where it did. What is left -- an
+    # acceptanceCriteria that is a number, a criterion that is not a string --
+    # is skipped rather than refused, because a warning must not be the thing
+    # that turns a document the port accepts into one it rejects.
+    for doc in docs:
+        for story in _stories(doc):
+            criteria = jq_index(story, "acceptanceCriteria", ".userStories[]")
+            if isinstance(criteria, dict):
+                criteria = list(criteria.values())
+            if not isinstance(criteria, list):
+                continue
+            anchors = []
+            for criterion in criteria:
+                if not isinstance(criterion, str):
+                    continue
+                for anchor in _line_anchors(criterion):
+                    if anchor not in anchors:
+                        anchors.append(anchor)
+            if anchors:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": acceptanceCriteria cites a line number: "
+                    + ", ".join(anchors)
+                    + " — the tree moves and the anchor does not"
+                )
+
+    # R17 -- implementation.files naming a directory that is not there. A
+    # WARNING for R16's reason and, additionally, for one of its own: a plan is
+    # written before the tree it describes exists, so a path that cannot be
+    # opened today is a question to the author, not a verdict on the document.
+    #
+    # THE PARENT DIRECTORY IS WHAT IS CHECKED, NEVER THE FILE. A story whose
+    # whole job is to create a file is the ordinary case, so requiring the file
+    # would refuse every scaffolding story in the corpus -- the exact opposite
+    # of what a reality check is for. Requiring the directory still catches the
+    # failure that motivated the rule: a plan naming a tree nobody can open.
+    #
+    # It sits BELOW R16 for a measurable reason rather than a stylistic one.
+    # Warnings are compared byte for byte by the golden corpus, so a rule
+    # inserted ABOVE R16 would reorder the stderr of any document that trips
+    # both, while one appended below it can only ever add lines after the last
+    # one already recorded. Nothing above moves, in either channel.
+    #
+    # `implementation` is read ONLY once jq_type says "object". That guard is
+    # not defensive habit -- it is the removed cd-prefix rule's regression
+    # written down, and validate_stories carries the account of it beside
+    # .project rather than this comment repeating it.
+    #
+    # Confinement goes through confined_spec_path because that is the one place
+    # a document-sourced path is resolved against PROJECT_ROOT; a path that
+    # escapes warns for the same reason a missing directory does, since neither
+    # names a directory that exists UNDER the project root.
+    for doc in docs:
+        for story in _stories(doc):
+            implementation = jq_index(story, "implementation", ".userStories[]")
+            if jq_type(implementation) != "object":
+                continue
+            files = jq_index(implementation, "files", ".userStories[].implementation")
+            if not isinstance(files, list):
+                continue
+            unopenable = []
+            for entry in files:
+                if not isinstance(entry, str):
+                    continue
+                path, inside = confined_spec_path(project_root, entry)
+                if inside and os.path.isdir(os.path.dirname(path)):
+                    continue
+                if entry not in unopenable:
+                    unopenable.append(entry)
+            if unopenable:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": implementation.files names a directory that does not exist: "
+                    + ", ".join(unopenable)
+                    + " — the file may be new, the directory it lands in may not"
+                )
 
     return errors
 
@@ -1995,7 +2117,7 @@ def _named_lines(values):
 # parses. The measurement is in op_get_story_context's docstring, beside the
 # code it measures.
 #
-# THREE RULES CHANGED HERE ON PURPOSE, and the golden file's
+# FOUR RULES CHANGED HERE ON PURPOSE, and the golden file's
 # `_comment_story_context` states each one beside what it cost:
 #
 #   1. The cap counts BYTES. `${#skill_content}` counted bytes under LC_ALL=C
@@ -2013,6 +2135,13 @@ def _named_lines(values):
 #      warnings stay on stderr where they were, but a caller running this verb
 #      with `2>/dev/null` -- which a JSON-parsing caller reasonably does -- could
 #      not previously tell a hydrated skill set from a halved one.
+#   4. `metadata` is PROJECTED, not copied whole. The payload used to carry the
+#      document's entire metadata object into every spawn; the projection keeps
+#      the keys STORY_CONTEXT_METADATA_KEYS names -- the ones with a measured
+#      reader in the story-executor -- and drops the rest, `decisions` first
+#      among them. The constant and the grep that produced it sit beside
+#      op_get_story_context; the golden's story_context_cases moved with the
+#      rule, in the rule's own commit.
 #
 # Everything else is the bash reproduced, aborts included, and the abort classes
 # are named in the golden comment rather than reproduced: there is no shell
@@ -3033,6 +3162,64 @@ def op_validate_tasks(argv):
     return 1
 
 
+# The `metadata` keys this payload's ONE consumer actually reads. DERIVED BY
+# MEASUREMENT, NOT FROM THE PROSE -- skills/story-executor/SKILL.md describes
+# fields in running text that it never reads, so the list below comes from the
+# reads themselves:
+#
+#     grep -rhoE 'metadata\.[a-zA-Z]+' \
+#         plugins/aimi-engineering/skills/story-executor/ | sort -u
+#
+# On 3 September 2026, over SKILL.md and both files under references/, that
+# printed exactly three -- metadata.designBundle (2 occurrences),
+# metadata.designTokens (1) and metadata.prototypePaths (9). Re-run it rather
+# than trusting this comment; a key that gains a reader has to gain a line here
+# in the same commit, or the reader silently gets null.
+#
+# The story-executor skill is the whole consumer list, and that is measured too:
+# commands/execute.md and commands/next.md read metadata from the tasks FILE
+# through other verbs, never out of this payload.
+#
+# WHAT THIS DROPS IS THE POINT. metadata.decisions is the largest block a plan
+# writes -- one object per resolved question, each carrying the question's own
+# prose -- and nothing in the executor has ever read it, so it travelled in
+# every spawn of every story for nothing.
+STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths")
+
+
+def projected_metadata(metadata):
+    """`.metadata` narrowed to STORY_CONTEXT_METADATA_KEYS, in the document's
+    own key order.
+
+    PRESENCE decides, not truthiness. A key the document carries as null is
+    projected as null, because `designBundle: null` and no designBundle at all
+    are different documents and bundle-null records the first of them. A key the
+    document does not carry stays absent: emitting it as null would hand every
+    consumer a key to test for and would make the payload claim the document
+    said something it did not.
+
+    A document with no metadata at all is unchanged -- `null` in, `null` out,
+    the same answer metadata-ausente and metadata-null already record. Anything
+    else that is neither dict nor None is returned as it arrived rather than
+    refused here: design_context has already indexed `.metadata` by the time
+    this runs, so a metadata that is a string aborted there (metadata-string),
+    and inventing a second refusal for an unreachable shape would be a new rule
+    wearing a projection's clothes.
+
+    A caller that reads a key no longer projected gets jq's null, not an error:
+    `.metadata.maxConcurrency` on `{}` is null exactly as it is on a document
+    with no metadata, which is what keeps this narrowing from breaking a reader
+    nobody has found yet.
+    """
+    if not isinstance(metadata, dict):
+        return metadata
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in STORY_CONTEXT_METADATA_KEYS
+    }
+
+
 def op_get_story_context(argv):
     """One crossing, no lock, and the assembly order bash ran in.
 
@@ -3101,7 +3288,7 @@ def op_get_story_context(argv):
         _emit(
             {
                 "story": story,
-                "metadata": jq_index(first, "metadata"),
+                "metadata": projected_metadata(jq_index(first, "metadata")),
                 "skills": skills,
                 "designContext": context,
                 "skillsDropped": dropped,

@@ -34,6 +34,17 @@ engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
 
+A FOURTH rule then changed and it is the only one that MOVED this block rather
+than being absorbed by a table or a strip: `metadata` is now projected onto the
+keys with a measured reader (tasks.py's STORY_CONTEXT_METADATA_KEYS) instead of
+copied whole, so 43 of the 45 non-empty recordings lost the keys nothing reads.
+They were not recaptured and not regenerated: each recorded payload was
+re-parsed, its metadata narrowed by the new rule and the rest re-rendered by the
+same writer, after that writer was shown to reproduce all 45 byte for byte
+first. `_comment_story_context` states it beside what it cost, and the
+assertions live under "DECISION 4" below -- including the one the corpus cannot
+make, because no fixture in it ever carried a `metadata.decisions`.
+
 `validate_tasks_cases` carries two fields the others have no use for: `files`,
 the spec fixtures written inside the project root, and `outside`, the ones
 written one directory ABOVE it. The second exists for two recordings alone, and
@@ -1540,6 +1551,205 @@ def test_every_one_of_the_fifteen_rules_has_a_case_that_trips_it_and_one_that_do
     assert len(_vt_errors("url-duas-ruins")) == 2
 
 
+def _replay_line_anchor(criterion, tmp_path):
+    """One story, one criterion, through the real CLI.
+
+    Built here rather than read out of the golden because R16 is the one rule in
+    validate_tasks bash never ran -- there is no jq recording of it to replay,
+    and adding one to `validate_tasks_cases` would be recording the Python,
+    which is the one thing that file must never hold. schemaVersion 3.3 is
+    load-bearing: R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [
+            {
+                "id": "US-001",
+                "title": "Story US-001",
+                "description": "As a user, I want US-001.",
+                "acceptanceCriteria": [criterion],
+                "status": "pending",
+                "priority": 1,
+                "dependsOn": [],
+                "wave": 0,
+            }
+        ],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_line_numbered_anchor_in_an_acceptance_criterion_warns_exactly_once(tmp_path):
+    """R16's warning half, and the channel it uses is the assertion.
+
+    It names the anchor, and it reaches `warn` rather than `errors`: the verdict
+    stays valid and the exit status stays 0. That is the whole point of the rule
+    living in validate_tasks -- a line number is fragile, not invalid, and an
+    error here would refuse plans that pass today.
+    """
+    actual = _replay_line_anchor("o bloco em commands/execute.md:2766 precisa mudar", tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "acceptanceCriteria cites a line number: commands/execute.md:2766"
+        " — the tree moves and the anchor does not\n"
+    )
+
+
+def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
+    """The exclusion, asserted from both sides so it cannot pass vacuously.
+
+    LINE_ANCHOR on its own DOES fire on this string -- the first assertion says
+    so -- and the rule still emits nothing, because R2/R3/R4 already validate a
+    citation by its literal against its section and bind the `L(...)` capture to
+    a `_line_number` nothing reads. Warning here would be warning about the one
+    anchor in the file that is checked by content.
+    """
+    citation = '"o alvo em commands/execute.md:2766" (DesignSpec § 2.1 L2766)'
+    assert T.LINE_ANCHOR.search(citation), "a matcher without the exclusion fires on it"
+    actual = _replay_line_anchor(citation, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+_ABSENT = object()
+
+
+def _replay_implementation(implementation, tmp_path, files=None):
+    """One story through the real CLI, carrying `implementation` as given.
+
+    R17's own replay, built here for the reason _replay_line_anchor is built
+    here: bash never ran this rule either, so there is no jq recording to
+    replay, and adding one to `validate_tasks_cases` would be recording the
+    Python. schemaVersion 3.3 is load-bearing for the same reason too -- R1
+    returns before validate_tasks on anything older, so the warning would never
+    fire and the test would pass on nothing.
+
+    THESE THREE CASES ARE THE ONLY COVERAGE R17 HAS, and that is a measured
+    claim rather than a cautious one: not one of the 121 recordings in
+    `validate_tasks_cases` carries an `implementation` object at all, so the
+    corpus cannot reach this rule even once. `_ABSENT` is a sentinel because
+    `None` is a value the schema allows and the absent case has to be distinct
+    from it. `files` seeds real files under PROJECT_ROOT, which is how a case
+    says "this directory exists" -- the rule asks about the PARENT, so a
+    fixture only ever has to create a sibling of the path under test.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    if implementation is not _ABSENT:
+        story["implementation"] = implementation
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": files or {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_story_with_no_implementation_reaches_r17_and_says_nothing(tmp_path):
+    """`implementation` is optional in schema v3.3, so absent is not a finding.
+
+    The story still reaches the rule -- R17 iterates every story unconditionally
+    and it is the jq_type guard, not a pre-filter, that ends this one. Silence
+    on both channels is the assertion, because a warning here would fire on the
+    majority of every tasks file the plugin has ever written.
+    """
+    actual = _replay_implementation(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_implementation_that_is_a_string_is_stopped_by_the_type_guard(tmp_path):
+    """The guard's own test, and it is shown to be load-bearing, not assumed.
+
+    The second assertion is the point: reading `.files` off this same scalar
+    WITHOUT the guard raises, and MalformedTasks out of validate_tasks is an
+    abort of the whole run -- exit 1 on a document that is merely unusual. That
+    is the regression the comment beside .project in validate_stories records,
+    reproduced here against the real function rather than restated in prose.
+    """
+    scalar = "isto e uma string, nao um objeto"
+    actual = _replay_implementation(scalar, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+    with pytest.raises(T.MalformedTasks):
+        T.jq_index(scalar, "files", ".userStories[].implementation")
+
+
+def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(tmp_path):
+    """R17's warning half, plus the half that keeps it from passing on nothing.
+
+    The same story shape is run twice and only the path changes: `src/` exists
+    because the fixture seeded a sibling into it, `nao/existe/` does not. One
+    warns, one is silent, so the rule is shown to discriminate rather than to
+    fire on every path it is handed.
+
+    The FILE is missing in both runs. That is the rule's whole design -- a story
+    that creates `src/novo.py` is the ordinary case, and checking the file
+    instead of its parent would refuse every scaffolding story in the corpus.
+
+    The verdict stays `valid` and the exit stays 0: this reaches `warn`, never
+    `errors`, because a plan may legitimately describe a directory it is about
+    to create and refusing that would be worse than not checking at all.
+    """
+    seeded = {"src/existente.py": "# um vizinho, so para criar src/\n"}
+
+    quiet = _replay_implementation(
+        {"files": ["src/novo.py"], "approach": "a", "verify": "true"}, tmp_path, seeded
+    )
+    assert quiet["exit"] == 0
+    assert quiet["stderr"] == "", "the file is absent too -- only the parent is checked"
+
+    loud = _replay_implementation(
+        {"files": ["nao/existe/de/jeito/nenhum/x.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        seeded,
+    )
+    assert loud["exit"] == 0
+    assert loud["stdout"] == '{"valid": true, "errors": []}\n', "a warning, never an error"
+    assert loud["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert loud["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "implementation.files names a directory that does not exist: "
+        "nao/existe/de/jeito/nenhum/x.py"
+        " — the file may be new, the directory it lands in may not\n"
+    )
+
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
@@ -2055,6 +2265,169 @@ def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
     actual, _ = _context_stdout("skills-tres", tmp_path)
     assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
     assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# DECISION 4: metadata is projected, not copied whole
+# ---------------------------------------------------------------------------
+#
+# The corpus MOVED for this rule -- 43 of its 45 non-empty recordings lost the
+# metadata keys nothing reads -- and `_comment_story_context` says how. What the
+# corpus cannot say is the thing that motivated the change: no fixture in it has
+# ever carried a `metadata.decisions`, so the assertion that discriminates is
+# hand-written here, against a document written for it.
+
+
+def _synthetic_context_case(metadata):
+    """One story and the given metadata, in the shape _replay_context rebuilds.
+
+    Reuses the replay machinery rather than a second runner, so these tests go
+    through the same bash wrapper, the same crossing and the same argv the 57
+    recordings do -- the projection is asserted on the payload a story executor
+    would actually receive, not on projected_metadata() called directly.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [{
+            "id": "US-001", "title": "Story US-001",
+            "description": "As a user, I want US-001.",
+            "acceptanceCriteria": ["Typecheck passes"], "status": "pending",
+            "priority": 1, "dependsOn": [], "wave": 0,
+        }],
+    }
+    return {
+        "args": ["get-story-context", "US-001"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, indent=2) + "\n",
+            "files": {}, "repeat": {}, "state": {}, "plugin_dir": True, "env": {},
+        },
+    }
+
+
+def _projected(metadata, tmp_path):
+    actual = _replay_context(_synthetic_context_case(metadata), tmp_path)
+    assert actual["exit"] == 0, actual["stderr"]
+    return json.loads(actual["stdout"])["metadata"]
+
+
+def test_decisions_stops_travelling_and_a_key_with_a_reader_survives(tmp_path):
+    """DECISION 4, and the one assertion that discriminates this story's change.
+
+    metadata.decisions is the largest block a plan writes -- one object per
+    resolved question, carrying that question's own prose -- and it was copied
+    into the first payload of every spawned story executor, none of which has
+    ever read it. prototypePaths sits in the same object and IS read, nine times
+    in SKILL.md, so a projection that dropped both would be a regression wearing
+    this story's name: both halves are asserted here, on one document.
+    """
+    metadata = _projected({
+        "branchName": "x/y",
+        "maxConcurrency": 3,
+        "decisions": [{"anchor": "a", "source": "b", "text": "c", "resolution": "d"}],
+        "prototypePaths": ["p.html"],
+    }, tmp_path)
+    assert "decisions" not in metadata, "the block that motivated the projection"
+    assert metadata["prototypePaths"] == ["p.html"], "a key WITH a reader survives"
+    assert metadata == {"prototypePaths": ["p.html"]}
+
+
+def test_the_projection_keeps_the_documents_own_key_order(tmp_path):
+    """Payload SHAPE is the contract here (this is parsed by an agent), and the
+    three keys are projected in the order the DOCUMENT wrote them, not in the
+    order the constant lists them."""
+    metadata = _projected({
+        "prototypePaths": ["p.html"],
+        "branchName": "x/y",
+        "designTokens": {"color": "#fff"},
+        "decisions": [],
+        "designBundle": {"root": ".aimi/design/b"},
+    }, tmp_path)
+    assert list(metadata) == ["prototypePaths", "designTokens", "designBundle"]
+
+
+def test_a_key_the_document_omits_does_not_become_null(tmp_path):
+    """PRESENCE, not truthiness, in both directions.
+
+    A projected key the document never wrote is absent, because inventing it as
+    null would make the payload claim the document said something it did not --
+    and a consumer that has to tell "absent" from "null" is one that will get it
+    wrong. A projected key the document wrote AS null survives as null, for the
+    same reason read the other way: `designBundle: null` is a real value, and
+    bundle-null records a document that carries it.
+    """
+    assert _projected({"prototypePaths": ["p.html"]}, tmp_path / "one") == {
+        "prototypePaths": ["p.html"]
+    }
+    assert _projected({"designBundle": None}, tmp_path / "two") == {"designBundle": None}
+
+
+def test_a_document_with_no_metadata_answers_exactly_what_it_did_before(tmp_path):
+    """`null`, not `{}` and not an omitted key -- unchanged by the projection.
+
+    metadata-ausente and metadata-null are the two recordings the move did NOT
+    touch, and the reason is a contract rather than an accident: a document that
+    carries no metadata says nothing, which is not the same statement as "every
+    projected key was missing". Both are replayed here so the pair is asserted
+    rather than inferred from the diff.
+    """
+    for label in ("metadata-ausente", "metadata-null"):
+        _, payload = _context_stdout(label, tmp_path / label)
+        assert payload["metadata"] is None, label
+        assert '"metadata": null' in CONTEXT[label]["stdout"], label + ": recorded too"
+
+    # And the key a caller still reaches for is jq's null either way, which is
+    # what keeps the narrowing from breaking a reader nobody has found yet.
+    assert _projected({"maxConcurrency": 3}, tmp_path / "narrowed") == {}
+
+
+def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
+    """The constant is the single place the set is written down.
+
+    The grep that produced it lives in the comment beside it in tasks.py rather
+    than in an assertion here, deliberately: skills/story-executor/SKILL.md is
+    owned by another story in this same wave, and a test that grepped a file
+    being edited beside it would go red for a reason that has nothing to do with
+    this rule. Re-run the grep the comment records when a reader is added.
+    """
+    assert T.STORY_CONTEXT_METADATA_KEYS == (
+        "designBundle", "designTokens", "prototypePaths"
+    )
+    assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
+
+
+def test_the_moved_recordings_carry_no_key_the_projection_would_drop():
+    """The corpus's own half of decision 4, over all 45 non-empty recordings.
+
+    The move was mechanical -- each recorded payload re-parsed, its metadata
+    narrowed, the rest re-rendered byte for byte -- so the property to check
+    afterwards is that nothing survived it that the live rule would remove. A
+    recording that still carried `branchName` would mean the replay test is
+    comparing the new code against a recording of the old rule.
+    """
+    seen = 0
+    for case in CONTEXT.values():
+        for payload in _payloads(case["stdout"]):
+            metadata = payload["metadata"]
+            if metadata is None:
+                continue
+            assert set(metadata) <= set(T.STORY_CONTEXT_METADATA_KEYS), case["label"]
+            seen += 1
+    assert seen, "the corpus has payloads with a metadata object"
+
+
+def _payloads(stdout):
+    """The recorded stdout's JSON values -- id-duplicado holds two."""
+    decoder = json.JSONDecoder()
+    index, values = 0, []
+    while True:
+        while index < len(stdout) and stdout[index] in " \n\t\r":
+            index += 1
+        if index >= len(stdout):
+            return values
+        value, index = decoder.raw_decode(stdout, index)
+        values.append(value)
 
 
 def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
@@ -2812,7 +3185,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "os.unlink(handle.name)",
         "os.unlink(path)",
     ]
-    # Thirty-five os.path calls, and the module still names no path of its own
+    # Thirty-seven os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
     # are confined_spec_path resolving and comparing, three arrived with
@@ -2828,7 +3201,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # base directory, PROJECT_ROOT, the archive directory and the tasks-file
     # list are all bash's answers, handed in as flags or as arguments.
     #
-    # The last six arrived with list-known-gaps and they are the first that
+    # The next six arrived with list-known-gaps and they are the first that
     # name a DIRECTORY of their own: "known-gaps", "tasks" and "archive", each
     # joined onto the --aimi-dir bash handed in, plus one join and one isdir()
     # in the bounded listing that walks them. That is a real widening and it is
@@ -2837,9 +3210,18 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # argument -- and what changed is that a leaf name below one now is. A
     # SEVENTH such name, or any of these three moving off --aimi-dir, is the
     # thing to argue about.
-    assert code.count("os.path.") == 35
+    #
+    # The last two arrived with R17 and they name NOTHING of their own: a
+    # dirname() and an isdir() over whatever confined_spec_path already
+    # resolved, which is PROJECT_ROOT concatenated with a string the document
+    # supplied. So the count moves while the rule this comment is about does
+    # not -- R17 reads a directory the tasks file named, never one tasks.py
+    # chose. It is also the second isdir() in the module, and the first that
+    # asks whether a path the plan CITES is real rather than whether one the
+    # CLI walks is.
+    assert code.count("os.path.") == 37
     assert code.count("os.path.isfile(") == 7
-    assert code.count("os.path.isdir(") == 1
+    assert code.count("os.path.isdir(") == 2
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]

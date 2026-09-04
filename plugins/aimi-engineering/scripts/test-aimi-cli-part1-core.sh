@@ -1261,10 +1261,13 @@ test_get_story_context() {
   story_id=$(echo "$output" | jq -r '.story.id')
   assert_eq "US-001" "$story_id" "get-story-context story.id matches requested ID"
 
-  # Metadata is verbatim from the tasks file
-  local branch_name
-  branch_name=$(echo "$output" | jq -r '.metadata.branchName')
-  assert_eq "feat/test-feature" "$branch_name" "get-story-context metadata.branchName matches tasks file"
+  # Metadata is PROJECTED, not verbatim: only the keys with a measured reader in
+  # skills/story-executor/ survive (STORY_CONTEXT_METADATA_KEYS in tasks.py).
+  # branchName is read from the tasks file by other verbs and never out of this
+  # payload, so it is dropped -- and this assertion used to demand the opposite.
+  local has_branch
+  has_branch=$(echo "$output" | jq '.metadata | has("branchName")')
+  assert_eq "false" "$has_branch" "get-story-context metadata drops branchName (no reader in the executor)"
 
   # (2) Invalid-format ID exits non-zero and writes to stderr
   local stderr_output

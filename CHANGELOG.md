@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.126.0] - 2026-09-04
+
+Phase 2 of the pipeline audit: every field a story carries now has both a writer
+and a reader, what travels to an executor is what the executor uses, and a plan
+that names a line number or a directory nobody can open says so at write time.
+
+### Added
+
+- **R16 in `validate_tasks`** — an `acceptanceCriteria` that anchors to
+  `path.ext:N` draws one warning line per story, naming every anchor found. It
+  warns and never errors: `errors` is what makes `validate-tasks` exit 1, and a
+  line number is fragile rather than invalid, so promoting it would refuse plans
+  that pass today. DesignSpec citations are excluded as part of the rule rather
+  than as a refinement of it — `CITATION` already captures an `L([0-9]+)` group
+  that the R2/R3/R4 walk binds and never reads, because a citation is validated
+  by its literal against its section. The one anchor already answered for by
+  content is exactly the one a naive matcher would fire on.
+- **R17 in `validate_tasks`** — an `implementation.files` entry whose parent
+  directory does not exist under the project root draws a warning. The parent is
+  what is checked, never the file: a story whose whole job is to create a file is
+  the ordinary case, and requiring the file would refuse every scaffolding story.
+  `implementation` is read only once `jq_type` says `object`. It sits below R16
+  for a measured reason — warnings are compared byte for byte by the golden
+  corpus, so a rule inserted above R16 would reorder the stderr of any document
+  tripping both, while one appended below can only add lines after the last
+  already recorded.
+- **`warn_list` in `roadmap.py`** — every verdict the file could reach was fatal,
+  13 `_die_list` call sites and nothing else, so a non-fatal check had no channel
+  to speak through. `warn_list` mirrors the pair `story_merge.py` already has
+  rather than inventing a second shape, and `_die_list` now calls it and adds the
+  exit, so the two cannot drift in how a diagnostic renders. All 13 fatal checks
+  are untouched.
+- **A missing-parent-directory advisory in `judge_phases`**, on both writers
+  (`roadmap-init` and `roadmap-amend-phase`). It fires only on identities that are
+  actually path-shaped: a bare verb name names no directory and is never judged, a
+  `METHOD /path` route's slash belongs to the route, and a globbed parent names no
+  one literal directory. The project root is the parent of the nearest `.aimi`
+  ancestor of the roadmap path both writers already hold, walked lexically because
+  a fresh `roadmap-init` runs before its own feature directory exists.
+- **`metadata.baseRef` in `/aimi:plan`** — the full 40-character SHA from
+  `git rev-parse HEAD`, read in the repository the file's stories target. A plan
+  is written against one tree and nothing in the file said which one, so a base
+  that had since moved was discovered mid-wave, by an executor, as a merge
+  conflict. The key enters all four enumerations the command maintains, because a
+  key named only in the first is silently dropped from every file a split run
+  produces. On the PROJECT axis each file carries its own repository's SHA — one
+  global value would be wrong for N-1 of them. A root that does not resolve omits
+  the key entirely: an absent key reads as "written before this field existed",
+  where `""` reads as a SHA.
+
+### Changed
+
+- **`get-story-context` projects `metadata`** onto the three keys a story
+  executor actually reads — `designBundle`, `designTokens`, `prototypePaths` —
+  derived by grepping the skill rather than from the schema's maximum. The whole
+  object had been travelling, `metadata.decisions` included.
+- **`implementation.approach` gained the reader it never had.** The field was
+  written by the expander and read by nothing in the executor; both
+  `<execution_flow>` blocks in the story-executor skill now carry it.
+
+### Fixed
+
+- **A story's `verify` could not exercise a verb the story itself added.**
+  Resolving `AIMI_CLI` from `~/.config/aimi/cli-path` points at the deployed
+  plugin copy, never the worktree, so a story changing a verb measured the old
+  one. Documented in the expander's rules as a named rule.
+
 ## [1.125.0] - 2026-09-03
 
 Three bodies of work that had accumulated unreleased on one branch. The thread
