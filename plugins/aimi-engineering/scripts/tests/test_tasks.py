@@ -3125,16 +3125,16 @@ def test_tasks_py_takes_no_lock_of_its_own():
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     """One writer, and the writer is atomic.
 
-    open() appears six times and ALL SIX are read mode. The second arrived
+    open() appears seven times and ALL SEVEN are read mode. The second arrived
     with validate-tasks, the one verb that reads a file other than the tasks
     file -- the DesignSpec or BusinessSpec named in metadata.designBundle,
     discovered after the crossing and therefore unreachable from bash's own
     confinement. The third and fourth arrived with get-story-context for the
     same reason: a SKILL.md under the skills base directory bash resolved, and
     the brainstorm named by metadata.brainstormPath. Each is read-only and each
-    is scoped to its own call site, which is what this asserts: a SEVENTH open,
-    or any of these six in a writing mode, is a new capability and has to be
-    argued for rather than appear.
+    is scoped to its own call site, which is what this asserts: an EIGHTH
+    open, or any of these seven in a writing mode, is a new capability and has
+    to be argued for rather than appear.
 
     The fifth and sixth arrived TOGETHER with list-known-gaps, and they are the
     first two that open a file this module was not handed a path to: a gap file
@@ -3145,6 +3145,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     directories down and never uses a recursive traversal helper, because the
     test above bans every one of them by name and that ban is worth more than
     the four lines it costs to avoid.
+
+    The SEVENTH arrived with verify-probe's `--previous-file`: a PRIOR run's
+    own JSON array, named by a path bash already ran through
+    validate_path_in_project like --tasks-file, and read by
+    _read_previous_probe. It degrades to `None` on ANY failure -- missing,
+    unreadable, not JSON, not a list -- rather than raising, because this read
+    backs a diagnostic comparison layered on top of `discriminates`, never a
+    gate, and a bad --previous-file must not be why the probe itself refuses.
 
     The single BYTE-writing path is write_docs_atomically, a NamedTemporaryFile
     in the TARGET's own directory followed by os.replace -- never a
@@ -3160,13 +3168,13 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     in it and has to change this test to arrive.
     """
     code = _code()
-    assert code.count("open(") == 6
+    assert code.count("open(") == 7
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 6
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 7
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -4488,12 +4496,16 @@ def test_a_missing_branchname_is_still_the_word_null():
 # branch is never run.
 
 
-def _probe(tmp_path, verify, files=(), cwd=None):
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None):
     """A one-story project whose story carries `verify`, probed through the CLI.
 
     `files` are created relative to the project root before the run, and `cwd`
     names the directory to invoke from -- the two things the probe's answer
-    depends on besides the verify text itself.
+    depended on before `unsatisfiable` existed. `previous` is the THIRD: a
+    JSON-serializable array (typically a prior call's own `probed` return
+    value) written to a file inside the project and passed as
+    `--previous-file`, the same way the story-executor hands the
+    pre-implementation run's output to the post-implementation one.
     """
     base = os.path.realpath(str(tmp_path))
     root = os.path.join(base, "proj")
@@ -4522,8 +4534,14 @@ def _probe(tmp_path, verify, files=(), cwd=None):
     tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
     with open(tasks_file, "w", encoding="utf-8") as handle:
         json.dump(document, handle)
+    args = ["bash", CLI, "verify-probe", "US-001", "--tasks-file", tasks_file]
+    if previous is not None:
+        previous_file = os.path.join(root, ".aimi", "tasks", "previous.json")
+        with open(previous_file, "w", encoding="utf-8") as handle:
+            json.dump(previous, handle)
+        args += ["--previous-file", previous_file]
     proc = subprocess.run(
-        ["bash", CLI, "verify-probe", "US-001", "--tasks-file", tasks_file],
+        args,
         cwd=os.path.join(root, cwd) if cwd else root,
         env=_isolated_env(base),
         capture_output=True,
@@ -4715,7 +4733,9 @@ def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
     Carrying the `cd` may act only where there IS one. A verify without one has
     to produce the same array as before, field for field -- same count, same
     exit, same discriminates -- so this compares whole entries rather than any
-    single field of them.
+    single field of them. `unsatisfiable` is the one field this branch added,
+    and with no `--previous-file` it is `false` on every entry -- a single
+    failure proves nothing about a second run that never happened.
     """
     _, probed = _probe(
         tmp_path,
@@ -4723,9 +4743,9 @@ def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
         files=("existe.txt",),
     )
     assert probed == [
-        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False},
-        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True},
-        {"segment": "true", "exit": 0, "discriminates": False},
+        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
     ]
 
 
@@ -4742,14 +4762,19 @@ def test_a_cd_that_fails_aborts_instead_of_falling_back_to_the_caller(tmp_path):
 def test_the_probe_wrapper_crosses_once_takes_no_lock_and_runs_the_same_gates():
     """Bash keeps the argument, its format, which file is current and whether
     the story is in it -- and adds exactly one thing, the caller's directory.
-    Nothing here reads the document, and a reader takes no lock."""
+    Nothing here reads the document, and a reader takes no lock.
+
+    `--previous-file` is a CLI argument like `--tasks-file`, so it goes
+    through `validate_path_in_project` too -- the count of two below is what
+    tells "both paths confined" from "one of them forgotten"."""
     body = _executable(dict(_wrappers())["cmd_verify_probe"])
     assert "jq " not in body and "jq(" not in body
     assert body.count(_TASKS_CROSSING) == 1
     assert "_lock" not in body, "a reader takes no lock"
     for kept in ("validate_story_id", "validate_path_in_project", "get_tasks_file",
-                 "validate_story_exists", "check_python3"):
+                 "validate_story_exists", "check_python3", "--previous-file"):
         assert kept in body, kept
+    assert body.count("validate_path_in_project") == 2, "tasks_file and previous_file"
     assert 'AIMI_INVOCATION_DIR:-$PWD' in body
 
 
@@ -4765,6 +4790,138 @@ def test_nothing_in_the_decomposition_reaches_eval():
     start = source.index("def verify_segments")
     end = source.index("def op_verify_probe")
     assert "eval" not in source[start:end]
+
+
+# ---------------------------------------------------------------------------
+# verify-probe --previous-file: the second measurement point (US-005)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: `discriminates` computed from ONE run cannot tell
+# "the work is not done yet" (fails once, would pass after the story lands)
+# from "this assertion can never pass" (fails no matter what gets written).
+# The story-executor already runs a story's verify twice -- once before any
+# work, once after -- so the fix is to let this verb COMPARE those two runs
+# rather than guess from a segment's text. These tests exercise that
+# comparison; the tests above it are unchanged because `discriminates` itself
+# is unchanged by any of this.
+
+
+def test_a_segment_failing_both_runs_is_named_possibly_unsatisfiable(tmp_path):
+    """AC: a segment non-zero in the recorded PREVIOUS run and non-zero again
+    THIS run is `unsatisfiable: true`, with a note pointing at the harness
+    rather than at the story's own code -- exactly the case a `set -e` script
+    hides behind its first failure, and the one the phase-1 incident this
+    story cites paid three fifteen-minute suite runs to not have."""
+    _, before = _probe(tmp_path, "true\nfalse\n")
+    _, after = _probe(tmp_path, "true\nfalse\n", previous=before)
+    assert [entry["unsatisfiable"] for entry in after] == [False, True]
+    assert "harness" in after[1]["note"]
+    assert "code" in after[1]["note"]
+    assert "note" not in after[0]
+
+
+def test_an_unmatched_segment_is_not_named_unsatisfiable(tmp_path):
+    """A segment with no entry in PREVIOUS at all -- because the verify itself
+    grew a new assertion between the two runs -- looks exactly like ordinary
+    unfinished work, not a broken harness: nothing to compare it against, so
+    `unsatisfiable` stays false however many times it just failed."""
+    previous = [{"segment": "true", "exit": 0}]
+    _, after = _probe(tmp_path, "true\ntest -f nope.txt\n", previous=previous)
+    assert [entry["segment"] for entry in after] == ["true", "test -f nope.txt"]
+    assert [entry["unsatisfiable"] for entry in after] == [False, False]
+
+
+def test_a_segment_passing_both_runs_stays_discriminates_false(tmp_path):
+    """GUARDRAIL (AC): the semantics of `discriminates` do not change for a
+    reader who already consumes it -- a segment that passed before continues
+    to read `discriminates: false` once `--previous-file` is in play, not
+    just when it is absent."""
+    _, before = _probe(tmp_path, "true\n")
+    _, after = _probe(tmp_path, "true\n", previous=before)
+    assert after == [
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False}
+    ]
+
+
+def test_a_regression_is_not_unsatisfiable_only_a_double_failure_is(tmp_path):
+    """The other direction a naive "non-zero now" heuristic would get wrong: the
+    IDENTICAL segment text, PASSING in the recorded previous run and failing
+    now because the story's own work broke something along the way -- a
+    regression, not a harness that can never observe its own claim.
+    `unsatisfiable` requires non-zero on BOTH sides of the pair; one side
+    passing rules it out, whichever side it is."""
+    root, before = _probe(tmp_path, "test -f existe.txt\n", files=("existe.txt",))
+    assert before == [
+        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False}
+    ]
+    os.remove(os.path.join(root, "existe.txt"))
+    _, after = _probe(tmp_path, "test -f existe.txt\n", previous=before)
+    assert after == [
+        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False}
+    ]
+
+
+def test_a_repeated_segment_is_paired_positionally_against_its_own_repeats(tmp_path):
+    """Two occurrences of an identical segment text are told apart only by the
+    order they appear in among their OWN repeats, a different segment sitting
+    between them notwithstanding: the first PREVIOUS "false" pairs with the
+    first current one, the second PREVIOUS "false" -- which passed -- pairs
+    with the second current one, so a flip from failing to passing is not
+    borrowed from the wrong occurrence."""
+    previous = [
+        {"segment": "false", "exit": 1},
+        {"segment": "true", "exit": 0},
+        {"segment": "false", "exit": 0},  # the SECOND "false" occurrence passed
+    ]
+    _, after = _probe(tmp_path, "false\ntrue\nfalse\n", previous=previous)
+    assert [entry["exit"] for entry in after] == [1, 0, 1]
+    assert [entry["unsatisfiable"] for entry in after] == [True, False, False]
+
+
+def test_an_unreadable_or_malformed_previous_file_degrades_to_no_comparison(tmp_path):
+    """AC (guardrail): a bad `--previous-file` is a diagnostic input, not a
+    gate -- the probe must still answer, with every `unsatisfiable` false,
+    rather than fail the whole call over a file it cannot use."""
+    root, probed = _probe(tmp_path, "false\n")
+    assert probed[0]["unsatisfiable"] is False
+    bogus = os.path.join(root, ".aimi", "tasks", "not-json.txt")
+    with open(bogus, "w", encoding="utf-8") as handle:
+        handle.write("not json at all")
+    proc = subprocess.run(
+        ["bash", CLI, "verify-probe", "US-001", "--tasks-file",
+         os.path.join(root, ".aimi", "tasks", "p-tasks.json"),
+         "--previous-file", bogus],
+        cwd=root,
+        env=_isolated_env(os.path.dirname(root)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)[0]["unsatisfiable"] is False
+
+
+def test_match_previous_never_touches_discriminates_directly():
+    """Unit-level guardrail on `_match_previous` itself: it is additive only,
+    called after `discriminates` is already computed from THIS run alone, and
+    must not overwrite it for any entry regardless of what `previous` says."""
+    current = [{"segment": "x", "exit": 0, "discriminates": False}]
+    T._match_previous([{"segment": "x", "exit": 1}], current)
+    assert current[0]["discriminates"] is False
+    assert current[0]["unsatisfiable"] is False  # exit is 0 this run
+
+
+def test_read_previous_probe_tolerates_absence_and_bad_shape(tmp_path):
+    """Unit-level guardrail on `_read_previous_probe`: no path, a missing
+    path, and a JSON value that parses but is not an array all answer `None`
+    -- the same "nothing to compare against" outcome, never a raised
+    exception the caller would have to catch."""
+    assert T._read_previous_probe(None) is None
+    assert T._read_previous_probe(os.path.join(str(tmp_path), "missing.json")) is None
+    obj_path = os.path.join(str(tmp_path), "obj.json")
+    with open(obj_path, "w", encoding="utf-8") as handle:
+        json.dump({"not": "a list"}, handle)
+    assert T._read_previous_probe(obj_path) is None
 
 
 # ---------------------------------------------------------------------------

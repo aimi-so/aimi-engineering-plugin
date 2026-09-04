@@ -56,5 +56,5 @@ review.md	22577
 references/scope-contexts.md	20743
 deepen.md	18029
 
-skills/story-executor/SKILL.md	43690
+skills/story-executor/SKILL.md	45381
 skills/task-planner/SKILL.md	23042

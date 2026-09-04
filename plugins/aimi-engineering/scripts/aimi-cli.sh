@@ -1811,8 +1811,16 @@ cmd_get_story_context() {
 # The executor's pre-run answers "does this whole verify already pass before
 # the work?". This answers the finer question the `set -e` in front of most
 # verifies makes unanswerable: WHICH of its assertions already pass. Prints a
-# JSON array of {segment, exit, discriminates}; an absent or empty verify is an
-# empty array at exit 0.
+# JSON array of {segment, exit, discriminates, unsatisfiable}; an absent or
+# empty verify is an empty array at exit 0.
+#
+# --previous-file names a PRIOR run's own JSON array -- the executor's
+# pre-implementation call to this same verb, on this same story -- so a
+# segment non-zero in both runs can be told apart from one that merely has
+# not passed yet. It goes through resolve_path/validate_path_in_project like
+# --tasks-file, because it too arrives as a CLI argument. Omitted, or naming a
+# segment this run's script does not carry, every entry's `unsatisfiable` is
+# false: see tasks.py's _match_previous for what the comparison actually does.
 #
 # The same five gates every other tasks verb runs, and the same one crossing --
 # the decomposition, the per-segment run and the shape are tasks.py's. The only
@@ -1825,13 +1833,25 @@ cmd_get_story_context() {
 #
 # No lock: this reads the document and writes nothing to it.
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --previous-file <path> (optional; a prior run's own output)
 cmd_verify_probe() {
-  local tasks_file positional=()
-  _parse_positional_tasks_file tasks_file positional "$@"
+  local tasks_file positional=() previous_file="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--previous-file" ]; then
+      i=$((i + 1))
+      previous_file="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>]" >&2
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>]" >&2
     exit 1
   fi
 
@@ -1845,10 +1865,17 @@ cmd_verify_probe() {
   fi
   validate_story_exists "$story_id" "$tasks_file"
 
+  local previous_args=()
+  if [ -n "$previous_file" ]; then
+    previous_file=$(resolve_path "$previous_file")
+    validate_path_in_project "$previous_file"
+    previous_args=(--previous-file "$previous_file")
+  fi
+
   check_python3
   python3 "$(_aimi_tasks_py)" verify-probe \
     --tasks-file "$tasks_file" --story-id "$story_id" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}"
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}"
 }
 
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
@@ -15162,15 +15189,19 @@ COMMANDS:
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
-    verify-probe <id> [--tasks-file <path>]
+    verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
                               report which ones already pass. Output: a JSON array of
-                              {segment, exit, discriminates}; discriminates is false for an
-                              assertion that passed, i.e. one that does not tell the
-                              before-state from the after-state. Segments run in the CALLER's
-                              directory, in order, carrying the verify's own variable
-                              assignments; `set` lines, comments and assignments are not
-                              reported. An absent or empty verify is [] at exit 0.
+                              {segment, exit, discriminates, unsatisfiable}; discriminates is
+                              false for an assertion that passed, i.e. one that does not tell
+                              the before-state from the after-state. --previous-file names a
+                              prior run's own output (e.g. the pre-implementation call to this
+                              same verb); a segment non-zero in both runs gets
+                              unsatisfiable:true plus a note pointing at the harness, not the
+                              code -- omitted or unmatched, unsatisfiable is false. Segments
+                              run in the CALLER's directory, in order, carrying the verify's
+                              own variable assignments; `set` lines, comments and assignments
+                              are not reported. An absent or empty verify is [] at exit 0.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
