@@ -4681,6 +4681,64 @@ def test_the_segments_run_where_the_CALLER_stood_not_at_the_project_root(tmp_pat
     assert from_sub[0]["discriminates"] is False
 
 
+def test_a_cd_moves_the_probe_and_not_the_callers_directory(tmp_path):
+    """AC: a verify whose segments include a `cd` stops leaving artifacts where
+    the caller stood.
+
+    The defect this closes: `cd` ran as a segment of its own, changed nothing
+    that outlived it, and the `mkdir` after it landed in `cwd` -- the story
+    executor's own worktree, since step 1.5 probes from there. The probe was
+    manufacturing the class of defect it exists to find. Both halves are
+    asserted, because "nothing in the caller's tree" is also what a probe that
+    silently ran nothing would produce.
+    """
+    root, probed = _probe(
+        tmp_path,
+        "cd sub\nmkdir -p criado\ntest -d criado\n",
+        files=("sub/marcador.txt",),
+    )
+    assert not os.path.exists(
+        os.path.join(root, "criado")
+    ), "the probe wrote into the caller's directory"
+    assert os.path.isdir(
+        os.path.join(root, "sub", "criado")
+    ), "the cd was not carried: the mkdir landed nowhere the real script would"
+    assert [entry["segment"] for entry in probed] == [
+        "mkdir -p criado",
+        "test -d criado",
+    ], "the cd is carried like an assignment, so it is not reported either"
+
+
+def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
+    """GUARDRAIL, and it passed before this branch existed as well as after.
+
+    Carrying the `cd` may act only where there IS one. A verify without one has
+    to produce the same array as before, field for field -- same count, same
+    exit, same discriminates -- so this compares whole entries rather than any
+    single field of them.
+    """
+    _, probed = _probe(
+        tmp_path,
+        'set -eu\nF=existe.txt\ntest -f "$F"\ntest -f ausente.txt\ntrue\n',
+        files=("existe.txt",),
+    )
+    assert probed == [
+        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False},
+        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True},
+        {"segment": "true", "exit": 0, "discriminates": False},
+    ]
+
+
+def test_a_cd_that_fails_aborts_instead_of_falling_back_to_the_caller(tmp_path):
+    """A `cd` into a directory that is not there must not degrade into "carry
+    on where the caller stood" -- that is this defect again and quieter, since
+    nothing in the answer would say the probe never moved. The abort reports
+    what follows as discriminating, the safe direction, and writes nothing."""
+    root, probed = _probe(tmp_path, "cd nao-existe\nmkdir -p criado\n")
+    assert not os.path.exists(os.path.join(root, "criado"))
+    assert [entry["discriminates"] for entry in probed] == [True]
+
+
 def test_the_probe_wrapper_crosses_once_takes_no_lock_and_runs_the_same_gates():
     """Bash keeps the argument, its format, which file is current and whether
     the story is in it -- and adds exactly one thing, the caller's directory.
