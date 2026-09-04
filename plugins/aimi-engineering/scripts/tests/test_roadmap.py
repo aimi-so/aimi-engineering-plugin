@@ -813,10 +813,15 @@ def test_pathspec_magic_cannot_verify_a_phase_that_built_nothing():
     tracked file and any of these would have verified by PATH."""
     for label in ("glob-estrela", "glob-exclude"):
         assert _verdicts(label)[0]["method"] != "path", label
-    # The honest residue, recorded rather than papered over: a bare ":" still
-    # verifies by TEXT, because `git grep -F ':'` finds a colon in any source
-    # file. That is closed at WRITE time -- an identity must carry an
-    # alphanumeric -- not here. Do not "fix" the reader for it.
+    # The honest residue AS THE JQ LEFT IT, which is what the golden records: a
+    # bare ":" verified by TEXT, because `git grep -F ':'` finds a colon in any
+    # source file. The assertion stays because the golden must not be quietly
+    # regenerated -- but it is history now, not the current rule. Adding -w
+    # closed the residue as a side effect: a colon is not a word character, so
+    # `grep -F -w ':'` matches nothing, and test_the_word_boundary_also_closes_
+    # the_bare_colon_residue below measures that against a live repository.
+    # Do not "fix" the reader for it either way -- the write-time alphanumeric
+    # rule still owns the case, and -w is a second net under it.
     assert _verdicts("glob-doispontos")[0]["status"] == "verified"
     assert _verdicts("glob-doispontos")[0]["method"] == "text"
 
@@ -830,6 +835,254 @@ def test_one_verdict_per_declared_identity_in_declaration_order():
         "never_written",
     ]
     assert _verdicts("creates-vazio") == []
+
+
+# ---------------------------------------------------------------------------
+# verify-creates: the word boundary, the meta-document floor, and the advisory
+# ---------------------------------------------------------------------------
+#
+# THESE RUN LIVE, and that is the point. Everything above reads golden_from_jq
+# as recorded data, which cannot answer a question about matching that the jq
+# never asked. Each test here builds a real committed repository and puts the
+# real `git grep` behind the real verify_creates_one, because every rule in this
+# block is a claim about what git grep matches.
+
+
+def _git_repo(tmp_path, files):
+    """A COMMITTED git repository. verify-creates sees tracked files only, so an
+    uncommitted fixture would make every case answer "missing" for the wrong
+    reason."""
+    root = tmp_path / "repo"
+    # parents=True so a test can pass a SUBdirectory of tmp_path and get a second
+    # independent repository, which several below need.
+    root.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=str(root), check=True)
+    for name, body in files.items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(root), check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.email=t@example.invalid", "-c", "user.name=fixture",
+            "commit", "-qm", "fixture",
+        ],
+        cwd=str(root),
+        check=True,
+    )
+    return str(root)
+
+
+def test_a_bare_name_no_longer_verifies_inside_a_longer_identifier(tmp_path):
+    """The measurement this rule was written from, reproduced hermetically.
+
+    At phase 2's close the identity "baseRef" verified against
+    `--arg baseRefName` in the forge adapter -- a GitHub pull-request field with
+    nothing to do with the metadata.baseRef the phase had promised. The entire
+    match was a substring of a longer identifier.
+    """
+    repo = _git_repo(tmp_path, {"src/forge.sh": 'gh pr create --arg baseRefName "$b"\n'})
+    assert R.verify_creates_one(repo, "baseRef")["status"] == "missing"
+    # And it discriminates: the same tree, the same grep, only -w removed, is
+    # what used to answer "verified".
+    assert R._git(repo, "grep", "-n", "-I", "-F", "-e", "baseRef")[0] != ""
+    assert R._git(repo, "grep", "-n", "-I", "-F", "-w", "-e", "baseRef")[0] == ""
+
+
+def test_a_bare_name_that_stands_alone_still_verifies(tmp_path):
+    """-w narrows the false positive without dropping the true one. These are the
+    three bare verb identities phase 1 declared, in the shape aimi-cli.sh writes
+    them -- each bounded by a space and a ")", both non-word characters."""
+    repo = _git_repo(tmp_path, {
+        "scripts/aimi-cli.sh": (
+            '    list-known-gaps)       shift; cmd_list_known_gaps "$@" ;;\n'
+            '    verify-probe)          shift; cmd_verify_probe "$@" ;;\n'
+            '    measure-command-file)  shift; cmd_measure_command_file "$@" ;;\n'
+        ),
+    })
+    for identity in ("list-known-gaps", "verify-probe", "measure-command-file"):
+        verdict = R.verify_creates_one(repo, identity)
+        assert verdict["status"] == "verified", (identity, verdict)
+        assert verdict["method"] == "text", identity
+
+
+def test_the_word_boundary_also_closes_the_bare_colon_residue(tmp_path):
+    """A side effect, measured rather than assumed. The golden records ":"
+    verifying by text under the jq; a colon is not a word character, so -w
+    matches nothing and the residue closes here too. Recorded so the change is
+    not read later as an accident."""
+    repo = _git_repo(tmp_path, {"src/parse.ts": "const a: string = 'b';\n"})
+    assert R.verify_creates_one(repo, ":")["status"] == "missing"
+
+
+def test_a_doc_identity_with_a_tracked_file_still_verifies_by_path(tmp_path):
+    """The branch this rule deliberately leaves alone. A genuine documentation
+    phase whose page is committed closes exactly as before, at step 1, before
+    any text rule runs."""
+    verdict = R.verify_creates_one(_git_repo(tmp_path, {"docs/api.md": "# API\n"}), "docs/api.md")
+    assert verdict["status"] == "verified", verdict
+    assert verdict["method"] == "path", verdict
+
+
+def test_a_doc_identity_named_only_by_a_meta_document_does_not_close(tmp_path):
+    """README, CHANGELOG, CLAUDE.md and AGENTS.md exist to CITE other files by
+    name, so they match nearly any identity and prove nothing about it. They stay
+    excluded even for a doc identity -- which is precisely where the old
+    whole-list bypass used to send them.
+
+    The verdict is "missing", not "unconfirmed": the exclusion removes the only
+    line there was, so nothing reaches the text branch at all. "unconfirmed" is
+    what a doc identity gets when a non-meta file mentions it (the next test).
+    """
+    repo = _git_repo(tmp_path, {
+        "CHANGELOG.md": "- added docs/api.md\n",
+        "src/app.ts": "export const x = 1;\n",
+    })
+    verdict = R.verify_creates_one(repo, "docs/api.md")
+    assert verdict["status"] == "missing", verdict
+    assert "CHANGELOG.md:1" in verdict["evidence"], verdict
+    # Nested copies too: the anchored pattern alone would miss this one, which is
+    # why every meta-document is listed twice.
+    nested = _git_repo(tmp_path / "n", {"plugins/aimi/CLAUDE.md": "see docs/api.md\n"})
+    assert R.verify_creates_one(nested, "docs/api.md")["status"] == "missing"
+
+
+def test_a_doc_identity_confirmed_only_by_a_mention_is_unconfirmed(tmp_path):
+    """A source file naming the page is not the page. This used to answer
+    "verified"/"text" and close the phase on a table of contents."""
+    repo = _git_repo(tmp_path, {"src/nav.ts": 'export const help = "docs/api.md";\n'})
+    verdict = R.verify_creates_one(repo, "docs/api.md")
+    assert verdict["status"] == "unconfirmed", verdict
+    assert verdict["method"] == "text", verdict
+    assert "src/nav.ts:1" in verdict["evidence"], verdict
+    # The rest of the exclusion list stays OFF for a doc identity, which is what
+    # the bypass exists to give: a hit under docs/ IS the artifact.
+    under_docs = _git_repo(tmp_path / "d", {"docs/index.md": "see docs/api.md\n"})
+    assert R.verify_creates_one(under_docs, "docs/api.md")["status"] == "unconfirmed"
+
+
+def test_a_bare_name_verified_outside_every_declared_file_is_flagged(tmp_path):
+    """The second net, for the whole-word match -w cannot catch: a real match in
+    a file no story of the phase said it would touch. Advisory and never a
+    refusal -- a bare name legitimately resolves in code no story listed, so the
+    verdict stays "verified" and the doubt goes to stderr."""
+    repo = _git_repo(tmp_path, {
+        "src/forge.sh": "baseRef=$1\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    warnings = []
+    verdict = R.verify_creates_one(repo, "baseRef", {"src/owned.ts"}, warnings)
+    assert verdict["status"] == "verified", verdict
+    assert len(warnings) == 1, warnings
+    assert "src/forge.sh:1" in warnings[0], warnings
+
+    # Declared by a story: silent.
+    quiet = []
+    R.verify_creates_one(repo, "baseRef", {"src/forge.sh"}, quiet)
+    assert quiet == []
+    # Nothing declared: silent, because nobody measured what this phase declared.
+    unknown = []
+    R.verify_creates_one(repo, "baseRef", set(), unknown)
+    assert unknown == []
+    # A PATH identity is never flagged: it verified by path, not by a name.
+    pathy = []
+    R.verify_creates_one(repo, "src/forge.sh", {"src/owned.ts"}, pathy)
+    assert pathy == []
+    # And a caller that passes neither argument gets the old signature's answer
+    # with nothing on stderr.
+    assert R.verify_creates_one(repo, "baseRef")["status"] == "verified"
+
+
+def test_bare_name_and_path_normalisation_are_exact_not_substring(tmp_path):
+    """The advisory compares paths. Substring containment is the defect this
+    whole rule exists to remove, so reintroducing it in the check that catches it
+    would be absurd."""
+    assert R.is_bare_name_identity("baseRef")
+    assert R.is_bare_name_identity("list-known-gaps")
+    assert not R.is_bare_name_identity("docs/api.md")
+    assert not R.is_bare_name_identity("roadmap.py")
+    assert not R.is_bare_name_identity("/api/notifications")
+    assert not R.is_bare_name_identity("")
+    assert R._norm_repo_path("./a/b.py") == "a/b.py"
+    assert R._norm_repo_path("  c/d/  ") == "c/d"
+
+
+def test_the_phase_files_come_from_the_phases_own_tasks_file(tmp_path):
+    """The advisory is only as good as this set, and an empty set turns it OFF --
+    so a path derivation that silently missed would disable the check rather than
+    fail it. That is the shape a test has to pin."""
+    feature_dir = tmp_path / "pipeline-audit"
+    (feature_dir / "phase-2-x").mkdir(parents=True)
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [
+            {"implementation": {"files": ["./a/b.py", "c/d/"]}},
+            {"implementation": {"files": ["e.py"]}},
+        ]}),
+        encoding="utf-8",
+    )
+    roadmap_path = str(feature_dir / "roadmap.json")
+    doc = {"feature": "pipeline-audit"}
+    assert R._phase_declared_files(roadmap_path, doc, {"id": 2, "dir": "phase-2-x"}) == {
+        "a/b.py", "c/d", "e.py",
+    }
+    # No tasks file, and no feature slug: empty both times, which silences the
+    # advisory instead of firing it at a phase nobody expanded.
+    assert R._phase_declared_files(roadmap_path, doc, {"id": 9, "dir": "phase-9"}) == set()
+    assert R._phase_declared_files(roadmap_path, {}, {"id": 2, "dir": "phase-2-x"}) == set()
+
+
+def test_the_advisory_reaches_stderr_and_leaves_stdout_parseable(tmp_path):
+    """The wiring, through the real process. Every caller of this verb parses
+    stdout as JSON, so an advisory written there would break the very report it
+    is trying to inform -- and a warning collected but never printed would be a
+    check that silently does nothing. Only running the op catches either."""
+    repo = _git_repo(tmp_path, {
+        "src/forge.sh": "baseRef=$1\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    feature_dir = tmp_path / "aimi" / "pipeline-audit"
+    (feature_dir / "phase-2-x").mkdir(parents=True)
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [{"implementation": {"files": ["src/owned.ts"]}}]}),
+        encoding="utf-8",
+    )
+    roadmap = feature_dir / "roadmap.json"
+    roadmap.write_text(
+        json.dumps({
+            "roadmapVersion": "2.0",
+            "feature": "pipeline-audit",
+            "phases": [{
+                "id": 2, "name": "P", "goal": "g", "slug": "p", "dir": "phase-2-x",
+                "status": "completed", "dependsOn": [],
+                "creates": [{"identity": "baseRef", "description": "d"}], "needs": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "roadmap.py"), "verify-creates",
+         "--roadmap", str(roadmap), "--phase", "2", "--dir", repo],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    verdicts = json.loads(proc.stdout)
+    assert [v["status"] for v in verdicts] == ["verified"], verdicts
+    assert "no story" in proc.stderr, proc.stderr
+    assert "src/forge.sh:1" in proc.stderr, proc.stderr
+
+    # Declared by a story: the same run goes silent, so the advisory is
+    # discriminating rather than always-on.
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [{"implementation": {"files": ["src/forge.sh"]}}]}),
+        encoding="utf-8",
+    )
+    quiet = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "roadmap.py"), "verify-creates",
+         "--roadmap", str(roadmap), "--phase", "2", "--dir", repo],
+        capture_output=True, text=True,
+    )
+    assert quiet.returncode == 0, quiet.stderr
+    assert quiet.stderr == "", quiet.stderr
 
 
 # ---------------------------------------------------------------------------
