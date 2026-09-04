@@ -2190,6 +2190,144 @@ test_version_verbs_empty_plugin_cache_glob() {
 }
 
 # ----------------------------------------------------------------------------
+# The SECOND global pointer: ~/.config/aimi/worktree-path
+#
+# It had a reader everywhere and no writer anywhere. `_validate_cached_worktree_
+# path` validated it, `read_global_worktree_cache` read it, next.md and
+# container-execution.md re-read it at the top of every Bash call -- and
+# `write_global_worktree_cache` was called by nothing in production, so the file
+# on disk existed only where a human had written it by hand. That is how it came
+# to name a version the cli-path had already moved off: a `check-version --fix`
+# repointed cli-path at the new install, worktree-path stayed on the old one,
+# `cleanup-versions` then deleted the old one, and $WORKTREE_MGR became a path
+# to nothing while every guard around it still only asked whether the VARIABLE
+# was empty.
+#
+# These two tests assert the write side of that fix. The read side is the
+# `[ -x "$WORKTREE_MGR" ]` half of the guard in commands/, checked by
+# hooks/tests/test_auto_approve_cli.py's corpus scan.
+# ----------------------------------------------------------------------------
+
+# Like _make_cached_version, but also plants the worktree-manager.sh sibling a
+# real install carries. _make_cached_version deliberately does NOT -- every
+# fixture and every golden case built on it resolves no manager, which is why
+# adding these calls changed no recording in version_cache_cases.
+_make_cached_version_with_manager() {
+  local cache_root="$1" entry="$2" version="$3"
+  _make_cached_version "$cache_root" "$entry" "$version"
+  local mgr_dir="$cache_root/plugins/cache/$entry/aimi-engineering/$version/skills/git-worktree/scripts"
+  mkdir -p "$mgr_dir"
+  printf '#!/usr/bin/env bash\n' > "$mgr_dir/worktree-manager.sh"
+  chmod +x "$mgr_dir/worktree-manager.sh"
+}
+
+_cached_manager_path() {
+  printf '%s\n' "$1/plugins/cache/$2/aimi-engineering/$3/skills/git-worktree/scripts/worktree-manager.sh"
+}
+
+test_worktree_pointer_written_by_the_version_verbs() {
+  echo ""
+  echo "=== Testing the global worktree-path pointer is written and cured beside the cli-path ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local root cfg aimi_cfg mgr_old mgr_new
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  _make_cached_version_with_manager "$cfg" "abc123" "1.2.3"
+  mgr_old=$(_cached_manager_path "$cfg" "abc123" "1.2.3")
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: absent before the run -- this file used to have no writer at all"
+
+  # A stale state cli-path puts check-version on its `fixed` branch, the same
+  # fake-path idiom test_check_version_fix uses.
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_old" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: writes the worktree-path pointer for the install it resolved"
+
+  # The invariant itself, stated as an assertion rather than as a comment: both
+  # pointers name ONE install directory. Four dirnames strip
+  # skills/git-worktree/scripts/worktree-manager.sh, two strip
+  # scripts/aimi-cli.sh.
+  local cli_root mgr_root
+  cli_root=$(dirname "$(dirname "$(cat "$aimi_cfg/cli-path" 2>/dev/null)")")
+  mgr_root=$(dirname "$(dirname "$(dirname "$(dirname "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)")")")")
+  assert_eq "$cli_root" "$mgr_root" \
+    "check-version --fix: both global pointers name the same install directory"
+
+  # The recorded divergence, reproduced: a newer install appears, the pointer
+  # still names the old one, and --fix moves it.
+  _make_cached_version_with_manager "$cfg" "abc123" "1.3.0"
+  mgr_new=$(_cached_manager_path "$cfg" "abc123" "1.3.0")
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: cures a worktree-path left behind on an older version"
+
+  # cleanup-versions is where the dangle was produced -- it deletes the version
+  # the pointer used to name. Point it back at 1.2.3 first so the prune has
+  # something to invalidate.
+  printf '%s\n' "$mgr_old" > "$aimi_cfg/worktree-path"
+  _run_cleanup_versions_isolated "$cfg" "$aimi_cfg" > /dev/null
+
+  assert_eq "no" "$([ -e "$(dirname "$(dirname "$(dirname "$(dirname "$mgr_old")")")")" ] && echo yes || echo no)" \
+    "cleanup-versions: pruned the 1.2.3 directory the pointer named"
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "cleanup-versions: re-points worktree-path at the version it kept, not at the one it deleted"
+
+  # prime-cache, the third writer, on a config dir that has never been primed.
+  local fresh_aimi_cfg
+  fresh_aimi_cfg="$root/aimi-config-fresh"
+  mkdir -p "$fresh_aimi_cfg"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$fresh_aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$fresh_aimi_cfg/worktree-path" 2>/dev/null)" \
+    "prime-cache: primes the worktree pointer, not only the cli one"
+
+  rm -rf "$root"
+}
+
+test_worktree_pointer_needs_a_manager_beside_the_cli() {
+  echo ""
+  echo "=== Testing the worktree pointer is silent when the install carries no manager ==="
+
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  # _make_cached_version plants scripts/aimi-cli.sh and nothing else.
+  _make_cached_version "$cfg" "abc123" "1.2.3"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: nothing is persisted when no manager sits beside the resolved CLI"
+  # And the run really did happen -- the silence above is the manager's absence,
+  # not a verb that did nothing.
+  assert_eq "$cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh" \
+    "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "worktree-path: the same run still wrote cli-path, so the silence is the missing manager"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
 # check-version against a directory-source (locally-added marketplace) host
 # whose versioned plugin-cache glob is EMPTY.
 #
@@ -10279,6 +10417,8 @@ main() {
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
   test_cleanup_versions_sorts_on_version_segment
+  test_worktree_pointer_written_by_the_version_verbs
+  test_worktree_pointer_needs_a_manager_beside_the_cli
   test_resolve_skills_base_dir_picks_newest_version
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"

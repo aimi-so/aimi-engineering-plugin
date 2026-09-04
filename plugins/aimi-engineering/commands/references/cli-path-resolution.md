@@ -128,6 +128,8 @@ if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-
 
 Writes to the new XDG path. `mkdir -p` ensures the directory exists before the atomic write.
 
+This is no longer the only writer, and it is no longer the reason the file exists. `aimi-cli.sh` now writes `worktree-path` itself, at the three points it already wrote `cli-path` — `check-version --fix`, `cleanup-versions` and `prime-cache` — deriving the manager from the same install root as the CLI (`_persist_worktree_pointer_for`). Until it did, the two pointers were written by different things at different times and could name different installs: a `check-version --fix` moved `cli-path` to the new version while `worktree-path` stayed on the old one, and when the old version was later pruned `$WORKTREE_MGR` became a path to nothing. Keep this block anyway — it is what primes the pointer for a session that resolves the manager before it ever calls a CLI verb.
+
 ```bash
 if [ -n "$WORKTREE_MGR" ]; then _aimi_cfg="${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}"; mkdir -p "$_aimi_cfg" && printf '%s\n' "$WORKTREE_MGR" > "$_aimi_cfg/worktree-path.tmp" && mv "$_aimi_cfg/worktree-path.tmp" "$_aimi_cfg/worktree-path" && chmod 600 "$_aimi_cfg/worktree-path"; fi
 ```
@@ -151,6 +153,8 @@ $AIMI_CLI check-version --quiet --fix
 ```
 
 The `--quiet` flag suppresses informational output and `--fix` auto-updates a stale cli-path. This does NOT call `cleanup-versions` (cleanup is manual-only).
+
+**`--fix` heals BOTH pointers, and the second one independently of the first.** The `status` field below reports the cli-path only; the worktree-path is re-derived from whichever install this run resolved and rewritten whenever it disagrees, whatever that status says. That is deliberate rather than incidental — `worktree-path` can be missing or stale while `cli-path` is already `current`, which is precisely the state the two-writer arrangement used to produce — so do not read `"status": "current"` as "nothing was written".
 
 **Read the `status` field, not the exit code alone.** Exit 0 covers four different situations, and one of them is not a healthy host:
 
@@ -197,8 +201,10 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
-: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 ```
+
+**Two guards, because they catch two different failures, and only the first one used to exist.** `${VAR:?word}` fires on an EMPTY variable — the cache file absent, unreadable, or never primed. It says nothing about a variable that read back perfectly well and names a directory that has since been pruned, which is the failure that actually happened: the pointer survived a version cleanup, `$WORKTREE_MGR` expanded to a path to nothing, and the run continued past a guard that had no complaint. `[ -x "$WORKTREE_MGR" ]` is the half that catches that, and it exits non-zero so the Bash call stops there instead of carrying a dangling path into `create`, `serve` or `merge-all`. `$AIMI_CLI`'s own one-liner needs no twin of this: it is INVOKED (`$AIMI_CLI <verb>`), so a dangling path is a loud 127 at the next line — `$WORKTREE_MGR` is too, but only where it is invoked directly, and the sites that pass it into a command substitution or an `|| true` were where the silence came from.
 
 ### Failure Signature
 
