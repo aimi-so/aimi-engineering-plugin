@@ -3702,7 +3702,14 @@ CV_EXIT_FAILURES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | select(.exi
 CV_EXIT_LINES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] | select(.exit != 0) | if $multi then "\(.group_key) (\(.dir)): verify-creates exited \(.exit) and produced no verdicts." else "verify-creates exited \(.exit) and produced no verdicts." end')
 ERROR_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "error")] | length')
 ERROR_CREATES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r --argjson multi "$CV_MULTI" '.[] as $r | ($r.verdicts[]? | select(.status == "error")) as $v | if $multi then "\($r.group_key): \($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" else "\($v.identity) — \($v.evidence) [git exit \($v.gitStatus)]" end')
-CV_RAW_MISSING_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "missing")] | length')
+# `unconfirmed` is counted here beside `missing` because both mean the same
+# thing to a reader: the artifact was not proven to exist. verify-creates
+# returns it for a documentation identity that resolved only through the text
+# search -- some tracked file writes the page's name, which is what a table of
+# contents does, and is not the page. Counting only `missing` here would let a
+# tooling-failed run report "0 further entries" while every doc identity in the
+# phase came back mention-only.
+CV_RAW_MISSING_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '[.[] | .verdicts[]? | select(.status == "missing" or .status == "unconfirmed")] | length')
 
 if [ "$CV_EXIT_FAILURES" -gt 0 ] || [ "$ERROR_COUNT" -gt 0 ]; then
   CV_BRANCH="tooling-failed"
@@ -3711,10 +3718,20 @@ else
   # it; missing only when EVERY repository reported it missing. This step
   # never runs on a set missing a repository's own verdicts — reached only
   # once every repository's own call is confirmed clean above.
-  CREATES_REPORT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s --argjson multi "$CV_MULTI" '(.[0].verdicts | map(.identity)) as $order | ([.[] as $r | $r.verdicts[] | {group_key: $r.group_key, identity, status, method, evidence, gitStatus}]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | ($grp | map(select(.status == "verified")) | sort_by(.group_key)) as $ver | if ($ver | length) > 0 then {identity: $id, status: "verified", method: $ver[0].method, evidence: $ver[0].evidence, gitStatus: $ver[0].gitStatus} else ($grp | sort_by(.group_key)) as $mis | (if $multi then ($mis | map("\(.group_key): \(.evidence)") | join("; ")) else $mis[0].evidence end) as $ev | {identity: $id, status: "missing", method: $mis[0].method, evidence: $ev, gitStatus: $mis[0].gitStatus} end ]')
+  CREATES_REPORT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s --argjson multi "$CV_MULTI" '(.[0].verdicts | map(.identity)) as $order | ([.[] as $r | $r.verdicts[] | {group_key: $r.group_key, identity, status, method, evidence, gitStatus}]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | ($grp | map(select(.status == "verified")) | sort_by(.group_key)) as $ver | ($grp | map(select(.status == "missing" or .status == "unconfirmed")) | sort_by(.group_key)) as $und | if ($ver | length) > 0 then {identity: $id, status: "verified", method: $ver[0].method, evidence: $ver[0].evidence, gitStatus: $ver[0].gitStatus} else (if ($und | length) > 0 then $und else ($grp | sort_by(.group_key)) end) as $mis | (if $multi then ($mis | map("\(.group_key): \(.evidence)") | join("; ")) else $mis[0].evidence end) as $ev | {identity: $id, status: "missing", method: $mis[0].method, evidence: $ev, gitStatus: $mis[0].gitStatus} end ]')
   VERIFIED_ARTIFACTS=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "verified") | "\(.identity) — \(.evidence)"')
   MISSING_CREATES=$(printf '%s' "$CREATES_REPORT" | jq -r '.[] | select(.status == "missing") | "\(.identity) — \(.evidence)"')
   MISSING_COUNT=$(printf '%s' "$CREATES_REPORT" | jq '[.[] | select(.status == "missing")] | length')
+  # Which of those undelivered identities are undelivered because they were
+  # found ONLY as a mention. Derived from the RAW per-repository verdicts, not
+  # from CREATES_REPORT: the union deliberately collapses `unconfirmed` into
+  # `missing` so one branch handles both, and this is the one place that still
+  # needs to tell them apart -- for the report, never for the branch decision.
+  # An identity qualifies when no repository verified it and at least one
+  # reported it `unconfirmed`; an identity every repository reported `missing`
+  # does not, and neither does one some other repository verified.
+  MENTION_ONLY_CREATES=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s -r '(.[0].verdicts | map(.identity)) as $order | ([.[] | .verdicts[]?]) as $flat | $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | select(($grp | map(.status) | index("verified")) == null) | select(($grp | map(.status) | index("unconfirmed")) != null) | $id')
+  MENTION_ONLY_COUNT=$(printf '%s\n' "$PHASE_CV_RESULTS" | jq -s '(.[0].verdicts | map(.identity)) as $order | ([.[] | .verdicts[]?]) as $flat | [ $order[] | . as $id | ($flat | map(select(.identity == $id))) as $grp | select(($grp | map(.status) | index("verified")) == null) | select(($grp | map(.status) | index("unconfirmed")) != null) ] | length')
   if [ "$MISSING_COUNT" -gt 0 ]; then
     CV_BRANCH="missing"
   else
@@ -3722,13 +3739,15 @@ else
   fi
 fi
 
-printf 'creates-verification: branch=%s repos=%s exit_failures=%s error_count=%s missing_count=%s\n' \
-  "$CV_BRANCH" "$CV_REPO_COUNT" "$CV_EXIT_FAILURES" "$ERROR_COUNT" "${MISSING_COUNT:-0}"
-printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- tooling exit failures ---\n%s\n--- tooling errors ---\n%s\n' \
-  "${VERIFIED_ARTIFACTS:-}" "${MISSING_CREATES:-}" "$CV_EXIT_LINES" "$ERROR_CREATES"
+printf 'creates-verification: branch=%s repos=%s exit_failures=%s error_count=%s missing_count=%s mention_only_count=%s\n' \
+  "$CV_BRANCH" "$CV_REPO_COUNT" "$CV_EXIT_FAILURES" "$ERROR_COUNT" "${MISSING_COUNT:-0}" "${MENTION_ONLY_COUNT:-0}"
+printf -- '--- verified ---\n%s\n--- missing ---\n%s\n--- mention only ---\n%s\n--- tooling exit failures ---\n%s\n--- tooling errors ---\n%s\n' \
+  "${VERIFIED_ARTIFACTS:-}" "${MISSING_CREATES:-}" "${MENTION_ONLY_CREATES:-}" "$CV_EXIT_LINES" "$ERROR_CREATES"
 ```
 
 Every value is still derived with a `jq` select on `.status` — jq is the loop, deliberately instead of a shell `while` that accumulates a variable read after the loop has closed (`test-command-blocks.sh` check 3 catches exactly that shape) — now in two passes: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own **raw**, pre-union verdicts (so a tool failure is visible before any union is attempted), and `CREATES_REPORT`/`VERIFIED_ARTIFACTS`/`MISSING_CREATES`/`MISSING_COUNT` are computed from the **unioned** per-identity array, reached only once every repository's own call is confirmed clean. Each unioned verdict object keeps the existing shape, `{identity, status, method, evidence, gitStatus}`: `status` is `verified` | `missing` (never `error` — an error anywhere already routed the phase to Verification tooling failed before this point), `method` is `"path"` | `"text"` | `null`, and `evidence` names the tracked path or `file:line` that decided it, or, on a `missing`, what was found and rejected.
+
+**`verify-creates` returns a third verdict, `unconfirmed`, and this section treats it as NOT DELIVERED — the same branch as `missing`, on purpose.** It is what a documentation identity gets when it resolved only through the text search: some tracked file writes the string `docs/api.md`, which is what a table of contents does, and is not the page. Only that identity's own tracked path verifies it (`${CLAUDE_PLUGIN_ROOT}/commands/references/scope-contexts.md` § What verification looks for). The union names it beside `missing` in its own `$und` binding rather than leaving it to the `else` that used to catch every non-`verified` status unnamed: a verdict handled only by a catch-all is a verdict nobody can see is handled, and this file's own vocabulary sentence claimed for three releases that `missing` was the only undelivered status there was. Its **evidence is carried through unchanged**, so the report says the artifact was found only by mention rather than not found at all — the whole difference between "nobody wrote this page" and "three files link to a page nobody wrote". The unioned `status` still reads `missing`, which is what keeps `MISSING_COUNT`, `MISSING_CREATES` and the branch decision below identical to what they were: one undelivered branch, not two. `MENTION_ONLY_CREATES`/`MENTION_ONLY_COUNT` are the one place that still tells the two apart, computed from the raw per-repository verdicts and used only by the report.
 
 `VERIFIED_ARTIFACTS` keeps its line shape `"<identity> — <location>"`, identity verbatim and first, one line per verified entry in `creates[]` order, with the winning repository's own `evidence` string as the location — never tagged with that repository's `group_key`, and never a concatenation of every repository that verified it: when more than one repository verifies the same identity, the location is the evidence from the first repository, in sorted `group_key` order, that verified it. Identity-first is load-bearing, not cosmetic: this list becomes handoff.md's `## Artifacts Created`, which `roadmap.py`'s `handoff_lists_artifact` substring-matches to resolve a downstream phase's `needs`.
 
@@ -3739,7 +3758,7 @@ Every value is still derived with a `jq` select on `.status` — jq is the loop,
 Read the `creates-verification:` line the Procedure block printed above.
 
 - `branch=tooling-failed` → **Verification tooling failed** below. No status transition. This fires when `CV_EXIT_FAILURES > 0` (at least one repository's own `verify-creates` call never ran) or `ERROR_COUNT > 0` (git broke while checking at least one identity in at least one repository) — decided before `MISSING_COUNT` is ever computed, so a single repository's tooling failure can never be silently read as that repository contributing zero verified identities to the union.
-- `branch=missing` → **On any missing entry** below. `verification_failed`.
+- `branch=missing` → **On any missing entry** below. `verification_failed`. An `unconfirmed` verdict routes here too, and is counted in `MISSING_COUNT` like any other undelivered entry — see the paragraph above for why the union collapses the two into one branch and where the distinction survives (`mention_only_count` on the same printed line, and the `--- mention only ---` block beneath it).
 - `branch=ok` → **Write Handoff**.
 
 Error entries are never part of `CREATES_REPORT`: `ERROR_COUNT`/`ERROR_CREATES` are computed from every repository's own raw verdicts, before the union step runs, and the union itself is reached only once `CV_EXIT_FAILURES` and `ERROR_COUNT` are both confirmed zero across every participating repository — so a tool failure in one repository can never be counted or reported as an undelivered artifact, and no repository's data is ever silently dropped from the union because a sibling repository's call failed.
@@ -3824,6 +3843,21 @@ line that was found and rejected. "Found and rejected ... documentation or test
 path" means the name exists only in prose or in a test — a mention of the work,
 not the work. "Found and rejected ... TODO/FIXME marker comment" means the code
 says the work is still owed.
+
+[if MENTION_ONLY_COUNT > 0:]
+[MENTION_ONLY_COUNT] of those entr(y|ies) came back as a MENTION, not as an
+absence — the name is written somewhere in tracked source, but the artifact
+it names was never found:
+
+[for each line of MENTION_ONLY_CREATES:]
+  - [line]
+
+For a documentation identity, a text hit is a link to the page, not the page.
+Confirm one of these by committing the file its identity names — the tracked
+path is the only thing that verifies it. If the identity is not documentation,
+it is named wrongly in `creates[]`: fix the entry with
+`$AIMI_CLI roadmap-amend-phase --feature [FEATURE] --phase [PHASE_ID]` rather
+than writing a file to satisfy the check.
 
 git ls-files and git grep see tracked (committed) files only, in every
 participating repository, so work that is written but committed nowhere in
@@ -4313,6 +4347,28 @@ Parse gate summary from status output:
 - `pending_verify_gates`: count of stories with gate.type == "verify" and gate.status == "pending"
 - `pending_decision_gates`: count of stories with gate.type == "decision" and gate.status == "pending"
 
+A gate is not the only thing that can still be open at this point. A story whose `verification.status` is still the literal `pending` declared a check nobody has judged — it is neither passed nor failed, and until this section it left no trace in the report at all, so a phase could close in silence with every one of its verifications unlooked-at. `verification-report`'s `pending` partition answers that from the same one read the malformed scan uses (see Step 0.7), scoped to the object branch so a story that never declared a verification never enters — the partition counts what was declared and not looked at, never what was never declared:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+if [ "${PHASE_MODE:-false}" = true ]; then
+  COMPLETION_VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$PHASE_TASKS_PATH" 2>/dev/null)
+else
+  COMPLETION_VERIF_REPORT=$($AIMI_CLI verification-report 2>/dev/null)
+fi
+# `.pending // []` is deliberate, not defensive habit: a CLI predating this
+# partition answers {visual, malformed} with no `pending` key at all, and a
+# bare `.pending | length` would abort the whole completion report over a
+# section that is meant to be additive. An older CLI reports zero pending
+# verifications, which is exactly what it knew.
+PENDING_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.pending // [] | length' 2>/dev/null)
+PENDING_VERIF_IDS=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.pending // [] | join(", ")' 2>/dev/null)
+printf 'pending-verification: count=%s ids=%s\n' "${PENDING_VERIF_COUNT:-0}" "${PENDING_VERIF_IDS:-}"
+```
+
+In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
+
 ```
 ## Execution Complete
 
@@ -4344,6 +4400,22 @@ if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
 fi
 ```
 
+If `PENDING_VERIF_COUNT` > 0, append:
+```
+## Pending Verification
+
+[PENDING_VERIF_COUNT] stor(y|ies) declared a verification that has not been
+judged — not passed, not failed, still `pending`:
+
+  [PENDING_VERIF_IDS]
+
+These stories are complete as work and open as verification. Nothing here
+blocks the branch or the PR; it is named because the alternative is a phase
+that closes with its checks unlooked-at and says nothing about it.
+```
+
+If `PENDING_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `pending` partition reads as zero), omit the `## Pending Verification` section entirely.
+
 If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
 ```
 ## Design Review
@@ -4356,6 +4428,34 @@ For each entry in DESIGN_REVIEW_BUFFERS (keyed by story id, insertion order):
 ```
 
 If `DESIGN_REVIEW_BUFFERS` is empty, omit the `## Design Review` section entirely.
+
+**Persist that section, then name the file it was written to.** Until this step the design reviews existed only in the transcript: the reviewer agent ran per story in Step 4, its output was buffered, printed once here, and lost with the session — so a review nobody read in the hour it was printed was a review nobody could read at all. `write-review` writes it to `.aimi/reviews/<feature>-phase-<N>.md` under the same `mktemp`-then-`mv` discipline every other document writer in this CLI uses, and returns `{review: "<path>"}`. Run this when `DESIGN_REVIEW_BUFFERS` is non-empty **and** `PHASE_MODE=true` and `$PHASE_ID` is set — the verb takes a feature and a phase, and those are the only two values that name the file. Compose the whole section body first (every `### [story_id]: [entry.title]` block and its `[entry.output]`, in insertion order, exactly as printed above) and pipe it in one call: the path is derived from feature and phase alone, so one call per story would have every story overwrite the last and leave only the final review on disk.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+DESIGN_REVIEW_BODY=$(cat <<'DESIGN_REVIEW_EOF'
+[paste the composed ## Design Review section body here, verbatim — every
+### [story_id]: [entry.title] heading and its [entry.output], insertion order]
+DESIGN_REVIEW_EOF
+)
+DESIGN_REVIEW_JSON=$(printf '%s\n' "$DESIGN_REVIEW_BODY" | $AIMI_CLI write-review --feature "$FEATURE" --phase "$PHASE_ID") || DESIGN_REVIEW_JSON=""
+DESIGN_REVIEW_PATH=$(printf '%s' "$DESIGN_REVIEW_JSON" | jq -r '.review // empty' 2>/dev/null)
+printf 'design-review: %s\n' "${DESIGN_REVIEW_PATH:-<not written>}"
+```
+
+The heredoc delimiter is quoted, so review prose carrying `$`, backticks or `$(` reaches the verb as the bytes the reviewer wrote rather than as something this shell tries to expand. `|| DESIGN_REVIEW_JSON=""` is what keeps a refusal advisory: `write-review` refuses an empty stdin at exit 1 rather than leaving a zero-byte file that reads on disk exactly like a review that was never written, and a completion report is not the place to abort over a document that was already printed in full two paragraphs above.
+
+When `DESIGN_REVIEW_PATH` is non-empty, append the path to the `## Design Review` section as its last line, so the reader is told where the section they just read now lives:
+```
+
+Written to: [DESIGN_REVIEW_PATH]
+```
+
+When the write did not happen, say which of the two reasons applies rather than printing nothing:
+
+- **`PHASE_MODE=false`** (flat execution, no roadmap and so no `FEATURE`/`PHASE_ID` pair): append `Not written to disk — flat execution has no feature/phase pair to name a review file.` The verb is not called at all here; inventing a phase id to satisfy it would put a review under a phase that does not exist.
+- **The call ran and returned nothing** (`DESIGN_REVIEW_PATH` empty at exit): append `Not written to disk — write-review returned no path; the review above is the only copy.` Say it plainly; a reader who believes a file was written and finds none is worse off than one who was told the transcript is it.
 
 If `CONSOLE_BUFFER` is non-empty, append:
 ```
