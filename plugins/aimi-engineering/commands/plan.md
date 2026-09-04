@@ -3156,10 +3156,18 @@ while IFS= read -r VALIDATE_FILE; do
   $AIMI_CLI validate-deps || exit 1
   $AIMI_CLI validate-stories || exit 1
   $AIMI_CLI validate-tasks || exit 1
+  WAVES_JSON=$($AIMI_CLI validate-waves)
+  if ! printf '%s\n' "$WAVES_JSON" | jq -e -s 'length > 0 and all(.valid)' >/dev/null; then
+    printf '%s\n' "$WAVES_JSON" | jq -r -s '.[].errors[]?' >&2
+    echo "validate-waves rejected $VALIDATE_FILE" >&2
+    exit 1
+  fi
 done <<< "$VALIDATE_FILES"
 ```
 
-`init-session --file` rebinds the session's active tasks file, so the four `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run Phase 4.5 from the top rather than validating the remaining files against a half-fixed set. When the failure came from `normalize-verification` or `normalize-status`, inspect that file for malformed `verification` / `status` fields before retrying.
+`init-session --file` rebinds the session's active tasks file, so the five `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run Phase 4.5 from the top rather than validating the remaining files against a half-fixed set. When the failure came from `normalize-verification` or `normalize-status`, inspect that file for malformed `verification` / `status` fields before retrying.
+
+**`validate-waves` is the one validator read from its payload rather than from `$?`, and that is deliberate — do not normalize it into the shape of its four neighbours.** Its body ends at the crossing with no `return 1`: an invalid verdict still exits 0, a contract stated in comments on both sides (`cmd_validate_waves` in `aimi-cli.sh`, `op_validate_waves` in `tasks.py`) and pinned by assertions in `test-aimi-cli-part1-core.sh` against a wave-mismatch fixture, so that nothing "fixes" it into a regression for a caller branching on the status. A `|| exit 1` here would therefore be vacuous — it would read a status that is always 0 and wave every mismatch through. The verdict lives in `.valid`; `-s` slurps because one verdict is emitted per document and a tasks file may hold more than one, and `length > 0` makes an empty payload — what a hard CLI failure leaves behind — a failure rather than a silent pass. What it catches is a planning error a human reads in the file, not something dispatch consumes: `wave` is read in exactly one line of `tasks.py`, inside `validate_waves` itself, and `list-ready` ignores the field entirely.
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
