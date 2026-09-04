@@ -26,6 +26,7 @@ set -uo pipefail
 #   - AIMI_PLUGIN_DIR Tests
 #   - Claude Code Host Detection Tests
 #   - Auto-Discovery Tests
+#   - PROJECT_ROOT-From-A-Worktree Tests
 #   - Global Cache Tests
 #   - XDG Cache Location Tests
 #   - prime-cache Tests
@@ -2784,6 +2785,127 @@ test_auto_discovery_not_found() {
   assert_contains ".aimi/ directory not found" "$output" "auto-discovery: error message mentions .aimi/ not found"
 
   rm -rf "$no_aimi_dir"
+}
+
+# ============================================================================
+# PROJECT_ROOT-From-A-Worktree Tests
+# ============================================================================
+#
+# THE RULE, IN ONE SENTENCE: find_aimi_root walks UP from the CWD and stops at
+# the FIRST directory that contains .aimi/. A worktree with no .aimi/ of its
+# own therefore resolves PROJECT_ROOT to the MAIN repository, and a
+# --tasks-file living in that repository is inside it. Create .aimi/ in the
+# worktree and the worktree itself becomes PROJECT_ROOT -- the main
+# repository's tasks file is then OUTSIDE it, and validate_path_in_project
+# refuses it. The path never changed; the root moved out from under it.
+#
+# WHY BOTH SIDES ARE ASSERTED. The regression this exists to catch does not
+# make the resolving case stop resolving -- it makes the refusing case start
+# refusing. A test pinning only the side that passes today would stay green
+# straight through it, so the second assertion is the entire point of the pair.
+#
+# ITS OTHER HALF IS A COMMENT, AND THEY CITE EACH OTHER ON PURPOSE.
+# create_worktree, in skills/git-worktree/scripts/worktree-manager.sh,
+# deliberately creates no .aimi/ in a worktree, and its comment names this
+# section. That comment is the only place someone stands while about to break
+# this: they are there to add the `mkdir -p "$worktree_path/.aimi"` this
+# measures the cost of. An explanation with no test ages alone; a test the
+# explanation does not name is unfindable from the one place it is needed.
+#
+# WHAT IT COST TO NOT HAVE THIS. Two phase-2 stories lost the per-assertion
+# half of executor step 1.5 to this and both filed the cause wrong -- they
+# recorded that a worktree cannot reach the main repository's tasks file at
+# all, when the measurement is that it reaches it perfectly until something
+# creates .aimi/ beside it.
+
+# Builds a throwaway repository standing in for a main checkout -- .aimi/tasks/
+# with one story in it -- plus one worktree of its own. .aimi/ stays untracked,
+# exactly as it is in the real repository (.gitignore:2), which is why
+# `git worktree add` never reproduces it and why side one below can exist.
+setup_worktree_project_root_fixture() {
+  WT_PR_MAIN=$(cd "$(mktemp -d)" && pwd -P)
+  WT_PR_TREE="$WT_PR_MAIN/.worktrees/probe"
+  WT_PR_TASKS="$WT_PR_MAIN/.aimi/tasks/2026-01-01-probe-tasks.json"
+
+  git init -q "$WT_PR_MAIN" >/dev/null 2>&1
+  mkdir -p "$WT_PR_MAIN/.aimi/tasks"
+  cat > "$WT_PR_TASKS" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Worktree PROJECT_ROOT probe",
+    "type": "feature",
+    "branchName": "feat/worktree-project-root-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["The story is readable from the main repository."],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  # The commit exists only so `git worktree add` has a revision to attach to.
+  # The identity is passed per-command rather than left to ambient config: a
+  # missing user.email would fail the commit, and the failure would surface
+  # three lines later as an unexplained `worktree add`.
+  echo "probe" > "$WT_PR_MAIN/README.md"
+  git -C "$WT_PR_MAIN" add README.md >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" \
+    -c user.email=test@example.com -c user.name="Test" \
+    commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" worktree add -q --detach "$WT_PR_TREE" HEAD >/dev/null 2>&1
+}
+
+teardown_worktree_project_root_fixture() {
+  git -C "$WT_PR_MAIN" worktree remove --force "$WT_PR_TREE" >/dev/null 2>&1
+  rm -rf "$WT_PR_MAIN"
+  unset WT_PR_MAIN
+  unset WT_PR_TREE
+  unset WT_PR_TASKS
+}
+
+test_worktree_project_root_resolution() {
+  echo ""
+  echo "=== Testing PROJECT_ROOT resolution from inside a worktree ==="
+
+  setup_worktree_project_root_fixture
+
+  local output exit_code
+
+  # --- Side one: the worktree has no .aimi/ of its own ---
+  # Every `cd` here is confined to a command substitution and guarded by the
+  # `&&` that follows it, and nothing in this test ever creates a directory
+  # relative to the CWD -- the mkdir below is absolute. A cd that failed can
+  # therefore only lose the assertion, never write .aimi/ somewhere it would
+  # then have to be found and removed.
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" \
+    "worktree PROJECT_ROOT: with NO .aimi/ in the worktree, find_aimi_root walks up past it to the main repository, so that repository's tasks file is inside PROJECT_ROOT and resolves"
+  assert_contains '"id": "US-001"' "$output" \
+    "worktree PROJECT_ROOT: the read really reached the main repository's tasks file — an exit 0 alone would not say that"
+
+  # --- Side two: the identical command, with .aimi/ created in the worktree ---
+  mkdir -p "$WT_PR_TREE/.aimi"
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" \
+    "worktree PROJECT_ROOT: creating .aimi/ IN the worktree makes find_aimi_root stop there instead of at the main repository, and the same tasks file is refused"
+  assert_contains "Path escapes project root" "$output" \
+    "worktree PROJECT_ROOT: the refusal is validate_path_in_project's, and it fires because PROJECT_ROOT moved — the path itself is byte-identical to side one's"
+  assert_contains "Project root: $WT_PR_TREE" "$output" \
+    "worktree PROJECT_ROOT: the root it reports IS the worktree, which is the causal claim itself — find_aimi_root stops at the FIRST directory holding .aimi/, so an .aimi/ here outranks the main repository's"
+
+  teardown_worktree_project_root_fixture
 }
 
 # ============================================================================
@@ -10460,6 +10582,10 @@ main() {
   echo "--- Auto-Discovery Tests ---"
   test_auto_discovery_from_subdirectory
   test_auto_discovery_not_found
+
+  echo ""
+  echo "--- PROJECT_ROOT-From-A-Worktree Tests ---"
+  test_worktree_project_root_resolution
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
   # Unset AIMI_PLUGIN_DIR to test non-converter code paths
