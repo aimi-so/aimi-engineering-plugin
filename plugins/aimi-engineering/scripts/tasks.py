@@ -4123,6 +4123,23 @@ def op_research_paths(argv):
 # pass. It decomposes the verify, runs each piece on its own, and reports the
 # exit status of each. `discriminates` is false for exactly the pieces that
 # already pass -- the ones a reader should look at.
+#
+# ONE MEASUREMENT IS NOT ENOUGH, EITHER. `discriminates` computed from a
+# single run cannot tell "the work is not done yet" from "this assertion can
+# never pass" -- a segment that is non-zero here is non-zero for either
+# reason, and the story that motivated this verb spent three fifteen-minute
+# suite runs re-testing a check of the second kind because nothing told them
+# apart. The fix is not to guess from the segment's TEXT -- it is to use the
+# second measurement the story-executor already takes: it runs the verify
+# once before implementing anything and once after. `--previous-file` accepts
+# the FIRST run's own JSON array (this verb's own prior output, written
+# somewhere the caller can hand back), and a segment whose exit is non-zero
+# in BOTH the recorded previous run and this one is named `unsatisfiable` --
+# possibly a broken harness rather than unfinished work, with a `note`
+# pointing at that. Without `--previous-file`, or with a segment the file
+# does not mention, `unsatisfiable` is `false`: failing once is exactly what
+# unfinished work looks like, and only two failures in a row rules it out.
+# `discriminates` itself is unchanged by any of this -- see _match_previous.
 
 # The keywords that open and close a compound command. While one is open no
 # separator inside it splits, so an `if ... ; then ... ; fi` stays ONE segment
@@ -4505,6 +4522,69 @@ def probe_verify(text, cwd):
     return results
 
 
+def _read_previous_probe(path):
+    """The prior run's own probe output, tolerated rather than required.
+
+    `path` is `None` when the caller passed no `--previous-file` at all --
+    the ordinary shape of a story's FIRST probe call, before any second run
+    exists to compare against. A path that is set but unreadable or not a
+    JSON array degrades the same way: this comparison is a diagnostic layered
+    on top of `discriminates`, never a gate, so a bad `--previous-file` must
+    never be why the probe itself fails.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+# The phrase named in the acceptance criteria: a segment failing both runs
+# points at the HARNESS, not at unfinished work, because unfinished work
+# fails once and a broken check fails no matter how much gets written.
+_UNSATISFIABLE_NOTE = (
+    "fails before and after the change -- check the harness, not the code"
+)
+
+
+def _match_previous(previous, current):
+    """Attach `unsatisfiable` to every entry of `current`, comparing each
+    against the matching entry of a PRIOR run recorded before this story's
+    own work landed.
+
+    Matched by SEGMENT TEXT rather than by position: `implementation.verify`
+    is the same script on both calls, so an untouched segment is byte-for-byte
+    identical across the two runs even though its exit status may change once
+    the story's own code exists. A segment repeated verbatim within one verify
+    is paired positionally against its own repeats in `previous` -- first
+    occurrence with first, second with second -- since nothing else tells two
+    identical segments apart.
+
+    `unsatisfiable` is `true` for exactly the entries this verb exists to
+    name: non-zero THIS run and non-zero the PREVIOUS run for the same
+    segment. Every other entry -- no `previous` at all, no matching segment,
+    or a previous exit of zero -- gets `false`, because a single failure is
+    what a story not yet implemented looks like, and only two failures in a
+    row for the same segment rules that reading out. `discriminates` is never
+    touched here: it was already computed from THIS run alone, and a segment
+    that passes now stays `discriminates: false` whatever `previous` says.
+    """
+    pending = {}
+    for entry in previous or []:
+        pending.setdefault(entry.get("segment"), []).append(entry.get("exit"))
+    for entry in current:
+        queue = pending.get(entry["segment"])
+        previous_exit = queue.pop(0) if queue else None
+        failed_both = entry["exit"] != 0 and previous_exit not in (None, 0)
+        entry["unsatisfiable"] = failed_both
+        if failed_both:
+            entry["note"] = _UNSATISFIABLE_NOTE
+    return current
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -4518,8 +4598,12 @@ def op_verify_probe(argv):
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
     cwd = _flag(argv, "--cwd")
+    previous_file = _flag(argv, "--previous-file")
     if not path or story_id is None:
-        die("Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> [--cwd <dir>]")
+        die(
+            "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
+            "[--cwd <dir>] [--previous-file <path>]"
+        )
     text = ""
     for doc in read_docs(path, "verify-probe"):
         for story in stories_with_id(doc, story_id):
@@ -4530,7 +4614,9 @@ def op_verify_probe(argv):
                 break
         if text:
             break
-    _emit(probe_verify(text, cwd or os.getcwd()))
+    results = probe_verify(text, cwd or os.getcwd())
+    _match_previous(_read_previous_probe(previous_file), results)
+    _emit(results)
     return 0
 
 
