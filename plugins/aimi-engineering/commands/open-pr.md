@@ -530,6 +530,7 @@ if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
 else
   if [ -n "$METADATA_TITLE" ]; then
     echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
+    METADATA_TITLE=""
   fi
   # Source 2: first commit subject, with any internal story tag stripped.
   PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
@@ -549,6 +550,8 @@ fi
 Store as `$PR_TITLE`.
 
 **Each of the three sources announces itself.** Whichever one wins, one `PR title from …` line goes to stderr, so the transcript records which of the three produced the title that was opened. Only source 1 can be silently wrong — sources 2 and 3 read this branch — so the mismatch that rejects it prints a second line naming the branch it found, which is what makes "why is this titled after another feature" answerable without re-reading the tasks file. The placeholder special-case above is deliberately upstream of all of this: it empties `$METADATA_TITLE` before the branch comparison, so a skeleton title falls to source 2 as it always has and the mismatch note stays quiet about a title that was never a title.
+
+**The mismatch branch empties `$METADATA_TITLE` too, not only the placeholder special-case above.** `$PR_TITLE` is not this gate's only consumer — Step 5c's backend issue title reads `$METADATA_TITLE` as well (see Step 4c and Step 5c below), and it never re-checks `branchName` itself. Emptying the variable here, right beside the note that already explains why, means that check never needs writing a second time at the point of use: every downstream reader of `$METADATA_TITLE` sees the same "not this feature" verdict this gate already reached, the same way the placeholder case already made source 2 the answer for both without either consumer needing to know why.
 
 ### 4b. PR Description
 
@@ -583,9 +586,9 @@ $AIMI_CLI metadata 2>/dev/null || true
 Capture the JSON output (if any). Parse it directly from the result:
 
 - If the CLI exits non-zero or emits no output, set `INCLUDE_BACKEND_SPEC=0` and skip this section entirely.
-- Otherwise read `metadata.frontendOnly`, `metadata.backendSpec`, and `metadata.title` from the JSON.
+- Otherwise read `metadata.frontendOnly` and `metadata.backendSpec` from the JSON.
 - Set `INCLUDE_BACKEND_SPEC=1` only when `frontendOnly` is exactly `true` AND `backendSpec` is a non-null object.
-- Store `metadata.title` as `$METADATA_TITLE` for use in Step 5c.
+- Step 5c's backend issue title reads `$METADATA_TITLE` as already computed by Step 4a — this section takes no second copy of `metadata.title`. When Step 4a's branchName gate discarded it (mismatch or placeholder), it is already empty here too, and Step 5c falls back to `$PR_TITLE` for the same reason Step 4a itself did.
 
 When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata.backendSpec` (no LLM generation). Contains four subsections:
 
@@ -804,7 +807,13 @@ if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
 <if businessContext is a plain string (legacy), render as a single paragraph instead>
 EOF
 )
-  ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $METADATA_TITLE" --body "$ISSUE_BODY")
+  if [ -n "$METADATA_TITLE" ]; then
+    ISSUE_TITLE_SOURCE="$METADATA_TITLE"
+  else
+    ISSUE_TITLE_SOURCE="$PR_TITLE"
+    echo "Backend issue title from \$PR_TITLE (this branch's own derivation) — metadata.title was empty or discarded by Step 4a's branchName gate." >&2
+  fi
+  ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $ISSUE_TITLE_SOURCE" --body "$ISSUE_BODY")
   ISSUE_STATUS=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.status')
   if [ "$ISSUE_STATUS" = "created" ]; then
     ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.url')
@@ -827,7 +836,7 @@ EOF
 fi
 ```
 
-Where `$METADATA_TITLE` is `metadata.title` from Step 4c, `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
+Where `$ISSUE_TITLE_SOURCE` is `$METADATA_TITLE` from Step 4a when Step 4a's branchName gate kept it, or `$PR_TITLE` when that gate discarded it (mismatch or placeholder) — the issue title always says which source it came from on stderr, the same guarantee Step 4a already gives the PR title. `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
 
 **Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 
