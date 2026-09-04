@@ -3675,8 +3675,25 @@ while IFS= read -r CV_PROJECT; do
   fi
   CV_CONTAINER="$CV_GROUP_TOPLEVEL/.worktrees/$PHASE_BRANCH"
 
+  # Judge with the CLI the phase itself produced, when this repository's own
+  # container carries one: a phase that changes aimi-cli.sh's own logic (e.g.
+  # a filter verify-creates itself relies on) must be judged by that changed
+  # code, not by whatever the global cache still has installed. This is only
+  # ever true for a repository that is this plugin's own source tree; every
+  # other participating repository's container has no
+  # plugins/aimi-engineering of its own, and CV_CLI falls back to today's
+  # resolution there. Either way the fallback is named on one stderr line, so
+  # the report never leaves silent which code judged this repository.
+  CV_CONTAINER_CLI="$CV_CONTAINER/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  if [ -x "$CV_CONTAINER_CLI" ]; then
+    CV_CLI="$CV_CONTAINER_CLI"
+  else
+    CV_CLI="$AIMI_CLI"
+    echo "creates-verification: $CV_GROUP_KEY: no executable aimi-cli.sh in container ($CV_CONTAINER_CLI) -- judging with the resolved CLI ($AIMI_CLI) instead" >&2
+  fi
+
   CV_CALL_EXIT=0
-  CV_CALL_OUTPUT=$($AIMI_CLI verify-creates --feature "$FEATURE" --phase "$PHASE_ID" --dir "$CV_CONTAINER") || CV_CALL_EXIT=$?
+  CV_CALL_OUTPUT=$($CV_CLI verify-creates --feature "$FEATURE" --phase "$PHASE_ID" --dir "$CV_CONTAINER") || CV_CALL_EXIT=$?
   [ "$CV_CALL_EXIT" -eq 0 ] || CV_CALL_OUTPUT='[]'
 
   PHASE_CV_RESULTS="${PHASE_CV_RESULTS}$(jq -nc \
