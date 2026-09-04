@@ -3247,6 +3247,41 @@ VERIFICATION_GATE_NOTE = (
 )
 
 
+def _completed_story_ids(tasks):
+    """The ids of the stories that actually finished, in document order.
+
+    The completed gate asks one question -- was the work that was done also
+    judged -- so the set of stories it can ask it ABOUT is the set that did
+    work. A story that never ran has nothing to verify, and demanding a
+    verdict for it is a demand nobody can satisfy honestly.
+
+    "completed" rather than "not skipped", and the difference is the whole
+    fix. cascade-skip writes `{status: "skipped", notes: ...}` and does not
+    touch `verification.status`, so every story it skips keeps the "pending"
+    it was born with. Scoping to completed also covers "failed",
+    "in_progress" and a story with no status at all, none of which is work
+    somebody could have verified either -- and none of which can reach this
+    gate in the normal flow anyway, because ground_truth answers
+    verification_failed for a failed story and count-pending keeps a phase
+    with an unfinished one from ever trying to close.
+
+    Shape handling is _story_statuses': userStories as an object yields its
+    values, a null story contributes nothing, and anything else reads as no
+    stories at all -- degrading rather than raising, like every other read in
+    this gate.
+    """
+    stories = tasks.get("userStories") if isinstance(tasks, dict) else None
+    if isinstance(stories, dict):
+        stories = list(stories.values())
+    if not isinstance(stories, list):
+        return []
+    return [
+        story.get("id")
+        for story in stories
+        if isinstance(story, dict) and story.get("status") == "completed"
+    ]
+
+
 def _unacknowledged_verify_coverage(tasks):
     """The `verify-coverage` smell entries nobody has signed off on.
 
@@ -3297,19 +3332,37 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
     handoff.md existed on disk and stopped there -- so "the work is described"
     was the whole test and "somebody judged the work" was never asked.
 
-    Two predicates, both read out of ONE document:
+    Two predicates, both read out of ONE document, and BOTH scoped to the
+    stories that actually completed (see _completed_story_ids):
 
       * the `pending` partition verification-report returns -- the ids whose
         `verification.status` is the literal "pending", the stories a phase
         declared a verification for and nobody has judged;
       * the `verify-coverage` smell entries carrying no `acknowledged: true`.
 
-    `skipped` PASSES and only `pending` blocks, and that distinction is the
-    design rather than an omission. `skipped` is the honest degrade of somebody
-    who looked and decided not to verify -- the answer the story executor is
-    told to record when agent-browser is not installed. A gate that refused it
-    would wedge every phase holding a visual story on any host without a
-    browser, which trades one silent failure for a loud one that is worse.
+    ONE RULE DECIDES BOTH: a verification judges work that was done, so only a
+    story whose own `status` is "completed" can be asked for a verdict. The
+    scope is not a softening bolted onto the first predicate -- it is what the
+    gate always meant, and applying it to only one of the two would leave the
+    same wedge open for a phase whose skipped story also carries a smell.
+
+    WITHOUT THAT SCOPE THIS GATE WEDGES THE FAILURE PATH, measured rather than
+    argued: cascade-skip writes `{status: "skipped", notes: ...}` and never
+    touches `verification.status`, so a story it skips stays at "pending"
+    forever. Since skipped is terminal, count-pending reaches zero, the phase
+    tries to close, and an unscoped gate refuses -- meaning any phase with one
+    failed story could never be closed at all. cascade-skip is automatic; no
+    human chose to leave that verification unjudged, and the failure path is
+    the last place that can afford a new trap.
+
+    `verification.status` "skipped" PASSES for a completed story too, and that
+    distinction is the design rather than an omission. It is the honest degrade
+    of somebody who looked and decided not to verify -- the answer the story
+    executor is told to record when agent-browser is not installed. A gate that
+    refused it would wedge every phase holding a visual story on any host
+    without a browser. Note the two different "skipped" this paragraph and the
+    one above it are about: a STORY's status, and a story's VERIFICATION
+    status. They are separate fields and only the second is a judgment.
 
     verification_report is IMPORTED rather than restated. The partition rule --
     scoped to the object branch so a story with no verification never enters,
@@ -3353,16 +3406,26 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
     if tasks is None:
         return tasks_path, []
 
-    from tasks import MalformedTasks, verification_report
+    from tasks import MalformedTasks, jq_equal, verification_report
 
     try:
         pending = verification_report(tasks).get("pending") or []
     except MalformedTasks:
         return tasks_path, []
 
+    # jq's ==, not Python's, and not a set: a story id is whatever the document
+    # holds, which need not be hashable and need not be a string. This is the
+    # same comparison verification_report matched the "pending" literal with,
+    # so the two halves of one verdict cannot disagree about what an id is.
+    done = _completed_story_ids(tasks)
+
+    def did_work(story_id):
+        return any(jq_equal(story_id, finished) for finished in done)
+
     lines = [
         "  " + _tsv(story_id) + ': verification.status is still the literal "pending"'
         for story_id in pending
+        if did_work(story_id)
     ]
     lines += [
         "  "
@@ -3370,6 +3433,7 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
         + ": verify-coverage smell is not acknowledged -- "
         + _tsv(entry.get("message") or "asserts a command implementation.verify does not run")
         for entry in _unacknowledged_verify_coverage(tasks)
+        if did_work(entry.get("storyId"))
     ]
     return tasks_path, lines
 

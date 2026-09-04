@@ -3347,3 +3347,131 @@ def test_the_pending_partition_is_tasks_pys_and_is_not_recomputed_here(tmp_path)
     tasks_path, lines = R._completed_gate_refusals(roadmap_path, doc, 1)
     assert [line.strip().split(":", 1)[0] for line in lines] == ["US-001", "US-006"]
     assert tasks_path.endswith(feature + "-phase-1-tasks.json")
+
+
+# ---------------------------------------------------------------------------
+# The gate asks only about work that was done
+#
+# cascade-skip writes {status: "skipped", notes: ...} and never touches
+# verification.status, so every story it skips keeps the "pending" it was born
+# with. Skipped is terminal, so count-pending reaches zero and the phase tries
+# to close -- and an unscoped gate refuses, which means any phase carrying one
+# failed story could never be closed. The failure path is the last place that
+# can afford a new trap, so the scope is asserted from both ends here.
+# ---------------------------------------------------------------------------
+
+
+def _cascade_skipped(sid, dep):
+    """What cascade-skip actually leaves behind, copied from a real run rather
+    than imagined: the story status moves, the verification status does not."""
+    return {
+        "id": sid, "status": "skipped", "dependsOn": [dep],
+        "notes": "Skipped: dependency failed - " + dep,
+        "verification": {"strategy": "test", "status": "pending"},
+    }
+
+
+def test_a_cascade_skipped_story_does_not_wedge_the_phase(tmp_path):
+    """THE REGRESSION THIS SECTION EXISTS FOR. Fails against the first cut of
+    this gate, which refused any non-empty pending partition: the phase below
+    is the ordinary shape of a phase that had a failure, and it must still be
+    closeable."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        {"id": "US-001", "status": "failed",
+         "verification": {"strategy": "test", "status": "failed"}},
+        _cascade_skipped("US-002", "US-001"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_the_genuine_pending_still_blocks_beside_a_cascade_skipped_one(tmp_path):
+    """The discrimination that makes the test above mean something. One story
+    completed and unjudged, one skipped and unjudged, in ONE file: the refusal
+    must name the first and not the second. A scope that had merely been
+    loosened into "any pending is fine" passes the test above and fails here."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "pending"),
+        _cascade_skipped("US-002", "US-003"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-001" in proc.stderr
+    assert "US-002" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+@pytest.mark.parametrize("status", ["skipped", "failed", "in_progress", "pending", None])
+def test_no_story_but_a_completed_one_is_ever_asked_for_a_verdict(tmp_path, status):
+    """The scope stated as a rule rather than as one case. A verification judges
+    work that was done, so a story that did not complete -- for any reason, or
+    with no status recorded at all -- is never what this gate is about."""
+    story = {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}}
+    if status is not None:
+        story["status"] = status
+    root, env, feature = _gate_fixture(tmp_path, [story])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_smell_against_a_skipped_story_does_not_wedge_it_either(tmp_path):
+    """Both predicates take the same scope. Fixing only the pending partition
+    would leave the identical wedge open for a phase whose skipped story also
+    carries a smell -- the same bug, half fixed."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_cascade_skipped("US-002", "US-001")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+    # And the same smell against a story that DID complete still blocks.
+    root, env, feature = _gate_fixture(
+        tmp_path / "second",
+        [_story("US-002", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-002" in proc.stderr
+
+
+def test_completed_story_ids_reads_the_shapes_story_statuses_reads():
+    """Same shape handling as _story_statuses, degrading rather than raising --
+    an id list this could not build must mean "ask nobody for a verdict", never
+    a crash inside a verb that is holding a lock."""
+    assert R._completed_story_ids({"userStories": [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-002", "status": "skipped"},
+        None,
+        {"id": "US-003"},
+    ]}) == ["US-001"]
+    # userStories as an object yields its values, exactly as jq's .[] does.
+    assert R._completed_story_ids(
+        {"userStories": {"a": {"id": "US-001", "status": "completed"}}}
+    ) == ["US-001"]
+    for doc in ({}, {"userStories": None}, {"userStories": "x"}, [], None):
+        assert R._completed_story_ids(doc) == [], repr(doc)
+
+
+def test_an_unhashable_story_id_is_compared_rather_than_hashed():
+    """Ids come out of a document, so they need not be strings and need not be
+    hashable. The intersection uses jq's == -- the same comparison
+    verification_report matched the "pending" literal with -- so a hand-edited
+    list id refuses to close rather than raising TypeError inside the lock."""
+    import tasks as T
+
+    doc = {"userStories": [{"id": ["US-001"], "status": "completed",
+                            "verification": {"status": "pending"}}]}
+    assert T.verification_report(doc)["pending"] == [["US-001"]]
+    assert R._completed_story_ids(doc) == [["US-001"]]
