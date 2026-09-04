@@ -130,10 +130,47 @@ copy_env_files() {
   echo -e "  ${GREEN}✓ Copied $copied environment file(s)${NC}"
 }
 
+# Machine-readable sentinels for the two facts a caller cannot recover from
+# create_worktree's human output: WHERE the worktree is, and WHICH commit it
+# sits on. Emitted on BOTH branches -- reuse and fresh creation -- because the
+# reuse branch is the one a re-run takes, and a reused worktree standing on a
+# stale base is precisely the failure these lines exist to make visible.
+#
+# WORKTREE_BASE is the field that closes the class; WORKTREE_PATH alone would
+# not have. The measured symptom was not a wrong path -- it was a wrong BASE
+# at a perfectly right path: a story worktree cut from `main` instead of from
+# its phase branch looked correct by every path in the log and failed far
+# downstream, when a CLI verb that exists on the intended base answered
+# "Unknown command".
+#
+# The sha is resolved from the worktree's OWN HEAD rather than from the
+# from_branch argument, so it reports what the tree actually stands on across
+# all three paths (fresh branch, attach-to-existing-branch, reuse) instead of
+# what the caller asked for. It is full-length on purpose: an abbreviated sha
+# is ambiguous exactly when two bases are close enough to be confused.
+_emit_worktree_sentinels() {
+  local path="$1"
+  local base
+  base=$(git -C "$path" rev-parse HEAD 2>/dev/null || true)
+  [[ -n "$base" ]] || base="unknown"
+  echo "WORKTREE_PATH=$path"
+  echo "WORKTREE_BASE=$base"
+}
+
 # Create a new worktree
 create_worktree() {
   local branch_name=""
-  local from_branch="main"
+  # Left EMPTY until argument parsing finishes: the default is resolved after
+  # the loop, from the repository this create is actually running in, so an
+  # explicit --from (or a positional second argument) still wins simply by
+  # being non-empty when we get there.
+  #
+  # This used to be the literal "main", and that literal was a measured bug
+  # rather than a harmless default: a phase-2 story worktree was cut from
+  # main, carrying neither wave 1 nor the whole of phase 1, and the damage
+  # surfaced far downstream as `verify-probe` answering "Unknown command" for
+  # a verb that does exist on the branch it should have been cut from.
+  local from_branch=""
 
   # Parse arguments (supports both positional and --from flag)
   while [[ $# -gt 0 ]]; do
@@ -155,6 +192,18 @@ create_worktree() {
 
   if [[ -z "$branch_name" ]]; then
     echo -e "${RED}Error: Branch name required${NC}"
+    exit 1
+  fi
+
+  # No --from and no positional base: inherit the branch this create is
+  # running on. In a detached HEAD this resolves to the literal "HEAD", which
+  # is the right answer rather than a fallback -- it is a valid revision for
+  # `git worktree add` and it names the commit actually checked out here.
+  if [[ -z "$from_branch" ]]; then
+    from_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  fi
+  if [[ -z "$from_branch" ]]; then
+    echo -e "${RED}Error: Could not resolve a branch to create from. Pass --from <branch>.${NC}" >&2
     exit 1
   fi
 
@@ -180,6 +229,7 @@ create_worktree() {
   if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
     echo -e "${YELLOW}Worktree already exists at: $worktree_path${NC}"
     echo "$worktree_path"
+    _emit_worktree_sentinels "$worktree_path"
     return
   fi
 
@@ -219,7 +269,30 @@ create_worktree() {
   # Copy environment files
   copy_env_files "$worktree_path"
 
+  # Deliberately NOT created here: .aimi/. If you arrived to add a
+  # `mkdir -p "$worktree_path/.aimi"`, this comment is what exists to stop
+  # you. The absence is the decision, not an omission.
+  #
+  # find_aimi_root (aimi-cli.sh) walks UP from CWD and stops at the FIRST
+  # directory that contains .aimi/. A worktree that has one therefore becomes
+  # PROJECT_ROOT itself instead of the main repository -- and the tasks file,
+  # which lives in the main repository, is then OUTSIDE that root, so
+  # validate_path_in_project refuses every path that resolves against it.
+  # That refusal lands on `get-story-context`, which is the FIRST action of
+  # every story executor, so creating this directory here does not degrade
+  # one story: it breaks every executor in the phase.
+  #
+  # Measured: running a verb from inside a phase container that had .aimi/
+  # (created there by hand) answers "Path escapes project root", naming the
+  # worktree itself as the project root.
+  #
+  # A verify that genuinely needs .aimi/ creates it in its own header, and
+  # the ORDERING is what makes that safe: the executor reads story context at
+  # step 0, while the worktree still has no .aimi/, and runs the verify only
+  # at step 4 -- so the mkdir arrives after the read it would have broken.
+
   echo -e "${GREEN}✓ Worktree created successfully!${NC}"
+  _emit_worktree_sentinels "$worktree_path"
   echo ""
   echo "To switch to this worktree:"
   echo -e "${BLUE}cd $worktree_path${NC}"
