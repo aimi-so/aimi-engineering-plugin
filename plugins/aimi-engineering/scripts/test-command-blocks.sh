@@ -94,7 +94,7 @@ trap cleanup EXIT
 # never by the prose, so check 4 would otherwise report every one of them in
 # every file that resolves the CLI path. Repo-owned variables are NOT listed
 # here — those belong in the baseline, where they stay visible.
-ENV_ALLOWLIST='^(HOME|PWD|PPID|USER|PATH|SHELL|TMPDIR|TMP|IFS|RANDOM|OSTYPE|HOSTNAME|UID|EUID|TERM|EDITOR|LANG|LC_ALL|ARGUMENTS|CLAUDECODE|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_SESSION_ID|XDG_CONFIG_HOME|AIMI_CONFIG_DIR|AIMI_PLUGIN_DIR|OPENCODE_CONFIG_DIR)$'
+ENV_ALLOWLIST='^(HOME|PWD|PPID|USER|PATH|SHELL|TMPDIR|TMP|IFS|RANDOM|OSTYPE|HOSTNAME|UID|EUID|TERM|EDITOR|LANG|LC_ALL|ARGUMENTS|CLAUDECODE|CLAUDE_CONFIG_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_SESSION_ID|XDG_CONFIG_HOME|AIMI_CONFIG_DIR|AIMI_DEV_DIR|AIMI_PLUGIN_DIR|OPENCODE_CONFIG_DIR)$'
 
 # ---------------------------------------------------------------------------
 # Test helpers (verbatim from test-aimi-cli.sh)

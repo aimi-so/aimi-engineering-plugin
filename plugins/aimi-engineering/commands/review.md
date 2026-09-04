@@ -33,7 +33,15 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 ### Resolve $AIMI_CLI
 
-Unconditional — every item below (PR number, GitHub URL, and the Setup section's changed-files lookup) needs `$AIMI_CLI` regardless of which target type is detected, not only the empty-argument path. Resolve the CLI path using the four-layer strategy. Each check is a separate Bash call (no compound operators).
+Unconditional — every item below (PR number, GitHub URL, and the Setup section's changed-files lookup) needs `$AIMI_CLI` regardless of which target type is detected, not only the empty-argument path. Resolve the CLI path using the layered strategy. Each check is a separate Bash call (no compound operators).
+
+**Layer 0-dev: AIMI_DEV_DIR (development override, any host)**
+
+Consulted first, and unlike Layer 0 below it carries no `CLAUDECODE` gate: `AIMI_DEV_DIR` names a checkout the operator is deliberately testing, not another host's install. The fifth check refuses a path under `/.worktrees/`, the same refusal `write_global_cli_cache` applies — a worktree copy vanishes on cleanup. Canonical rule: `references/cli-path-resolution.md`.
+
+```bash
+if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+```
 
 **Layer 0: AIMI_PLUGIN_DIR (env var override)**
 
@@ -58,12 +66,14 @@ if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 Picks the newest **version**, which is not the last line `ls` prints — `ls`
 collates `1.121.3` before `1.9.0`. Sorting whole paths is wrong too, because
 the glob spans two wildcards and would order by marketplace entry first, so
-each candidate carries its own version segment and `sort -V` keys on that.
-Canonical rule: `_resolve_latest_cache_path` in `aimi-cli.sh`, inlined here
-because it lives inside the file this block is still looking for.
+each candidate carries its own version segment and `sort -V` keys on that. The
+`grep` is load-bearing too: `sort -V` ranks a directory that is not a version
+at all, and ranks it above the real ones — a sibling named `1.124.0.bak` wins
+without it. Canonical rule: `_resolve_latest_cache_path` in `aimi-cli.sh`,
+inlined here because it lives inside the file this block is still looking for.
 
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 **Layer 2 cache update: save for next time**

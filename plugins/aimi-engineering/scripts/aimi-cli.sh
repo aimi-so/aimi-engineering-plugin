@@ -341,12 +341,40 @@ _extract_version_from_path() {
 # existence test on the first element is for -- `-e` for an ordinary path, `-L`
 # so a dangling symlink still counts as the match `ls -d` would have printed.
 #
-# The ORDERING is untouched: the same sed/sort -V/tail/cut comparator as before,
-# still keyed on each candidate's own version segment rather than on the whole
-# path. Every out-of-file copy of that idiom (the --help EXAMPLES block,
-# cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
+# The ORDERING is otherwise untouched: the same sed/sort -V/tail/cut comparator
+# as before, still keyed on each candidate's own version segment rather than on
+# the whole path. Every out-of-file copy of that idiom (the --help EXAMPLES
+# block, cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
 # _resolve-cli.sh, and the two literal patterns in hooks/auto-approve-cli.sh
 # that must match them) therefore still agrees with this function.
+#
+# A VERSION SEGMENT ONLY COUNTS WHEN IT LOOKS LIKE A VERSION, and that grep is
+# the newest line in the pipeline. `sort -V` is a total order over arbitrary
+# strings, not a filter: it happily ranks a directory that is not a version at
+# all, and ranks it ABOVE the real ones. Measured against the installed plugin
+# before this line existed -- a sibling directory named `1.124.0.bak` beside
+# `1.124.0` made check-version answer "latestVersion": "1.124.0.bak", and
+# `printf '1.124.0\n1.124.0.bak' | sort -V | tail -1` picks the `.bak` on its
+# own; a directory named `zz` beats `1.127.0` outright. Those names are not
+# hypothetical: a `cp -a` backup before an upgrade, an editor's leftover, a
+# half-extracted download all land right beside the versions in the same cache
+# entry. The damage is not only a wrong version STRING -- cmd_cleanup_versions
+# rm -rf's every directory this function does not pick, so the backup was kept
+# and the real install deleted. Two golden recordings show exactly that
+# (cv-versao-malformada-cc, clv-versao-malformada-cc, both now excused by name
+# in tests/test_version_cache.py's NUMERIC_VERSION_FILTER).
+#
+# The shape admitted is deliberately narrow -- three numeric segments and
+# nothing else, anchored at the start and terminated by the separator space the
+# sed above just inserted, so `1.124.0.bak` fails on the fourth segment rather
+# than passing on its first three. This plugin has only ever published plain
+# `major.minor.patch`, so nothing real is excluded; a pre-release suffix would
+# have to widen this and the six copies of it together.
+#
+# `grep` exits 1 when nothing matches, which under `set -o pipefail` is exactly
+# the empty-glob answer this function already documents: the `|| newest=""`
+# below catches it, and a cache holding no version-shaped directory reads as
+# "nothing installed" rather than as an abort.
 _resolve_latest_cache_path() {
   local config_dir="$1" suffix="$2"
   local -a candidates=()
@@ -358,6 +386,7 @@ _resolve_latest_cache_path() {
   newest=$(
     printf '%s\n' "${candidates[@]}" \
       | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+      | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " \
       | sort -V \
       | tail -1 \
       | cut -d' ' -f2-
@@ -526,6 +555,84 @@ _validate_plugin_dir() {
 # Detect if running inside Claude Code (CLAUDECODE=1 is set by Claude Code in every session)
 _is_claude_code_host() {
   [ "${CLAUDECODE:-}" = "1" ]
+}
+
+# Validate and resolve AIMI_DEV_DIR -- the LAYER 0 development override, ahead
+# of AIMI_PLUGIN_DIR and honored on EVERY host.
+#
+# Usage: dev_dir=$(_dev_dir_path) || <the value was invalid>
+#   Prints the stripped directory when the override is set and valid.
+#   Prints nothing and returns 0 when it is unset -- "no override" is a normal
+#   answer, not a failure.
+#   Prints one diagnostic to stderr and returns 1 when it is set and invalid.
+#
+# WHY THE CLAUDECODE GATE IS ABSENT, and why that asymmetry with
+# AIMI_PLUGIN_DIR is the point rather than an oversight. AIMI_PLUGIN_DIR names
+# where the compound-plugin converter INSTALLED the plugin, so inside Claude
+# Code -- which has an install of its own under the plugin cache -- honoring it
+# would let another host's install win, and _validate_cached_cli_path,
+# cmd_check_version, cmd_cleanup_versions and cmd_prime_cache all skip it for
+# that reason. AIMI_DEV_DIR names a tree the operator is DELIBERATELY testing.
+# A gate would make it work in exactly the host where nobody needs it and do
+# nothing in the one where the whole workflow lives, so it has none.
+#
+# IT NEVER `exit`s, and that is not a style choice: every caller reads it
+# through `$( )`, and an `exit` inside a command substitution kills the
+# SUBSHELL while the parent carries on with an empty value -- the silent
+# shadowing this override exists to make impossible. The refusal travels as an
+# exit status the caller must handle instead.
+#
+# The four validity checks are _validate_plugin_dir's regime, in its order,
+# with a fifth that AIMI_PLUGIN_DIR has no need of:
+#   1. absolute -- a RELATIVE value makes "$AIMI_DEV_DIR/scripts/aimi-cli.sh"
+#      resolve against the caller's CWD, handing execution to any repository
+#      that happens to ship an executable scripts/aimi-cli.sh of its own.
+#   2. the directory exists.
+#   3. scripts/aimi-cli.sh under it is executable -- an override that names a
+#      tree with no CLI in it is a typo, and answering "no override" for it
+#      would hide the typo behind the installed plugin.
+#   4/5. NOT under a `/.worktrees/` segment, checked on the given string and
+#      then on its symlink-resolved target -- the same refusal, in the same
+#      order and for the same reason, that write_global_cli_cache applies (see
+#      its header ~line 730): a worktree copy is ephemeral, and pointing a
+#      whole shell session at one leaves every later call at exit 127 once the
+#      worktree is cleaned up. The resolved check is what catches the shape
+#      that defeated the string check there -- a symlink into a worktree whose
+#      own name carries no `.worktrees/` segment -- and is best-effort in the
+#      same way: a path that cannot be resolved falls back to the string
+#      verdict rather than being refused.
+_dev_dir_path() {
+  if [ -z "${AIMI_DEV_DIR:-}" ]; then
+    return 0
+  fi
+  if [ "${AIMI_DEV_DIR#/}" = "$AIMI_DEV_DIR" ]; then
+    echo "Error: AIMI_DEV_DIR must be an absolute path, got: $AIMI_DEV_DIR" >&2
+    return 1
+  fi
+  if [ ! -d "$AIMI_DEV_DIR" ]; then
+    echo "Error: AIMI_DEV_DIR directory does not exist: $AIMI_DEV_DIR" >&2
+    return 1
+  fi
+  local dev_dir="${AIMI_DEV_DIR%/}"
+  if [ ! -x "$dev_dir/scripts/aimi-cli.sh" ]; then
+    echo "Error: AIMI_DEV_DIR/scripts/aimi-cli.sh is not executable: $dev_dir/scripts/aimi-cli.sh" >&2
+    return 1
+  fi
+  case "$dev_dir" in
+    */.worktrees/*)
+      echo "Error: AIMI_DEV_DIR must not name a git worktree copy (a path under .worktrees/ vanishes on cleanup): $dev_dir" >&2
+      return 1
+      ;;
+  esac
+  local resolved_dev=""
+  resolved_dev=$(resolve_path "$dev_dir" 2>/dev/null) || resolved_dev=""
+  case "$resolved_dev" in
+    */.worktrees/*)
+      echo "Error: AIMI_DEV_DIR resolves into a git worktree copy (a path under .worktrees/ vanishes on cleanup): $dev_dir -> $resolved_dev" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$dev_dir"
 }
 
 # Resolve the Aimi config directory (XDG-compliant, host-agnostic).
@@ -1587,6 +1694,27 @@ cmd_get_story() {
 # caller -- that is now _resolve_latest_cache_path's own contract rather than
 # something this call site has to arrange.
 _resolve_skills_base_dir() {
+  # Layer 0: AIMI_DEV_DIR, ahead of the host split below and with no
+  # CLAUDECODE gate -- see _dev_dir_path's header for why that gate is absent
+  # here and present for AIMI_PLUGIN_DIR. This is what makes the override
+  # actually useful rather than merely announced: a maintainer testing a
+  # branch is usually testing a SKILL.md, and every agent /aimi:execute spawns
+  # reads its skills from whatever this function answers. Resolving the CLI
+  # from the dev tree while the spawned agents read the installed tree's
+  # SKILL.md is the "two different installs answering in one session" defect
+  # this function's own header already records, one variable over.
+  #
+  # The `-d` test is what keeps it honest: a dev tree with no skills/ falls
+  # through to the ordinary host resolution rather than answering a path to
+  # nothing. An invalid AIMI_DEV_DIR cannot reach here -- main() has already
+  # exited 1 on it -- so the `|| dev_dir=""` covers only the re-consultation
+  # cost, not a second refusal.
+  local dev_dir=""
+  dev_dir=$(_dev_dir_path) || dev_dir=""
+  if [ -n "$dev_dir" ] && [ -d "$dev_dir/skills" ]; then
+    printf '%s\n' "$dev_dir/skills"
+    return 0
+  fi
   if _is_claude_code_host; then
     local config_dir
     config_dir=$(_claude_config_dir)
@@ -11520,6 +11648,40 @@ cmd_check_version() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
+  # ---- Layer 0 first: under AIMI_DEV_DIR this verb reports and stops.
+  #
+  # A STATUS OF ITS OWN, and NO --fix, and the second half is the reason the
+  # first half exists. commands/references/cli-path-resolution.md has every
+  # command call `check-version --quiet --fix` immediately after resolving a
+  # path, so --fix is not a rare maintenance gesture -- it runs constantly.
+  # What it does is write the resolved install into `.aimi/cli-path` AND into
+  # the GLOBAL cli-path cache, which is read by every later session in every
+  # project on this machine. Under a dev override the install in hand is a
+  # development tree, so a --fix here would persist that tree globally: the
+  # override would stop being a per-shell experiment and become the machine's
+  # plugin, outliving the shell that set the variable. That is exactly the
+  # damage this override exists to avoid, so the answer is reported and
+  # nothing is written.
+  #
+  # Placed above the converter branch and above every resolution below, so no
+  # stale/fixed/current comparison is even computed: those compare the STORED
+  # pointer against the INSTALLED one, and under an override neither is the
+  # tree actually running. Exit 0 -- callers treat non-zero from this verb as
+  # "stale, act on it", and there is nothing here for them to act on. The
+  # notice naming the path was already printed by main().
+  #
+  # _dev_dir_path is re-consulted rather than memoized because a command
+  # substitution runs in a subshell: a global that main() set inside one would
+  # not survive back into this process. The checks are a handful of test
+  # builtins and at most one realpath, on a verb that already runs jq.
+  local dev_dir=""
+  dev_dir=$(_dev_dir_path) || dev_dir=""
+  if [ -n "$dev_dir" ]; then
+    jq -n --arg path "$dev_dir/scripts/aimi-cli.sh" \
+      '{status: "dev-override", path: $path, message: "AIMI_DEV_DIR is set; staleness is not meaningful against a development tree and --fix would persist it into the global cache"}'
+    return 0
+  fi
+
   # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
@@ -15817,15 +15979,32 @@ ENVIRONMENT:
     CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
                        Must be an absolute path when set.
     AIMI_PLUGIN_DIR    Plugin install directory set by compound-plugin converter;
-                       bypasses Claude cache resolution.
+                       bypasses Claude cache resolution. SKIPPED inside Claude
+                       Code (CLAUDECODE=1), so the Claude cache wins there.
+    AIMI_DEV_DIR       Layer 0 development override: a plugin checkout to run
+                       instead of the installed copy. Honored on EVERY host --
+                       no CLAUDECODE gate, unlike AIMI_PLUGIN_DIR above. Must be
+                       an absolute path to an existing directory whose
+                       scripts/aimi-cli.sh is executable, and must not sit under
+                       a .worktrees/ segment. Every invocation prints one
+                       unconditional stderr notice naming the path, and
+                       check-version answers status "dev-override" without
+                       attempting --fix, so the global cli-path cache is never
+                       repointed at a development tree.
 
 EXAMPLES:
-    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR).
+    # Layer 0 first: the development override, honored on any host.
+    if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+
+    # Otherwise resolve the installed CLI path (honors CLAUDE_CONFIG_DIR).
     # Sort on the VERSION segment, never on the whole path and never plain `ls`:
     # `ls` collates 1.121.3 before 1.9.0, and a whole-path sort orders by
-    # marketplace-entry directory first. Canonical rule: _resolve_latest_cache_path.
+    # marketplace-entry directory first. The grep is not decoration: sort -V
+    # ranks a non-version directory too, and ranks it ABOVE the real ones --
+    # a sibling named 1.124.0.bak wins without it. Canonical rule:
+    # _resolve_latest_cache_path.
     CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d' ' -f2-)
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d' ' -f2-)
 
     # Initialize a new session
     $AIMI_CLI init-session
@@ -15868,6 +16047,35 @@ EOF
 # ============================================================================
 
 main() {
+  # ---- Layer 0: the AIMI_DEV_DIR announcement, before anything is dispatched.
+  #
+  # UNCONDITIONAL, and that word is the whole requirement rather than a
+  # stylistic preference. The defect this override closes is a real install
+  # silently SHADOWED by a development tree: a maintainer exports AIMI_DEV_DIR
+  # for one experiment, forgets it in a shell profile, and every later session
+  # runs code that is not what is installed while every diagnostic keeps
+  # naming the version the installed plugin reports. So the line is printed on
+  # the SUCCESS path, on every verb, once per process -- not only when
+  # something goes wrong, because nothing going wrong is precisely the failure
+  # mode.
+  #
+  # It sits above the skip-list case rather than inside a verb, so `version`,
+  # `help` and the forge verbs -- which return before find_aimi_root ever runs
+  # -- carry it too. stderr, never stdout: every verb below has a stdout
+  # contract a caller parses, and this must not enter one of them.
+  #
+  # A value that is set but invalid is fatal HERE, at exit 1, rather than
+  # falling through to the installed plugin. Falling through would be the
+  # silent shadowing again with the sign flipped -- the operator asked for the
+  # dev tree and would get the install without being told.
+  local _dev_dir=""
+  if ! _dev_dir=$(_dev_dir_path); then
+    exit 1
+  fi
+  if [ -n "$_dev_dir" ]; then
+    echo "Notice: AIMI_DEV_DIR override is active; aimi resolution points at $_dev_dir/scripts/aimi-cli.sh (development tree, shadowing any installed plugin)." >&2
+  fi
+
   # Skip auto-discovery for commands that don't touch .aimi/
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;

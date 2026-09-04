@@ -161,7 +161,54 @@ PC_EMPTY_GLOB = {
     ),
 }
 
-KNOWN_DIVERGENCES = {**D2_ABORTS, **D11_AND_D13, **PC_EMPTY_GLOB}
+# The fourth fix: a cache directory that is not a version was still ranked by
+# `sort -V`, and ranked ABOVE the real ones.
+#
+# A table of its own for the same mechanical reason PC_EMPTY_GLOB is: these two
+# recordings share neither of the shapes the guards above assert. They are
+# ordinary successful answers -- exit 0, no stderr -- which is what makes them
+# the most valuable recordings in this file. They are the defect SUCCEEDING,
+# captured in passing more than a year before anyone went looking for it, and
+# the pair of them shows both halves of the damage:
+#
+#   cv-versao-malformada-cc  reported "latestVersion": "nao-e-uma-versao"
+#                            -- cosmetic on its own.
+#   clv-versao-malformada-cc DELETED 1.2.3, KEPT nao-e-uma-versao, and wrote
+#                            the kept directory's path into BOTH cli-path
+#                            files -- not cosmetic at all.
+#
+# The second is the one that matters. cleanup-versions rm -rf's every version
+# directory _resolve_latest_cache_path does not pick, so a wrong pick is not a
+# wrong string, it is the real install deleted and a `1.124.0.bak`-shaped
+# leftover enthroned in its place, with the global cli-path cache repointed at
+# it. Both fields and both trees move for that case; only `stdout` moves for
+# the first.
+NUMERIC_VERSION_FILTER = {
+    "cv-versao-malformada-cc": (
+        'FIXED: was {status:"missing", latestVersion:"nao-e-uma-versao"} -- '
+        "`sort -V` is a total order over arbitrary strings, not a filter, so a "
+        "sibling directory that is not a version outranked the real 1.2.3. "
+        "_resolve_latest_cache_path now requires three numeric segments before "
+        "the sort, so the answer is 1.2.3. Only `stdout` moves; this verb "
+        "writes nothing."
+    ),
+    "clv-versao-malformada-cc": (
+        'FIXED, and this is the recording of the actual damage: {removed:1, '
+        'kept:"nao-e-uma-versao"} with BOTH cli-path files pointed at it means '
+        "cleanup-versions deleted the real 1.2.3 install and kept the "
+        "malformed directory. It now keeps 1.2.3 and prunes the other, so "
+        "`stdout`, both cli-path files and `tree` all move together -- every "
+        "one of them because the verb picked a different directory, not "
+        "because it started doing something new."
+    ),
+}
+
+KNOWN_DIVERGENCES = {
+    **D2_ABORTS,
+    **D11_AND_D13,
+    **PC_EMPTY_GLOB,
+    **NUMERIC_VERSION_FILTER,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +650,58 @@ def test_prime_cache_keeps_every_documented_status_and_its_exit_code(tmp_path):
         assert actual["exit"] == code, label
 
 
+@pytest.mark.parametrize(
+    "label", sorted(NUMERIC_VERSION_FILTER), ids=sorted(NUMERIC_VERSION_FILTER)
+)
+def test_each_malformed_version_case_recorded_the_defect_it_is_excused_for(label):
+    """The excuse is only good while the RECORDING still shows the wrong pick.
+
+    The same guard the two tables above carry, with the shape these entries
+    share: an ordinary answer at exit 0 that names `nao-e-uma-versao` as the
+    version it resolved. Repairing the recording to match the fix would destroy
+    the only evidence the defect ever shipped and leave the skip excusing
+    nothing.
+    """
+    case = CASES[label]
+    assert case["exit"] == 0, label + ": the recording is not an ordinary answer"
+    assert "nao-e-uma-versao" in case["stdout"], (
+        label + ": the recording did not pick the malformed directory"
+    )
+
+
+@pytest.mark.parametrize(
+    "label", sorted(NUMERIC_VERSION_FILTER), ids=sorted(NUMERIC_VERSION_FILTER)
+)
+def test_a_directory_that_is_not_a_version_is_never_resolved_as_the_latest(
+    label, tmp_path
+):
+    """And the inversion is asserted, not merely skipped past.
+
+    Both cases now answer 1.2.3 and neither mentions the malformed name
+    anywhere. For cleanup-versions that is checked against the FILESYSTEM as
+    well: the fix is worth nothing if the right version is named on stdout
+    while the wrong directory is the one still on disk.
+    """
+    case = CASES[label]
+    actual = replay(case["input"], str(tmp_path))
+    assert actual["exit"] == 0, label + ": the fix introduced a failure"
+    assert "1.2.3" in actual["stdout"], label + ": did not resolve the real version"
+    assert "nao-e-uma-versao" not in actual["stdout"], (
+        label + ": the malformed directory is still being named"
+    )
+    if case["input"]["args"][0] == "cleanup-versions":
+        survivors = [p for p in actual["tree"] if "aimi-engineering/" in p]
+        assert any("/1.2.3/" in p or p.endswith("/1.2.3/") for p in survivors), (
+            label + ": the real install was deleted anyway"
+        )
+        assert not any("nao-e-uma-versao" in p for p in survivors), (
+            label + ": the malformed directory survived instead"
+        )
+        assert "1.2.3" in (actual["global_cli_path"] or ""), (
+            label + ": the global cli-path still names the wrong install"
+        )
+
+
 def test_the_newest_version_wins_over_the_lexicographically_last(tmp_path):
     """1.9.0 next to 1.10.0 and 1.123.0 -- `ls | tail -1` answers 1.9.0.
 
@@ -613,6 +712,74 @@ def test_the_newest_version_wins_over_the_lexicographically_last(tmp_path):
         actual = replay(CASES[label]["input"], str(tmp_path / label))
         assert "1.123.0" in actual["stdout"], label
         assert "1.9.0" not in actual["stdout"], label
+
+
+def test_a_bak_sibling_never_wins_against_the_version_it_backs_up(tmp_path):
+    """The reproduction that opened this, spelled as a fixture.
+
+    Hand-written rather than replayed, because no recording in the corpus
+    carries this shape: `nao-e-uma-versao` above is the FAR miss -- it looks
+    nothing like a version -- while `1.124.0.bak` is the NEAR one, three
+    correct numeric segments with a suffix. A filter anchored only at the start
+    admits it, and `printf '1.124.0\\n1.124.0.bak' | sort -V | tail -1` picks
+    it unaided, so a fixture with only the far miss would let a half-right
+    filter through. `zz` rides along as a third shape that beats every real
+    version lexicographically.
+
+    All three verbs are checked because they resolve through the same helper
+    and each one does something different with the answer -- report it, prime
+    the global cache with it, or rm -rf everything else.
+    """
+    cache = [
+        {"entry": "mk1", "version": "1.124.0"},
+        {"entry": "mk1", "version": "1.124.0.bak"},
+        {"entry": "mk1", "version": "1.127.0"},
+        {"entry": "mk1", "version": "zz"},
+    ]
+
+    checked = replay({"args": ["check-version"], "cache": cache}, str(tmp_path / "cv"))
+    assert json.loads(checked["stdout"])["latestVersion"] == "1.127.0"
+
+    primed = replay({"args": ["prime-cache"], "cache": cache}, str(tmp_path / "pc"))
+    assert json.loads(primed["stdout"])["version"] == "1.127.0"
+
+    cleaned = replay({"args": ["cleanup-versions"], "cache": cache}, str(tmp_path / "clv"))
+    assert json.loads(cleaned["stdout"])["kept"] == "1.127.0"
+    survivors = [p for p in cleaned["tree"] if "aimi-engineering/" in p]
+    assert any("/1.127.0/" in p or p.endswith("/1.127.0/") for p in survivors)
+    assert not any(".bak" in p for p in survivors), "the backup outlived the install"
+    assert not any("/zz" in p for p in survivors)
+
+
+def test_a_cache_holding_no_version_shaped_directory_reads_as_empty(tmp_path):
+    """grep's empty match is the empty glob, not an abort.
+
+    The filter sits inside a pipeline running under `set -o pipefail`, so a
+    cache where NOTHING matches makes grep exit 1 and the whole pipeline
+    non-zero. That is caught by the helper's existing `|| newest=""` and lands
+    on the documented no-install answer -- the same one an absent
+    plugins/cache/ produces. Without that catch the verb would abort with both
+    streams empty, which is precisely the D2 defect this file was written to
+    record the repair of.
+    """
+    cache = [{"entry": "mk1", "version": "backup"}, {"entry": "mk1", "version": "old"}]
+
+    checked = replay({"args": ["check-version"], "cache": cache}, str(tmp_path / "cv"))
+    assert checked["exit"] == 0
+    assert json.loads(checked["stdout"]) == {
+        "status": "unknown",
+        "message": "No installed version found",
+    }
+
+    cleaned = replay({"args": ["cleanup-versions"], "cache": cache}, str(tmp_path / "clv"))
+    assert cleaned["exit"] == 0
+    assert json.loads(cleaned["stdout"]) == {"removed": 0, "kept": None}
+    # It returns before write_global_cli_cache, so nothing is persisted -- and
+    # before the rm -rf loop, so the unrecognized directories are left alone
+    # rather than swept because they were not picked.
+    assert cleaned["global_cli_path"] is None
+    assert any("backup" in p for p in cleaned["tree"])
+    assert any("/old" in p for p in cleaned["tree"])
 
 
 def test_cleanup_keeps_the_newest_and_deletes_the_rest(tmp_path):

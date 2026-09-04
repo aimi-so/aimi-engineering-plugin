@@ -77,8 +77,33 @@ AIMI_DIR_RE="(~/\\.config/aimi|\\\$\\{XDG_CONFIG_HOME:-\\\$HOME/\\.config\\}/aim
 # metacharacters -- `\1` left unescaped is a BACK-REFERENCE, not a literal --
 # and hand-escaping it twice, once here and once for the worktree-manager
 # twin, is exactly how two copies of one string drift apart.
-GLOB_VERSION_TAIL=' | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'
+#
+# THE `grep -E` IN THE MIDDLE IS PART OF THE LITERAL and not an optimization
+# the commands may skip: `sort -V` is a total order over arbitrary strings, so
+# a cache directory that is not a version at all still gets ranked, and gets
+# ranked above the real ones -- a sibling named `1.124.0.bak` beside `1.124.0`
+# wins outright. Both this constant and every command block it approves gained
+# it in the same commit, because a command that emits the filtered pipeline
+# while this constant still spells the unfiltered one is a command that stops
+# being auto-approved. That escape pass handles it unaided: `[0-9]` becomes
+# `\[0-9\]` and each `\.` becomes `\\\.`, which is the literal backslash-dot
+# the command text really carries.
+GLOB_VERSION_TAIL=' | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d" " -f2-'
 GLOB_VERSION_TAIL_RE=$(printf '%s' "$GLOB_VERSION_TAIL" | sed 's/[].[\*^$()+?{|\\}]/\\&/g')
+
+# The same tail WITHOUT the numeric filter -- the spelling every command block
+# carried before the filter was added. Kept for the reason Pattern 0a is kept
+# beside Pattern 0a2: a fix for today's text must not un-approve yesterday's.
+# A command body that entered a conversation before an upgrade is still run
+# verbatim afterwards, and the only thing the hook can do about a line it no
+# longer recognizes is prompt the user for it -- which is precisely the
+# regression the mirrored-idiom rule exists to prevent. Patterns 7L and 8L
+# below are built from this and are otherwise byte-identical to 7 and 8.
+# Deliberately a SECOND LITERAL rather than a loosened first one: the two
+# alternatives are exact strings, and no path that was not already spelled out
+# here becomes matchable.
+GLOB_VERSION_TAIL_LEGACY=' | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'
+GLOB_VERSION_TAIL_LEGACY_RE=$(printf '%s' "$GLOB_VERSION_TAIL_LEGACY" | sed 's/[].[\*^$()+?{|\\}]/\\&/g')
 
 # --- Helper: Reject shell metacharacters ---
 # Returns 0 (true) if dangerous metacharacters are found after the variable reference.
@@ -123,6 +148,27 @@ fi
 
 # --- Pattern 0b2: Layer 0 WORKTREE_MGR assignment, current five-condition form ---
 if echo "$COMMAND" | grep -qE '^if \[ -z "\$\{CLAUDECODE:-\}" \] && \[ -n "\$AIMI_PLUGIN_DIR" \] && \[ "\$\{AIMI_PLUGIN_DIR#/\}" != "\$AIMI_PLUGIN_DIR" \] && \[ -d "\$AIMI_PLUGIN_DIR" \] && \[ -x "\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh" \]; then WORKTREE_MGR="\$AIMI_PLUGIN_DIR/skills/git-worktree/scripts/worktree-manager\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 0c: Layer 0 AIMI_CLI assignment via AIMI_DEV_DIR ---
+# Approves: if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+#
+# The development override sits AHEAD of AIMI_PLUGIN_DIR and carries no
+# CLAUDECODE gate -- see _dev_dir_path in scripts/aimi-cli.sh for why that
+# asymmetry is deliberate. Its five conditions are matched literally, in
+# order, like every Pattern 0 above: the last one is the `.worktrees/`
+# refusal, expressed as a prefix-strip comparison rather than a `case` so the
+# whole guard stays one line an agent can run in one Bash call.
+if echo "$COMMAND" | grep -qE '^if \[ -n "\$AIMI_DEV_DIR" \] && \[ "\$\{AIMI_DEV_DIR#/\}" != "\$AIMI_DEV_DIR" \] && \[ -d "\$AIMI_DEV_DIR" \] && \[ -x "\$AIMI_DEV_DIR/scripts/aimi-cli\.sh" \] && \[ "\$\{AIMI_DEV_DIR#\*/\.worktrees/\}" = "\$AIMI_DEV_DIR" \]; then AIMI_CLI="\$AIMI_DEV_DIR/scripts/aimi-cli\.sh"; fi$'; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 0d: Layer 0 WORKTREE_MGR assignment via AIMI_DEV_DIR ---
+# Approves: if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then WORKTREE_MGR="$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager.sh"; fi
+if echo "$COMMAND" | grep -qE '^if \[ -n "\$AIMI_DEV_DIR" \] && \[ "\$\{AIMI_DEV_DIR#/\}" != "\$AIMI_DEV_DIR" \] && \[ -d "\$AIMI_DEV_DIR" \] && \[ -x "\$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager\.sh" \] && \[ "\$\{AIMI_DEV_DIR#\*/\.worktrees/\}" = "\$AIMI_DEV_DIR" \]; then WORKTREE_MGR="\$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager\.sh"; fi$'; then
   echo "$ALLOW"
   exit 0
 fi
@@ -291,6 +337,19 @@ fi
 # --- Pattern 8: WORKTREE_MGR Layer 2 glob fallback (bash -c wrapper) ---
 # Approves: if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls <config>/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null<version tail>'); fi
 if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/skills/git-worktree/scripts/worktree-manager\\.sh 2>/dev/null${GLOB_VERSION_TAIL_RE}'\\); fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 7L: AIMI_CLI Layer 2 glob fallback, pre-numeric-filter spelling ---
+# Byte-identical to Pattern 7 except for the tail. See GLOB_VERSION_TAIL_LEGACY.
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$AIMI_CLI\" \\]; then AIMI_CLI=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/scripts/aimi-cli\\.sh 2>/dev/null${GLOB_VERSION_TAIL_LEGACY_RE}'\\); fi\$"; then
+  echo "$ALLOW"
+  exit 0
+fi
+
+# --- Pattern 8L: WORKTREE_MGR Layer 2 glob fallback, pre-numeric-filter spelling ---
+if echo "$COMMAND" | grep -qE "^if \\[ -z \"\\\$WORKTREE_MGR\" \\]; then WORKTREE_MGR=\\$\\(bash -c 'ls ${CONFIG_DIR_RE}/plugins/cache/\\*/aimi-engineering/\\*/skills/git-worktree/scripts/worktree-manager\\.sh 2>/dev/null${GLOB_VERSION_TAIL_LEGACY_RE}'\\); fi\$"; then
   echo "$ALLOW"
   exit 0
 fi
