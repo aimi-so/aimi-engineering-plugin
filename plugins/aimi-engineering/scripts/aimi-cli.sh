@@ -899,12 +899,18 @@ write_global_worktree_cache() {
 # Exact twin of _validate_cached_cli_path immediately above -- same three
 # admission routes in the same order, same reason the versioned-cache arm's
 # own `return 0` must run before _validate_directory_source_identity's
-# equality check (and its jq call) ever does. NOTE, per this story's notes:
-# nothing in this CLI calls write_global_worktree_cache or
-# read_global_worktree_cache in production today (grep confirms it -- only
-# their own definitions, test-aimi-cli-fixtures.sh, and tests call them), so
-# this widening is symmetry for a reader with no writer yet, not an
-# end-to-end round trip.
+# equality check (and its jq call) ever does.
+#
+# THE WRITER THIS COMMENT USED TO SAY DID NOT EXIST NOW DOES. It said the
+# widening was "symmetry for a reader with no writer yet", and that was true
+# for as long as it stood: nothing called write_global_worktree_cache, so the
+# worktree-path file on disk existed only where somebody had written it by
+# hand -- which is how it came to name a version the cli-path had already
+# moved off. _persist_worktree_pointer_for below is the writer, and
+# cmd_check_version (on --fix), cmd_cleanup_versions and cmd_prime_cache are
+# the three verbs that call it, each one immediately beside its existing
+# write_global_cli_cache call so the two pointers cannot name different
+# installs.
 _validate_cached_worktree_path() {
   local cached_path="$1"
   local plugin_dir
@@ -945,6 +951,80 @@ read_global_worktree_cache() {
   local cached_path
   cached_path=$(cat "$legacy_file" 2>/dev/null) || return 0
   _validate_cached_worktree_path "$cached_path"
+}
+
+# _worktree_manager_beside: the worktree-manager.sh that belongs to a given
+# aimi-cli.sh path. Prints it, or prints nothing -- always returns 0, like
+# every other helper in this family.
+#
+# The two scripts are fixed siblings inside one install root:
+#   <root>/scripts/aimi-cli.sh
+#   <root>/skills/git-worktree/scripts/worktree-manager.sh
+# so the manager is a pure function of the CLI path. That is the whole point.
+# The two global pointers used to be written by different things at different
+# times -- cli-path by this CLI, worktree-path by a human or by
+# cli-path-resolution.md's Layer 2 one-liner -- so they could name different
+# installs, and did: after a `check-version --fix` the cli-path moved to the
+# new version and the worktree-path stayed on the old one. Deriving the second
+# from the first at the moment the first is written is what makes that
+# impossible rather than unlikely.
+#
+# THE EXISTENCE TEST IS THE CONTRACT, not politeness. The failure this exists
+# to stop is a pointer that outlived the directory it named: the old version
+# was pruned, $WORKTREE_MGR became a path to nothing, and every guard around
+# it only asked whether the VARIABLE was empty. Refusing to persist a path
+# that is not there is the write-side half of that fix; the read-side half is
+# the `[ -x ]` check the command call sites now carry beside their `:?` guard.
+#
+# It also keeps this whole family invisible to an install that has no worktree
+# manager beside its CLI -- a fake cache entry in a test fixture, an OpenCode
+# plugin dir carrying only scripts/ -- which is why adding these calls changed
+# no recording in tests/golden_from_jq.json's version_cache_cases.
+_worktree_manager_beside() {
+  local cli_path="$1"
+  [ -n "$cli_path" ] || return 0
+  case "$cli_path" in
+    */scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  local candidate="${cli_path%/scripts/aimi-cli.sh}/skills/git-worktree/scripts/worktree-manager.sh"
+  [ -f "$candidate" ] || return 0
+  printf '%s\n' "$candidate"
+}
+
+# _persist_worktree_pointer_for: write the global worktree-path pointer for the
+# install that <cli_path> belongs to. Silent no-op when that install carries no
+# manager beside its CLI.
+#
+# NEVER FAILS ITS CALLER. Each of the three is a verb whose own answer -- the
+# JSON object it prints and the exit status it returns -- is a contract, and
+# none of them should change because a SECONDARY pointer could not be written.
+# So the write's own non-zero (a config dir that cannot be created, a read-only
+# aimi-config) is swallowed here, having already printed its own line on
+# stderr from write_global_worktree_cache.
+#
+# The already-current short-circuit reads the raw file rather than calling
+# read_global_worktree_cache, and the reason is the same one cmd_prime_cache
+# gives for its own raw read: that reader runs _validate_cached_worktree_path's
+# whitelist, which answers empty for a path shape it does not admit, so on a
+# directory-source install every single run would decide the file was wrong
+# and rewrite a value that was already correct.
+_persist_worktree_pointer_for() {
+  local cli_path="$1"
+  local manager
+  manager=$(_worktree_manager_beside "$cli_path")
+  if [ -z "$manager" ]; then
+    return 0
+  fi
+  local cache_file current=""
+  cache_file=$(_global_worktree_cache_path)
+  if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
+    current=$(cat "$cache_file" 2>/dev/null) || current=""
+  fi
+  if [ "$current" = "$manager" ]; then
+    return 0
+  fi
+  write_global_worktree_cache "$manager" || return 0
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
@@ -11464,6 +11544,37 @@ cmd_check_version() {
     latest_path=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh")
   fi
 
+  # ---- The SECOND pointer, healed here rather than in the fix branch below.
+  #
+  # This verb is what commands/references/cli-path-resolution.md calls right
+  # after every path resolution, so --fix is the curation entry point for the
+  # whole pointer family -- not only for the one pointer whose staleness this
+  # verb reports. It sits ABOVE the `unknown` early return and outside the
+  # stored-vs-latest comparison on purpose: worktree-path can be missing or
+  # stale while cli-path is already `current`, and healing it only in the
+  # `fixed` branch would leave exactly the divergence this exists to close.
+  # _persist_worktree_pointer_for is idempotent and reads one file when there
+  # is nothing to do, so paying for it on every --fix is cheaper than being
+  # wrong about when it is needed.
+  #
+  # THE FALLBACK IS THE RUNNING SCRIPT, and only when nothing is installed.
+  # An empty latest_path means both the versioned-cache glob and the
+  # directory-source resolver came up empty -- there is no install to derive a
+  # sibling from -- but this script is nonetheless executing from somewhere,
+  # and on a host running the plugin straight out of a checkout that somewhere
+  # has the manager beside it. Restricting the fallback to the empty case is
+  # what keeps a RESOLVED-but-manager-less install (a fake cache entry, an
+  # OpenCode plugin dir with only scripts/) writing nothing at all, rather
+  # than silently pointing the pointer at whatever tree this process happens
+  # to have been launched from.
+  if [ "$fix" = true ]; then
+    local worktree_source="$latest_path"
+    if [ -z "$worktree_source" ]; then
+      worktree_source=$(resolve_path "$0" 2>/dev/null) || worktree_source=""
+    fi
+    _persist_worktree_pointer_for "$worktree_source"
+  fi
+
   # Case: glob AND directory-source fallback both returned empty — no
   # installed version found.
   # CALLER-VISIBLE: this branch is documented but was dead code until the
@@ -11609,6 +11720,13 @@ cmd_cleanup_versions() {
   # Update cli-path state to point to the latest version
   write_state "cli-path" "$latest_path"
   write_global_cli_cache "$latest_path"
+  # And the worktree pointer with it. This verb is where the divergence was
+  # actually PRODUCED: the rm -rf loop above has just deleted every version
+  # directory it did not keep, so any worktree-path still naming one of them
+  # is now a path to nothing. Re-pointing it at the kept version in the same
+  # breath as the cli-path is the difference between a stale pointer and a
+  # dangling one.
+  _persist_worktree_pointer_for "$latest_path"
 
   jq -n --argjson removed "$removed" --arg kept "$latest_version" \
     '{removed: $removed, kept: $kept}'
@@ -11858,6 +11976,11 @@ cmd_prime_cache() {
   local existing_cache
   existing_cache=$(read_global_cli_cache)
   if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
+    # already_current is about the CLI pointer alone. The worktree pointer can
+    # be absent or stale while this one is right -- that asymmetry is exactly
+    # what this story is about -- so prime it here too, before the early
+    # return, rather than only on the path that writes.
+    _persist_worktree_pointer_for "$resolved_path"
     jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
       '{status:"already_current",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache already points to this path" + $note)}'
     return 0
@@ -11894,6 +12017,13 @@ cmd_prime_cache() {
       '{status:"error",path:null,host:$host,version:null,message:$msg}'
     return 1
   fi
+
+  # The cli-path is persisted and verified; give the worktree pointer the same
+  # install in the same call. Placed after the read-back above so a resolution
+  # that write_global_cli_cache declined has already answered error and
+  # returned -- the two pointers are never left naming different installs, not
+  # even for the length of one failed run.
+  _persist_worktree_pointer_for "$resolved_path"
 
   jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
     '{status:"ok",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache primed successfully" + $note)}'

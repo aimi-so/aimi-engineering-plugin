@@ -209,6 +209,18 @@ def _build_root(spec, root):
         else:
             os.makedirs(os.path.join(version_dir, "scripts"), exist_ok=True)
             _write_stub(os.path.join(version_dir, "scripts", "aimi-cli.sh"), entry.get("exec", True))
+        if entry.get("worktree_manager"):
+            # The worktree-manager.sh sibling a REAL install carries, planted
+            # only when a case asks for it. Every pre-existing case leaves it
+            # out, and that is why _persist_worktree_pointer_for -- whose whole
+            # contract is "write nothing when no manager sits beside the
+            # resolved CLI" -- changed not one recording in version_cache_cases.
+            # Placed AFTER the branch above so the symlink case, if a future
+            # case ever combines the two, writes through the symlink rather
+            # than racing os.symlink for the same path.
+            mgr_dir = os.path.join(version_dir, "skills", "git-worktree", "scripts")
+            os.makedirs(mgr_dir, exist_ok=True)
+            _write_stub(os.path.join(mgr_dir, "worktree-manager.sh"), True)
 
     plugin_dir = None
     if spec.get("plugin_dir") is not None:
@@ -223,6 +235,13 @@ def _build_root(spec, root):
     if spec.get("global_cli_path") is not None:
         with open(os.path.join(aimi_config, "cli-path"), "w", encoding="utf-8") as handle:
             handle.write(_expand(spec["global_cli_path"], root, config_dir) + "\n")
+
+    if spec.get("global_worktree_path") is not None:
+        # Seeds the SECOND pointer, so a case can start from the divergence
+        # this file's worktree-pointer section describes: a worktree-path left
+        # naming a version the cli-path has already moved off.
+        with open(os.path.join(aimi_config, "worktree-path"), "w", encoding="utf-8") as handle:
+            handle.write(_expand(spec["global_worktree_path"], root, config_dir) + "\n")
 
     if spec.get("state_cli_path") is not None:
         with open(os.path.join(project, ".aimi", "cli-path"), "w", encoding="utf-8") as handle:
@@ -345,6 +364,15 @@ def replay(spec, root):
         "tree": _tree(root),
         "global_cli_path": _read(os.path.join(root, "aimi-config", "cli-path"), root),
         "state_cli_path": _read(os.path.join(root, "project", ".aimi", "cli-path"), root),
+        # The SECOND global pointer. Deliberately NOT in FIELDS below: the
+        # corpus was captured before anything wrote this file, so no recording
+        # carries the key and comparing it would fail every case on a
+        # KeyError rather than on a behaviour change. `tree` already covers
+        # the regression risk -- a run that started writing worktree-path
+        # where it should not would show the new path there, in a field every
+        # case does compare. This key exists for the hand-written tests below,
+        # which read it directly.
+        "global_worktree_path": _read(os.path.join(root, "aimi-config", "worktree-path"), root),
     }
     _unlock(root)
     return record
@@ -726,6 +754,143 @@ def test_cleanup_refuses_a_version_dir_that_resolves_outside_the_cache(tmp_path)
 
     # And the symlink entry itself still stands: refusing is not deleting.
     assert any("/1.0.0" in p for p in actual["tree"]), actual["tree"]
+
+
+# ---------------------------------------------------------------------------
+# The SECOND global pointer: aimi-config/worktree-path
+#
+# These cases are hand-written rather than replayed from the corpus, and they
+# have to be: the capture ran against 112d72f, when NOTHING in this CLI called
+# write_global_worktree_cache. `_validate_cached_worktree_path` validated the
+# file, `read_global_worktree_cache` read it, and next.md and
+# container-execution.md re-read it at the top of every Bash call -- while the
+# file on disk existed only where a human had written it by hand. So the corpus
+# cannot contain a before-picture of a write that never happened; what it CAN
+# do, and does, is prove these writes reach no case that has no manager beside
+# its CLI, because every recorded case's `tree` comes back byte-identical.
+#
+# What the pointer's absence cost, and why the tests below are shaped around
+# cleanup-versions rather than around check-version alone: a `check-version
+# --fix` moved cli-path to the new install while worktree-path stayed on the
+# old one, `cleanup-versions` then rm -rf'd the old one, and $WORKTREE_MGR
+# became a path to nothing that every guard around it still let through,
+# because those guards only asked whether the VARIABLE was empty.
+#
+# Every case here builds its own throwaway root through the same `replay` the
+# corpus uses, so the HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/AIMI_CONFIG_DIR
+# quarantine this module's header describes applies unchanged. That is not
+# decorative for these four: one of them runs `cleanup-versions`, which rm -rf's
+# every version directory it did not keep.
+# ---------------------------------------------------------------------------
+
+def _manager(entry, version):
+    return (
+        "/TMP/claude-config/plugins/cache/"
+        + entry
+        + "/aimi-engineering/"
+        + version
+        + "/skills/git-worktree/scripts/worktree-manager.sh"
+    )
+
+
+def _cli(entry, version):
+    return (
+        "/TMP/claude-config/plugins/cache/"
+        + entry
+        + "/aimi-engineering/"
+        + version
+        + "/scripts/aimi-cli.sh"
+    )
+
+
+def test_check_version_fix_writes_the_worktree_pointer_for_the_install_it_resolved(tmp_path):
+    """--fix persists the pointer that had no writer at all before.
+
+    `state_cli_path` seeds a stale value so the verb takes its `fixed` branch;
+    the pointer write sits above that branch and does not depend on it, which
+    the next case is what actually pins.
+    """
+    spec = {
+        "args": ["check-version", "--quiet", "--fix"],
+        "cache": [{"entry": "mk1", "version": "1.2.3", "worktree_manager": True}],
+        "state_cli_path": "/fake/old/1.0.0/scripts/aimi-cli.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "fixed", actual["stdout"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.2.3") + "\n"
+    # The invariant itself: both pointers name ONE install directory.
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_fix_heals_the_worktree_pointer_while_the_cli_pointer_is_current(tmp_path):
+    """The divergence this story exists to close, in its exact shape.
+
+    cli-path is already correct -- status comes back `current`, the `fixed`
+    branch never runs -- while worktree-path names an older version. A heal
+    wired into the `fixed` branch would leave this state untouched forever,
+    which is how the two pointers came apart in the first place.
+    """
+    spec = {
+        "args": ["check-version", "--quiet", "--fix"],
+        "cache": [
+            {"entry": "mk1", "version": "1.2.3", "worktree_manager": True},
+            {"entry": "mk1", "version": "1.3.0", "worktree_manager": True},
+        ],
+        "state_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh",
+        "global_worktree_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3"
+        "/skills/git-worktree/scripts/worktree-manager.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "current", actual["stdout"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.3.0") + "\n"
+
+
+def test_cleanup_versions_repoints_the_worktree_pointer_at_the_version_it_kept(tmp_path):
+    """The verb that PRODUCED the dangling path now repairs it in the same run.
+
+    1.2.3 is pruned; a pointer still naming it would be a path to nothing the
+    moment this verb returns. The tree assertion is what proves the prune
+    happened, so the repointing is measured against a real deletion rather
+    than against a directory that was never touched.
+    """
+    spec = {
+        "args": ["cleanup-versions"],
+        "cache": [
+            {"entry": "mk1", "version": "1.2.3", "worktree_manager": True},
+            {"entry": "mk1", "version": "1.3.0", "worktree_manager": True},
+        ],
+        "global_worktree_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3"
+        "/skills/git-worktree/scripts/worktree-manager.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"]) == {"removed": 1, "kept": "1.3.0"}
+    assert any("/1.2.3" in p for p in actual["tree_before"]), actual["tree_before"]
+    assert not any("/1.2.3" in p for p in actual["tree"]), actual["tree"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.3.0") + "\n"
+
+
+def test_no_worktree_pointer_is_written_when_the_install_carries_no_manager(tmp_path):
+    """The existence gate, which is what keeps the whole corpus byte-identical.
+
+    An install with only `scripts/` -- every pre-existing fixture in this file,
+    and the shape an OpenCode plugin dir takes -- must persist nothing at all,
+    rather than a path to a file that is not there. The cli-path assertion is
+    the control: the run happened, so the silence is the missing manager and
+    not a verb that did nothing.
+    """
+    spec = {
+        "args": ["prime-cache"],
+        "cache": [{"entry": "mk1", "version": "1.2.3"}],
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "ok", actual["stdout"]
+    assert actual["global_worktree_path"] is None
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+    assert not any("worktree-path" in p for p in actual["tree"]), actual["tree"]
 
 
 def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):
