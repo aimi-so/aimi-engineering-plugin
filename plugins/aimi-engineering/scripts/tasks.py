@@ -4139,6 +4139,15 @@ _VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 # The words that may precede an assignment and still leave it an assignment.
 _VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
 
+# The builtins whose whole job is to MOVE the shell. Only `cd` appears in the
+# corpus this parser was cut against -- 11 of the 258 verifies under this
+# plugin's own .aimi/ carry one and none carries a pushd, measured 2026-09-04 --
+# and the dirstack pair is listed anyway, because unlike the parser's other
+# rules this one is not descriptive. A word missing from here is a directory
+# change the probe fails to replicate, and that failure is silent and lands in
+# the caller's tree. Two strings buy the whole family.
+_VERIFY_CHDIR = ("cd", "pushd", "popd")
+
 # A verify is allowed to be a whole test suite, so this is generous. A segment
 # that outlives it is reported at 124 -- `timeout`'s own status -- which reads
 # as discriminating, the safe direction: a probe must never invent dead weight.
@@ -4387,6 +4396,19 @@ def verify_asserts_nothing(segment):
     return len(words) == 1 and bool(_VERIFY_ASSIGN.match(words[0]))
 
 
+def verify_changes_directory(segment):
+    """True for a segment whose whole job is to move the shell.
+
+    Kept apart from verify_asserts_nothing, which answers a different question.
+    That one asks whether a segment could be an assertion at all, and a `cd`
+    could be -- `cd build` fails when the directory is not there. This one asks
+    whether running the segment leaves the NEXT one somewhere else, which is
+    the property the prelude has to reproduce.
+    """
+    words = verify_words(segment)
+    return bool(words) and words[0] in _VERIFY_CHDIR
+
+
 def probe_verify(text, cwd):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
@@ -4406,6 +4428,28 @@ def probe_verify(text, cwd):
     subshell -- buys that back by making every exit status depend on parsing a
     marker out of a stream the assertions themselves write to.
 
+    THE WORKING DIRECTORY IS CARRIED FOR THE SAME REASON, WITH MORE AT STAKE.
+    An assignment is carried so an assertion is not measured against an empty
+    variable; a `cd` is carried so an assertion is not measured against -- and
+    not WRITTEN INTO -- the wrong tree. Without it, `cd "$W"` ran as a segment
+    of its own and changed nothing that outlived it, so a `mkdir -p out` two
+    segments later landed in `cwd`: the story executor's own worktree, which is
+    where step 1.5 probes from. The probe was manufacturing the class of defect
+    it exists to find. Like an assignment it is carried and not reported -- a
+    segment that only establishes context is noise in a list whose subject is
+    assertions that already pass.
+
+    REFUSING A VERIFY THAT CONTAINS A `cd` WOULD CLOSE THAT TOO, AND IS WORSE.
+    The verifies that cd are the elaborate ones: the verify that builds a
+    throwaway repo under `mktemp -d`, cds into it and asserts against it is
+    exactly the verify whose assertions are worth taking apart, and the story
+    that closed this carried one itself. A refusal still has to answer
+    something, and the only honest thing it can answer is the empty array --
+    which is indistinguishable from "every assertion here discriminates", so
+    the executor would print a clean all-clear for the verifies least likely to
+    deserve one. Carrying the `cd` keeps the answer; refusing would trade a
+    wrong directory for a wrong answer.
+
     Output is discarded. What the caller gets is the status, because that is
     what `discriminates` is computed from and a probe that echoed a whole test
     suite's output would bury its own answer.
@@ -4423,6 +4467,17 @@ def probe_verify(text, cwd):
     prelude = []
     for separator, segment in verify_segments(text):
         if separator == "||":
+            continue
+        if verify_changes_directory(segment):
+            # `|| exit 1` rather than the bare segment. A `cd` that FAILS in
+            # the prelude would leave everything after it running in the
+            # caller's directory -- this same defect, only quieter, because
+            # nothing in the answer would say the probe had never moved.
+            # Aborting instead reports every assertion after it at the shell's
+            # own failure status, which reads as discriminating: the safe
+            # direction, the one the timeout takes, since a probe must never
+            # invent dead weight.
+            prelude.append(segment + " || exit 1")
             continue
         if verify_asserts_nothing(segment):
             words = verify_words(segment)
@@ -4605,8 +4660,14 @@ def _tasks_documents(base):
                 yield feature, name, full
 
 
-def tasks_feature_index(aimi_dir):
-    """date -> feature, for the dates where exactly ONE feature was planned.
+def tasks_feature_scan(aimi_dir):
+    """(date -> feature for the dates that carry exactly one, every feature
+    name that exists).
+
+    ONE walk answers both questions because both are asked of the same two
+    directories, and the walk OPENS tasks documents to read `metadata.createdAt`
+    for the ones whose name carries no date. Asking twice would pay the cost of
+    the whole verb twice.
 
     Both `.aimi/tasks` and `.aimi/archive` are read, because a gap written in
     July belongs to a feature whose tasks file was archived weeks ago: an index
@@ -4616,9 +4677,18 @@ def tasks_feature_index(aimi_dir):
     guess. Picking one would attribute a gap to a feature it was never about,
     and a wrong `feature` is worse than a null one -- the null is visible to the
     reader and to the --feature filter, the wrong one is not.
+
+    THE NAME SET IS THE WIDER OF THE TWO, deliberately. It answers one question
+    and only one: does a feature by this name exist? A feature whose every date
+    was ambiguous never reaches the index and is still a feature that exists, so
+    the set is built before the ambiguity rule discards anything. A directory
+    directly under `.aimi/tasks/` counts on its own terms too -- someone created
+    it -- even in the window before it holds a tasks document.
     """
     seen = {}
-    for base in (os.path.join(aimi_dir, "tasks"), os.path.join(aimi_dir, "archive")):
+    names = set()
+    tasks_dir = os.path.join(aimi_dir, "tasks")
+    for base in (tasks_dir, os.path.join(aimi_dir, "archive")):
         for feature, name, full in _tasks_documents(base):
             matched = _TASKS_FILENAME.match(name)
             date = matched.group("date") if matched else None
@@ -4630,11 +4700,18 @@ def tasks_feature_index(aimi_dir):
                     if matched
                     else _TASKS_PHASE_SUFFIX.sub("", name[: -len(_TASKS_SUFFIX)])
                 )
+            names.add(feature)
             if date is None:
                 date = _created_at(full)
             if date:
                 seen.setdefault(date, set()).add(feature)
-    return {date: features.pop() for date, features in seen.items() if len(features) == 1}
+    for name in _listdir(tasks_dir):
+        if os.path.isdir(os.path.join(tasks_dir, name)):
+            names.add(name)
+    index = {
+        date: features.pop() for date, features in seen.items() if len(features) == 1
+    }
+    return index, names
 
 
 # One frontmatter line. Deliberately not a YAML parser: the block this reads
@@ -4747,19 +4824,39 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
     1. The file's own `feature:` frontmatter key. A gap that DECLARES its
        feature is believed over anything derived, even when the two disagree --
        a name is a guess and a declaration is not.
-    2. The file name's own slug. THIS IS NOT DEPRECATED: 49 of the files on
-       disk carry no frontmatter, none of them will retroactively gain one, and
-       a fallback that stopped answering for them would drop the corpus this
-       verb was built to stop dropping.
+    2. The file name's own slug, AND ONLY WHEN A FEATURE BY THAT NAME EXISTS.
+       The fallback is not deprecated -- 49 of the files on disk carry no
+       frontmatter, none of them will retroactively gain one, and a fallback
+       that stopped answering for them would drop the corpus this verb was
+       built to stop dropping. What it stopped doing is INVENTING. The slug is
+       where an author puts a description, so an unchecked slug produced a
+       feature that had never existed: measured on 2026-09-04 against 114
+       entries, the LARGEST feature in the corpus was `phase2`, 30 entries, out
+       of files named `2026-09-03-US-001-phase2.md`, and no feature by that
+       name was ever planned. Sixteen distinct names were reported that day and
+       twelve of them were invented this way; only four were features.
     3. The tasks file planned on the same date.
 
     A file that resolves to none of the three enters the result with a NULL
     feature rather than being discarded -- discarding it would repeat the
     defect this verb exists to fix, and step 1 does not revoke that rule.
+    A rejected slug falls to step 3 rather than to null, which is where the 30
+    `phase2` entries went: their date resolves to `pipeline-audit`, the feature
+    they were always about.
 
-    Both filters are exact. `--since` drops an entry whose date is null: an
+    `--feature` MATCHES THE NULLS TOO, and that is a filter rule rather than an
+    attribution one. An entry with no feature is not an entry of some other
+    feature -- it is one whose feature is unknown, and a planning defect with no
+    owner is still a defect the plan being written can repeat. Eighteen of the
+    114 were invisible to every `--feature` call for that reason. An entry that
+    DID resolve, to some other real feature, stays out: this widens the filter
+    onto the unattributed, never onto the attributed-elsewhere.
+
+    `--since` is still exact and still drops an entry whose date is null: an
     entry with no date cannot answer "on or after", and inventing an answer for
-    it is the guess this parser refuses everywhere else.
+    it is the guess this parser refuses everywhere else. The two filters differ
+    because their nulls do: a null date cannot be compared, a null feature can
+    be reported.
     """
     gaps_dir = os.path.join(aimi_dir, "known-gaps")
     try:
@@ -4767,7 +4864,7 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
     except OSError:
         return []
 
-    index = None
+    scan = None
     entries = []
     for name in names:
         matched = _GAP_FILENAME.match(name)
@@ -4787,15 +4884,20 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
         # bare-prose rule doing exactly the right thing to the wrong input.
         declared, body = gap_frontmatter(body)
         entry_feature = declared.get("feature") or None
-        if entry_feature is None:
-            entry_feature = matched.group("slug") if matched else None
-        if entry_feature is None and date is not None:
-            if index is None:
+        slug = matched.group("slug") if matched else None
+        if entry_feature is None and (slug is not None or date is not None):
+            if scan is None:
                 # Built at most once per run, and only when some file actually
-                # needs it: the walk opens tasks documents, and the common case
-                # is a corpus whose names already carry their slug.
-                index = tasks_feature_index(aimi_dir)
-            entry_feature = index.get(date)
+                # has a question for it: the walk opens tasks documents, and a
+                # file naming neither a slug nor a date has nothing to ask.
+                scan = tasks_feature_scan(aimi_dir)
+            index, known = scan
+            # A slug is believed only when it names a feature that exists. It
+            # is the one source here an AUTHOR types freehand, so it is the one
+            # that can name something that never existed.
+            entry_feature = slug if slug in known else None
+            if entry_feature is None and date is not None:
+                entry_feature = index.get(date)
         for story, text in gap_blocks(body):
             entries.append(
                 {
@@ -4808,7 +4910,7 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
             )
 
     if feature is not None:
-        entries = [entry for entry in entries if entry["feature"] == feature]
+        entries = [entry for entry in entries if entry["feature"] in (feature, None)]
     if since is not None:
         entries = [
             entry

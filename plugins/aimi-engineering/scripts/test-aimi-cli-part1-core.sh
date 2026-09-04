@@ -1832,11 +1832,17 @@ test_version() {
 # should answer for "newest installed version". Tests below compare the CLI's
 # answer against this, so it must key on the VERSION SEGMENT for the same
 # reason the CLI does -- `ls | tail -1` collates 1.121.3 before 1.9.0, and a
-# whole-path `sort -V` orders by marketplace-entry directory first.
+# whole-path `sort -V` orders by marketplace-entry directory first -- and it
+# must FILTER by version shape for the same reason too: `sort -V` ranks a
+# directory that is not a version at all, and ranks it above the real ones.
+# A twin that kept the unfiltered pipeline would agree with the defect rather
+# than with the fix, and every comparison below would pass while measuring the
+# wrong answer.
 _test_latest_installed_cli_path() {
   local config_dir="$1"
   ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null \
     | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+    | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " \
     | sort -V \
     | tail -1 \
     | cut -d' ' -f2-
@@ -2186,6 +2192,200 @@ test_version_verbs_empty_plugin_cache_glob() {
     "cleanup-versions (empty glob): stderr is empty"
   assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
     "cleanup-versions (empty glob): the branch returns before write_global_cli_cache, so still no cli-path"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# A version segment only counts when it looks like a version.
+#
+# `sort -V` is a TOTAL ORDER over arbitrary strings, not a filter. Anything
+# sitting beside the real version directories inside one marketplace cache
+# entry gets ranked with them, and ranks ABOVE them: measured against the
+# installed plugin before the fix, a sibling named `1.124.0.bak` made
+# check-version answer "latestVersion": "1.124.0.bak", and a directory named
+# `zz` beat `1.127.0` outright. Those names arrive by ordinary accident -- a
+# `cp -a` backup taken before an upgrade, an editor's leftover, a half-extracted
+# download.
+#
+# The fixture uses BOTH shapes on purpose. `1.124.0.bak` is the near miss (its
+# first three segments are a real version, so a filter anchored only at the
+# start would still admit it) and `zz` is the far one; a fixture with only one
+# of them lets a half-right filter pass.
+#
+# THE VERB THAT MATTERS MOST HERE IS cleanup-versions, not check-version.
+# check-version reporting the wrong string is cosmetic; cleanup-versions rm
+# -rf's every directory the same resolver does not pick, so before the filter
+# it KEPT the backup and DELETED the real install, then wrote the backup's path
+# into the global cli-path cache. That is asserted against the filesystem
+# below, not against stdout.
+# ----------------------------------------------------------------------------
+test_version_resolution_ignores_non_version_directories() {
+  echo ""
+  echo "=== Testing the numeric version filter (a .bak sibling must not win) ==="
+
+  local root cfg aimi_cfg out ec
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+
+  _make_cached_version "$cfg" "mk1" "1.124.0"
+  _make_cached_version "$cfg" "mk1" "1.124.0.bak"
+  _make_cached_version "$cfg" "mk1" "1.127.0"
+  _make_cached_version "$cfg" "mk1" "zz"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>/dev/null) || true
+
+  assert_contains '"latestVersion": "1.127.0"' "$out" \
+    "check-version: the newest NUMERIC version wins over a .bak sibling and a zz directory"
+  case "$out" in
+    *1.124.0.bak*) echo -e "${RED}✗${NC} check-version: the .bak sibling hijacked resolution"; ((TESTS_FAILED++)) ;;
+    *) echo -e "${GREEN}✓${NC} check-version: the .bak sibling appears nowhere in the answer"; ((TESTS_PASSED++)) ;;
+  esac
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) || true
+  assert_contains '"version": "1.127.0"' "$out" \
+    "prime-cache: primes the newest numeric version, not the lexicographically last name"
+
+  # The one verb that deletes. Before the filter this kept `zz` and removed
+  # 1.127.0 -- so the assertion that matters is which directory SURVIVED.
+  out=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg") || true
+  assert_contains '"kept": "1.127.0"' "$out" \
+    "cleanup-versions: keeps the newest numeric version"
+  assert_eq "yes" "$([ -d "$cfg/plugins/cache/mk1/aimi-engineering/1.127.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the real install still exists on disk"
+  assert_eq "no" "$([ -d "$cfg/plugins/cache/mk1/aimi-engineering/1.124.0.bak" ] && echo yes || echo no)" \
+    "cleanup-versions: the .bak sibling was pruned rather than enthroned"
+
+  # A cache holding NOTHING version-shaped is the empty glob again: grep exits
+  # 1, `|| newest=""` catches it, and the documented unknown branch answers.
+  # Without that the verb would abort under `set -o pipefail`.
+  local bare="$root/bare-config"
+  _make_cached_version "$bare" "mk1" "backup"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$bare" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>/dev/null) && ec=0 || ec=$?
+  assert_exit_code "0" "$ec" \
+    "check-version (no version-shaped directory): grep's empty match is the empty glob, not an abort"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version (no version-shaped directory): answers the documented unknown status"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# AIMI_DEV_DIR: the Layer 0 development override.
+#
+# Three properties, each with its own reason for existing:
+#
+#   1. THE NOTICE IS UNCONDITIONAL. The defect being closed is a real install
+#      silently shadowed by a development tree, so the line has to appear on
+#      the SUCCESS path of every verb -- `version` included, which returns
+#      before find_aimi_root ever runs. A notice that only appeared on failure
+#      would be absent in exactly the case that motivates the feature.
+#
+#   2. check-version ANSWERS dev-override AND DOES NOT --fix. --fix writes the
+#      resolved install into the GLOBAL cli-path cache, read by every later
+#      session in every project on the machine. Under an override that would
+#      persist a development tree machine-wide, outliving the shell that set
+#      the variable. The assertion that carries this is the one about the cache
+#      FILE, not the one about the status string.
+#
+#   3. AN INVALID VALUE IS FATAL. Falling through to the installed plugin would
+#      be the same silent shadowing with the sign flipped: the operator asked
+#      for the dev tree and would get the install without being told.
+#
+# NO CLAUDECODE GATE, unlike AIMI_PLUGIN_DIR -- asserted here in both host
+# shapes, because that asymmetry is the single most likely thing for a later
+# edit to "tidy up" into consistency with its neighbour.
+# ----------------------------------------------------------------------------
+test_dev_dir_override() {
+  echo ""
+  echo "=== Testing AIMI_DEV_DIR (layer 0 development override) ==="
+
+  local root dev out err ec
+  root=$(mktemp -d)
+  dev="$root/dev-checkout"
+  err="$root/stderr"
+  mkdir -p "$dev/scripts" "$dev/skills"
+  cp "$CLI" "$dev/scripts/aimi-cli.sh"
+  chmod +x "$dev/scripts/aimi-cli.sh"
+
+  # --- 1. The unconditional notice, on a verb that never reaches .aimi/ ---
+  out=$(env AIMI_DEV_DIR="$dev" bash "$CLI" version 2>"$err") && ec=0 || ec=$?
+  assert_exit_code "0" "$ec" "AIMI_DEV_DIR: the verb still succeeds under the override"
+  assert_stderr_contains "$dev/scripts/aimi-cli.sh" "$(cat "$err")" \
+    "AIMI_DEV_DIR: stderr names the path it resolved"
+  assert_stderr_contains "AIMI_DEV_DIR override is active" "$(cat "$err")" \
+    "AIMI_DEV_DIR: the notice is printed on the SUCCESS path, not only on failure"
+  assert_eq "0" "$(env AIMI_DEV_DIR="$dev" bash "$CLI" version 2>/dev/null | grep -c 'AIMI_DEV_DIR' || true)" \
+    "AIMI_DEV_DIR: the notice goes to stderr and never pollutes a verb's stdout contract"
+
+  # Honored on EVERY host: CLAUDECODE set or unset, the notice is the same.
+  assert_stderr_contains "AIMI_DEV_DIR override is active" \
+    "$(env CLAUDECODE=1 AIMI_DEV_DIR="$dev" bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_DEV_DIR: honored inside Claude Code too -- no CLAUDECODE gate"
+
+  # And absent when the variable is not set, so the notice cannot become noise.
+  assert_eq "" "$(env -u AIMI_DEV_DIR bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_DEV_DIR: unset means no notice at all"
+
+  # --- 2. check-version reports and refuses to --fix ---
+  local cfg aimi_cfg
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  _make_cached_version "$cfg" "mk1" "1.127.0"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_DEV_DIR="$dev" \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version (dev override): exits 0 -- there is no staleness for a caller to act on"
+  assert_contains '"status": "dev-override"' "$out" \
+    "check-version (dev override): answers a status of its own"
+  assert_contains "$dev/scripts/aimi-cli.sh" "$out" \
+    "check-version (dev override): names the development tree it is running from"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "check-version --fix (dev override): the GLOBAL cli-path cache was not repointed at the dev tree"
+
+  # --- 3. Every invalid value refuses loudly rather than falling through ---
+  local wt="$root/repo/.worktrees/branch-x"
+  mkdir -p "$wt/scripts"
+  cp "$CLI" "$wt/scripts/aimi-cli.sh"
+  chmod +x "$wt/scripts/aimi-cli.sh"
+
+  local noexec="$root/no-exec"
+  mkdir -p "$noexec/scripts"
+  printf '#!/usr/bin/env bash\n' > "$noexec/scripts/aimi-cli.sh"
+  chmod 0644 "$noexec/scripts/aimi-cli.sh"
+
+  local label value
+  for label in relative missing not-executable worktree; do
+    case "$label" in
+      relative)       value="dev-checkout" ;;
+      missing)        value="$root/does-not-exist" ;;
+      not-executable) value="$noexec" ;;
+      worktree)       value="$wt" ;;
+    esac
+    env AIMI_DEV_DIR="$value" bash "$CLI" version >/dev/null 2>"$err" && ec=0 || ec=$?
+    assert_exit_code "1" "$ec" \
+      "AIMI_DEV_DIR ($label): refused at exit 1 rather than falling through to the install"
+    assert_stderr_contains "AIMI_DEV_DIR" "$(cat "$err")" \
+      "AIMI_DEV_DIR ($label): the refusal names the variable on stderr"
+  done
+
+  # --- 4. Guard-rail: the AIMI_PLUGIN_DIR rule did NOT change ---
+  # It stays SKIPPED under CLAUDECODE, which is the opposite of the rule above
+  # and must stay that way. An invalid AIMI_PLUGIN_DIR is silent here.
+  assert_eq "" "$(env CLAUDECODE=1 AIMI_PLUGIN_DIR=/does/not/exist bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_PLUGIN_DIR: still skipped under CLAUDECODE=1, unchanged by the new layer"
 
   rm -rf "$root"
 }
@@ -10534,6 +10734,8 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_version_verbs_empty_plugin_cache_glob
+  test_version_resolution_ignores_non_version_directories
+  test_dev_dir_override
   test_check_version_directory_source_fallback
   test_version_verbs_config_dir_metacharacters
   test_cleanup_versions

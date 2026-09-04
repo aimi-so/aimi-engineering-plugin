@@ -4,7 +4,21 @@ Shared reference for resolving `$AIMI_CLI` and `$WORKTREE_MGR` across all comman
 
 ## Resolve CLI Path
 
-**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the four-layer strategy below. Each command is a separate Bash call (no compound operators).
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the layered strategy below. Each command is a separate Bash call (no compound operators).
+
+### Layer 0-dev: AIMI_DEV_DIR (development override, any host)
+
+```bash
+if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+```
+
+`AIMI_DEV_DIR` names a plugin checkout to run **instead of** the installed copy, and it is the first thing consulted — ahead of the `AIMI_PLUGIN_DIR` layer below. It exists so testing a branch does not require editing the installed cache in place, which is how a "temporary" edit becomes the machine's plugin.
+
+**It carries no `CLAUDECODE` gate, and that asymmetry with `AIMI_PLUGIN_DIR` is deliberate.** `AIMI_PLUGIN_DIR` names where the compound-plugin converter *installed* the plugin, so inside Claude Code — which has an install of its own under the plugin cache — honoring it would let another host's install win, and the layer below is skipped there for exactly that reason. `AIMI_DEV_DIR` names a tree the operator is deliberately testing; gating it on `CLAUDECODE` would make it work only in the host where nobody needs it.
+
+The five checks are the four `AIMI_PLUGIN_DIR` applies below, plus a refusal of any path under a `/.worktrees/` segment — the same refusal `write_global_cli_cache` in `aimi-cli.sh` already applies, and for the same reason: a worktree copy is ephemeral, so pointing a session at one leaves every later call at exit 127 once the worktree is cleaned up. Written as a prefix-strip comparison rather than a `case` so the whole guard stays one line.
+
+`aimi-cli.sh` honors the same variable from the inside: **every** invocation prints one unconditional stderr notice naming the path it resolved (unconditional because the defect being closed is a real install *silently* shadowed — the line belongs on the success path, not only on failure), `_resolve_skills_base_dir` answers the dev tree's `skills/`, and `check-version` answers a status of its own, `dev-override`, **without attempting `--fix`**. That last part is the point: `--fix` writes the resolved install into the *global* cli-path cache read by every later session in every project on the machine, so a `--fix` under the override would persist a development tree machine-wide and outlive the shell that set the variable. A value that is set but invalid is fatal at exit 1 rather than falling through to the install — falling through would be the same silent shadowing with the sign flipped.
 
 ### Layer 0: AIMI_PLUGIN_DIR (env var override)
 
@@ -32,7 +46,7 @@ if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME
 if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 ```
 
-> **A directory-source install (marketplace source: `directory`) legitimately writes a path here too, not only a versioned cache copy.** Layer 1's cache file just holds whatever `prime-cache` last wrote — for a directory-source Claude Code host that is the checkout's own `scripts/aimi-cli.sh`, not a copy under `plugins/cache/`. No layer in this file can produce it: Layer 0 is gated off whenever `CLAUDECODE` is set (every Claude Code session), Layer 2's glob below only ever matches `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` and a directory source has no copy there, and Layer 3's `.aimi/cli-path` is created by nobody. So on a fresh directory-source host every layer legitimately fails and `$AIMI_CLI` resolves to empty — which means `/aimi:init` itself cannot self-heal, since its own Step 0 needs `$AIMI_CLI` resolved before it can call `prime-cache` at all.
+> **A directory-source install (marketplace source: `directory`) legitimately writes a path here too, not only a versioned cache copy.** Layer 1's cache file just holds whatever `prime-cache` last wrote — for a directory-source Claude Code host that is the checkout's own `scripts/aimi-cli.sh`, not a copy under `plugins/cache/`. No layer in this file produces it on its own: Layer 0 is gated off whenever `CLAUDECODE` is set (every Claude Code session), Layer 2's glob below only ever matches `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` and a directory source has no copy there, and Layer 3's `.aimi/cli-path` is created by nobody. Layer 0-dev above is the one exception, and it is not one in practice: it is an override the operator sets by hand for one tree, never something a fresh host arrives at. So on a fresh directory-source host every layer legitimately fails and `$AIMI_CLI` resolves to empty — which means `/aimi:init` itself cannot self-heal, since its own Step 0 needs `$AIMI_CLI` resolved before it can call `prime-cache` at all.
 >
 > **The SessionStart hook now writes Layer 1 whenever it does not already resolve**, so a session started after the plugin is installed finds the cache primed and the four layers above succeed at Layer 1. `_heal_cli_path_cache()` in `hooks/inspect-session.py` — registered on `SessionStart` in `hooks/hooks.json`, and the first thing that module runs — reads `$CLAUDE_PLUGIN_ROOT`, which Claude Code puts in the hook process's own environment and which is the one value that names the running install without guessing. Only when the Layer 1 read comes back empty or non-executable does it spawn that install's `scripts/aimi-cli.sh prime-cache`; it writes no cache file itself, because confinement, atomicity and the 0600 mode all belong to `prime-cache` and invoking the verb rather than re-deriving its rules is the whole point of the shape. The cheap Layer 1 read is the gate deliberately: a `prime-cache` spawn measured 299 ms against that module's 500 ms budget while the read plus the executable check measured 0.025 ms, so a host that already resolves pays nothing. It never raises — a missing `CLAUDE_PLUGIN_ROOT`, a root with no executable `scripts/aimi-cli.sh`, an unreadable config dir, a non-zero exit and a timeout each leave the session exactly as it was found.
 >
@@ -46,7 +60,9 @@ if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
 >
 > That single invocation writes Layer 1 directly (bypassing the four-layer search entirely, since the CLI is being run by a path the operator already knows), and every later `/aimi:*` command in the session resolves normally from there. It is the same verb the hook spawns, run by hand — so it repairs the session in front of you, and a new session would have healed itself anyway.
 >
-> **A new Layer 2b was the route NOT taken, and the reason it was rejected still stands even though it is no longer the reason nothing is automated.** The resolution snippets in this file are matched *literally* by `hooks/auto-approve-cli.sh`'s Patterns 7 and 8, built from `GLOB_VERSION_TAIL` around line 58 of that file — so a new layer's command text would need a byte-identical mirror in this file, `hooks/auto-approve-cli.sh`, the `--help` EXAMPLES block in `aimi-cli.sh`, `skills/resolve-pr-parallel/scripts/_resolve-cli.sh`, `commands/review.md`, `commands/validate-bug.md`, the top-level `CLAUDE.md`, and three test suites. One character of drift between any two of those turns every Layer 2 call into a permission prompt instead of an auto-approval. That cost is unchanged and is why the manual bootstrap stood alone for as long as it did; what changed is that the SessionStart healing above buys the automation without paying it, since it runs outside the resolution snippets entirely and touches none of those mirrors. Kept here so the mirror cost is not re-derived, and so the next proposal for a new layer is weighed against it.
+> **A new Layer 2b was the route NOT taken, and the reason it was rejected still stands even though it is no longer the reason nothing is automated.** The resolution snippets in this file are matched *literally* by `hooks/auto-approve-cli.sh`'s Patterns 7 and 8, built from `GLOB_VERSION_TAIL` near the top of that file — so a new layer's command text would need a byte-identical mirror in this file, `hooks/auto-approve-cli.sh`, the `--help` EXAMPLES block in `aimi-cli.sh`, `skills/resolve-pr-parallel/scripts/_resolve-cli.sh`, `commands/review.md`, `commands/validate-bug.md`, the top-level `CLAUDE.md`, and three test suites. One character of drift between any two of those turns every Layer 2 call into a permission prompt instead of an auto-approval. That cost is unchanged and is why the manual bootstrap stood alone for as long as it did; what changed is that the SessionStart healing above buys the automation without paying it, since it runs outside the resolution snippets entirely and touches none of those mirrors. Kept here so the mirror cost is not re-derived, and so the next proposal for a new layer is weighed against it.
+>
+> **The cost above is a measurement, not a warning, and it has since been paid twice in one commit** — once to add the numeric filter to `GLOB_VERSION_TAIL` and every block built from it, and once to add Layer 0-dev. Both moved all seven surfaces together, which is the only way this is survivable; the hook additionally keeps the pre-filter tail approved as a legacy form, so a command body that entered a conversation before the change is not suddenly prompted for. The lesson is unchanged: a layer is cheap to write and expensive to mirror, and the mirror is what the user actually feels.
 >
 > **Refuted alternative, recorded so it is not re-derived:** `CLAUDE_PLUGIN_ROOT` is NOT usable as a Layer 0b. It was measured unset in the Bash-tool environment — exactly where these resolution snippets execute — so a Layer 0b keyed on it would never fire for the host it would need to help.
 
@@ -60,12 +76,20 @@ below `9` at the third character. A plain `sort -V` over the whole path is
 wrong too — the glob spans two wildcards, so it would order by
 marketplace-entry directory first and by version only inside one entry. So each
 candidate is prefixed with its own version segment and `sort -V` keys on that.
+
+The `grep -E` between the `sed` and the `sort` is load-bearing, not decoration.
+`sort -V` is a total order over arbitrary strings, not a filter: a cache
+directory that is not a version at all still gets ranked, and gets ranked
+*above* the real ones. Measured — a sibling named `1.124.0.bak` beside
+`1.124.0` wins, and a directory named `zz` beats `1.127.0`. A segment therefore
+only counts when it looks like a version: three numeric parts and nothing else.
+
 This is an inline copy of `_resolve_latest_cache_path` in `aimi-cli.sh`, which
 is the canonical rule; it cannot be called here because it lives inside the
 file this block is still looking for.
 
 ```bash
-if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time
@@ -88,7 +112,15 @@ If empty, report error and STOP:
 
 ## Resolve Worktree Manager Path
 
-**CRITICAL:** The worktree manager script lives alongside the CLI. Resolve `$WORKTREE_MGR` using the same four-layer strategy.
+**CRITICAL:** The worktree manager script lives alongside the CLI. Resolve `$WORKTREE_MGR` using the same layered strategy.
+
+### Layer 0-dev: AIMI_DEV_DIR (development override, any host)
+
+```bash
+if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then WORKTREE_MGR="$AIMI_DEV_DIR/skills/git-worktree/scripts/worktree-manager.sh"; fi
+```
+
+Same variable, same five checks, same absent `CLAUDECODE` gate as the CLI's own Layer 0-dev above. The two must move together for the reason the Layer 2 blocks give below: resolving the manager from a different install than the CLI is the same defect one file over, and a dev override that reaches one but not the other produces exactly that split.
 
 ### Layer 0: AIMI_PLUGIN_DIR (env var override)
 
@@ -121,7 +153,7 @@ CLI's own Layer 2 above does — canonical rule: `_resolve_latest_cache_path` in
 different install than the CLI is the same defect one file over.
 
 ```bash
-if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-'); fi
+if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/worktree-manager.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d" " -f2-'); fi
 ```
 
 ### Layer 2 cache update: save for next time

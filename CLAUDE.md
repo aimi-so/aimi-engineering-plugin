@@ -17,6 +17,7 @@ A single source tree serves both hosts. Anything touching CLI path resolution, e
 
 - **`CLAUDECODE=1`** — set by Claude Code in every session. Absent in OpenCode. This is the runtime discriminator used by `aimi-cli.sh` and `commands/references/cli-path-resolution.md` to decide between Claude Code's cache (`~/.claude/plugins/cache/`) and OpenCode's install (`$AIMI_PLUGIN_DIR`).
 - **`AIMI_PLUGIN_DIR`** — set by `install.sh` in shell profiles. Only honored when `CLAUDECODE` is unset. Inside Claude Code, Layer 0 resolution skips this entirely so the Claude Code cache always wins.
+- **`AIMI_DEV_DIR`** — set by a maintainer by hand, never by an installer. A plugin checkout to run *instead of* the installed copy, consulted ahead of `AIMI_PLUGIN_DIR` and honored on **both** hosts; `CLAUDECODE` does not gate it. `install.sh` rewrites nothing for it, because it is host-agnostic by design.
 - **`install.sh`** — performs heavy translation: rewrites command bodies (Task tool mappings, CLI path glob → `OPENCODE_CONFIG_DIR`), handles missing OpenCode features (`disable-model-invocation`, `AskUserQuestion`, custom `subagent_type`), copies/flattens skills and agents. Before changing command syntax or CLI behavior, check whether `install.sh` needs a matching translation.
 
 ## Multi-Repo Execution Layout
@@ -101,19 +102,26 @@ Every plugin change requires synchronized bumps in three files (per `plugins/aim
 
 ## CLI Path Resolution (Critical)
 
-`aimi-cli.sh` is the only executable consumed by commands. All commands resolve it through a four-layer strategy documented in `plugins/aimi-engineering/commands/references/cli-path-resolution.md`:
+`aimi-cli.sh` is the only executable consumed by commands. All commands resolve it through the layered strategy documented in `plugins/aimi-engineering/commands/references/cli-path-resolution.md`:
 
+- Layer 0-dev: `$AIMI_DEV_DIR` (honored on **every** host — no `CLAUDECODE` gate)
 - Layer 0: `$AIMI_PLUGIN_DIR` (skipped inside Claude Code)
 - Layer 1: `~/.config/aimi/cli-path` global cache (new XDG path; `$AIMI_CONFIG_DIR/cli-path` when that var is set; legacy `~/.claude/aimi-engineering-cli-path` read as fallback)
-- Layer 2: glob under `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`
+- Layer 2: glob under `~/.claude/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, keyed on the version segment and admitting **only** a segment of three numeric parts
 - Layer 3: per-project `.aimi/cli-path`
+
+**The two Layer 0s are asymmetric on purpose, and that is the thing most likely to be "tidied up" into consistency by a later edit.** `$AIMI_PLUGIN_DIR` names where the converter installed the plugin, so inside Claude Code — which has an install of its own — honoring it would let another host's install win; `$AIMI_DEV_DIR` names a checkout the operator is deliberately testing, so a `CLAUDECODE` gate would make it work only where nobody needs it. Layer 0-dev validates the same way plus a refusal of any path under `/.worktrees/`, prints one **unconditional** stderr notice naming the path on every invocation, and makes `check-version` answer `dev-override` **without** `--fix` — repointing the machine-wide cli-path cache at a development tree is the damage the override exists to avoid.
+
+**Layer 2's numeric filter is not cosmetic.** `sort -V` is a total order over arbitrary strings, not a filter, so a directory that is not a version at all still gets ranked and ranks *above* the real ones — a `1.124.0.bak` sibling beside `1.124.0` wins, and `cleanup-versions` then `rm -rf`s the real install and keeps the backup. Two golden recordings capture exactly that (`cv-versao-malformada-cc`, `clv-versao-malformada-cc`).
 
 After resolution, commands call `$AIMI_CLI check-version --quiet --fix` for self-heal. The fix path is gated by `_is_claude_code_host()` — it short-circuits to "managed by converter" only when running under OpenCode.
 
 When editing resolution logic, mirror changes in:
 - `plugins/aimi-engineering/commands/references/cli-path-resolution.md` (command-facing docs)
-- `plugins/aimi-engineering/scripts/aimi-cli.sh` (`read_global_cli_cache`, `read_global_worktree_cache`, `cmd_check_version`, `cmd_cleanup_versions`)
+- `plugins/aimi-engineering/scripts/aimi-cli.sh` (`_dev_dir_path`, `_resolve_latest_cache_path`, `read_global_cli_cache`, `read_global_worktree_cache`, `cmd_check_version`, `cmd_cleanup_versions`)
 - `plugins/aimi-engineering/scripts/test-aimi-cli-fixtures.sh` (`source_cache_functions` must eval every helper used by the code under test)
+
+**The resolution idiom lives in seven places and they must move in one commit** — measured with `grep -rn "plugins/cache/\*/aimi-engineering"`: `scripts/aimi-cli.sh`, `commands/references/cli-path-resolution.md`, `commands/review.md`, `commands/validate-bug.md`, `skills/resolve-pr-parallel/scripts/_resolve-cli.sh`, `scripts/test-aimi-cli-part1-core.sh` (the test twin), and `hooks/auto-approve-cli.sh`. **The hook is the one that hurts:** its Patterns 7/8 match the command text *literally*, so a hook left behind turns every inline CLI resolution in every command back into a permission prompt. `hooks/tests/test_auto_approve_cli.py::test_every_resolution_line_in_commands_is_approved` scans the tree and is what catches that — verified to go red against a deliberately un-moved hook, not assumed to.
 
 ## Where Things Live
 

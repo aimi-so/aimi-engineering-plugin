@@ -136,7 +136,7 @@ run_script() {
   out_file=$(mktemp)
   err_file=$(mktemp)
   (
-    unset CLAUDECODE
+    unset CLAUDECODE AIMI_DEV_DIR
     export AIMI_PLUGIN_DIR="$FAKE_PLUGIN_DIR"
     bash "$script" "$@"
   ) >"$out_file" 2>"$err_file"
@@ -164,7 +164,7 @@ run_script_from() {
   out_file=$(mktemp)
   err_file=$(mktemp)
   (
-    unset CLAUDECODE CLAUDE_PLUGIN_ROOT
+    unset CLAUDECODE CLAUDE_PLUGIN_ROOT AIMI_DEV_DIR
     export AIMI_PLUGIN_DIR="$plugin_dir"
     export AIMI_CONFIG_DIR="$config_dir"
     export CLAUDE_CONFIG_DIR="$claude_config_dir"
@@ -184,14 +184,23 @@ run_script_from() {
 # resolver gives up it exits 1 from inside the `.`, taking the subshell with
 # it, so RUN_RC and RUN_STDERR carry its own not-found error verbatim.
 #
-# Args: <workdir> <AIMI_PLUGIN_DIR> <AIMI_CONFIG_DIR> <CLAUDE_CONFIG_DIR> [CLAUDE_PLUGIN_ROOT]
+# Args: <workdir> <AIMI_PLUGIN_DIR> <AIMI_CONFIG_DIR> <CLAUDE_CONFIG_DIR> [CLAUDE_PLUGIN_ROOT] [AIMI_DEV_DIR]
+#
+# AIMI_DEV_DIR is the sixth argument rather than a seventh isolation `unset`
+# because it is the one Layer 0-dev consults, and a test needs to drive it. An
+# omitted or empty value UNSETS it inside the subshell -- the same total
+# control the header above describes, extended to the newest variable: a
+# developer who exports AIMI_DEV_DIR on their own machine must not change what
+# any test here measures.
 run_resolver() {
-  local workdir="$1" plugin_dir="$2" config_dir="$3" claude_config_dir="$4" plugin_root="${5:-}"
+  local workdir="$1" plugin_dir="$2" config_dir="$3" claude_config_dir="$4" plugin_root="${5:-}" dev_dir="${6:-}"
   local out_file err_file rc
   out_file=$(mktemp)
   err_file=$(mktemp)
   (
     unset CLAUDECODE
+    export AIMI_DEV_DIR="${dev_dir:-}"
+    [ -z "${dev_dir:-}" ] && unset AIMI_DEV_DIR
     export AIMI_PLUGIN_DIR="$plugin_dir"
     export AIMI_CONFIG_DIR="$config_dir"
     export CLAUDE_CONFIG_DIR="$claude_config_dir"
@@ -492,6 +501,114 @@ test_layer0_both_env_vars_carry_all_four_guards() {
     "Layer 0: CLAUDE_PLUGIN_ROOT branch tests that the target script is executable"
 }
 
+# Layer 0-dev: AIMI_DEV_DIR, ahead of everything and honored on any host.
+#
+# The property that matters is PRECEDENCE, and it is the one an ordinary
+# reading of this file gets wrong: the AIMI_PLUGIN_DIR block below Layer 0-dev
+# assigns AIMI_CLI unconditionally, so without the `[ -z "$AIMI_CLI" ]` guard
+# wrapped around it a dev override would be silently overwritten by the
+# installed copy on exactly the host (OpenCode) where AIMI_PLUGIN_DIR is set.
+# Both env vars are set here at once for that reason -- a fixture that set only
+# AIMI_DEV_DIR would pass against the unguarded version too.
+test_layer0_dev_dir_wins_over_every_later_layer() {
+  local dev_dir trusted_cfg empty_claude_cfg workdir
+  dev_dir=$(mktemp -d)
+  trusted_cfg=$(mktemp -d)
+  empty_claude_cfg=$(mktemp -d)
+  workdir=$(mktemp -d)
+
+  mkdir -p "$dev_dir/scripts"
+  printf '#!/usr/bin/env bash\n' > "$dev_dir/scripts/aimi-cli.sh"
+  chmod +x "$dev_dir/scripts/aimi-cli.sh"
+
+  # A Layer 1 cache that would otherwise answer, so "the dev tree won" is a
+  # real preference rather than the only path available.
+  printf '%s\n' "$FAKE_PLUGIN_DIR/scripts/aimi-cli.sh" > "$trusted_cfg/cli-path"
+
+  run_resolver "$workdir" "$FAKE_PLUGIN_DIR" "$trusted_cfg" "$empty_claude_cfg" "" "$dev_dir"
+  assert_eq "$dev_dir/scripts/aimi-cli.sh" "$RUN_STDOUT" \
+    "Layer 0-dev: AIMI_DEV_DIR wins over both AIMI_PLUGIN_DIR and the Layer 1 cache"
+
+  # No CLAUDECODE gate -- unlike AIMI_PLUGIN_DIR, which the block below skips
+  # inside Claude Code. run_resolver unsets CLAUDECODE, so this drives it back
+  # on around the same call.
+  local out
+  out=$(cd "$workdir" && env CLAUDECODE=1 AIMI_DEV_DIR="$dev_dir" \
+    AIMI_PLUGIN_DIR="$FAKE_PLUGIN_DIR" AIMI_CONFIG_DIR="$trusted_cfg" \
+    CLAUDE_CONFIG_DIR="$empty_claude_cfg" \
+    bash -c '. "$0"; printf "%s" "$AIMI_CLI"' "$RESOLVE_CLI")
+  assert_eq "$dev_dir/scripts/aimi-cli.sh" "$out" \
+    "Layer 0-dev: honored inside Claude Code too -- no CLAUDECODE gate"
+
+  rm -rf "$dev_dir" "$trusted_cfg" "$empty_claude_cfg" "$workdir"
+}
+
+# Every way of getting AIMI_DEV_DIR wrong falls through to the layers below
+# rather than resolving something useless. This is the branch's REFUSAL side,
+# and the `.worktrees/` case is the one with no counterpart in any other
+# layer: an ephemeral worktree copy resolves fine today and is gone tomorrow,
+# which is why write_global_cli_cache in aimi-cli.sh refuses to persist one.
+test_layer0_dev_dir_refuses_every_bad_shape() {
+  local trusted_cfg empty_claude_cfg workdir noexec wt
+  trusted_cfg=$(mktemp -d)
+  empty_claude_cfg=$(mktemp -d)
+  workdir=$(mktemp -d)
+  noexec=$(mktemp -d)
+  wt=$(mktemp -d)
+
+  printf '%s\n' "$FAKE_PLUGIN_DIR/scripts/aimi-cli.sh" > "$trusted_cfg/cli-path"
+
+  mkdir -p "$noexec/scripts"
+  printf '#!/usr/bin/env bash\n' > "$noexec/scripts/aimi-cli.sh"
+  chmod 0644 "$noexec/scripts/aimi-cli.sh"
+
+  mkdir -p "$wt/.worktrees/branch-x/scripts"
+  printf '#!/usr/bin/env bash\n' > "$wt/.worktrees/branch-x/scripts/aimi-cli.sh"
+  chmod +x "$wt/.worktrees/branch-x/scripts/aimi-cli.sh"
+
+  local label value
+  for label in relative missing not-executable worktree; do
+    case "$label" in
+      relative)       value="dev-checkout" ;;
+      missing)        value="/nonexistent/dev/checkout" ;;
+      not-executable) value="$noexec" ;;
+      worktree)       value="$wt/.worktrees/branch-x" ;;
+    esac
+    run_resolver "$workdir" "" "$trusted_cfg" "$empty_claude_cfg" "" "$value"
+    assert_eq "$FAKE_PLUGIN_DIR/scripts/aimi-cli.sh" "$RUN_STDOUT" \
+      "Layer 0-dev ($label): rejected, and the trusted Layer 1 cache answers instead"
+  done
+
+  rm -rf "$trusted_cfg" "$empty_claude_cfg" "$workdir" "$noexec" "$wt"
+}
+
+# The static twin of the two behavioral tests above: the guards themselves,
+# read out of the file. Behavior proves the branch works today; this proves it
+# still carries all five checks after someone edits it, including the two that
+# only a hostile fixture would otherwise exercise.
+test_layer0_dev_branch_carries_all_five_guards() {
+  local layer0dev
+  layer0dev=$(sed -n '/^# Layer 0-dev:/,/^fi$/p' "$RESOLVE_CLI")
+
+  assert_contains '-n "${AIMI_DEV_DIR:-}"' "$layer0dev" \
+    "Layer 0-dev: tests that the variable is set at all"
+  assert_contains '${AIMI_DEV_DIR#/}' "$layer0dev" \
+    "Layer 0-dev: tests that the path is absolute"
+  assert_contains '-d "$AIMI_DEV_DIR"' "$layer0dev" \
+    "Layer 0-dev: tests that the directory exists"
+  assert_contains '-x "$AIMI_DEV_DIR/scripts/aimi-cli.sh"' "$layer0dev" \
+    "Layer 0-dev: tests that the target script is executable"
+  assert_contains '${AIMI_DEV_DIR#*/.worktrees/}' "$layer0dev" \
+    "Layer 0-dev: refuses a path under a .worktrees/ segment"
+
+  # And the guard that makes it a LAYER rather than a value the next block
+  # overwrites. Read from the AIMI_PLUGIN_DIR section, not this one.
+  local layer0
+  layer0=$(sed -n '/^# Layer 0:/,/^fi$/p' "$RESOLVE_CLI")
+  assert_contains 'if [ -z "$AIMI_CLI" ]; then' "$layer0" \
+    "Layer 0: the AIMI_PLUGIN_DIR block yields to an AIMI_CLI that Layer 0-dev already set"
+}
+
 # Layer 1 already discards a cached path that is not executable. Layer 2's
 # glob result went unvalidated, so a non-executable match was handed
 # straight to the caller, which then died on a bare "Permission denied"
@@ -575,6 +692,9 @@ main() {
   test_layer0_relative_claude_plugin_root_is_rejected_too
   test_layer0_nonexistent_plugin_dir_falls_through
   test_layer0_both_env_vars_carry_all_four_guards
+  test_layer0_dev_dir_wins_over_every_later_layer
+  test_layer0_dev_dir_refuses_every_bad_shape
+  test_layer0_dev_branch_carries_all_five_guards
   test_layer2_discards_non_executable_glob_result
 
   echo ""

@@ -135,6 +135,28 @@ A criterion that only a human can confirm does not belong in `verify` — route 
 
 This is the same principle as the Typecheck rule below, applied generally: because that criterion is itself adapted to the project's language, the `verify` command that satisfies it must be adapted too. Extending `verify` to match a language-specific criterion isn't a special case — it's this rule.
 
+### A size claim measures both sides, or stops being a claim
+
+A criterion asserting a reduction — "cuts the file by 400 bytes", "saves 2KB of prompt", "shrinks the command body" — is a criterion `verify` must *execute*, and executing it means measuring **both** sides. The current size read from disk proves nothing alone: a file always has some size, so an assertion about a saving nobody measured is satisfied by whatever the story happens to leave behind. That is the failure this rule exists for — a story claimed a byte saving in its prose and its `verify` never opened the previous version, so the claim was never once checked.
+
+**The "before" side comes from `metadata.baseRef`, named explicitly.** That field is the 40-character SHA `/aimi:plan` records for the commit this tasks file's stories were planned against (`commands/plan.md`'s metadata contract writes it; `commands/execute.md` already reads it back). Name it in the `verify` you write instead of leaving the executor to choose a base. `HEAD` is the wrong choice, and wrong in the way nobody notices: by the time the check runs the story's own edit is in the tree and may already be committed, so `git show HEAD:<path>` can hand back the file the story just wrote and report a reduction of zero — as a pass.
+
+`baseRef` is optional in the schema, because a plan written before the field existed omits it. So the `verify` must **fail** when it resolves empty rather than substituting another base. An unresolvable base means the claim cannot be checked, and saying so is the correct outcome — a silent fallback turns an unverifiable claim into a green one.
+
+The shape, with `AIMI_CLI` bound per the two rules above, `<path>` from `implementation.files`, and `N` the number the criterion states:
+
+```
+BASE=$("$AIMI_CLI" metadata | jq -r '.baseRef // empty')
+[ -n "$BASE" ] || { echo 'FAIL: metadata.baseRef absent - the reduction cannot be measured'; exit 1; }
+BEFORE=$(git show "$BASE:<path>" | wc -c)
+AFTER=$(wc -c < "<path>")
+[ "$((BEFORE - AFTER))" -ge N ] || { echo "FAIL: reduced $((BEFORE - AFTER))B, claimed ${N}B"; exit 1; }
+```
+
+Emit the measurement in that order — resolve, refuse-if-empty, read both sides, compare — so the message a reader gets names which of the three ways it failed.
+
+**A reduction with no number is not a claim.** A criterion saying a file "gets smaller" without saying by how much admits no `verify` at all: every outcome satisfies it, one byte included. Rewrite it to carry the number you actually expect, or drop the size language and keep what the criterion was really about — a section removed, a duplication collapsed, a block that no longer appears — as something `verify` can execute. Never emit an unquantified saving: it is a sentence that looks like an acceptance criterion and cannot function as one.
+
 ## dependsOn encoding
 
 - Use `outline:NN` tokens (zero-padded, matching the outline `idx`).

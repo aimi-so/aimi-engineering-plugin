@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.128.0] - 2026-09-04
+
+Phase 4 of the pipeline audit: the plugin's own cache resolution, `open-pr`
+correctness, and four checks the pipeline had built but never run.
+
+### Added
+
+- **`AIMI_DEV_DIR`, a layer-0 development override honored on any host.** Testing
+  a branch used to mean editing the installed cache in place, which is how a
+  temporary edit becomes the machine's plugin. The variable names a checkout to
+  run instead, validated exactly as `AIMI_PLUGIN_DIR` is — absolute, existing,
+  with an executable `scripts/aimi-cli.sh` — and refused when it points inside a
+  worktree. Every command resolving through it prints an unconditional stderr
+  line naming where it is running from: the defect being closed is a real install
+  silently shadowed, so the notice appears on the success path, not only on
+  failure. `check-version` answers a `dev-override` status and never `--fix`es,
+  because repointing the global cache at a development tree is the damage the
+  override exists to avoid. Unlike `AIMI_PLUGIN_DIR`, it is not skipped inside
+  Claude Code; that rule is unchanged.
+- **A byte-reduction claim must measure both sides.** `aimi-story-expander` now
+  requires a criterion asserting a saving of N bytes to emit the measurement in
+  its own `verify` — the previous size from `metadata.baseRef`, the current size
+  from disk, compared against N — and to fail rather than fall back when the base
+  cannot be resolved. `HEAD` is named as the wrong base for a reason worth
+  keeping: by the time the check runs the story's own edit is in the tree, so
+  `git show HEAD:<path>` can hand back the file the story just wrote and report a
+  reduction of zero as a pass. A reduction with no number is not a claim and is
+  rewritten to carry one.
+
+### Fixed
+
+- **A cache directory that is not a version can no longer win.** `sort -V` is a
+  total order over arbitrary strings, not a filter, so a sibling `1.124.0.bak`
+  outranked the real `1.124.0` and a directory named `zz` outranked `1.127.0`.
+  `_resolve_latest_cache_path` now requires three numeric segments before the
+  sort. The damage this was doing was not cosmetic: the recorded behaviour of
+  `cleanup-versions` was to delete the real `1.2.3` install and keep the
+  malformed directory beside it. The idiom moves across all seven surfaces that
+  carry it, the approval hook included, so no inline CLI resolution starts asking
+  for permission again.
+- **A comment about the work no longer counts as the work.** `verify-creates`
+  filtered only `TODO`/`FIXME`/`XXX`/`HACK` markers, so any other comment line
+  satisfied a `creates` entry — twice in the previous phase the prose written to
+  explain a defect became the evidence that the artifact existed. An identity
+  whose only textual evidence is a comment now returns `unconfirmed`, which
+  `execute.md` already treats as undelivered. The narrowness lives in the comment
+  opener rather than in a prose-versus-code test, so `#define parseThing(x)`,
+  `--count;` and `*ptr = f();` keep reading as code while `// f() is called here`
+  does not.
+- **`list-known-gaps` reads the corpus that exists.** A filename suffix became a
+  feature without anything checking that the feature existed, so the corpus
+  reported sixteen features of which the largest — thirty entries under `phase2`
+  — was not one, and `--feature` excluded every entry whose feature had not
+  resolved. A suffix is now believed only when it names a known feature, and the
+  filter also returns the unattributed: an entry with no feature is not another
+  feature's entry, and a planning defect with no owner is still one this plan can
+  repeat. Measured coverage of the real use path went from 26% to 82%.
+- **`open-pr` verifies the branch before switching to it, and says where the
+  title came from.** A tasks file naming a branch that was never executed used to
+  switch to it and fail further downstream with an unrelated error; the ref is now
+  checked with `show-ref --verify refs/heads/`, which — unlike `rev-parse` — also
+  refuses a same-named tag, and the command reports that the plan was generated
+  and never run. `metadata.title` is adopted only when the tasks file's
+  `branchName` matches the PR's branch, so an unrelated feature's file can no
+  longer title this pull request, and all three sources are named in the output.
+- **`verify-probe` stops writing into the caller's directory.** It replicated
+  variable assignments between segments but not `cd`, so a later `mkdir` landed in
+  the executor's own worktree — producing the class of defect the probe exists to
+  find. The `cd` is now carried in the prelude, as `<segment> || exit 1` rather
+  than bare: a `cd` that fails would otherwise leave everything after it running
+  in the caller's directory again, the same defect with nothing in the answer to
+  say the probe never moved. Refusing such a verify was considered and rejected on
+  a measurement — eleven of the plugin's own 258 verifies carry a `cd`, and they
+  are the elaborate ones, for which a refusal could only answer with an empty
+  list indistinguishable from "every assertion discriminates".
+- **The fifth validator runs.** `/aimi:plan`'s Phase 4.5 loop ran four of the five
+  `validate-*` verbs; `validate-waves` appeared nowhere in any command. Against a
+  story depending on another in the same declared wave, all four report
+  `valid: true` — only the fifth sees it. Its verdict is read from `.valid` and
+  not from the exit status, deliberately and with the reason written beside the
+  call: the verb always exits 0 by a contract the suite pins, so `|| exit 1` would
+  have read the zero and waved the file through.
+
+
 ## [1.127.0] - 2026-09-04
 
 Phase 3 of the pipeline audit: an executor no longer works against the wrong

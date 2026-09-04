@@ -276,9 +276,10 @@ first step that finds the artifact ends the search.
    whole, carry a space, and so is refused at write time as well.
 3. **Text in source.** Whatever is left is matched as a literal **whole word**
    across tracked files, with documentation (`*.md`, `docs/`, `README*`), tests
-   (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with lines
-   that are nothing but a `TODO`/`FIXME`/`XXX`/`HACK` comment discarded. A
-   `Table` identity such as `notifications` resolves here.
+   (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with comment
+   lines set aside — a `TODO`/`FIXME`/`XXX`/`HACK` line discarded outright, any
+   other comment line held back as a mention (step 4). A `Table` identity such
+   as `notifications` resolves here.
 
    Whole word rather than substring, and the difference decided a phase:
    `baseRef` matched 37 lines that were every one of them `--arg baseRefName`
@@ -296,6 +297,14 @@ first step that finds the artifact ends the search.
    step 1's tracked path reports `verified` for one, because finding the string
    `docs/api.md` proves that some file names the page, not that the page
    exists.
+4. **Comment-only evidence.** When every line step 3 matched is a comment, the
+   identity reports **`unconfirmed`** rather than `verified` — the same verdict
+   a doc identity gets, for the same reason: a note describing an artifact is
+   not the artifact. One real code line outranks any number of comments, so a
+   phase that built the thing and also wrote about it still verifies at the
+   code. `#`, `--` and `*` count as comment openers only when followed by
+   whitespace, which is what keeps `#define parseThing(x)`, `--count;` and
+   `*ptr = parseThing();` reading as the code they are.
 
 This is guidance about verification *strength*, which is not judged. `roadmap-init`
 accepts a bare name such as `notifications` exactly as the table above
