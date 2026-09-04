@@ -3258,7 +3258,12 @@ test_script_reached_through_symlinked_directory_resolves_siblings() {
 EOF
 
   cp "$CLI" "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  # tasks.py imports compute_waves from story_merge.py (normalize-waves' own
+  # rule, read from the writer rather than restated) -- so story_merge.py is
+  # now one of tasks.py's siblings this fixture must provision, the same as
+  # roadmap.py and sanitize.py already are.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
+    "$SCRIPT_DIR/story_merge.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 

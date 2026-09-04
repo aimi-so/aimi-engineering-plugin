@@ -2302,6 +2302,49 @@ cmd_normalize_status() {
   printf '%s\n' "$out"
 }
 
+# Normalize wave fields: recompute every story's wave from dependsOn (roots=1,
+# others=max(dep waves)+1 -- story_merge.py's own compute_waves rule, imported
+# rather than restated in tasks.py). wave is documented (commands/plan.md) as
+# DERIVED and informational only; nothing in dispatch reads it, so this verb
+# exists to correct a stale number by hand, never to give dispatch something
+# new to read. Leaves validate_waves and its exit-0-always contract untouched.
+cmd_normalize_waves() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-waves <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  # One crossing, inside the lock. Same shape, and same reason, as
+  # cmd_normalize_verification above.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-waves --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
 # Validate all story IDs in the tasks file against the US-NNN format
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_validate_ids() {
@@ -15162,6 +15205,11 @@ COMMANDS:
                               Already-set status values are preserved (uses //= operator).
                               Writes atomically (tmp + mv). Exits 0 on success.
                               Reports count of stories with status field after heal.
+    normalize-waves <file>    Recompute every story's wave from dependsOn (roots=1, others=
+                              max(dep waves)+1 -- story_merge.py's own compute_waves rule).
+                              wave is DERIVED and informational only; dispatch never reads it.
+                              Writes atomically (tmp + mv). Exits 0 on success.
+                              Reports count of stories whose wave value actually changed.
     validate-ids [--tasks-file <path>]
                               Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value'] [--tasks-file <path>]
@@ -16227,6 +16275,7 @@ main() {
     validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
     normalize-status)         cmd_normalize_status "${2:-}" ;;
+    normalize-waves)          cmd_normalize_waves "${2:-}" ;;
     validate-ids)             shift; cmd_validate_ids "$@" ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         shift; cmd_gate_fail "$@" ;;

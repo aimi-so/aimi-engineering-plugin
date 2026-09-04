@@ -156,6 +156,16 @@ import tempfile
 # commit rather than being imported out of whichever file happened to hold it.
 from roadmap import TERMINAL_STORY_STATUSES, _json_type, jq_numbers, jq_sort_key
 
+# compute_waves is the WRITER's own rule -- roots at 1, everyone else at
+# max(dependency waves) + 1. normalize_waves (below) recomputes a stale
+# `wave` field with this same import rather than restating the rule from
+# prose: two implementations of one rule drift, and story_merge.py is the
+# one this verb exists to agree with. computed_waves further down in this
+# file is a DIFFERENT function -- validate_waves' own read-only twin, which
+# returns a dict and omits any story a cycle or a dangling dependency never
+# reaches. This import is the writer; that one stays the checker.
+from story_merge import compute_waves
+
 # THE default, in the one place it is now written.
 #
 # A FOURTH copy lives in hooks/pre-bash-dispatcher.py's worktree-budget handler
@@ -2543,6 +2553,47 @@ def normalize_verification(doc):
         _mapped_stories(doc, _verification_migrated),
         lambda s: isinstance(jq_index(s, "verification", STORY), dict),
     )
+
+
+def normalize_waves(doc):
+    """Recompute every story's `wave` from `dependsOn`, in place.
+
+    The rule is compute_waves' own -- roots at 1, everyone else at
+    max(dependency waves) + 1 -- imported at the top of this file and called
+    here unchanged. `wave` is documented (commands/plan.md) as DERIVED and
+    informational only: nothing in dispatch reads it (list_ready does not
+    mention it, and validate_waves is the one place in this file that does),
+    so this verb exists to correct a stale number by hand, never to hand
+    dispatch a new one to read.
+
+    Unlike the two normalizers above, compute_waves needs every story's `id`
+    as a plain dict key rather than through the null-tolerant jq_index --
+    that plain `story["id"]` is exactly what makes it the writer's own rule
+    and not a restatement, so the one precondition it assumes is guarded
+    here instead of inside it: a story whose id is missing, null, or not a
+    string raises the same MalformedTasks a null-keyed userStories map
+    raises everywhere else in this file, before compute_waves ever runs.
+    dependsOn is left to compute_waves' own `// []` equivalent, the same as
+    at every other call site.
+
+    Returns the count of stories whose stored wave this write actually
+    changed -- computed by comparing before and after with jq_equal, read
+    off the document AFTER compute_waves ran, the same shape the other two
+    normalizers already report in and for the same reason: a second read
+    once the lock has released could see a document another writer already
+    changed.
+    """
+    stories = _stories(doc)
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        if not isinstance(story_id, str):
+            raise MalformedTasks(
+                ".userStories: cannot use " + _json_type(story_id) + " as an object key"
+            )
+    before = [story.get("wave") for story in stories]
+    compute_waves(stories)
+    doc["userStories"] = stories
+    return sum(1 for story, prior in zip(stories, before) if not jq_equal(story.get("wave"), prior))
 
 
 def _report_project(story):
@@ -5048,6 +5099,7 @@ _OPS = {
     "set-execution-mode": op_set_execution_mode,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
+    "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
     "cascade-skip": op_cascade_skip,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

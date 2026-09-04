@@ -1228,6 +1228,115 @@ def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
     }
 
 
+# ---------------------------------------------------------------------------
+# normalize-waves: a brand-new verb, so these are hand-written rather than a
+# golden replay -- there is no jq implementation it ports and none to compare
+# against. The rule itself is asserted only by import (compute_waves lives in
+# story_merge.py and is not re-derived here); what these pin is the wrapper
+# around it -- the write, the reported count, and the one precondition it
+# guards before compute_waves ever runs.
+# ---------------------------------------------------------------------------
+
+
+def _run_normalize_waves(tmp_path, stories):
+    """One live normalize-waves over a document written for the occasion.
+
+    Mirrors _run_validate_waves, but the fixture path is passed POSITIONALLY
+    -- the same shape normalize-status/normalize-verification already take --
+    and the file is read back afterward because this verb, unlike
+    validate-waves, writes it.
+    """
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    fixture = os.path.join(tasks_dir, "2020-01-01-normalize-waves-tasks.json")
+    with open(fixture, "w", encoding="utf-8") as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "normalize-waves", fixture],
+        cwd=root, capture_output=True, text=True, timeout=120,
+    )
+    with open(fixture, encoding="utf-8") as fh:
+        written = json.load(fh)
+    return proc, written
+
+
+def test_normalize_waves_recomputes_by_the_writers_own_rule(tmp_path):
+    """The rule this verb exists to apply -- story_merge.compute_waves' own,
+    roots at 1 and everyone else at max(dependency waves) + 1 -- imported at
+    the top of tasks.py and never restated here. Three stale stored waves (9,
+    9, 3) all correct, and the reported count is the number that changed."""
+    stale = [
+        _wave_story("US-001", [], 9),
+        _wave_story("US-002", ["US-001"], 9),
+        _wave_story("US-003", ["US-001"], 3),
+    ]
+    proc, written = _run_normalize_waves(tmp_path, stale)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"normalized": 3}
+    assert {s["id"]: s["wave"] for s in written["userStories"]} == {
+        "US-001": 1, "US-002": 2, "US-003": 2,
+    }
+
+
+def test_normalize_waves_is_idempotent_and_the_count_is_a_change_count():
+    """A second run over an already-correct document reports zero -- the
+    count answers "how many waves were stale", not "how many stories exist",
+    which is what makes it useful rather than a story tally in disguise."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": [], "wave": 1},
+        {"id": "US-002", "dependsOn": ["US-001"], "wave": 2},
+    ]}
+    assert T.normalize_waves(doc) == 0
+    assert [s["wave"] for s in doc["userStories"]] == [1, 2]
+
+
+def test_normalize_waves_then_validate_waves_reports_clean(tmp_path):
+    """The two guardrails meeting: normalize-waves corrects a stale document,
+    and validate-waves -- untouched by this story, still exiting 0 always --
+    then reports it valid with no errors over the very file just written."""
+    stale = [_wave_story("US-001", []), _wave_story("US-002", ["US-001"], 99)]
+    proc, _ = _run_normalize_waves(tmp_path, stale)
+    assert proc.returncode == 0, proc.stderr
+    root = os.path.realpath(str(tmp_path))
+    verdict_proc = subprocess.run(
+        ["bash", CLI, "validate-waves"], cwd=root, capture_output=True, text=True, timeout=120,
+    )
+    assert verdict_proc.returncode == 0
+    assert json.loads(verdict_proc.stdout) == {"valid": True, "errors": []}
+
+
+def test_normalize_waves_a_cyclic_story_lands_on_zero_like_the_writer_does():
+    """compute_waves never omits a story the way its read-only twin does --
+    every story in a cycle still gets a numeric wave, stuck at 0 forever,
+    because the writer must put SOMETHING in the field. Reproduced here
+    rather than asserted only by import, because this is the one shape where
+    the writer and the validator visibly disagree (0 vs "never assigned"),
+    and a reader relying on this file alone should be able to see it."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": ["US-002"], "wave": 9},
+        {"id": "US-002", "dependsOn": ["US-001"], "wave": 9},
+    ]}
+    T.normalize_waves(doc)
+    assert [s["wave"] for s in doc["userStories"]] == [0, 0]
+
+
+def test_normalize_waves_refuses_a_missing_id_before_touching_any_story():
+    """compute_waves indexes `story["id"]` directly -- a plain dict subscript,
+    not the null-tolerant jq_index -- so a story with no id would otherwise
+    raise a raw KeyError instead of this file's one caught exception. The
+    guard runs over every story before compute_waves touches any of them, so
+    a later story's own wave is provably untouched by the refusal."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": [], "wave": 9},
+        {"dependsOn": ["US-001"], "wave": 9},
+    ]}
+    with pytest.raises(T.MalformedTasks) as excinfo:
+        T.normalize_waves(doc)
+    assert "cannot use null as an object key" in str(excinfo.value)
+    assert doc["userStories"][0]["wave"] == 9, "refused before any story was rewritten"
+
+
 def test_the_places_a_naive_python_would_have_diverged_from_jq():
     """Four rules that are not Python's, each with the recorded case behind it."""
     # `unique` inside validate-deps' cycle reduce, over a heterogeneous dependsOn.
@@ -3348,6 +3457,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
+        "cmd_normalize_waves",
         "cmd_cascade_skip",
         "cmd_reset_orphaned",
         "cmd_gate_pass",
@@ -3911,6 +4021,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "set-execution-mode",
         "normalize-status",
         "normalize-verification",
+        "normalize-waves",
         "cascade-skip",
         "reset-orphaned",
         "archive-task",
