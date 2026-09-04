@@ -2095,9 +2095,17 @@ test_roadmap_amend_phase_partial_merge() {
   # creates KEEPS _forge_account_override: phases 3 and 4 both need it, so
   # dropping it here is an orphan refusal, not a merge. Adding beside it is the
   # amendment shape this assertion is about.
+  # STDOUT ONLY here, unlike the 2>&1 captures around it, and the difference is
+  # load-bearing rather than a style slip: this assertion parses the report as
+  # JSON, and roadmap-amend-phase writes non-fatal advisories to stderr on a
+  # SUCCESSFUL write -- the missing-parent-directory line judge_phases emits
+  # (cli/ does not exist in this fixture), and the handoff advisory beside it.
+  # Folding either into the stream fed to jq turns a passing amend into
+  # "parse error: Invalid numeric literal". The captures that keep 2>&1 are the
+  # ones asserting on a refusal's text, where stderr IS the subject.
   output=$(jq -n '{creates: [{"identity": "_forge_account_override", "description": "the override"}, {"identity": "cli/z.sh", "description": "a new one"}],
                    needs: [{"identity": "forge/base.sh", "description": "the base adapter"}]}' \
-    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "roadmap-amend-phase merge: contract-list amend exits 0"
   assert_eq '["creates","needs"]' "$(printf '%s' "$output" | jq -c '.amended')" \
     "roadmap-amend-phase merge: amended names only amendable fields, never the __mk* scratch"

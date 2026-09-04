@@ -371,12 +371,111 @@ def _identity_reasons(ident, description):
     return reasons
 
 
-def judge_phases(phases):
+_GLOB_METACHAR = re.compile(r"[*?\[\]]")
+
+
+def _project_root_from_roadmap(roadmap_path):
+    """The AIMI_ROOT a roadmap.json sits under, or None when it sits nowhere.
+
+    Anchored on the path the writers already hold -- roadmap.json lives at
+    <AIMI_ROOT>/.aimi/tasks/<feature>/roadmap.json -- rather than on a fresh
+    resolution of its own: the root is the parent of the nearest ancestor
+    directory named ".aimi".
+
+    Two properties this needs and a fixed count of ".." would not have. The walk
+    is purely LEXICAL, because a fresh roadmap-init runs before its own feature
+    directory exists and no component of this path can be required to be on
+    disk. And a path that is not under a ".aimi" at all answers None instead of
+    a directory some fixed number of levels up, so a caller passing a path of a
+    different shape gets no root and therefore no advisory, never an advisory
+    measured against the wrong tree.
+    """
+    parent = os.path.dirname(os.path.abspath(roadmap_path))
+    while parent and parent != os.path.dirname(parent):
+        if os.path.basename(parent) == ".aimi":
+            return os.path.dirname(parent)
+        parent = os.path.dirname(parent)
+    return None
+
+
+def _missing_parent_dir_warnings(phases, roadmap_path):
+    """One advisory line per creates[] identity whose parent directory is absent.
+
+    verify-creates closes a phase on a textual match against the tokens git
+    tracks, so an identity naming a path nobody ever wrote can still come back
+    verified off a like-named token somewhere else. This is the cheap early
+    signal for that, and it is ONLY a signal: a phase whose whole job is to
+    create a directory tree legitimately declares a parent that does not exist
+    yet, so nothing here dies and nothing here is added to judge_phases' fatal
+    list.
+
+    Judged only for the identities that are actually path-shaped, because a
+    warning that fires on top of correct usage is one nobody reads by its third
+    appearance:
+      - a bare verb name -- list-known-gaps, verify-probe, measure-command-file,
+        which is the form phase 1 of this very roadmap declared -- carries no
+        "/" and names no directory, so it is never judged here;
+      - "METHOD /path" is a route, not a file, and its slash belongs to the
+        route;
+      - a parent carrying a glob metacharacter (src/*/models/x.py) names no one
+        literal directory, so there is nothing whose existence could be tested.
+
+    Entries _identity_reasons already refuses are skipped: they are dying
+    anyway, and a second line about them is noise on top of a refusal.
+    """
+    root = _project_root_from_roadmap(roadmap_path)
+    if root is None:
+        return []
+    out = []
+    for phase in phases:
+        for pos0, entry in enumerate(contract_entries(phase, "creates")):
+            ident = entry["identity"]
+            if _identity_reasons(ident, entry.get("description") or ""):
+                continue
+            if _METHOD_PREFIX.search(ident) or "/" not in ident:
+                continue
+            parent = os.path.dirname(ident)
+            if not parent or _GLOB_METACHAR.search(parent):
+                continue
+            resolved = os.path.normpath(os.path.join(root, parent))
+            # ".." is already fatal above, so this can only fire on a shape that
+            # normalizes out of the tree some other way. Skipping rather than
+            # warning keeps this channel from reporting on a path it did not
+            # actually test.
+            if resolved != root and not resolved.startswith(root + os.sep):
+                continue
+            if os.path.isdir(resolved):
+                continue
+            out.append(
+                "phase "
+                + _num(phase.get("id"))
+                + ": creates entry #"
+                + str(pos0 + 1)
+                + ' "'
+                + ident
+                + '" names a path whose parent directory "'
+                + parent
+                + '" does not exist under '
+                + root
+                + " -- fine when this phase is the one that creates it, but "
+                "verify-creates closes a phase on a textual match, so an "
+                "identity nobody ever writes can still come back verified"
+            )
+    return out
+
+
+def judge_phases(phases, roadmap_path=None):
     """Return one diagnostic line per indefensible creates/needs/areas entry.
 
     Reads its lists through contract_entries, so a payload whose shape never
     reached the entry validator raises here rather than being judged as though
     its identity were empty.
+
+    The returned lines are the FATAL half and are unchanged by roadmap_path.
+    When one is given -- the two writers know their own roadmap path; the
+    stdin-only judge-phases verb does not -- a second, advisory channel also
+    runs, writing to stderr through warn_list and adding nothing to the returned
+    list. No caller's refusal set moves because of it.
     """
     out = []
     for phase in phases:
@@ -429,6 +528,15 @@ def judge_phases(phases):
                 + "; and it ".join(reasons)
                 + " -- areas are repo-relative globs and are appended to research "
                 "path hints as-is"
+            )
+
+    if roadmap_path:
+        advisories = _missing_parent_dir_warnings(phases, roadmap_path)
+        if advisories:
+            warn_list(
+                "Warning: creates entry naming a path whose parent directory "
+                "does not exist:",
+                advisories,
             )
     return out
 
@@ -2018,10 +2126,23 @@ def _flag(argv, name):
     return None
 
 
-def _die_list(header, lines, note=False):
+def warn_list(header, lines):
+    """The non-fatal half of _die_list, and the same pair story_merge.py has.
+
+    Mirrored rather than reinvented: story_merge.py's warn_list writes the
+    header and the lines, and its die_list calls it and adds the exit, so the
+    two channels there cannot drift in how a diagnostic is rendered. _die_list
+    below is now that same shape. Until this existed, every verdict this file
+    could reach was fatal -- 13 _die_list call sites and nothing else -- so a
+    check that must not stop a write had nowhere to go.
+    """
     sys.stderr.write(header + "\n")
     for line in lines:
         sys.stderr.write(line + "\n")
+
+
+def _die_list(header, lines, note=False):
+    warn_list(header, lines)
     if note:
         sys.stderr.write(IDENTITY_NOTE + "\n")
     sys.exit(1)
@@ -2129,7 +2250,7 @@ def op_init_write(argv):
         # Over the whole payload, a legacy phase would make plan.md's full-array
         # submission fail forever, and both its call sites downgrade the failure
         # to a warning, so the new phase would vanish with nothing reported.
-        identity = judge_phases(filtered_new)
+        identity = judge_phases(filtered_new, path)
         if identity:
             _die_list(
                 "Error: roadmap-init: malformed creates/needs identity in new phase(s):",
@@ -2178,7 +2299,7 @@ def op_init_write(argv):
         if dangling:
             _die_list("Error: roadmap-init: dangling dependsOn reference(s):", dangling)
 
-        identity = judge_phases(new_phases)
+        identity = judge_phases(new_phases, path)
         if identity:
             _die_list(
                 "Error: roadmap-init: malformed creates/needs identity in new phase(s):",
@@ -2326,7 +2447,7 @@ def op_amend_write(argv):
         check["needs"] = amended.get("needs") or []
     if "areas" in patch:
         check["areas"] = amended.get("areas") or []
-    identity_errors = judge_phases([check])
+    identity_errors = judge_phases([check], path)
     if identity_errors:
         _die_list(
             "Error: roadmap-amend-phase: malformed creates/needs identity in the amended phase:",
