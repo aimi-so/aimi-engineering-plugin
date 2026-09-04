@@ -143,10 +143,16 @@ A criterion asserting a reduction — "cuts the file by 400 bytes", "saves 2KB o
 
 `baseRef` is optional in the schema, because a plan written before the field existed omits it. So the `verify` must **fail** when it resolves empty rather than substituting another base. An unresolvable base means the claim cannot be checked, and saying so is the correct outcome — a silent fallback turns an unverifiable claim into a green one.
 
+**Read `metadata` through the executor's own tasks file, never the bare form.** `skills/story-executor/SKILL.md` exports `TASKS_FILE_PATH` into the environment `implementation.verify` runs in — the tasks file this story was expanded into, resolved without depending on the shared `current-tasks` pointer a sibling split orchestrator's own `init-session` may have overwritten since. Pass it with `--tasks-file "$TASKS_FILE_PATH"` whenever the variable is set. A `verify` run by hand, outside the executor, has no `TASKS_FILE_PATH` to read; branch on that rather than emitting a command that fails unexplained — fall back to the bare `metadata` call, which resolves the same shared pointer a lone manual run already expects, with no sibling orchestrator around to have overwritten it.
+
 The shape, with `AIMI_CLI` bound per the two rules above, `<path>` from `implementation.files`, and `N` the number the criterion states:
 
 ```
-BASE=$("$AIMI_CLI" metadata | jq -r '.baseRef // empty')
+if [ -n "${TASKS_FILE_PATH:-}" ]; then
+  BASE=$("$AIMI_CLI" metadata --tasks-file "$TASKS_FILE_PATH" | jq -r '.baseRef // empty')
+else
+  BASE=$("$AIMI_CLI" metadata | jq -r '.baseRef // empty')
+fi
 [ -n "$BASE" ] || { echo 'FAIL: metadata.baseRef absent - the reduction cannot be measured'; exit 1; }
 BEFORE=$(git show "$BASE:<path>" | wc -c)
 AFTER=$(wc -c < "<path>")
