@@ -4139,6 +4139,15 @@ _VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 # The words that may precede an assignment and still leave it an assignment.
 _VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
 
+# The builtins whose whole job is to MOVE the shell. Only `cd` appears in the
+# corpus this parser was cut against -- 11 of the 258 verifies under this
+# plugin's own .aimi/ carry one and none carries a pushd, measured 2026-09-04 --
+# and the dirstack pair is listed anyway, because unlike the parser's other
+# rules this one is not descriptive. A word missing from here is a directory
+# change the probe fails to replicate, and that failure is silent and lands in
+# the caller's tree. Two strings buy the whole family.
+_VERIFY_CHDIR = ("cd", "pushd", "popd")
+
 # A verify is allowed to be a whole test suite, so this is generous. A segment
 # that outlives it is reported at 124 -- `timeout`'s own status -- which reads
 # as discriminating, the safe direction: a probe must never invent dead weight.
@@ -4387,6 +4396,19 @@ def verify_asserts_nothing(segment):
     return len(words) == 1 and bool(_VERIFY_ASSIGN.match(words[0]))
 
 
+def verify_changes_directory(segment):
+    """True for a segment whose whole job is to move the shell.
+
+    Kept apart from verify_asserts_nothing, which answers a different question.
+    That one asks whether a segment could be an assertion at all, and a `cd`
+    could be -- `cd build` fails when the directory is not there. This one asks
+    whether running the segment leaves the NEXT one somewhere else, which is
+    the property the prelude has to reproduce.
+    """
+    words = verify_words(segment)
+    return bool(words) and words[0] in _VERIFY_CHDIR
+
+
 def probe_verify(text, cwd):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
@@ -4406,6 +4428,28 @@ def probe_verify(text, cwd):
     subshell -- buys that back by making every exit status depend on parsing a
     marker out of a stream the assertions themselves write to.
 
+    THE WORKING DIRECTORY IS CARRIED FOR THE SAME REASON, WITH MORE AT STAKE.
+    An assignment is carried so an assertion is not measured against an empty
+    variable; a `cd` is carried so an assertion is not measured against -- and
+    not WRITTEN INTO -- the wrong tree. Without it, `cd "$W"` ran as a segment
+    of its own and changed nothing that outlived it, so a `mkdir -p out` two
+    segments later landed in `cwd`: the story executor's own worktree, which is
+    where step 1.5 probes from. The probe was manufacturing the class of defect
+    it exists to find. Like an assignment it is carried and not reported -- a
+    segment that only establishes context is noise in a list whose subject is
+    assertions that already pass.
+
+    REFUSING A VERIFY THAT CONTAINS A `cd` WOULD CLOSE THAT TOO, AND IS WORSE.
+    The verifies that cd are the elaborate ones: the verify that builds a
+    throwaway repo under `mktemp -d`, cds into it and asserts against it is
+    exactly the verify whose assertions are worth taking apart, and the story
+    that closed this carried one itself. A refusal still has to answer
+    something, and the only honest thing it can answer is the empty array --
+    which is indistinguishable from "every assertion here discriminates", so
+    the executor would print a clean all-clear for the verifies least likely to
+    deserve one. Carrying the `cd` keeps the answer; refusing would trade a
+    wrong directory for a wrong answer.
+
     Output is discarded. What the caller gets is the status, because that is
     what `discriminates` is computed from and a probe that echoed a whole test
     suite's output would bury its own answer.
@@ -4423,6 +4467,17 @@ def probe_verify(text, cwd):
     prelude = []
     for separator, segment in verify_segments(text):
         if separator == "||":
+            continue
+        if verify_changes_directory(segment):
+            # `|| exit 1` rather than the bare segment. A `cd` that FAILS in
+            # the prelude would leave everything after it running in the
+            # caller's directory -- this same defect, only quieter, because
+            # nothing in the answer would say the probe had never moved.
+            # Aborting instead reports every assertion after it at the shell's
+            # own failure status, which reads as discriminating: the safe
+            # direction, the one the timeout takes, since a probe must never
+            # invent dead weight.
+            prelude.append(segment + " || exit 1")
             continue
         if verify_asserts_nothing(segment):
             words = verify_words(segment)
