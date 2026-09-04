@@ -10,6 +10,29 @@ set -euo pipefail
 AIMI_DIR=".aimi"
 TASKS_DIR="$AIMI_DIR/tasks"
 
+# Absolute directory containing THIS script, resolved right here at the top --
+# before find_aimi_root (called later, from main()) ever changes the cwd.
+#
+# ${BASH_SOURCE[0]:-$0} can be a RELATIVE path: a caller inside a nested
+# worktree invoking `bash plugins/aimi-engineering/scripts/aimi-cli.sh` hands
+# bash that exact relative string. find_aimi_root then walks UP from the cwd
+# looking for .aimi/ -- and a worktree deliberately has no .aimi/ of its own
+# (see worktree-manager.sh's create_worktree), so the walk does not stop at
+# the worktree, it continues past it into the main checkout and cd's there.
+# Resolving "$(dirname "$script_path")" AFTER that cd, against the NEW cwd,
+# turns a relative BASH_SOURCE into a path rooted at the main checkout instead
+# of the worktree the caller actually stood in -- every sibling module this
+# script dispatches to would then be the main checkout's copy, silently.
+# Capturing the directory here, before find_aimi_root runs, resolves the
+# relative path against the invocation directory instead, which is the one
+# still guaranteed to be where the caller stood.
+#
+# `cd ... && pwd` (rather than a bare string join) is what keeps this correct
+# when the script is reached through a symlinked directory -- e.g. the plugin
+# cache path a Claude Code install resolves through -- since cd follows the
+# symlink and pwd then reports the real directory underneath it.
+_AIMI_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -183,14 +206,12 @@ check_python3() {
 # for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
 # tasks.json verbs, models.py for the models.json readers and their writer.
 #
-# Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
-# one directory up. It has to be resolved rather than assumed because this file
-# is invoked through a cached path, through $AIMI_PLUGIN_DIR, and from a
-# worktree, and only its own location is reliable in all three.
+# Built on $_AIMI_SCRIPT_DIR, captured at the top of this file before
+# find_aimi_root can move the cwd -- see that assignment's own comment for why
+# resolving ${BASH_SOURCE[0]:-$0} HERE, at call time, would be too late: every
+# verb using this helper dispatches after find_aimi_root has already run.
 _aimi_script_py() {
-  local script_path
-  script_path="${BASH_SOURCE[0]:-$0}"
-  printf '%s/%s\n' "$(cd "$(dirname "$script_path")" && pwd)" "$1"
+  printf '%s/%s\n' "$_AIMI_SCRIPT_DIR" "$1"
 }
 
 # The fourteen roadmap call sites name their module through this, so none of
