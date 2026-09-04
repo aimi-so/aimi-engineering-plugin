@@ -43,8 +43,8 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	374358
-plan.md	310005
+execute.md	375811
+plan.md	311193
 brainstorm.md	128637
 open-pr.md	62605
 references/forge-contract.md	45757
@@ -56,5 +56,5 @@ review.md	22577
 references/scope-contexts.md	20743
 deepen.md	18029
 
-skills/story-executor/SKILL.md	43086
+skills/story-executor/SKILL.md	43690
 skills/task-planner/SKILL.md	23042

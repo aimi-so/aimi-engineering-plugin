@@ -3109,6 +3109,177 @@ test_worktree_project_root_resolution() {
 }
 
 # ============================================================================
+# Script Self-Location Resolution Tests
+# ============================================================================
+#
+# THE RULE, IN ONE SENTENCE: aimi-cli.sh must resolve the directory holding
+# its own sibling modules (roadmap.py, tasks.py, models.py, story_merge.py,
+# lib/extract-command-blocks.sh) BEFORE find_aimi_root can move the cwd, so a
+# RELATIVE invocation from inside a nested worktree still runs that
+# worktree's own copies rather than whatever copies sit at the directory
+# find_aimi_root's walk-up lands on.
+#
+# This is a DIFFERENT bug from the PROJECT_ROOT-From-A-Worktree section
+# above. That section is about which .aimi/tasks/ file a worktree's own
+# invocation is allowed to read. This one is about which SCRIPT FILES a
+# worktree's own invocation actually runs — the two are independent, and a
+# worktree with no .aimi/ of its own is exactly the case that exercises both.
+#
+# WHAT IT COST TO NOT HAVE THIS. A phase-4 pipeline-audit story measured a
+# fix as a no-op: the CLI, invoked by a relative path from inside its own
+# worktree, kept reporting the UNFIXED numbers, because it was silently
+# running the main checkout's tasks.py instead of the worktree's own —
+# while the worktree's tasks.py, the one actually carrying the fix, was
+# never reached at all. No error, no warning: just the wrong tree's answer.
+
+# Builds a throwaway repository standing in for a main checkout, carrying a
+# REAL copy of the modules under test (aimi-cli.sh + tasks.py + roadmap.py +
+# sanitize.py — tasks.py's own import chain, see tasks.py's `from roadmap
+# import ...`), plus one worktree of its own. Marks the WORKTREE's own copy
+# of tasks.py with a stderr marker after the worktree is created, so the
+# main checkout's copy stays byte-identical to $SCRIPT_DIR's and only the
+# worktree's copy can print it.
+setup_worktree_module_resolution_fixture() {
+  WT_MOD_MAIN=$(cd "$(mktemp -d)" && pwd -P)
+  WT_MOD_TREE="$WT_MOD_MAIN/.worktrees/probe"
+  WT_MOD_TASKS="$WT_MOD_MAIN/.aimi/tasks/2026-01-01-module-probe-tasks.json"
+  WT_MOD_SCRIPTS_MAIN="$WT_MOD_MAIN/plugins/aimi-engineering/scripts"
+  WT_MOD_SCRIPTS_TREE="$WT_MOD_TREE/plugins/aimi-engineering/scripts"
+
+  git init -q "$WT_MOD_MAIN" >/dev/null 2>&1
+  mkdir -p "$WT_MOD_MAIN/.aimi/tasks" "$WT_MOD_SCRIPTS_MAIN"
+  cat > "$WT_MOD_TASKS" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Worktree module-resolution probe",
+    "type": "feature",
+    "branchName": "feat/worktree-module-resolution-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["The story is readable regardless of which copy of tasks.py answered."],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  cp "$CLI" "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" "$WT_MOD_SCRIPTS_MAIN/"
+  chmod +x "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
+
+  echo "probe" > "$WT_MOD_MAIN/README.md"
+  git -C "$WT_MOD_MAIN" add README.md plugins >/dev/null 2>&1
+  git -C "$WT_MOD_MAIN" \
+    -c user.email=test@example.com -c user.name="Test" \
+    commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$WT_MOD_MAIN" worktree add -q --detach "$WT_MOD_TREE" HEAD >/dev/null 2>&1
+
+  # Mark the WORKTREE's own tasks.py only, after the worktree checkout exists
+  # (worktrees have independent working directories, so this never touches
+  # $WT_MOD_SCRIPTS_MAIN's copy).
+  sed -i '1i import sys as _wt_marker_sys; print("MARCADOR-WT", file=_wt_marker_sys.stderr)' \
+    "$WT_MOD_SCRIPTS_TREE/tasks.py"
+}
+
+teardown_worktree_module_resolution_fixture() {
+  git -C "$WT_MOD_MAIN" worktree remove --force "$WT_MOD_TREE" >/dev/null 2>&1
+  rm -rf "$WT_MOD_MAIN"
+  unset WT_MOD_MAIN
+  unset WT_MOD_TREE
+  unset WT_MOD_TASKS
+  unset WT_MOD_SCRIPTS_MAIN
+  unset WT_MOD_SCRIPTS_TREE
+}
+
+test_relative_invocation_from_nested_worktree_uses_its_own_modules() {
+  echo ""
+  echo "=== Testing that a relative invocation from inside a nested worktree runs that worktree's own sibling modules ==="
+
+  setup_worktree_module_resolution_fixture
+
+  local output_abs output_rel
+
+  # --- Guard rail: absolute-path invocation, from the main repo and from
+  # inside the worktree, must keep seeing the worktree's own modules exactly
+  # as it does today. ---
+  output_abs=$(cd "$WT_MOD_TREE" && bash "$WT_MOD_SCRIPTS_TREE/aimi-cli.sh" get-story-context US-001 --tasks-file "$WT_MOD_TASKS" 2>&1)
+  assert_contains "MARCADOR-WT" "$output_abs" \
+    "nested worktree module resolution: ABSOLUTE invocation runs the worktree's own tasks.py (guard rail — must pass before and after this fix)"
+
+  # --- The fix: a RELATIVE invocation, from inside the worktree, must reach
+  # the SAME worktree's own tasks.py rather than the main checkout's. ---
+  output_rel=$(cd "$WT_MOD_TREE" && bash plugins/aimi-engineering/scripts/aimi-cli.sh get-story-context US-001 --tasks-file "$WT_MOD_TASKS" 2>&1)
+  assert_contains "MARCADOR-WT" "$output_rel" \
+    "nested worktree module resolution: RELATIVE invocation must also run the worktree's own tasks.py, not the main checkout's — this is the assertion that fails on the unfixed tree"
+
+  teardown_worktree_module_resolution_fixture
+}
+
+test_script_reached_through_symlinked_directory_resolves_siblings() {
+  echo ""
+  echo "=== Testing module resolution when the script is reached through a symlinked directory ==="
+
+  local real_dir link_dir tasks_file output exit_code
+
+  real_dir=$(cd "$(mktemp -d)" && pwd -P)
+  mkdir -p "$real_dir/.aimi/tasks" "$real_dir/plugins/aimi-engineering/scripts"
+  tasks_file="$real_dir/.aimi/tasks/2026-01-01-symlink-probe-tasks.json"
+  cat > "$tasks_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Symlink probe",
+    "type": "feature",
+    "branchName": "feat/symlink-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["ok"],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  cp "$CLI" "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
+    "$real_dir/plugins/aimi-engineering/scripts/"
+  chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  link_dir="$(mktemp -u)-symlink"
+  ln -s "$real_dir" "$link_dir"
+
+  # This is the shape the Claude Code plugin cache exposes: the resolved CLI
+  # path can be reached through a symlinked directory. Guard rail — this
+  # already works today and must keep working.
+  output=$(cd "$link_dir" && "$link_dir/plugins/aimi-engineering/scripts/aimi-cli.sh" get-story-context US-001 --tasks-file "$tasks_file" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" \
+    "symlinked script directory: invocation through the symlink still resolves its sibling modules (guard rail — must pass before and after this fix)"
+  assert_contains '"id": "US-001"' "$output" \
+    "symlinked script directory: get-story-context still reaches tasks.py through the symlink and returns the story"
+
+  rm -f "$link_dir"
+  rm -rf "$real_dir"
+}
+
+# ============================================================================
 # CLI Output Optimization Tests
 # ============================================================================
 
@@ -10788,6 +10959,11 @@ main() {
   echo ""
   echo "--- PROJECT_ROOT-From-A-Worktree Tests ---"
   test_worktree_project_root_resolution
+
+  echo ""
+  echo "--- Script Self-Location Resolution Tests ---"
+  test_relative_invocation_from_nested_worktree_uses_its_own_modules
+  test_script_reached_through_symlinked_directory_resolves_siblings
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
   # Unset AIMI_PLUGIN_DIR to test non-converter code paths

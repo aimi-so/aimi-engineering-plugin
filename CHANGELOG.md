@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.129.0] - 2026-09-04
+
+Phase 1 of verification-integrity: what a phase judges with, and what a plan is
+allowed to see.
+
+### Fixed
+
+- **Creates Verification judges with the CLI the phase itself produced.** Each
+  participating repository's `verify-creates` call now prefers that repository's
+  own phase-container `aimi-cli.sh` when one exists and is executable, falling
+  back to the resolved CLI otherwise and naming the fallback on one stderr line.
+  A phase that changes the CLI's own logic was previously judged by whatever the
+  global cache had installed — which accepted a comment as evidence for an
+  artifact the changed code correctly located in real source.
+- **`aimi-cli.sh` resolves its own directory before `find_aimi_root` moves the
+  cwd.** `_aimi_script_py` resolved `${BASH_SOURCE[0]:-$0}` at call time, after
+  the cwd had already changed; a relative invocation from inside a nested
+  worktree therefore dispatched to the PARENT checkout's `tasks.py`,
+  `roadmap.py`, `models.py` and `story_merge.py`. A worktree testing its own
+  changed modules silently ran the unchanged ones. The directory is now captured
+  once at the top of the file, keeping the `cd`/`pwd` pair so a script reached
+  through a symlinked directory still resolves correctly.
+- **The KNOWN-GAP extractor matches both spellings executors actually write.**
+  The merge-time trailer grep in `execute.md` widened from `^KNOWN-GAP:` to
+  `^KNOWN-GAP( \([^)]+\))?:`, still anchored to line start. Measured against
+  the corpus: the old pattern matched 35 lines of 114 — the extractor was seeing
+  31% of what executors had written.
+- **`plan.md` reads the whole known-gaps corpus rather than the planned
+  feature's slice.** Phase 1.7b scoped its read by `--feature` whenever a slug
+  resolved. Measured by executing the block: a feature reached 20 of 134 entries
+  and left 114 invisible — nearly all of them describing the pipeline every
+  feature runs through, not the feature they happened to be filed under. A
+  feature with gaps of its own gains entries and loses none (pipeline-audit
+  113 → 134, its 113 a subset).
+
+### Changed
+
+- **A story's `implementation.verify` can resolve its own tasks file.**
+  `story-executor` now exports `TASKS_FILE_PATH` into the verify's environment
+  at both the pre-run and the real run, in both templates, so a verify needing
+  `metadata.baseRef` reads the file its own story lives in rather than the
+  shared `current-tasks` pointer a sibling split orchestrator may have
+  overwritten. The expander's byte-reduction shape uses it when set and
+  documents its fallback for a verify run by hand.
+
+
 ## [1.128.0] - 2026-09-04
 
 Phase 4 of the pipeline audit: the plugin's own cache resolution, `open-pr`

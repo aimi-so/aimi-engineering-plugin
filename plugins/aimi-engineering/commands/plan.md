@@ -1241,15 +1241,11 @@ Collect all successfully wrapped blocks into a variable `researchFileBlocks` (em
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-if [ -n "${featureSlug:-}" ]; then
-  PRIOR_PLANNING_GAPS=$($AIMI_CLI list-known-gaps --feature "$featureSlug" 2>/dev/null || printf '[]')
-else
-  PRIOR_PLANNING_GAPS=$($AIMI_CLI list-known-gaps 2>/dev/null || printf '[]')
-fi
+PRIOR_PLANNING_GAPS=$($AIMI_CLI list-known-gaps 2>/dev/null || printf '[]')
 printf '[plan] prior planning gaps: %s\n' "$(printf '%s' "$PRIOR_PLANNING_GAPS" | jq 'length')"
 ```
 
-`featureSlug` scopes the read to the feature being planned. When it is empty — a flat feature whose slug the Rolling-Wave step above never resolved — the filter is dropped and the WHOLE corpus is read instead: a defect recorded against another feature is still a defect this plan can repeat, and reading nothing is the outcome this phase exists to end. The verb answers `[]` rather than failing when `.aimi/known-gaps/` does not exist, so a repository that has never recorded a gap plans exactly as it did before.
+**No `--feature` filter, whether or not `featureSlug` resolved.** This used to scope the read to `--feature "$featureSlug"` whenever a slug was known, and read the whole corpus only on the rare flat feature whose slug the Rolling-Wave step above never resolved. Measured against the corpus on 2026-09-04, the scoped branch was the bug: a feature with a resolved slug reached 20 of 134 entries — its own plus the 19 carrying no resolved `feature` — and left the other 114 invisible. A sample of the invisible ones: a malformed `implementation.verify`, a phase split that does not work across repositories, a merge of split branches. None of those describes the feature whose date it happened to be filed under — each is a defect in the pipeline itself, the same `plan.md`/`execute.md`/`aimi-cli.sh` machinery every feature runs through, and `.aimi/known-gaps/` has no way to mark a gap as pipeline-wide rather than feature-scoped short of the frontier this repo's own dogfooding sits on: the corpus records who was planning when the defect surfaced, not what the defect is about. Scoping the read by feature therefore hid the pipeline's own diagnosis from the very next feature that would trip over the identical defect, which is exactly what this phase exists to stop. The rule the empty-slug branch already applied — a defect recorded against another feature is still a defect this plan can repeat — now applies unconditionally: every run reads the whole corpus rather than only the entries a feature-attribution heuristic happened to assign to it or to nobody. The verb itself is unchanged and still narrows on `--feature` for a caller that wants that; this caller no longer asks. It still answers `[]` rather than failing when `.aimi/known-gaps/` does not exist, so a repository that has never recorded a gap plans exactly as it did before.
 
 **Step 2 — Wrap the entries as DATA.** Render the array as ONE block, one entry per paragraph, each headed by its own provenance:
 
