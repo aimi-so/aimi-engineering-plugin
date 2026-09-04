@@ -3219,9 +3219,19 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # chose. It is also the second isdir() in the module, and the first that
     # asks whether a path the plan CITES is real rather than whether one the
     # CLI walks is.
-    assert code.count("os.path.") == 37
+    #
+    # The final two are a join and the module's THIRD isdir(), and they name
+    # even less than R17's pair: they walk the children of `.aimi/tasks` --
+    # already joined onto --aimi-dir two lines above and already walked by the
+    # bounded listing -- to collect the feature DIRECTORY NAMES that are there.
+    # The names come off the disk rather than out of this module, which is the
+    # whole point of the read: it is what lets a file-name suffix be checked
+    # against the features that exist instead of being believed on sight. No
+    # new root, no new leaf, one more directory predicate over a directory
+    # --aimi-dir already reaches.
+    assert code.count("os.path.") == 39
     assert code.count("os.path.isfile(") == 7
-    assert code.count("os.path.isdir(") == 2
+    assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
@@ -4718,6 +4728,13 @@ def _gaps(tmp_path, gaps, tasks=(), archive=(), flags=()):
     `tasks` and `archive` are (relative path, document) pairs written under
     .aimi/tasks/ and .aimi/archive/ -- both are walked, because a gap written
     in July belongs to a feature whose tasks file was archived weeks ago.
+
+    That same walk is also what makes a feature name EXIST, so several tests
+    below write a tasks file for no reason but to register the name their gap's
+    slug uses. Their dates are deliberately far from the gap dates: the point is
+    the name, and a date collision would resolve the gap through the index and
+    prove nothing about the slug. A path that is not a `*-tasks.json` registers
+    only its directory, which is its own case.
     """
     base = os.path.realpath(str(tmp_path))
     root = os.path.join(base, "proj")
@@ -4838,7 +4855,12 @@ def test_a_declared_feature_beats_the_slug_the_name_would_have_guessed(tmp_path)
     The two sources are made to CONTRADICT here rather than merely to coexist:
     a file named `...-slug-errado.md` declaring `feature: pipeline-audit` must
     answer the declaration. A test where they agree passes against the old
-    derivation too and would prove nothing."""
+    derivation too and would prove nothing.
+
+    `slug-errado` is registered as a REAL feature so the contradiction survives
+    the rule that a slug naming no feature is not one: with nothing on disk by
+    that name the slug would lose to the null and this would pass without the
+    declaration ever being read."""
     entries = _gaps(
         tmp_path,
         {
@@ -4846,6 +4868,7 @@ def test_a_declared_feature_beats_the_slug_the_name_would_have_guessed(tmp_path)
                 "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: o executor nao commitou.\n"
             )
         },
+        archive=[("2026-01-05-slug-errado-tasks.json", _dated("2026-01-05"))],
     )
     assert [entry["feature"] for entry in entries] == ["pipeline-audit"]
     # The fence is metadata, not prose: left in the body it would surface as a
@@ -4891,7 +4914,13 @@ def test_only_a_well_formed_leading_fence_is_metadata_and_the_rest_is_evidence(
     An unterminated fence, a fence that does not open on the very first line,
     and a block carrying a line that is not `key: value` are all bodies that
     merely begin with a horizontal rule. Each keeps the slug the name gives it
-    -- the fallback, still answering."""
+    -- the fallback, still answering.
+
+    All four names are registered as real features, `declarada` included, so the
+    two outcomes stay distinguishable: were the fence read as metadata every
+    file would answer `declarada`, and were the slug rule the one breaking they
+    would answer null. Leaving any of them unregistered would collapse one of
+    those two into the other."""
     gaps = {
         "2026-09-04-US-001-sem-fecho.md": "---\nfeature: declarada\nKNOWN-GAP: a.\n",
         "2026-09-04-US-002-nao-na-primeira-linha.md": (
@@ -4901,7 +4930,16 @@ def test_only_a_well_formed_leading_fence_is_metadata_and_the_rest_is_evidence(
             "---\nfeature: declarada\numa frase solta\n---\nKNOWN-GAP: c.\n"
         ),
     }
-    entries = _gaps(tmp_path, gaps)
+    entries = _gaps(
+        tmp_path,
+        gaps,
+        archive=[
+            ("2026-01-01-declarada-tasks.json", _dated("2026-01-01")),
+            ("2026-01-02-sem-fecho-tasks.json", _dated("2026-01-02")),
+            ("2026-01-03-nao-na-primeira-linha-tasks.json", _dated("2026-01-03")),
+            ("2026-01-04-nao-e-par-chave-valor-tasks.json", _dated("2026-01-04")),
+        ],
+    )
     resolved = {entry["file"]: entry["feature"] for entry in entries}
     assert resolved == {
         "2026-09-04-US-001-sem-fecho.md": "sem-fecho",
@@ -4918,7 +4956,10 @@ def test_a_known_gap_line_inside_the_fence_is_the_record_and_never_metadata(
     one pair that needs a clause of its own: consumed as metadata it would take
     the record with it and leave a file whose gap had vanished. The whole block
     is disqualified instead, and the slug answers -- losing a declaration is
-    recoverable, losing the gap is not."""
+    recoverable, losing the gap is not.
+
+    `fence-com-gap` is registered as a real feature so that "the slug answers"
+    is what this asserts, rather than the null a slug naming nothing reaches."""
     entries = _gaps(
         tmp_path,
         {
@@ -4926,6 +4967,7 @@ def test_a_known_gap_line_inside_the_fence_is_the_record_and_never_metadata(
                 "---\nfeature: pipeline-audit\nKNOWN-GAP: o registro em si.\n---\ndepois\n"
             )
         },
+        archive=[("2026-01-06-fence-com-gap-tasks.json", _dated("2026-01-06"))],
     )
     assert any("o registro em si." in entry["text"] for entry in entries)
     assert [entry["feature"] for entry in entries] == ["fence-com-gap"] * len(entries)
@@ -4956,13 +4998,25 @@ def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path
 
     This is the FALLBACK and it is not deprecated: 49 files on disk carry no
     frontmatter, none of them will retroactively gain one, and a fallback that
-    stopped answering for them would drop the corpus the verb exists to keep."""
+    stopped answering for them would drop the corpus the verb exists to keep.
+
+    Both slugs name a feature that exists here, which is the condition the
+    fallback gained. The two real names in the corpus were chosen precisely
+    because they read like descriptions -- what changed is that a slug is now
+    checked, not that a real one stopped answering."""
     entries = _gaps(
         tmp_path,
         {
             "2026-08-04-US-006-roadmap-amend-no-git-trace.md": "a\n",
             "2026-08-04-verify-creates-excludes-miss-this-repo.md": "b\n",
         },
+        archive=[
+            ("2026-01-07-roadmap-amend-no-git-trace-tasks.json", _dated("2026-01-07")),
+            (
+                "2026-01-08-verify-creates-excludes-miss-this-repo-tasks.json",
+                _dated("2026-01-08"),
+            ),
+        ],
     )
     resolved = {entry["file"]: (entry["storyId"], entry["feature"]) for entry in entries}
     assert resolved["2026-08-04-US-006-roadmap-amend-no-git-trace.md"] == (
@@ -5000,6 +5054,62 @@ def test_the_feature_comes_from_the_tasks_file_planned_on_the_same_date(tmp_path
     assert resolved["2026-09-03-US-004.md"] == "pipeline-audit"
 
 
+def test_a_slug_naming_no_feature_is_not_one_and_the_date_answers_instead(tmp_path):
+    """The measurement this rule exists for. On 2026-09-04 the LARGEST feature
+    in the 114-entry corpus was `phase2` -- 30 entries, more than any real
+    feature held -- invented whole from the suffix of files named
+    `2026-09-03-US-001-phase2.md`. Nothing named `phase2` was ever planned:
+    those gaps are from phase 2 of `pipeline-audit`, and the date said so all
+    along, which is where the first file here lands.
+
+    The second file is the same invented suffix on a date nothing was planned
+    on. It falls to null, not back to the suffix: a name no feature answers to
+    is not made true by having nothing else to say.
+
+    The third keeps this from being a test of "reject every suffix". A slug
+    that DOES name a feature still answers, and it answers over the index --
+    the precedence phase 3 established, which validating the slug does not
+    reorder. Were the index consulted first this file would say
+    `pipeline-audit`."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-03-US-001-phase2.md": "inventada, mas a data resolve\n",
+            "2026-08-16-US-001-phase2.md": "inventada, e a data nao resolve\n",
+            "2026-09-03-US-002-split-by-project.md": "sufixo que e feature mesmo\n",
+        },
+        tasks=[
+            (
+                os.path.join(
+                    "pipeline-audit", "phase-2-x", "pipeline-audit-phase-2-tasks.json"
+                ),
+                _dated("2026-09-03"),
+            )
+        ],
+        archive=[("2026-07-27-split-by-project-tasks.json", _dated("2026-07-27"))],
+    )
+    assert {entry["file"]: entry["feature"] for entry in entries} == {
+        "2026-09-03-US-001-phase2.md": "pipeline-audit",
+        "2026-08-16-US-001-phase2.md": None,
+        "2026-09-03-US-002-split-by-project.md": "split-by-project",
+    }
+
+
+def test_a_feature_directory_carrying_no_tasks_file_yet_is_still_a_feature(tmp_path):
+    """A roadmap's feature directory exists from the moment `roadmap-init`
+    writes `roadmap.json` into it, and holds nothing else until
+    `/aimi:plan --phase 1` materialises the first phase file. A gap recorded in
+    that window names a feature that exists, so the directory counts on its own
+    terms: deriving the known names from tasks DOCUMENTS alone would call this
+    one invented and null it out."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-09-05-US-001-pipeline-audit.md": "gap no vao entre init e plan\n"},
+        tasks=[(os.path.join("pipeline-audit", "roadmap.json"), {"phases": []})],
+    )
+    assert [entry["feature"] for entry in entries] == ["pipeline-audit"]
+
+
 def test_a_feature_that_does_not_resolve_is_null_rather_than_a_dropped_file(tmp_path):
     """Two ways to fail to resolve, one answer. A date nothing was planned on,
     and a date carrying TWO features -- where picking one would attribute a gap
@@ -5020,21 +5130,52 @@ def test_a_feature_that_does_not_resolve_is_null_rather_than_a_dropped_file(tmp_
     }
 
 
-def test_the_feature_filter_is_exact_and_leaves_the_unresolved_out(tmp_path):
+def test_the_filter_takes_the_feature_and_the_unattributed_and_nothing_else(tmp_path):
     """--feature is what plan.md Phase 1.7b passes to scope the block to the
-    feature being planned. An entry whose feature is null is not a member of
-    any feature, so it is not a member of this one either."""
-    gaps = {"2026-09-03-US-004.md": "belongs\n", "2026-08-16-US-001.md": "unresolved\n"}
+    feature being planned, and this ASSERTION INVERTED: the unresolved entry
+    used to be excluded and is now included.
+
+    An entry with no feature is not an entry of some other feature -- it is one
+    whose feature is unknown, and a planning defect with no owner is still a
+    defect this plan can repeat. Eighteen of 114 entries were invisible to
+    every --feature call on 2026-09-04 for the sake of a membership rule that
+    was reading a null as an answer.
+
+    The third file is the boundary, and it is why this is not simply a looser
+    filter: it RESOLVES, to a different real feature, and stays out. What
+    widened is the treatment of the unattributed, never of the
+    attributed-elsewhere."""
+    gaps = {
+        "2026-09-03-US-004.md": "belongs\n",
+        "2026-08-16-US-001.md": "unresolved\n",
+        "2026-08-08-US-002.md": "another feature's\n",
+    }
     tasks = [
         (
             os.path.join("pipeline-audit", "phase-1-x", "pipeline-audit-phase-1-tasks.json"),
             _dated("2026-09-03"),
         )
     ]
-    scoped = _gaps(tmp_path, gaps, tasks=tasks, flags=("--feature", "pipeline-audit"))
-    assert [entry["file"] for entry in scoped] == ["2026-09-03-US-004.md"]
-    assert _gaps(tmp_path, gaps, tasks=tasks, flags=("--feature", "nao-existe")) == []
-    assert len(_gaps(tmp_path, gaps, tasks=tasks)) == 2
+    archive = [("2026-08-08-identity-contract-tasks.json", _dated("2026-08-08"))]
+    scoped = _gaps(
+        tmp_path,
+        gaps,
+        tasks=tasks,
+        archive=archive,
+        flags=("--feature", "pipeline-audit"),
+    )
+    assert [entry["file"] for entry in scoped] == [
+        "2026-08-16-US-001.md",
+        "2026-09-03-US-004.md",
+    ]
+    # The consequence of the rule stated plainly rather than left to be found:
+    # a filter naming no feature at all still answers with the unattributed,
+    # because "unknown" is what those entries mean, not "not yours".
+    absent = _gaps(
+        tmp_path, gaps, tasks=tasks, archive=archive, flags=("--feature", "nao-existe")
+    )
+    assert [entry["file"] for entry in absent] == ["2026-08-16-US-001.md"]
+    assert len(_gaps(tmp_path, gaps, tasks=tasks, archive=archive)) == 3
 
 
 def test_since_is_inclusive_and_an_entry_with_no_date_cannot_answer_it(tmp_path):
