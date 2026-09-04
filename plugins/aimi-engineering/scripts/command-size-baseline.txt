@@ -1,7 +1,14 @@
 # command-size-baseline.txt — grandfathered byte budgets for commands/
-# (including commands/references/), enforced by test-command-size.sh.
+# (including commands/references/) and for skills/**/SKILL.md, enforced by
+# test-command-size.sh.
 #
-# Format, tab-separated:  <path relative to commands/>  <budget in bytes>
+# Format, tab-separated:  <path>  <budget in bytes>
+#
+# A path with no prefix is relative to commands/ (`execute.md`,
+# `references/forge-contract.md`); a path starting with `skills/` is relative
+# to the plugin directory. Two roots rather than one so that the twelve
+# budgets recorded before skills/ joined the corpus did not have to move —
+# see test-command-size.sh's header for the rule and where it is applied.
 #
 # Every line is a promise that someone measured this exact file's size and
 # wrote it down -- never rounded up. The budget is a RATCHET, not a ceiling
@@ -12,12 +19,19 @@
 # after the file that earned it got smaller. Slack like that is exactly what
 # a later, unrelated change could spend without anyone noticing.
 #
-# Every commands/**/*.md file NOT listed here is held to DEFAULT_CEILING
-# (16384 bytes, declared in test-command-size.sh) instead. These twelve are
-# the only files that already exceeded that ceiling when this baseline was
-# first written; a global rule strict enough to catch a new bloated file
-# cannot also pass execute.md's tree today (20x any plausible ceiling), so
-# these get an individual budget instead of a shared one.
+# Every corpus file NOT listed here is held to DEFAULT_CEILING (16384 bytes,
+# declared in test-command-size.sh) instead. The first twelve were the only
+# files that already exceeded that ceiling when this baseline was first
+# written; a global rule strict enough to catch a new bloated file cannot
+# also pass execute.md's tree today (20x any plausible ceiling), so these get
+# an individual budget instead of a shared one.
+#
+# The two skills/ entries joined on the same terms, on the day the corpus
+# widened to reach them — grandfathered at the size they already were, never
+# at a rounded-up one. A budget here is a ratchet against further growth and
+# says nothing about whether the file is the right size: story-executor's
+# 613 lines are already over create-agent-skills' 300-line guidance, and this
+# suite measures bytes and cannot see that at all.
 #
 # Measured against the source .md files under commands/, never against
 # install.sh's OpenCode translation. translate_command_body() prepends a
@@ -41,3 +55,6 @@ references/cli-path-resolution.md	24710
 review.md	21665
 references/scope-contexts.md	18915
 deepen.md	18029
+
+skills/story-executor/SKILL.md	40744
+skills/task-planner/SKILL.md	23042
