@@ -2650,6 +2650,43 @@ def _report_status(verification):
     return status if isinstance(status, str) else None
 
 
+def _report_discriminating(verification, vtype):
+    """The count at `.verification.evidence.discriminating` -- how many of a
+    story's verify segments behaved differently before its work than after --
+    or `None` when NOTHING usable was recorded there.
+
+    `None` is a third answer, not a zero. Every shape that fails to produce a
+    real count reports it: a non-object `verification` (absent, null, a bare
+    string, a number), an `evidence` that is not an object, an absent
+    `discriminating` key, and a value that is not a plain integer. The caller
+    routes `None` to `unrecorded` and a real `0` to `blind`, and the whole
+    partition exists to keep those two apart -- see `verification_report`.
+
+    THE BOOL TEST COMES FIRST AND IS NOT OPTIONAL. Python's
+    `isinstance(True, int)` is `True`, so `{"discriminating": true}` would
+    otherwise read as the count 1 and land a story in `checked` on the
+    strength of a boolean nobody meant as a number. A float, a string, a
+    negative int and an absent key are rejected for the same reason in a
+    milder form: each of them is a field somebody wrote in a shape this
+    partition cannot count, and inventing a number for it would be worse than
+    saying nothing was recorded.
+
+    That tolerance is also the phase's integration safety net. The writers of
+    this field live in other stories; if one of them ships a different field
+    name, every reading here degrades to "never recorded" -- visible in
+    `unrecorded`, never a fabricated zero in `blind`.
+    """
+    if vtype != "object":
+        return None
+    evidence = jq_index(verification, "evidence", STORY + ".verification")
+    if jq_type(evidence) != "object":
+        return None
+    count = jq_index(evidence, "discriminating", STORY + ".verification.evidence")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        return None
+    return count
+
+
 def verification_report(doc):
     """One document read answering the three questions ten separate jq
     programs used to open the tasks file for: which stories carry a visual
@@ -2657,8 +2694,9 @@ def verification_report(doc):
     `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
     above), and how the old `type != "object"` malformed scan partitions into
     the shapes normalize-verification actually repairs and the shapes it does
-    not -- plus one question no jq program ever asked: which stories declared
-    a verification nobody has looked at yet.
+    not -- plus two questions no jq program ever asked: which stories declared
+    a verification nobody has looked at yet, and which FINISHED stories left
+    evidence that their verification discriminated anything at all.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
@@ -2687,11 +2725,52 @@ def verification_report(doc):
     number, an array, a boolean. The UNION of the two, in document order, is
     exactly the id list the old `type != "object"` scan produced; only the
     split is new.
+
+    `discriminating` is the fourth key and the only one that judges the
+    EVIDENCE a finished run left behind, rather than the declaration it
+    started from. It partitions the COMPLETED stories -- and only those --
+    into `checked` (a verification whose recorded count of discriminating
+    verify segments is at least 1), `blind` (a recorded count of exactly 0)
+    and `unrecorded` (no usable count at all, see `_report_discriminating`),
+    plus a `fraction` of checked over checked-plus-blind. Scope is
+    `roadmap.py:_completed_story_ids`' and the argument is that function's,
+    not restated here: a verification judges work that was DONE, and
+    `cascade-skip` writes `status: "skipped"` without touching `verification`,
+    so an unscoped partition would count stories nobody could have verified.
+    Note where the status test has to live for that to hold -- outside the
+    `type == "object"` arm below, because a completed story with NO
+    verification is precisely the case `unrecorded` exists to name.
+
+    `unrecorded` and `blind` are different answers and conflating them would
+    be worse than the silence this key replaces. `blind` says we looked and
+    found nothing that discriminated; `unrecorded` says nothing was ever
+    written down. A legacy tasks file -- every story completed, no evidence
+    anywhere -- must not report a confident zero for exactly the runs issue
+    #136 calls unreadable. That is also why `unrecorded` stays OUT of
+    `fraction`'s denominator: a run with no evidence at all has no fraction,
+    so it answers `None`, while a run that recorded honest zeros answers `0`.
+    Those two numbers are what make this the first pipeline metric that MOVES
+    when verification actually improves.
+
+    AND THE NUMBER READS HIGH -- a ceiling on what was verified, never a
+    measurement of it. The count originates in `verify-probe`'s
+    `discriminates`, and `probe_verify` carries only assignments and `cd` into
+    each assertion's isolated shell: a verify that builds its fixture with
+    `mkdir`, `printf > file` or a subshell has every downstream assertion
+    failing because the fixture is MISSING, and a failing segment is scored
+    `discriminates: true`. So `checked` over-counts and `fraction` reads high.
+    Three phase-2 executors hit exactly this; the gap is written up in
+    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
+    and is deliberately open -- read the number with that caveat rather than
+    fixing the probe from here.
     """
     visual = []
     pending = []
     repairable = []
     unrepairable = []
+    checked = []
+    blind = []
+    unrecorded = []
     for story in _stories(doc):
         story_id = jq_index(story, "id", STORY)
         verification = jq_index(story, "verification", STORY)
@@ -2712,10 +2791,28 @@ def verification_report(doc):
                 )
         elif vtype != "null":
             (repairable if vtype == "string" else unrepairable).append(story_id)
+        # Outside the arm above on purpose: a completed story whose
+        # verification is absent or null never reaches it, and that story is
+        # exactly what `unrecorded` is for.
+        if jq_equal(jq_index(story, "status", STORY), "completed"):
+            count = _report_discriminating(verification, vtype)
+            if count is None:
+                unrecorded.append(story_id)
+            elif count >= 1:
+                checked.append(story_id)
+            else:
+                blind.append(story_id)
+    denominator = len(checked) + len(blind)
     return {
         "visual": visual,
         "pending": pending,
         "malformed": {"repairable": repairable, "unrepairable": unrepairable},
+        "discriminating": {
+            "checked": checked,
+            "blind": blind,
+            "unrecorded": unrecorded,
+            "fraction": len(checked) / denominator if denominator else None,
+        },
     }
 
 

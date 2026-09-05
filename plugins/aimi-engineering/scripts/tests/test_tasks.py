@@ -3884,7 +3884,12 @@ def test_verification_report_passes_a_string_project_through_unchanged():
 def test_verification_report_ignores_a_well_formed_non_visual_object():
     """`.strategy != "visual"` on an otherwise well-formed verification object
     is neither visual NOR malformed -- the object-typed branch of the old
-    scan's `type == "object"` guard, which this partition never reaches."""
+    scan's `type == "object"` guard, which this partition never reaches.
+
+    The assertion below is WHOLE-DICT on purpose, and it is the only one in
+    this file that is: it pins the report's top-level SHAPE, so a new key is
+    a deliberate edit here rather than something a key-scoped sibling would
+    let through unnoticed. The `discriminating` entry arrived that way."""
     doc = {
         "userStories": [
             {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
@@ -3897,6 +3902,15 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         # it -- the pending partition is scoped by status, never by strategy.
         "pending": ["US-001"],
         "malformed": {"repairable": [], "unrepairable": []},
+        # this story carries no `status` of its own, so it is not completed
+        # and enters none of the three lists -- and with an empty denominator
+        # the fraction is None rather than 0.
+        "discriminating": {
+            "checked": [],
+            "blind": [],
+            "unrecorded": [],
+            "fraction": None,
+        },
     }
 
 
@@ -4004,6 +4018,106 @@ def test_pending_stays_inside_the_object_branch_across_story_01s_corpus(fixture)
         assert verification.get("status") == "pending"
     malformed = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
     assert malformed.isdisjoint(report["pending"])
+
+
+def test_verification_report_partitions_completed_stories_by_discriminating_evidence():
+    """The fourth key, and the distinction it exists to hold: absent evidence
+    is `unrecorded`, a recorded 0 is `blind`, and the two are never the same
+    answer. `blind` says somebody looked and nothing discriminated;
+    `unrecorded` says nothing was ever written down -- which is what every
+    story predating the field reads as, and reporting a confident zero for it
+    would be a lie about exactly the runs issue #136 calls unreadable.
+
+    Scope is a story's OWN `status == "completed"`, the same rule and the
+    same reason as `roadmap.py:_completed_story_ids`: a verification judges
+    work that was done, and `cascade-skip` writes `status: "skipped"` without
+    touching `verification`. So the pending story below carries a perfectly
+    good count and enters no list at all.
+
+    Three shapes are checked by name because each is a way the count could be
+    faked rather than read. `{"discriminating": true}` is `unrecorded`, not
+    the count 1 -- Python says `isinstance(True, int)` and jq does not, and a
+    boolean nobody meant as a number must not reach `checked`. A float, a
+    string, a negative int, an absent key and a non-object `evidence` are
+    `unrecorded` too: that tolerance is what makes a field-name disagreement
+    between this reader and its writers surface as "nothing was recorded"
+    rather than as a fabricated zero. And `unrecorded` stays OUT of
+    `fraction`'s denominator, so a legacy file answers `None` where a run of
+    honest zeros answers `0`.
+    """
+    doc = {
+        "userStories": [
+            # completed, no verification at all -- the legacy shape
+            {"id": "US-001", "status": "completed"},
+            {
+                "id": "US-002",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 3}},
+            },
+            {
+                "id": "US-003",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 0}},
+            },
+            {
+                "id": "US-004",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": True}},
+            },
+            # a real count, but the work is not done -- in no list
+            {
+                "id": "US-005",
+                "status": "pending",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 7}},
+            },
+            {
+                "id": "US-006",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": "probed"},
+            },
+        ]
+    }
+    report = T.verification_report(doc)["discriminating"]
+    assert report["checked"] == ["US-002"]
+    assert report["blind"] == ["US-003"]
+    assert report["unrecorded"] == ["US-001", "US-004", "US-006"]
+    # one checked over one checked plus one blind; US-005 and the three
+    # unrecorded ids are outside the denominator entirely
+    assert report["fraction"] == 0.5
+    every_id = report["checked"] + report["blind"] + report["unrecorded"]
+    assert len(every_id) == len(set(every_id)) and "US-005" not in every_id
+
+    # every count that is not a plain non-negative integer reads as "never
+    # recorded" -- including an `evidence` that is not an object at all
+    def report_for(evidence):
+        story = {"id": "US-001", "status": "completed", "verification": {}}
+        if evidence is not ...:
+            story["verification"]["evidence"] = evidence
+        return T.verification_report({"userStories": [story]})["discriminating"]
+
+    for evidence in (
+        ...,
+        None,
+        "probed",
+        ["discriminating"],
+        {},
+        {"segments": 3},
+        {"discriminating": 1.0},
+        {"discriminating": "2"},
+        {"discriminating": -1},
+        {"discriminating": None},
+    ):
+        assert report_for(evidence) == {
+            "checked": [],
+            "blind": [],
+            "unrecorded": ["US-001"],
+            "fraction": None,
+        }, evidence
+
+    # the two fraction boundaries: nothing recorded has NO fraction, a run of
+    # honest zeros has a fraction of zero
+    assert report_for(...)["fraction"] is None
+    assert report_for({"discriminating": 0})["fraction"] == 0
 
 
 # ---------------------------------------------------------------------------

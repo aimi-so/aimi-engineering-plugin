@@ -5483,6 +5483,38 @@ test_verification_report_visual_and_malformed_shape() {
       "dependsOn": [],
       "notes": "",
       "verification": 42
+    },
+    {
+      "id": "US-004",
+      "title": "Completed with discriminating evidence",
+      "description": "A recorded count of 1 or more -- checked",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 4,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "passed", "evidence": {"discriminating": 2}}
+    },
+    {
+      "id": "US-005",
+      "title": "Completed with a recorded zero",
+      "description": "Somebody looked and nothing discriminated -- blind",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 5,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "passed", "evidence": {"discriminating": 0}}
+    },
+    {
+      "id": "US-006",
+      "title": "Completed with no verification at all",
+      "description": "Nothing was ever written down -- unrecorded, never a zero",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 6,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
     }
   ]
 }
@@ -5499,6 +5531,14 @@ EOF
   assert_eq "US-002" "$(printf '%s' "$output" | jq -r '.malformed.repairable[0]')" "verification-report: bare string is repairable"
   assert_eq "US-003" "$(printf '%s' "$output" | jq -r '.malformed.unrepairable[0]')" "verification-report: a number is NOT repairable"
 
+  # The fourth key. US-004/005/006 are the only completed stories, so the
+  # three pending ones above appear in none of the lists -- and US-006, whose
+  # verification is absent entirely, is unrecorded rather than a zero in blind.
+  assert_eq "US-004" "$(printf '%s' "$output" | jq -r '.discriminating.checked[0]')" "verification-report: a recorded count of 1 or more is checked"
+  assert_eq "US-005" "$(printf '%s' "$output" | jq -r '.discriminating.blind[0]')" "verification-report: a recorded zero is blind"
+  assert_eq '["US-006"]' "$(printf '%s' "$output" | jq -c '.discriminating.unrecorded')" "verification-report: absent evidence is unrecorded, and only completed stories are partitioned"
+  assert_eq "0.5" "$(printf '%s' "$output" | jq -r '.discriminating.fraction')" "verification-report: fraction is checked over checked-plus-blind, unrecorded excluded"
+
   rm -f "$fixture_file"
 }
 
@@ -5513,6 +5553,9 @@ test_verification_report_defaults_to_get_tasks_file() {
   output=$("$CLI" verification-report 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "verification-report: exits 0 with no --tasks-file"
   assert_eq "0" "$(printf '%s' "$output" | jq '.visual | length')" "verification-report: session tasks file has no visual stories"
+  # The empty-denominator boundary, read through `jq -r` so a JSON null is the
+  # string "null" rather than an empty string an absent key would also give.
+  assert_eq "null" "$(printf '%s' "$output" | jq -r '.discriminating.fraction')" "verification-report: no evidence anywhere has NO fraction, never a fraction of zero"
 }
 
 test_verification_report_rejects_a_path_outside_the_project() {
