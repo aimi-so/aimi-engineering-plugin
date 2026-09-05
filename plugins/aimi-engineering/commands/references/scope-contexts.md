@@ -274,22 +274,49 @@ first step that finds the artifact ends the search.
    it rather than letting it reach a search it cannot survive. A method token
    *not* followed by a slash is not an endpoint either — it would be searched
    whole, carry a space, and so is refused at write time as well.
-3. **Text in source.** Whatever is left is matched as a literal string across
-   tracked files, with documentation (`*.md`, `docs/`, `README*`), tests
-   (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with lines
-   that are nothing but a `TODO`/`FIXME`/`XXX`/`HACK` comment discarded. A
-   `Table` identity such as `notifications` resolves here. When the identity is
-   itself documentation (`docs/api/notifications.md`), the documentation
-   exclusions are bypassed for that entry — there the docs page *is* the
-   artifact.
+3. **Text in source.** Whatever is left is matched as a literal **whole word**
+   across tracked files, with documentation (`*.md`, `docs/`, `README*`), tests
+   (`*_test.*`, `tests/`, `__tests__/`) and `.aimi/` excluded, and with comment
+   lines set aside — a `TODO`/`FIXME`/`XXX`/`HACK` line discarded outright, any
+   other comment line held back as a mention (step 4). A `Table` identity such
+   as `notifications` resolves here.
+
+   Whole word rather than substring, and the difference decided a phase:
+   `baseRef` matched 37 lines that were every one of them `--arg baseRefName`
+   inside a forge adapter — a GitHub pull-request field with no relation to the
+   `metadata.baseRef` the phase had promised. A match must begin and end at a
+   non-word character, which every kind in the table above already does:
+   `parseList<T>`, `queue:emails` and a stripped `/api/notifications` all still
+   resolve.
+
+   When the identity is itself documentation (`docs/api/notifications.md`), the
+   exclusions are bypassed *except* for the four meta-documents that cite other
+   files by name — `README*`, `CHANGELOG*`, `CLAUDE.md`, `AGENTS.md` — which
+   match nearly any identity and announce work rather than being it. And a text
+   hit does not close a doc identity at all: it reports **`unconfirmed`**. Only
+   step 1's tracked path reports `verified` for one, because finding the string
+   `docs/api.md` proves that some file names the page, not that the page
+   exists.
+4. **Comment-only evidence.** When every line step 3 matched is a comment, the
+   identity reports **`unconfirmed`** rather than `verified` — the same verdict
+   a doc identity gets, for the same reason: a note describing an artifact is
+   not the artifact. One real code line outranks any number of comments, so a
+   phase that built the thing and also wrote about it still verifies at the
+   code. `#`, `--` and `*` count as comment openers only when followed by
+   whitespace, which is what keeps `#define parseThing(x)`, `--count;` and
+   `*ptr = parseThing();` reading as the code they are.
 
 This is guidance about verification *strength*, which is not judged. `roadmap-init`
 accepts a bare name such as `notifications` exactly as the table above
 prescribes, and the close check verifies it — via step 3 rather than step 1.
 Knowing which step an identity will take tells you how much a pass proves: a
 tracked path is direct evidence the artifact exists at that location, while a
-bare name is evidence that the name appears in non-documentation, non-test
-source. Neither `roadmap-init` nor the close check prefers one of those shapes
+bare name is evidence that the name appears, as a whole word, in
+non-documentation, non-test source. When every one of a bare name's matches
+lands in a file no story of that phase declared touching, the verdict is still
+`verified` and one advisory line goes to stderr — the verdict is usually right,
+and the doubt belongs where a reader can weigh it rather than in a refusal.
+Neither `roadmap-init` nor the close check prefers one of those shapes
 over the other, and at declaration time an author often cannot know the eventual
 path — a wrong guessed path fails at close for a reason nobody can debug.
 

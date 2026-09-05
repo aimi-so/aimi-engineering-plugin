@@ -150,6 +150,153 @@ def test_the_golden_corpus_actually_exercises_the_judge():
         assert fragment in reasons, fragment + " is never exercised by the corpus"
 
 
+# ---------------------------------------------------------------------------
+# The advisory channel: a creates path whose parent directory is not there
+# ---------------------------------------------------------------------------
+#
+# Every verdict roadmap.py could reach used to be fatal, so this pair of tests
+# is really about the SHAPE of the new channel as much as its rule: the warning
+# case must return an empty fatal list (a phase that declares a directory it is
+# about to create still writes), and the bare-verb case must produce no stderr
+# at all (a warning that fires on correct usage is one nobody reads).
+
+
+def _fresh_roadmap_path(tmp_path, feature="feat"):
+    """<root>/.aimi/tasks/<feature>/roadmap.json, the layout the writers pass.
+
+    The file itself is never created: roadmap-init judges its payload before it
+    writes, so the advisory has to work off a path that is not yet on disk.
+    """
+    path = tmp_path / ".aimi" / "tasks" / feature / "roadmap.json"
+    path.parent.mkdir(parents=True)
+    return str(path)
+
+
+def test_judge_phases_warns_when_a_creates_path_has_no_parent_directory(tmp_path, capsys):
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 2,
+            "creates": [R.contract_entry("src/api/handlers.py", "the request handlers")],
+            "needs": [],
+        }
+    ]
+
+    # The fatal list stays empty: this is an advisory, so the phase still writes.
+    assert R.judge_phases(phases, path) == []
+
+    err = capsys.readouterr().err
+    assert 'phase 2: creates entry #1 "src/api/handlers.py"' in err
+    assert '"src/api" does not exist under ' + str(tmp_path) in err
+
+
+def test_a_bare_verb_name_identity_warns_nothing(tmp_path, capsys):
+    """The three names phase 1 of this very roadmap declared in its own creates.
+
+    A verb name is not a broken path, and warning on one would put the advisory
+    on top of the correct usage rather than the mistake it is for.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 1,
+            "creates": [
+                R.contract_entry(name, "a new aimi-cli verb")
+                for name in ("list-known-gaps", "verify-probe", "measure-command-file")
+            ],
+            "needs": [],
+        }
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_existing_parent_directory_warns_nothing(tmp_path, capsys):
+    path = _fresh_roadmap_path(tmp_path)
+    (tmp_path / "src" / "api").mkdir(parents=True)
+    phases = [
+        {"id": 3, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_endpoints_globbed_parents_and_needs_entries_are_not_judged(tmp_path, capsys):
+    """Three shapes that carry a slash and still name no testable directory.
+
+    A route's slash belongs to the route; a globbed parent names no one literal
+    directory; and needs[] points at what ANOTHER phase produces, which is
+    absent by design until that phase runs.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {
+            "id": 4,
+            "creates": [
+                R.contract_entry("POST /api/v2/users", "the create-user route"),
+                R.contract_entry("db/*/migrations/*.sql", "the migrations"),
+            ],
+            "needs": [R.contract_entry("src/api/handlers.py", "from phase 2")],
+        }
+    ]
+    assert R.judge_phases(phases, path) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_the_advisory_is_silent_without_a_roadmap_path(tmp_path, capsys):
+    """op_judge_phases reads a phases array off stdin and knows no path.
+
+    It therefore has no root to measure against, and gets the pre-advisory
+    behaviour byte for byte rather than a guess at one.
+    """
+    phases = [
+        {"id": 5, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_a_roadmap_path_outside_any_dot_aimi_yields_no_root_and_no_advisory(tmp_path, capsys):
+    """None, not a directory some fixed number of levels up.
+
+    The anchor is the nearest ".aimi" ancestor precisely so a path of another
+    shape produces no advisory instead of one measured against the wrong tree.
+    """
+    stray = tmp_path / "elsewhere" / "roadmap.json"
+    stray.parent.mkdir(parents=True)
+    assert R._project_root_from_roadmap(str(stray)) is None
+    phases = [
+        {"id": 6, "creates": [R.contract_entry("src/api/handlers.py", "handlers")], "needs": []}
+    ]
+    assert R.judge_phases(phases, str(stray)) == []
+    assert capsys.readouterr().err == ""
+
+
+def test_an_entry_that_is_already_fatal_draws_no_second_advisory_line(tmp_path, capsys):
+    """A refusal and an advisory about the same entry is noise on top of a stop."""
+    path = _fresh_roadmap_path(tmp_path)
+    phases = [
+        {"id": 7, "creates": [R.contract_entry("/etc/nope/passwd", "absolute")], "needs": []}
+    ]
+    assert len(R.judge_phases(phases, path)) == 1
+    assert capsys.readouterr().err == ""
+
+
+def test_die_list_is_warn_list_plus_the_exit(tmp_path, capsys):
+    """The pair mirrors story_merge.py's: one renderer, two exit behaviours.
+
+    Asserted rather than described, because the whole point of mirroring the
+    shape is that the two channels cannot drift in what a diagnostic looks like.
+    """
+    with pytest.raises(SystemExit) as raised:
+        R._die_list("Error: header:", ["line one", "line two"])
+    assert raised.value.code == 1
+    fatal = capsys.readouterr().err
+
+    R.warn_list("Error: header:", ["line one", "line two"])
+    assert capsys.readouterr().err == fatal
+
+
 def test_the_mutation_rule_went_with_the_thing_that_made_it_necessary():
     """It refused an entry whose STORED identity differed from the SUBMITTED one.
 
@@ -652,6 +799,50 @@ def test_marker_line_recognises_the_comment_syntaxes_it_claims():
     assert not R.is_marker_line("// TODOS is a different word")
 
 
+def test_comment_line_is_the_wider_question_under_the_marker_one():
+    """Every marker line is a comment line; the reverse is what this rule adds.
+
+    The four markers were never the point -- they were the only comments anyone
+    had gotten around to naming. A comment with no marker at all describes the
+    artifact just as much as one with a TODO in it, and the caller keeps asking
+    the marker question first only because "the work is still owed" is a more
+    useful thing to print than "somebody wrote this name down".
+    """
+    for line in ("// TODO: x", "# FIXME x", "-- XXX x", " * HACK x", "<!-- TODO x"):
+        assert R.is_comment_line(line), line
+    for line in (
+        "# o simbolo parseThing e o que esta story descreve",
+        "// parseThing() is called from here",
+        "-- the notifications table, described",
+        "  * a block-comment continuation line",
+        "/* an opener */",
+        "<!-- an html note -->",
+    ):
+        assert R.is_comment_line(line), line
+
+
+def test_the_three_code_shapes_that_start_like_a_comment_are_not_swallowed():
+    """The whole cost of widening past the markers, paid here.
+
+    "#", "--" and "*" each open a comment in one language and a real declaration
+    or operator in another, so each is required to be followed by whitespace or
+    end of line. A "#define" that DECLARES the identity is exactly the artifact
+    this verb exists to find, and swallowing it would trade one false verdict
+    for another.
+    """
+    for line in (
+        "#define parseThing(x) ((x) + 1)",
+        "#include <stdio.h>",
+        "#ifdef parseThing",
+        "--count;",
+        "*ptr = parseThing();",
+        "#!/usr/bin/env python3",
+        "export function parseList<T>(raw: string): T[] {",
+        "CREATE TABLE notifications (id INTEGER PRIMARY KEY);",
+    ):
+        assert not R.is_comment_line(line), line
+
+
 def test_the_endpoint_strip_is_exactly_one_space_then_slash():
     """verify-creates strips a leading method token so the search hits the route
     real code writes. Two spaces is not that shape -- and the writer refuses it
@@ -666,10 +857,15 @@ def test_pathspec_magic_cannot_verify_a_phase_that_built_nothing():
     tracked file and any of these would have verified by PATH."""
     for label in ("glob-estrela", "glob-exclude"):
         assert _verdicts(label)[0]["method"] != "path", label
-    # The honest residue, recorded rather than papered over: a bare ":" still
-    # verifies by TEXT, because `git grep -F ':'` finds a colon in any source
-    # file. That is closed at WRITE time -- an identity must carry an
-    # alphanumeric -- not here. Do not "fix" the reader for it.
+    # The honest residue AS THE JQ LEFT IT, which is what the golden records: a
+    # bare ":" verified by TEXT, because `git grep -F ':'` finds a colon in any
+    # source file. The assertion stays because the golden must not be quietly
+    # regenerated -- but it is history now, not the current rule. Adding -w
+    # closed the residue as a side effect: a colon is not a word character, so
+    # `grep -F -w ':'` matches nothing, and test_the_word_boundary_also_closes_
+    # the_bare_colon_residue below measures that against a live repository.
+    # Do not "fix" the reader for it either way -- the write-time alphanumeric
+    # rule still owns the case, and -w is a second net under it.
     assert _verdicts("glob-doispontos")[0]["status"] == "verified"
     assert _verdicts("glob-doispontos")[0]["method"] == "text"
 
@@ -683,6 +879,328 @@ def test_one_verdict_per_declared_identity_in_declaration_order():
         "never_written",
     ]
     assert _verdicts("creates-vazio") == []
+
+
+# ---------------------------------------------------------------------------
+# verify-creates: the word boundary, the meta-document floor, and the advisory
+# ---------------------------------------------------------------------------
+#
+# THESE RUN LIVE, and that is the point. Everything above reads golden_from_jq
+# as recorded data, which cannot answer a question about matching that the jq
+# never asked. Each test here builds a real committed repository and puts the
+# real `git grep` behind the real verify_creates_one, because every rule in this
+# block is a claim about what git grep matches.
+
+
+def _git_repo(tmp_path, files):
+    """A COMMITTED git repository. verify-creates sees tracked files only, so an
+    uncommitted fixture would make every case answer "missing" for the wrong
+    reason."""
+    root = tmp_path / "repo"
+    # parents=True so a test can pass a SUBdirectory of tmp_path and get a second
+    # independent repository, which several below need.
+    root.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=str(root), check=True)
+    for name, body in files.items():
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=str(root), check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.email=t@example.invalid", "-c", "user.name=fixture",
+            "commit", "-qm", "fixture",
+        ],
+        cwd=str(root),
+        check=True,
+    )
+    return str(root)
+
+
+def test_a_bare_name_no_longer_verifies_inside_a_longer_identifier(tmp_path):
+    """The measurement this rule was written from, reproduced hermetically.
+
+    At phase 2's close the identity "baseRef" verified against
+    `--arg baseRefName` in the forge adapter -- a GitHub pull-request field with
+    nothing to do with the metadata.baseRef the phase had promised. The entire
+    match was a substring of a longer identifier.
+    """
+    repo = _git_repo(tmp_path, {"src/forge.sh": 'gh pr create --arg baseRefName "$b"\n'})
+    assert R.verify_creates_one(repo, "baseRef")["status"] == "missing"
+    # And it discriminates: the same tree, the same grep, only -w removed, is
+    # what used to answer "verified".
+    assert R._git(repo, "grep", "-n", "-I", "-F", "-e", "baseRef")[0] != ""
+    assert R._git(repo, "grep", "-n", "-I", "-F", "-w", "-e", "baseRef")[0] == ""
+
+
+def test_a_bare_name_that_stands_alone_still_verifies(tmp_path):
+    """-w narrows the false positive without dropping the true one. These are the
+    three bare verb identities phase 1 declared, in the shape aimi-cli.sh writes
+    them -- each bounded by a space and a ")", both non-word characters."""
+    repo = _git_repo(tmp_path, {
+        "scripts/aimi-cli.sh": (
+            '    list-known-gaps)       shift; cmd_list_known_gaps "$@" ;;\n'
+            '    verify-probe)          shift; cmd_verify_probe "$@" ;;\n'
+            '    measure-command-file)  shift; cmd_measure_command_file "$@" ;;\n'
+        ),
+    })
+    for identity in ("list-known-gaps", "verify-probe", "measure-command-file"):
+        verdict = R.verify_creates_one(repo, identity)
+        assert verdict["status"] == "verified", (identity, verdict)
+        assert verdict["method"] == "text", identity
+
+
+def test_the_word_boundary_also_closes_the_bare_colon_residue(tmp_path):
+    """A side effect, measured rather than assumed. The golden records ":"
+    verifying by text under the jq; a colon is not a word character, so -w
+    matches nothing and the residue closes here too. Recorded so the change is
+    not read later as an accident."""
+    repo = _git_repo(tmp_path, {"src/parse.ts": "const a: string = 'b';\n"})
+    assert R.verify_creates_one(repo, ":")["status"] == "missing"
+
+
+def test_a_doc_identity_with_a_tracked_file_still_verifies_by_path(tmp_path):
+    """The branch this rule deliberately leaves alone. A genuine documentation
+    phase whose page is committed closes exactly as before, at step 1, before
+    any text rule runs."""
+    verdict = R.verify_creates_one(_git_repo(tmp_path, {"docs/api.md": "# API\n"}), "docs/api.md")
+    assert verdict["status"] == "verified", verdict
+    assert verdict["method"] == "path", verdict
+
+
+def test_a_doc_identity_named_only_by_a_meta_document_does_not_close(tmp_path):
+    """README, CHANGELOG, CLAUDE.md and AGENTS.md exist to CITE other files by
+    name, so they match nearly any identity and prove nothing about it. They stay
+    excluded even for a doc identity -- which is precisely where the old
+    whole-list bypass used to send them.
+
+    The verdict is "missing", not "unconfirmed": the exclusion removes the only
+    line there was, so nothing reaches the text branch at all. "unconfirmed" is
+    what a doc identity gets when a non-meta file mentions it (the next test).
+    """
+    repo = _git_repo(tmp_path, {
+        "CHANGELOG.md": "- added docs/api.md\n",
+        "src/app.ts": "export const x = 1;\n",
+    })
+    verdict = R.verify_creates_one(repo, "docs/api.md")
+    assert verdict["status"] == "missing", verdict
+    assert "CHANGELOG.md:1" in verdict["evidence"], verdict
+    # Nested copies too: the anchored pattern alone would miss this one, which is
+    # why every meta-document is listed twice.
+    nested = _git_repo(tmp_path / "n", {"plugins/aimi/CLAUDE.md": "see docs/api.md\n"})
+    assert R.verify_creates_one(nested, "docs/api.md")["status"] == "missing"
+
+
+def test_a_doc_identity_confirmed_only_by_a_mention_is_unconfirmed(tmp_path):
+    """A source file naming the page is not the page. This used to answer
+    "verified"/"text" and close the phase on a table of contents."""
+    repo = _git_repo(tmp_path, {"src/nav.ts": 'export const help = "docs/api.md";\n'})
+    verdict = R.verify_creates_one(repo, "docs/api.md")
+    assert verdict["status"] == "unconfirmed", verdict
+    assert verdict["method"] == "text", verdict
+    assert "src/nav.ts:1" in verdict["evidence"], verdict
+    # The rest of the exclusion list stays OFF for a doc identity, which is what
+    # the bypass exists to give: a hit under docs/ IS the artifact.
+    under_docs = _git_repo(tmp_path / "d", {"docs/index.md": "see docs/api.md\n"})
+    assert R.verify_creates_one(under_docs, "docs/api.md")["status"] == "unconfirmed"
+
+
+def test_a_bare_name_verified_outside_every_declared_file_is_flagged(tmp_path):
+    """The second net, for the whole-word match -w cannot catch: a real match in
+    a file no story of the phase said it would touch. Advisory and never a
+    refusal -- a bare name legitimately resolves in code no story listed, so the
+    verdict stays "verified" and the doubt goes to stderr."""
+    repo = _git_repo(tmp_path, {
+        "src/forge.sh": "baseRef=$1\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    warnings = []
+    verdict = R.verify_creates_one(repo, "baseRef", {"src/owned.ts"}, warnings)
+    assert verdict["status"] == "verified", verdict
+    assert len(warnings) == 1, warnings
+    assert "src/forge.sh:1" in warnings[0], warnings
+
+    # Declared by a story: silent.
+    quiet = []
+    R.verify_creates_one(repo, "baseRef", {"src/forge.sh"}, quiet)
+    assert quiet == []
+    # Nothing declared: silent, because nobody measured what this phase declared.
+    unknown = []
+    R.verify_creates_one(repo, "baseRef", set(), unknown)
+    assert unknown == []
+    # A PATH identity is never flagged: it verified by path, not by a name.
+    pathy = []
+    R.verify_creates_one(repo, "src/forge.sh", {"src/owned.ts"}, pathy)
+    assert pathy == []
+    # And a caller that passes neither argument gets the old signature's answer
+    # with nothing on stderr.
+    assert R.verify_creates_one(repo, "baseRef")["status"] == "verified"
+
+
+def test_bare_name_and_path_normalisation_are_exact_not_substring(tmp_path):
+    """The advisory compares paths. Substring containment is the defect this
+    whole rule exists to remove, so reintroducing it in the check that catches it
+    would be absurd."""
+    assert R.is_bare_name_identity("baseRef")
+    assert R.is_bare_name_identity("list-known-gaps")
+    assert not R.is_bare_name_identity("docs/api.md")
+    assert not R.is_bare_name_identity("roadmap.py")
+    assert not R.is_bare_name_identity("/api/notifications")
+    assert not R.is_bare_name_identity("")
+    assert R._norm_repo_path("./a/b.py") == "a/b.py"
+    assert R._norm_repo_path("  c/d/  ") == "c/d"
+
+
+def test_the_phase_files_come_from_the_phases_own_tasks_file(tmp_path):
+    """The advisory is only as good as this set, and an empty set turns it OFF --
+    so a path derivation that silently missed would disable the check rather than
+    fail it. That is the shape a test has to pin."""
+    feature_dir = tmp_path / "pipeline-audit"
+    (feature_dir / "phase-2-x").mkdir(parents=True)
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [
+            {"implementation": {"files": ["./a/b.py", "c/d/"]}},
+            {"implementation": {"files": ["e.py"]}},
+        ]}),
+        encoding="utf-8",
+    )
+    roadmap_path = str(feature_dir / "roadmap.json")
+    doc = {"feature": "pipeline-audit"}
+    assert R._phase_declared_files(roadmap_path, doc, {"id": 2, "dir": "phase-2-x"}) == {
+        "a/b.py", "c/d", "e.py",
+    }
+    # No tasks file, and no feature slug: empty both times, which silences the
+    # advisory instead of firing it at a phase nobody expanded.
+    assert R._phase_declared_files(roadmap_path, doc, {"id": 9, "dir": "phase-9"}) == set()
+    assert R._phase_declared_files(roadmap_path, {}, {"id": 2, "dir": "phase-2-x"}) == set()
+
+
+def test_the_advisory_reaches_stderr_and_leaves_stdout_parseable(tmp_path):
+    """The wiring, through the real process. Every caller of this verb parses
+    stdout as JSON, so an advisory written there would break the very report it
+    is trying to inform -- and a warning collected but never printed would be a
+    check that silently does nothing. Only running the op catches either."""
+    repo = _git_repo(tmp_path, {
+        "src/forge.sh": "baseRef=$1\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    feature_dir = tmp_path / "aimi" / "pipeline-audit"
+    (feature_dir / "phase-2-x").mkdir(parents=True)
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [{"implementation": {"files": ["src/owned.ts"]}}]}),
+        encoding="utf-8",
+    )
+    roadmap = feature_dir / "roadmap.json"
+    roadmap.write_text(
+        json.dumps({
+            "roadmapVersion": "2.0",
+            "feature": "pipeline-audit",
+            "phases": [{
+                "id": 2, "name": "P", "goal": "g", "slug": "p", "dir": "phase-2-x",
+                "status": "completed", "dependsOn": [],
+                "creates": [{"identity": "baseRef", "description": "d"}], "needs": [],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "roadmap.py"), "verify-creates",
+         "--roadmap", str(roadmap), "--phase", "2", "--dir", repo],
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    verdicts = json.loads(proc.stdout)
+    assert [v["status"] for v in verdicts] == ["verified"], verdicts
+    assert "no story" in proc.stderr, proc.stderr
+    assert "src/forge.sh:1" in proc.stderr, proc.stderr
+
+    # Declared by a story: the same run goes silent, so the advisory is
+    # discriminating rather than always-on.
+    (feature_dir / "phase-2-x" / "pipeline-audit-phase-2-tasks.json").write_text(
+        json.dumps({"userStories": [{"implementation": {"files": ["src/forge.sh"]}}]}),
+        encoding="utf-8",
+    )
+    quiet = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "roadmap.py"), "verify-creates",
+         "--roadmap", str(roadmap), "--phase", "2", "--dir", repo],
+        capture_output=True, text=True,
+    )
+    assert quiet.returncode == 0, quiet.stderr
+    assert quiet.stderr == "", quiet.stderr
+
+
+def test_a_comment_about_the_work_does_not_close_the_phase(tmp_path):
+    """THE DEFECT, reproduced from the tree it was measured against.
+
+    src/nota.py says the symbol is what the story describes and that it does not
+    exist here; before this rule that sentence verified parseThing by text, at
+    src/nota.py:1. It closed two verifications in phase 3 of this roadmap, both
+    times on comments an author had written to explain the very defect.
+    """
+    repo = _git_repo(tmp_path, {
+        "src/nota.py": "# o simbolo parseThing e o que esta story descreve, "
+                       "mas nao existe aqui\n",
+        "src/real.py": "def realThing():\n    return 1\n",
+    })
+    prose = R.verify_creates_one(repo, "parseThing")
+    assert prose["status"] == "unconfirmed", prose
+    assert prose["method"] == "text", prose
+    assert "src/nota.py:1" in prose["evidence"], prose
+    assert "not the artifact" in prose["evidence"], prose
+
+    # GUARDRAIL: real code on the same commit still verifies by text. A filter
+    # that took this with it would be too wide, and the six method=text cases in
+    # golden_from_jq say the same thing about the recorded corpus.
+    real = R.verify_creates_one(repo, "realThing")
+    assert real["status"] == "verified", real
+    assert real["method"] == "text", real
+
+
+def test_one_real_line_outranks_any_number_of_comments(tmp_path):
+    """The rule is about an identity whose ONLY evidence is prose. A phase that
+    both built the artifact and wrote about it is a phase that built it, and the
+    evidence names the code rather than whichever file sorted first."""
+    repo = _git_repo(tmp_path, {
+        "src/aaa_note.py": "# parseThing will live in parse.py\n",
+        "src/parse.py": "def parseThing():\n    return 1\n",
+    })
+    verdict = R.verify_creates_one(repo, "parseThing")
+    assert verdict["status"] == "verified", verdict
+    assert "src/parse.py:1" in verdict["evidence"], verdict
+
+
+def test_a_path_identity_never_reaches_the_comment_filter(tmp_path):
+    """GUARDRAIL: only the textual path narrows. Step 1 returns before any line
+    is read, so a tracked file whose every line is a comment still verifies --
+    the file IS the artifact, and nothing in it is being read as evidence."""
+    repo = _git_repo(tmp_path, {"src/notes.py": "# nothing but prose in here\n"})
+    verdict = R.verify_creates_one(repo, "src/notes.py")
+    assert verdict["status"] == "verified", verdict
+    assert verdict["method"] == "path", verdict
+
+
+def test_a_todo_still_outranks_an_ordinary_comment_in_the_report(tmp_path):
+    """The two questions are asked in order, and the order is the reason the
+    marker verdict survives this change. A TODO says the work is owed, which is
+    worth printing; demoting it to "mentioned" would lose that."""
+    repo = _git_repo(tmp_path, {"src/todo.ts": "// TODO: marker_only_symbol\n"})
+    verdict = R.verify_creates_one(repo, "marker_only_symbol")
+    assert verdict["status"] == "missing", verdict
+    assert "TODO/FIXME marker comment" in verdict["evidence"], verdict
+
+
+def test_a_comment_only_identity_is_not_flagged_by_the_bare_name_advisory(tmp_path):
+    """The advisory questions a "verified" verdict against nobody's file. An
+    unconfirmed one is already being reported as undelivered, so a second doubt
+    on top of it would only add noise to a line nobody disputes."""
+    repo = _git_repo(tmp_path, {
+        "src/nota.py": "# baseRef is described here and built nowhere\n",
+        "src/owned.ts": "export const y = 2;\n",
+    })
+    warnings = []
+    verdict = R.verify_creates_one(repo, "baseRef", {"src/owned.ts"}, warnings)
+    assert verdict["status"] == "unconfirmed", verdict
+    assert warnings == [], warnings
 
 
 # ---------------------------------------------------------------------------
@@ -1843,6 +2361,65 @@ def test_judge_phases_is_silent_on_a_clean_roadmap():
     assert result.stdout == ""
 
 
+def test_init_write_advises_on_a_missing_parent_and_writes_the_phase_anyway(tmp_path):
+    """The advisory end to end: judge_phases has the rule, this proves the wiring.
+
+    Both halves matter and neither is visible from the function alone -- that
+    init-write is the caller that hands over its own roadmap path, and that a
+    phase declaring a directory it is about to create still lands on disk.
+    """
+    path = _fresh_roadmap_path(tmp_path)
+    phases = json.dumps(
+        [
+            {
+                "id": 1,
+                "name": "one",
+                "goal": "build the api",
+                "slug": "",
+                "dir": "phase-1",
+                "status": "pending",
+                "dependsOn": [],
+                "creates": [R.contract_entry("src/api/handlers.py", "the handlers")],
+                "needs": [],
+                "claim": None,
+            }
+        ]
+    )
+    result = _run(["init-write", "--roadmap", path, "--feature", "feat"], stdin=phases)
+
+    assert result.returncode == 0
+    assert 'creates entry #1 "src/api/handlers.py"' in result.stderr
+    with open(path, encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["creates"][0]["identity"] == "src/api/handlers.py"
+
+
+def test_the_advisory_goes_to_stderr_so_the_json_report_on_stdout_still_parses(tmp_path):
+    """The report is a JSON document a caller parses; an advisory must not enter it."""
+    path = _fresh_roadmap_path(tmp_path, feature="other")
+    phases = json.dumps(
+        [
+            {
+                "id": 1,
+                "name": "one",
+                "goal": "build the api",
+                "slug": "",
+                "dir": "phase-1",
+                "status": "pending",
+                "dependsOn": [],
+                "creates": [R.contract_entry("src/api/handlers.py", "the handlers")],
+                "needs": [],
+                "claim": None,
+            }
+        ]
+    )
+    result = _run(["init-write", "--roadmap", path, "--feature", "other"], stdin=phases)
+
+    assert result.returncode == 0
+    assert result.stderr != ""
+    json.loads(result.stdout)
+
+
 def test_a_malformed_entry_stops_the_verb_with_one_stderr_line_and_no_traceback():
     """main() catches MalformedEntry and nothing else. The agent reading this
     stream needs a sentence naming the entry, not a Python stack -- and a
@@ -2609,3 +3186,410 @@ def test_the_three_readers_of_the_terminal_rule_agree():
     assert 'select((.status? // "pending") != "completed")]' not in source, (
         "the pre-#112 predicate is back: split-detect is counting skipped as pending again"
     )
+
+
+# ---------------------------------------------------------------------------
+# The completed gate reads the phase's own tasks file (issue #135)
+#
+# Before this, closing a phase checked that handoff.md existed on disk and
+# opened no tasks file at all. pipeline-audit's phase 1 reached "completed"
+# with all five of its stories still at verification.status "pending" and
+# nothing said a word -- the defect this roadmap reproduced in itself.
+#
+# Both sides are asserted throughout, and that is not padding: a gate that
+# only ever refuses would pass every refusal test here while wedging every
+# phase in the repository, which is a worse failure than the one it fixes.
+# ---------------------------------------------------------------------------
+
+_GATE_PHASE = {
+    "id": 1, "name": "P1", "goal": "g", "slug": "p1", "dir": "phase-1",
+    "status": "in_progress", "dependsOn": [], "branch": None, "notes": None,
+    "successCriteria": [], "creates": [], "needs": [], "areas": [], "claim": None,
+}
+
+
+def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feature="gate"):
+    """A roadmap with one in_progress phase, its own tasks file, and a handoff.
+
+    `tasks=False` writes no tasks file at all -- the shape every phase had
+    before this gate existed, and the one it must still close.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    phase_dir = os.path.join(feature_dir, "phase-1")
+    os.makedirs(phase_dir, exist_ok=True)
+
+    roadmap = {
+        "roadmapVersion": "2.0", "feature": feature,
+        "createdAt": "2020-01-01T00:00:00Z", "brainstormPath": None,
+        "phases": [dict(_GATE_PHASE)],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+
+    if tasks:
+        doc = {"userStories": stories}
+        if smells is not None:
+            doc["metadata"] = {"smellWarnings": smells}
+        with open(
+            os.path.join(phase_dir, feature + "-phase-1-tasks.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(doc, handle)
+    if handoff:
+        with open(os.path.join(phase_dir, "handoff.md"), "w", encoding="utf-8") as handle:
+            handle.write("# handoff\n")
+
+    return root, _fixture_env(base), feature
+
+
+def _close(root, env, feature="gate", force=False):
+    argv = ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-set-status",
+            "--feature", feature, "--phase", "1", "--status", "completed"]
+    if force:
+        argv.append("--force")
+    return subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=120, env=env)
+
+
+def _stored_status(root, feature="gate"):
+    path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)["phases"][0]["status"]
+
+
+def _story(sid, status):
+    return {"id": sid, "status": "completed", "verification": {"strategy": "test", "status": status}}
+
+
+def test_a_phase_nobody_judged_is_refused_and_every_pending_story_is_named(tmp_path):
+    """The refusal names each offending story rather than reporting a count: the
+    fix is per-story, so a count would send the reader back to the file to work
+    out which ones. The judged stories must NOT appear -- an error listing every
+    story in the phase names nothing."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed"),
+        _story("US-002", "pending"),
+        _story("US-003", "pending"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1, proc.stdout
+    assert proc.stdout == ""
+    assert "US-002" in proc.stderr and "US-003" in proc.stderr
+    assert "US-001" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress", "a refusal writes nothing"
+
+
+def test_a_phase_with_an_empty_pending_partition_closes_exactly_as_it_did(tmp_path):
+    """The side that must keep working, and the reason it is asserted at all:
+    without it this gate could wedge every phase in the repository and still
+    pass the refusal test above. Same stdout contract as before the gate."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed"),
+        _story("US-002", "failed"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"phase": 1, "from": "in_progress", "to": "completed"}
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_skipped_passes_because_it_records_that_somebody_looked(tmp_path):
+    """The distinction the gate is built on. `skipped` is what the story
+    executor is told to record when agent-browser is not installed; refusing it
+    would wedge every phase holding a visual story on a host without a browser,
+    which is a louder version of the failure this gate exists to fix."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "skipped")])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_story_that_declared_no_verification_never_enters_the_partition(tmp_path):
+    """Scoped to the object branch, so every phase whose stories predate the
+    field still closes. The partition counts what was declared and not judged,
+    never what was never declared."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-002", "status": "skipped"},
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_force_overrides_the_transition_graph_and_not_this_gate(tmp_path):
+    """The same reading --force already gets against the handoff precondition.
+    --force is the flag people reach for when a phase is stuck for an unrelated
+    reason; letting it silence this one would reopen the blind close through the
+    side door."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "pending")])
+    proc = _close(root, env, feature, force=True)
+    assert proc.returncode == 1
+    assert "US-001" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_the_handoff_precondition_still_reports_first(tmp_path):
+    """Order matters for the reader, not for correctness: the cheaper physical
+    check keeps its own wording, so every existing assertion about it still
+    describes what a caller sees."""
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "pending")], handoff=False)
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "no handoff.md found at" in proc.stderr
+    assert "US-001" not in proc.stderr
+
+
+def test_an_unacknowledged_verify_coverage_smell_blocks_the_close(tmp_path):
+    """The consumer that smell never had. story-merge has written it into
+    metadata.smellWarnings since issue #134's US-004 and nothing read it back --
+    a warning that reaches no decision is the same defect as an unjudged
+    verification wearing a different name."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_story("US-001", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-001",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "verify-coverage" in proc.stderr and "US-001" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_only_the_json_literal_true_acknowledges_a_smell(tmp_path):
+    """An acknowledgement that can be produced by accident acknowledges nothing,
+    so the check is `is not True` rather than falsiness. Every near-miss below
+    leaves the entry unacknowledged; only `true` clears it."""
+    for value in ("true", 1, [], {"acknowledged": True}, "yes"):
+        assert R._unacknowledged_verify_coverage(
+            {"metadata": {"smellWarnings": [
+                {"type": "verify-coverage", "storyId": "US-001", "acknowledged": value}
+            ]}}
+        ), repr(value)
+    assert R._unacknowledged_verify_coverage(
+        {"metadata": {"smellWarnings": [
+            {"type": "verify-coverage", "storyId": "US-001", "acknowledged": True}
+        ]}}
+    ) == []
+    # A sibling smell of another type is never this gate's business.
+    assert R._unacknowledged_verify_coverage(
+        {"metadata": {"smellWarnings": [{"type": "orphan-symbol", "storyId": "US-001"}]}}
+    ) == []
+    # And an absent or wrongly-shaped field reads as no smells, never an error:
+    # story-merge writes it only when it found something.
+    for doc in ({}, {"metadata": None}, {"metadata": {}}, {"metadata": {"smellWarnings": "x"}}):
+        assert R._unacknowledged_verify_coverage(doc) == []
+
+
+def test_an_acknowledged_smell_lets_the_phase_close(tmp_path):
+    """The other side of the same predicate, for the same reason as the pending
+    partition's: a gate with no way through is not a gate."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_story("US-001", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-001",
+            "commands": ["bun run typecheck"], "acknowledged": True,
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+@pytest.mark.parametrize("write_tasks,body", [
+    (False, None),
+    (True, "{ not json"),
+    (True, "null"),
+    (True, '{"userStories": "not a list"}'),
+])
+def test_the_gate_degrades_to_no_refusal_when_it_cannot_measure(tmp_path, write_tasks, body):
+    """Every unreadable shape closes, and that direction is deliberate. A phase
+    /aimi:plan has not expanded, a split phase whose stories live in sibling
+    files this name does not reach, a document that will not parse -- in none of
+    them has anybody MEASURED that a verification went unjudged, and a gate that
+    refuses on an unknown is one people learn to route around."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+    if write_tasks:
+        path = os.path.join(
+            root, ".aimi", "tasks", feature, "phase-1", feature + "-phase-1-tasks.json"
+        )
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_roadmap_with_no_feature_slug_builds_no_path_to_miss_against():
+    """_phase_tasks_path returns None rather than a name nothing writes. A path
+    with an empty component would always miss, and a gate that always misses is
+    off while looking like it is on."""
+    phase = dict(_GATE_PHASE)
+    assert R._phase_tasks_path("/f/roadmap.json", {"feature": "gate"}, phase) == (
+        "/f/phase-1/gate-phase-1-tasks.json"
+    )
+    for doc in ({}, {"feature": ""}, {"feature": None}, {"feature": 7}, []):
+        assert R._phase_tasks_path("/f/roadmap.json", doc, phase) is None, repr(doc)
+
+
+def test_the_pending_partition_is_tasks_pys_and_is_not_recomputed_here(tmp_path):
+    """The rule belongs to tasks.json and lives in tasks.py; a second copy here
+    is the "second opinion" this module's header forbids. Asserted by running
+    both over one adversarial document and requiring them to name the same
+    stories -- a re-implementation would have to reproduce every shape below,
+    including the near-misses ("Pending", a null status, a string verification,
+    no verification at all) that are exactly what a second copy gets wrong.
+    """
+    import tasks as T
+
+    stories = [
+        {"id": "US-001", "status": "completed", "verification": {"status": "pending"}},
+        {"id": "US-002", "status": "completed", "verification": {"status": "Pending"}},
+        {"id": "US-003", "status": "completed", "verification": {"status": None}},
+        {"id": "US-004", "status": "completed", "verification": "pending"},
+        {"id": "US-005", "status": "completed"},
+        {"id": "US-006", "status": "completed",
+         "verification": {"strategy": "visual", "status": "pending"}},
+    ]
+    assert T.verification_report({"userStories": stories})["pending"] == ["US-001", "US-006"]
+
+    root, _env, feature = _gate_fixture(tmp_path, stories)
+    roadmap_path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    tasks_path, lines = R._completed_gate_refusals(roadmap_path, doc, 1)
+    assert [line.strip().split(":", 1)[0] for line in lines] == ["US-001", "US-006"]
+    assert tasks_path.endswith(feature + "-phase-1-tasks.json")
+
+
+# ---------------------------------------------------------------------------
+# The gate asks only about work that was done
+#
+# cascade-skip writes {status: "skipped", notes: ...} and never touches
+# verification.status, so every story it skips keeps the "pending" it was born
+# with. Skipped is terminal, so count-pending reaches zero and the phase tries
+# to close -- and an unscoped gate refuses, which means any phase carrying one
+# failed story could never be closed. The failure path is the last place that
+# can afford a new trap, so the scope is asserted from both ends here.
+# ---------------------------------------------------------------------------
+
+
+def _cascade_skipped(sid, dep):
+    """What cascade-skip actually leaves behind, copied from a real run rather
+    than imagined: the story status moves, the verification status does not."""
+    return {
+        "id": sid, "status": "skipped", "dependsOn": [dep],
+        "notes": "Skipped: dependency failed - " + dep,
+        "verification": {"strategy": "test", "status": "pending"},
+    }
+
+
+def test_a_cascade_skipped_story_does_not_wedge_the_phase(tmp_path):
+    """THE REGRESSION THIS SECTION EXISTS FOR. Fails against the first cut of
+    this gate, which refused any non-empty pending partition: the phase below
+    is the ordinary shape of a phase that had a failure, and it must still be
+    closeable."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        {"id": "US-001", "status": "failed",
+         "verification": {"strategy": "test", "status": "failed"}},
+        _cascade_skipped("US-002", "US-001"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_the_genuine_pending_still_blocks_beside_a_cascade_skipped_one(tmp_path):
+    """The discrimination that makes the test above mean something. One story
+    completed and unjudged, one skipped and unjudged, in ONE file: the refusal
+    must name the first and not the second. A scope that had merely been
+    loosened into "any pending is fine" passes the test above and fails here."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "pending"),
+        _cascade_skipped("US-002", "US-003"),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-001" in proc.stderr
+    assert "US-002" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+@pytest.mark.parametrize("status", ["skipped", "failed", "in_progress", "pending", None])
+def test_no_story_but_a_completed_one_is_ever_asked_for_a_verdict(tmp_path, status):
+    """The scope stated as a rule rather than as one case. A verification judges
+    work that was done, so a story that did not complete -- for any reason, or
+    with no status recorded at all -- is never what this gate is about."""
+    story = {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}}
+    if status is not None:
+        story["status"] = status
+    root, env, feature = _gate_fixture(tmp_path, [story])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_smell_against_a_skipped_story_does_not_wedge_it_either(tmp_path):
+    """Both predicates take the same scope. Fixing only the pending partition
+    would leave the identical wedge open for a phase whose skipped story also
+    carries a smell -- the same bug, half fixed."""
+    root, env, feature = _gate_fixture(
+        tmp_path,
+        [_cascade_skipped("US-002", "US-001")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+
+    # And the same smell against a story that DID complete still blocks.
+    root, env, feature = _gate_fixture(
+        tmp_path / "second",
+        [_story("US-002", "passed")],
+        smells=[{
+            "type": "verify-coverage", "storyId": "US-002",
+            "commands": ["bun run typecheck"],
+            "message": "asserts a command implementation.verify does not run",
+        }],
+    )
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1
+    assert "US-002" in proc.stderr
+
+
+def test_completed_story_ids_reads_the_shapes_story_statuses_reads():
+    """Same shape handling as _story_statuses, degrading rather than raising --
+    an id list this could not build must mean "ask nobody for a verdict", never
+    a crash inside a verb that is holding a lock."""
+    assert R._completed_story_ids({"userStories": [
+        {"id": "US-001", "status": "completed"},
+        {"id": "US-002", "status": "skipped"},
+        None,
+        {"id": "US-003"},
+    ]}) == ["US-001"]
+    # userStories as an object yields its values, exactly as jq's .[] does.
+    assert R._completed_story_ids(
+        {"userStories": {"a": {"id": "US-001", "status": "completed"}}}
+    ) == ["US-001"]
+    for doc in ({}, {"userStories": None}, {"userStories": "x"}, [], None):
+        assert R._completed_story_ids(doc) == [], repr(doc)
+
+
+def test_an_unhashable_story_id_is_compared_rather_than_hashed():
+    """Ids come out of a document, so they need not be strings and need not be
+    hashable. The intersection uses jq's == -- the same comparison
+    verification_report matched the "pending" literal with -- so a hand-edited
+    list id refuses to close rather than raising TypeError inside the lock."""
+    import tasks as T
+
+    doc = {"userStories": [{"id": ["US-001"], "status": "completed",
+                            "verification": {"status": "pending"}}]}
+    assert T.verification_report(doc)["pending"] == [["US-001"]]
+    assert R._completed_story_ids(doc) == [["US-001"]]

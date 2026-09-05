@@ -24,6 +24,7 @@ set -uo pipefail
 #   - Contract Validation Tests (US-003)
 #   - verify-creates Tests (US-001)
 #   - Phase Completion Tests (US-011)
+#   - write-review Tests (phase 3 US-009)
 #   - Detect Forge Tests (US-001)
 #   - Forge Contract Tests (US-002)
 #   - forge-auth-status / forge-repo-info Tests (US-003)
@@ -2095,9 +2096,17 @@ test_roadmap_amend_phase_partial_merge() {
   # creates KEEPS _forge_account_override: phases 3 and 4 both need it, so
   # dropping it here is an orphan refusal, not a merge. Adding beside it is the
   # amendment shape this assertion is about.
+  # STDOUT ONLY here, unlike the 2>&1 captures around it, and the difference is
+  # load-bearing rather than a style slip: this assertion parses the report as
+  # JSON, and roadmap-amend-phase writes non-fatal advisories to stderr on a
+  # SUCCESSFUL write -- the missing-parent-directory line judge_phases emits
+  # (cli/ does not exist in this fixture), and the handoff advisory beside it.
+  # Folding either into the stream fed to jq turns a passing amend into
+  # "parse error: Invalid numeric literal". The captures that keep 2>&1 are the
+  # ones asserting on a refusal's text, where stderr IS the subject.
   output=$(jq -n '{creates: [{"identity": "_forge_account_override", "description": "the override"}, {"identity": "cli/z.sh", "description": "a new one"}],
                    needs: [{"identity": "forge/base.sh", "description": "the base adapter"}]}' \
-    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "roadmap-amend-phase merge: contract-list amend exits 0"
   assert_eq '["creates","needs"]' "$(printf '%s' "$output" | jq -c '.amended')" \
     "roadmap-amend-phase merge: amended names only amendable fields, never the __mk* scratch"
@@ -3689,6 +3698,178 @@ test_roadmap_write_handoff_enables_validate_contracts_delivery() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+# ---------------------------------------------------------------------------
+# write-review Tests (phase 3 US-009)
+# ---------------------------------------------------------------------------
+# The verb exists because a design review that lives only in the transcript of
+# the session that produced it is not a review. So the assertion that matters
+# is not "the command exited 0" -- it is "write in one invocation, read in a
+# SECOND one, get the same bytes back", which is what a later session, a later
+# reader and a PR citation all actually do.
+
+# Remove only this suite's own review files, never the whole directory: a real
+# project's .aimi/reviews/ holds reviews a developer wants to keep, and the
+# tests run in whatever tree the suite was started from.
+_wr_cleanup() {
+  local feature="$1"
+  rm -f "$AIMI_DIR/reviews/${feature}-phase-"*.md
+  rmdir "$AIMI_DIR/reviews" 2>/dev/null || true
+}
+
+test_write_review_survives_the_session() {
+  echo ""
+  echo "=== write-review: written in one invocation, read back whole in another ==="
+
+  local feature="wr-roundtrip"
+  _wr_cleanup "$feature"
+
+  # A review's own markdown, including the two constructs the handoff writer's
+  # sanitizer would strip. Here they are content: a review that cannot quote
+  # code is not worth persisting.
+  local md
+  md=$(printf '# Review of phase 3\n\nThe hot path is fine:\n\n```bash\nprintf %%s "$body" > "$tmp"\n```\n\nSee `cmd_write_review` for the rest.')
+
+  local output exit_code
+  output=$(printf '%s' "$md" | "$CLI" write-review --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review: exits 0"
+
+  local review_path reported_path
+  review_path="$AIMI_DIR/reviews/${feature}-phase-3.md"
+  reported_path=$(printf '%s' "$output" | jq -r '.review')
+  assert_contains "$review_path" "$reported_path" "write-review: reports the review path it wrote"
+  assert_eq "true" "$([ -f "$review_path" ] && echo true || echo false)" "write-review: the review exists on disk"
+
+  # THE story's assertion: a separate process reads back what a prior process
+  # wrote. Compared whole rather than by substring -- a substring match passes
+  # against a writer that dropped everything else.
+  local readback
+  readback=$(cat "$review_path")
+  assert_eq "$md" "$readback" "write-review: the second invocation reads back the same content"
+
+  # Named separately from the whole-content compare above so a future change
+  # that loosens that compare cannot silently start sanitizing a review body.
+  assert_contains '`cmd_write_review`' "$readback" "write-review: backticks and code fences are stored verbatim"
+
+  # Re-reviewing a phase replaces the file rather than appending to it.
+  printf '# Second look\n' | "$CLI" write-review --feature "$feature" --phase 3 >/dev/null
+  local rewritten
+  rewritten=$(cat "$review_path")
+  assert_eq "# Second look" "$rewritten" "write-review: a re-run replaces the review instead of appending"
+
+  _wr_cleanup "$feature"
+}
+
+test_write_review_refuses_before_it_writes() {
+  echo ""
+  echo "=== write-review: every refusal happens before anything reaches disk ==="
+
+  local feature="wr-refusals"
+  _wr_cleanup "$feature"
+
+  local out exit_code
+  out=$(printf 'x\n' | "$CLI" write-review --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses --phase without --feature (a mixed pair, not flat mode)"
+  assert_contains "must be given together" "$out" "write-review: says why --phase alone was refused"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses --feature without --phase (the mirror mixture)"
+  assert_contains "must be given together" "$out" "write-review: says why --feature alone was refused"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase "one" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses a non-numeric --phase"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase 3 --oops 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses an unknown flag"
+
+  # A traversing feature never reaches validate_path_in_project: the feature
+  # regex is a single path component, so the escape dies one gate earlier. The
+  # assertion that discriminates is the second one -- an exit 1 alone would also
+  # be produced by a verb that wrote the file and then failed.
+  out=$(printf 'x\n' | "$CLI" write-review --feature "../../etc" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses a --feature that is not a single path component"
+  assert_eq "false" "$([ -d "$AIMI_DIR/reviews" ] && echo true || echo false)" "write-review: a refused feature created no reviews directory"
+
+  # Empty stdin is refused rather than written: a zero-byte review reads on disk
+  # exactly like a review nobody ever wrote.
+  out=$("$CLI" write-review --feature "$feature" --phase 3 </dev/null 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses empty stdin"
+  assert_contains "refusing to write an empty review" "$out" "write-review: says why it refused the empty body"
+  assert_eq "false" "$([ -f "$AIMI_DIR/reviews/${feature}-phase-3.md" ] && echo true || echo false)" "write-review: an empty body wrote no file"
+
+  _wr_cleanup "$feature"
+}
+
+# A flat (non-phase) execution has no roadmap and no feature/phase pair -- the
+# two validators write-review used to call unconditionally would die on both
+# being empty (issue: write-review names a review with no feature/phase pair).
+# Run in an isolated directory (mirrors test_init_session_file_flag_nested_path)
+# because the fix reads the SESSION's own active tasks file via
+# get_tasks_file(), which is state this suite's shared .aimi/ must not leak
+# into other tests, and vice versa.
+test_write_review_flat_mode_derives_from_tasks_basename() {
+  echo ""
+  echo "=== write-review: a flat execution (no --feature/--phase) derives its own name ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  local flat_file="$iso_dir/.aimi/tasks/2026-09-04-flat-tasks.json"
+  cat > "$flat_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Flat", "type": "feat", "branchName": "feat/flat", "maxConcurrency": 2},
+  "userStories": []
+}
+EOF
+
+  pushd "$iso_dir" >/dev/null
+  "$CLI" init-session --file "$flat_file" >/dev/null 2>&1
+
+  local output exit_code
+  output=$(printf '## Design Review\n\nok\n' | "$CLI" write-review 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "write-review flat mode: accepts an execution with neither flag"
+
+  # The path must come from the tasks file's OWN basename -- never an invented
+  # feature/phase pair, which would point the review at a phase that does not
+  # exist. find_aimi_root rewrites AIMI_DIR to an absolute path before any verb
+  # runs, so the reported path is absolute -- iso_dir is known here, so assert
+  # the exact value rather than the substring-contains style
+  # test_write_review_survives_the_session uses against the shared suite tree.
+  local absolute_path reported_path
+  absolute_path="$iso_dir/.aimi/reviews/2026-09-04-flat-tasks.md"
+  reported_path=$(printf '%s' "$output" | jq -r '.review')
+  assert_eq "$absolute_path" "$reported_path" "write-review flat mode: names the review after the active tasks file's basename"
+  assert_eq "true" "$([ -f "$absolute_path" ] && echo true || echo false)" "write-review flat mode: the review exists on disk"
+  assert_eq "$(printf '## Design Review\n\nok')" "$(cat "$absolute_path")" "write-review flat mode: reads back the same content in a second invocation"
+
+  rm -rf "$iso_dir"
+}
+
+test_write_review_registered_in_help_and_dispatcher() {
+  echo ""
+  echo "=== write-review: listed in help with its flags and routed by the dispatcher ==="
+
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "write-review [--feature <slug> --phase <N>]" "$help_out" "help: documents write-review with its optional flags"
+  assert_contains ".aimi/reviews/<slug>-phase-<N>.md" "$help_out" "help: names the phase-execution path write-review writes"
+  assert_contains ".aimi/reviews/<active tasks file's basename>.md" "$help_out" "help: names the flat-execution path write-review writes"
+
+  # The dispatcher must route it: an unrouted verb answers "Unknown command".
+  local dispatch_out
+  dispatch_out=$("$CLI" write-review --feature "wr-dispatch" --phase 1 </dev/null 2>&1) || true
+  if printf '%s' "$dispatch_out" | grep -q "Unknown command"; then
+    echo -e "${RED}✗${NC} dispatcher: write-review is not routed (answers 'Unknown command')"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} dispatcher: write-review is routed"
+    ((TESTS_PASSED++))
+  fi
+}
+
 # normalize-status and status field regression tests (US-003)
 # ============================================================================
 
@@ -4779,7 +4960,7 @@ test_verify_creates_row_f_doc_file_verified_by_path() {
 
 test_verify_creates_doc_identity_bypasses_exclusions() {
   echo ""
-  echo "=== verify-creates: a documentation identity searches docs too (exclusions bypassed for that entry) ==="
+  echo "=== verify-creates: a documentation identity searches docs too, but a mention does not close it ==="
 
   local dir out
   dir=$(_vc_repo "vc-doc-bypass")
@@ -4792,11 +4973,48 @@ test_verify_creates_doc_identity_bypasses_exclusions() {
   _vc_run "vc-doc-bypass" "$dir" "doc bypass"
   out="$VC_OUT"
 
-  assert_eq "verified" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc bypass: doc identity verifies from a docs hit"
+  # INVERTED DELIBERATELY, and the fixture is unchanged: the docs/ exclusion is
+  # still off for a doc identity -- that is what finding docs/plano.md at all
+  # proves, and it is what this test was written for. What changed is the
+  # verdict. A file writing the string "README.md" is a file that MENTIONS the
+  # page; only a tracked path proves the page. So the text branch answers
+  # "unconfirmed" here, and row F above still answers "verified" by path.
+  assert_eq "unconfirmed" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc bypass: a mention does not close a doc identity"
   assert_eq "text" "$(printf '%s' "$out" | jq -r '.[0].method')" "doc bypass: method is text"
   assert_contains "docs/plano.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "doc bypass: evidence names the docs hit"
 
   rm -rf ".aimi/tasks/vc-doc-bypass" "$dir"
+}
+
+test_verify_creates_meta_documents_stay_excluded_for_a_doc_identity() {
+  echo ""
+  echo "=== verify-creates: a doc identity named ONLY by a meta-document does not close ==="
+
+  # The floor under the bypass above. README, CHANGELOG, CLAUDE.md and AGENTS.md
+  # exist to CITE other files by name, so they match nearly any identity and
+  # announce work rather than being it. Both fixtures below would have closed
+  # this phase while the bypass turned the WHOLE exclusion list off.
+  #
+  # "missing" rather than "unconfirmed" proves BOTH patterns at once: the
+  # anchored CHANGELOG.md and, through the "*/" companion, the nested
+  # plugins/aimi/CLAUDE.md. Leave either one searchable and its hit reaches the
+  # text branch, and the verdict is "unconfirmed" instead.
+  local dir out
+  dir=$(_vc_repo "vc-doc-meta")
+  mkdir -p "$dir/plugins/aimi" "$dir/src"
+  echo "- adicionado docs/api.md" > "$dir/CHANGELOG.md"
+  echo "veja docs/api.md" > "$dir/plugins/aimi/CLAUDE.md"
+  echo "export const unrelated = 1;" > "$dir/src/index.ts"
+  _vc_commit "$dir"
+
+  _vc_roadmap "vc-doc-meta" 'docs/api.md|API reference'
+  _vc_run "vc-doc-meta" "$dir" "doc meta"
+  out="$VC_OUT"
+
+  assert_eq "missing" "$(printf '%s' "$out" | jq -r '.[0].status')" "doc meta: a meta-document mention is not the page"
+  assert_contains "CHANGELOG.md" "$(printf '%s' "$out" | jq -r '.[0].evidence')" "doc meta: evidence names what was found and rejected"
+
+  rm -rf ".aimi/tasks/vc-doc-meta" "$dir"
 }
 
 test_verify_creates_row_g_file_verified_by_path() {
@@ -8260,6 +8478,7 @@ main() {
   test_verify_creates_row_e_todo_marker_only_is_missing
   test_verify_creates_row_f_doc_file_verified_by_path
   test_verify_creates_doc_identity_bypasses_exclusions
+  test_verify_creates_meta_documents_stay_excluded_for_a_doc_identity
   test_verify_creates_row_g_file_verified_by_path
   test_verify_creates_row_h_tests_only_is_missing_and_git_never_128
   test_verify_creates_exclusions_use_long_form_only
@@ -8285,6 +8504,15 @@ main() {
   test_roadmap_set_status_verification_failed_reachable_and_retryable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
+
+  # write-review: the verb that puts a phase's design review on disk, so it
+  # outlives the session that produced it (phase 3 US-009).
+  echo ""
+  echo "--- write-review Tests (phase 3 US-009) ---"
+  test_write_review_survives_the_session
+  test_write_review_refuses_before_it_writes
+  test_write_review_flat_mode_derives_from_tasks_basename
+  test_write_review_registered_in_help_and_dispatcher
 
   # Detect Forge Tests (US-001) -- the foundational contract every later
   # forge-* verb in this phase consumes verbatim

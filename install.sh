@@ -191,6 +191,14 @@ translate_command_body() {
   # Replace Claude config dir references with OpenCode config dir
   body="${body//\$\{CLAUDE_CONFIG_DIR:-\$HOME\/.claude\}/\$\{OPENCODE_CONFIG_DIR:-\$HOME\/.config\/opencode\}}"
 
+  # Coverage re-verified (US-003): the single-line Per-Call Resolution form
+  # documented in commands/references/cli-path-resolution.md — the same two
+  # statements above, joined by `;` into one line — needs no new rule here.
+  # This function was sourced in isolation, fed that literal joined line, and
+  # returned it with only the CLAUDE_CONFIG_DIR token swapped and every other
+  # byte (including the `;`) unchanged: the substring rewrite above is
+  # already agnostic to where a statement boundary falls.
+
   # Replace plugin root variable with the OpenCode-side AIMI_PLUGIN_DIR
   # (CLAUDE_PLUGIN_ROOT is injected by Claude Code only; AIMI_PLUGIN_DIR is
   # exported by this installer for OpenCode.)

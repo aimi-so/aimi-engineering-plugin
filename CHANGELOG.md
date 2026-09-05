@@ -7,6 +7,425 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.124.0] - 2026-09-05
+
+One release consolidating the verification work that reached this branch across
+seven internal phase bumps. The organising defect: the pipeline had roughly
+fifteen validators checking the SHAPE of a plan and none checking its MEANING,
+so research figures that were wrong, verifies that could not fail, and criteria
+citing files that did not exist all passed every gate.
+
+Three bodies of work land together. Issue #134 gave `implementation.verify` a
+coverage contract. A 38-finding audit of the `brainstorm -> plan -> execute`
+pipeline was then fixed across four phases. Finally three phases closed the holes
+that audit's own execution exposed — several of which its runs walked into live.
+
+The finding that reorganised the rest: executors had been recording diagnoses in
+`.aimi/known-gaps/` since July and no plan had ever read one back. Every defect
+the audit found was already written there. That corpus is now an input to
+planning.
+
+### Added
+
+- **A normative rule for where new `commands/` instruction content belongs** —
+  `plugins/aimi-engineering/commands/references/context-budget.md`. It
+  classifies three shapes: a deterministic procedure (validation,
+  sanitization, path confinement, shell orchestration) belongs in a
+  `scripts/aimi-cli.sh` verb; a rare conditional judgment belongs in a
+  lazily-read `commands/references/` file; an always-needed "does this
+  apply?" decision belongs inline in the parent, or in a verb that returns a
+  verdict. It states the rule that makes the lazy-reference shape actually
+  pay for itself — the condition gating whether to open the reference must
+  be cheap and already live in the parent, or the file is read every time
+  regardless and the saving is zero — grounded against this repo's own
+  history rather than asserted abstractly, and cites
+  `plugins/aimi-engineering/CLAUDE.md`'s "What stays `jq`, and why" section
+  as precedent for the same organising test applied to a different surface.
+  `plugins/aimi-engineering/CLAUDE.md`'s Command Conventions section gains
+  one pointer bullet at it, mirroring the existing Skill Conventions size
+  bullet.
+
+- **`measure-command-file <path>`** — returns `{bytes, lines, prose_bytes,
+  fence_bytes, bash_fence_bytes, fences, bash_fences}` for a command file,
+  computed by the same fence parser `test-command-blocks.sh` already uses. There
+  is still exactly one fence parser in the tree; the verb sums what it reports
+  rather than parsing anything itself. A hand-rolled `awk` had been counting 45
+  bash fences in `plan.md` where the shared parser counts 50.
+- **`verify-probe <story-id>`** — splits a story's `implementation.verify` into
+  top-level segments and runs each in isolation, reporting
+  `{segment, exit, discriminates}`. Settings such as `set -euo pipefail` are
+  skipped, being configuration rather than assertions. Most verifies open with
+  `set -e`, so the script stops at its first failing assertion and every
+  assertion after it never runs — meaning a verify that exits non-zero can still
+  carry assertions that would have passed before a line was written. The
+  script-level pre-run says nothing about those.
+- **`list-known-gaps [--feature <slug>] [--since <date>]`** — reads
+  `.aimi/known-gaps/`, the corpus every story executor writes and no plan had
+  ever read back. It depends on no frontmatter: the files have none, and arrive
+  in three shapes (`KNOWN-GAP:` prefixed, `KNOWN-GAP (US-NNN):` prefixed, and
+  bare prose). A file whose feature cannot be resolved yields an entry with a
+  null feature rather than being dropped.
+- **`prior_planning_gaps` in `/aimi:plan`** — the gaps above are injected into
+  the story expander's prompt as a sanitized DATA block, tag-escaped exactly as
+  the existing `research_file` blocks are, and the expander gained a section
+  saying what to do with them.
+- **A `measure` block convention in the three research agents** — every
+  repository figure now arrives with the shell command that produced it and that
+  command's literal output; a figure with no block is marked `UNVERIFIED`.
+  `/aimi:plan` Phase 1.6 re-executes each block and escalates a divergence
+  through the conflict path that already existed. Because those blocks are
+  executed against agent-authored text, `commands/references/sanitization.md`
+  gained a normative read-only allowlist, matched on the leading word of every
+  pipeline segment, with shell constructs that could smuggle a command past it
+  refused as shapes before the allowlist is consulted.
+- **The question every new gate must answer**, in
+  `commands/references/context-budget.md`: does what this check measures bear on
+  what it claims? It carries the four measured cases that motivated it, and
+  documents the three distinct verification concepts (`acceptanceCriteria`,
+  `implementation.verify`, `verification.strategy`) without renaming any field.
+- **`test-command-size.sh`** — a per-file byte budget for `commands/**/*.md`,
+  enforced as a ratchet in both directions: a listed file that grows past its
+  budget fails, and one that shrinks below it fails too, so the commit that
+  shrinks a file must lower its number in the same diff.
+- **A pre-run of `implementation.verify`** in the story executor, before any
+  work exists. A zero exit means the check cannot tell the before-state from the
+  after-state; it warns and never blocks, because a story re-executed over
+  partial work can legitimately pass that early run.
+
+- **R16 in `validate_tasks`** — an `acceptanceCriteria` that anchors to
+  `path.ext:N` draws one warning line per story, naming every anchor found. It
+  warns and never errors: `errors` is what makes `validate-tasks` exit 1, and a
+  line number is fragile rather than invalid, so promoting it would refuse plans
+  that pass today. DesignSpec citations are excluded as part of the rule rather
+  than as a refinement of it — `CITATION` already captures an `L([0-9]+)` group
+  that the R2/R3/R4 walk binds and never reads, because a citation is validated
+  by its literal against its section. The one anchor already answered for by
+  content is exactly the one a naive matcher would fire on.
+- **R17 in `validate_tasks`** — an `implementation.files` entry whose parent
+  directory does not exist under the project root draws a warning. The parent is
+  what is checked, never the file: a story whose whole job is to create a file is
+  the ordinary case, and requiring the file would refuse every scaffolding story.
+  `implementation` is read only once `jq_type` says `object`. It sits below R16
+  for a measured reason — warnings are compared byte for byte by the golden
+  corpus, so a rule inserted above R16 would reorder the stderr of any document
+  tripping both, while one appended below can only add lines after the last
+  already recorded.
+- **`warn_list` in `roadmap.py`** — every verdict the file could reach was fatal,
+  13 `_die_list` call sites and nothing else, so a non-fatal check had no channel
+  to speak through. `warn_list` mirrors the pair `story_merge.py` already has
+  rather than inventing a second shape, and `_die_list` now calls it and adds the
+  exit, so the two cannot drift in how a diagnostic renders. All 13 fatal checks
+  are untouched.
+- **A missing-parent-directory advisory in `judge_phases`**, on both writers
+  (`roadmap-init` and `roadmap-amend-phase`). It fires only on identities that are
+  actually path-shaped: a bare verb name names no directory and is never judged, a
+  `METHOD /path` route's slash belongs to the route, and a globbed parent names no
+  one literal directory. The project root is the parent of the nearest `.aimi`
+  ancestor of the roadmap path both writers already hold, walked lexically because
+  a fresh `roadmap-init` runs before its own feature directory exists.
+- **`metadata.baseRef` in `/aimi:plan`** — the full 40-character SHA from
+  `git rev-parse HEAD`, read in the repository the file's stories target. A plan
+  is written against one tree and nothing in the file said which one, so a base
+  that had since moved was discovered mid-wave, by an executor, as a merge
+  conflict. The key enters all four enumerations the command maintains, because a
+  key named only in the first is silently dropped from every file a split run
+  produces. On the PROJECT axis each file carries its own repository's SHA — one
+  global value would be wrong for N-1 of them. A root that does not resolve omits
+  the key entirely: an absent key reads as "written before this field existed",
+  where `""` reads as a SHA.
+
+- **A `pending` partition in `verification-report`** — the ids of every story
+  whose `verification.status` is the literal `pending`. It counts the literal and
+  nothing else: a story carrying no `verification` object at all is absent rather
+  than counted, because "declared and unlooked-at" and "never declared" are
+  different states and a gate conflating them would refuse every legacy phase.
+  Each `.visual[]` entry now carries its own `status` as well.
+- **A refusal in `roadmap-set-status --status completed`** when that partition is
+  non-empty, naming each story, and a second when a `verify-coverage` smell
+  carries no `acknowledged` beside it. The rule it applies is narrower than the
+  partition: only a story whose own `status` is `completed` can be asked for a
+  verdict, because a verification judges work that was done. That is what keeps a
+  cascade-skipped story — which the orchestrator produces automatically, leaving
+  its verification pending — from wedging a phase that legitimately closes.
+- **`WORKTREE_PATH=` and `WORKTREE_BASE=` sentinels** from `create_worktree`, on
+  both the fresh and the reuse branch, with every human-readable line unchanged.
+  The base is read from the worktree's own `HEAD` rather than from the `--from`
+  argument, so it reports what the tree actually stands on. `from_branch` no
+  longer defaults to the literal `main`.
+- **`write-review`** — a phase's design review written atomically to
+  `.aimi/reviews/<feature>-phase-<N>.md`, guard-protected like `handoff.md`, so
+  it survives the session that produced it.
+- **A writer for the worktree-manager pointer.** `write_global_worktree_cache`
+  had been defined, validated, and called by nothing; the file on disk existed
+  only because somebody wrote it by hand. It is now written by `check-version
+  --fix`, `cleanup-versions` and `prime-cache`, and the 24 sites that read it
+  check the path exists rather than only that the variable is non-empty — a
+  dangling path is exactly what made one `merge-all` exit 0 having merged
+  nothing.
+
+- **`AIMI_DEV_DIR`, a layer-0 development override honored on any host.** Testing
+  a branch used to mean editing the installed cache in place, which is how a
+  temporary edit becomes the machine's plugin. The variable names a checkout to
+  run instead, validated exactly as `AIMI_PLUGIN_DIR` is — absolute, existing,
+  with an executable `scripts/aimi-cli.sh` — and refused when it points inside a
+  worktree. Every command resolving through it prints an unconditional stderr
+  line naming where it is running from: the defect being closed is a real install
+  silently shadowed, so the notice appears on the success path, not only on
+  failure. `check-version` answers a `dev-override` status and never `--fix`es,
+  because repointing the global cache at a development tree is the damage the
+  override exists to avoid. Unlike `AIMI_PLUGIN_DIR`, it is not skipped inside
+  Claude Code; that rule is unchanged.
+- **A byte-reduction claim must measure both sides.** `aimi-story-expander` now
+  requires a criterion asserting a saving of N bytes to emit the measurement in
+  its own `verify` — the previous size from `metadata.baseRef`, the current size
+  from disk, compared against N — and to fail rather than fall back when the base
+  cannot be resolved. `HEAD` is named as the wrong base for a reason worth
+  keeping: by the time the check runs the story's own edit is in the tree, so
+  `git show HEAD:<path>` can hand back the file the story just wrote and report a
+  reduction of zero as a pass. A reduction with no number is not a claim and is
+  rewritten to carry one.
+
+- **The executor returns the verify evidence it already computes.** The
+  `<result_json>` Result Contract gains an eighth key, `verify`, carrying the
+  real verify's exit, the step-1.5 pre-run's exit, how many segments
+  `verify-probe` returned and how many of them discriminated. Step 1.5 already
+  measured all four and wrote them to a throwaway file that died with the
+  worker. The object is omitted entirely when the story declares no verify —
+  that absence is itself the signal, and zero is never used to mean "not
+  measured", because zero is a real measured pass.
+- **`mark-complete` accepts an optional `--evidence` and persists it at
+  `verification.evidence`.** The write goes deep, through the same `jq_setpath`
+  writer `update-field` uses: the shallow `. + {…}` patch the four mark-* verbs
+  share would have replaced the whole `verification` object and destroyed
+  `strategy`, `status`, `url` and `expect`. Without the flag the verb applies
+  the identical `{"status": "completed"}` patch it always did and the crossing
+  stays silent, so the 14 recorded `mark-complete` cases in
+  `tests/golden_from_jq.json` are byte-unchanged. `/aimi:next` keeps calling it
+  flagless forever, which is what makes that no-op load-bearing rather than
+  tidy.
+- **`verification-report` names which completed stories discriminated.** A
+  fourth top-level key, `discriminating`, partitions completed stories into
+  `checked`, `blind` and `unrecorded` beside a null-safe `fraction`. Absent
+  evidence reads as `unrecorded`, never as `blind`: a story completed before the
+  field existed was not shown to have zero discriminating assertions — nothing
+  was recorded, and reporting a confident zero there would be a worse lie than
+  the silence it replaces. `unrecorded` stays outside the denominator, so a
+  legacy file answers `null` rather than `0`. The count is read as a plain
+  non-negative int with `bool` rejected first, since `isinstance(True, int)`.
+- **`metadata.pluginVersion` stamps the writing install into every tasks.json.**
+  Shared across split files rather than resolved per file: `branchName` and
+  `baseRef` are per-file because they name a repository, but a version names the
+  writer, and one `/aimi:plan` invocation has one writer however many
+  repositories it splits across. Omitted entirely when it cannot be resolved,
+  the same rule and the same reason as `baseRef`.
+
+### Changed
+
+- **The story executor runs `story.implementation.verify` as written**, from the
+  working directory step 0c established, and a non-zero exit fails the story. It
+  previously ran a hardcoded `npx tsc --noEmit`, which named a tool this
+  repository does not have.
+- **The story expander must make `verify` cover what the criteria assert.** A
+  criterion naming a check the verify never runs is the defect this closes.
+- **`/aimi:plan` requires the project's own typecheck**, rather than mandating
+  the literal string `Typecheck passes` regardless of whether the project has
+  such a command.
+- **The canonical single-line CLI resolution form is auto-approved by the hook**,
+  and `commands/references/cli-path-resolution.md` defines it once as Per-Call
+  Resolution.
+
+- **`get-story-context` projects `metadata`** onto the three keys a story
+  executor actually reads — `designBundle`, `designTokens`, `prototypePaths` —
+  derived by grepping the skill rather than from the schema's maximum. The whole
+  object had been travelling, `metadata.decisions` included.
+- **`implementation.approach` gained the reader it never had.** The field was
+  written by the expander and read by nothing in the executor; both
+  `<execution_flow>` blocks in the story-executor skill now carry it.
+
+- **`verify-creates` anchors its textual search on word boundaries.** Without
+  `-w`, the identity `baseRef` matched inside `--arg baseRefName` in a forge
+  adapter and closed a phase on a field it had nothing to do with. A doc identity
+  now keeps the meta-document exclusions (`README*`, `CHANGELOG*`, `CLAUDE.md`,
+  `AGENTS.md`) instead of disabling the whole list, and a `method=text` verdict
+  over one reports `unconfirmed` rather than `verified`.
+- **The block analysis scans `skills/**/SKILL.md`.** Those files are executed
+  exactly like a command file and had no static analysis at all; the scan finds
+  56 blocks there where it found none.
+- **`known_gap_entries` reads a `feature` declared in frontmatter**, with the
+  filename slug kept as the fallback for the corpus that has none. Scoped reads
+  went from 10 entries to 23 against the same corpus.
+- **The completion report names what stayed open** — the pending partition, the
+  review file's path, and creates that were found only by mention.
+
+- **A story's `implementation.verify` can resolve its own tasks file.**
+  `story-executor` now exports `TASKS_FILE_PATH` into the verify's environment
+  at both the pre-run and the real run, in both templates, so a verify needing
+  `metadata.baseRef` reads the file its own story lives in rather than the
+  shared `current-tasks` pointer a sibling split orchestrator may have
+  overwritten. The expander's byte-reduction shape uses it when set and
+  documents its fallback for a verify run by hand.
+
+- **`wave` is documented as derived, and rebuildable.** The schema now states
+  that `wave` comes from `dependsOn`, is informational, and is never consumed by
+  dispatch — measured: it is read zero times as a field outside `validate_waves`
+  itself, and `list-ready` never mentions it. A new `normalize-waves` verb
+  recomputes it beside the three existing `normalize-*`, importing
+  `compute_waves` from `story_merge.py` rather than restating the writer's rule.
+- **The static-analysis corpus reaches `agents/`.** `command_block_files()`
+  gained a third root, walked recursively like `commands/`. Measured by invoking
+  the extractor rather than by grep: 33 agent files, 8 carrying a bash fence,
+  all parsing clean — the block baseline gained no entries. The two files over
+  the size ceiling are grandfathered at their measured sizes.
+
+- **`/aimi:execute` carries the evidence from executor to record to report.**
+  The wave loop reads `result_json.verify` beside the `knownGaps` extraction and
+  passes it to the one `mark-complete` call already there, omitting the flag
+  entirely — never empty — when the worker recorded nothing. The completion
+  report prints `verification-evidence: discriminating=N completed=M`
+  unconditionally, plus a `closed unchecked` line when `checked` is zero and
+  completed stories exist. Printing only when the number is good would have
+  reproduced the exact defect this phase removes.
+
+### Fixed
+
+- **`story-merge` warns when a criterion asserts a check the verify never runs**
+  (`verify-coverage`), reporting the story ids it could not determine separately
+  from the ones it cleared.
+
+- **A story's `verify` could not exercise a verb the story itself added.**
+  Resolving `AIMI_CLI` from `~/.config/aimi/cli-path` points at the deployed
+  plugin copy, never the worktree, so a story changing a verb measured the old
+  one. Documented in the expander's rules as a named rule.
+
+- **A story's uncommitted work is no longer discarded.** When the tree is dirty
+  and every modified path is inside `implementation.files`, the orchestrator
+  commits on the executor's behalf instead of marking the story failed and
+  cascade-skipping its dependents. This was not hypothetical: it happened to a
+  story in this very phase.
+- **The worktree base is validated before an executor is spawned.** A missing
+  sentinel, or a base that is neither the container's `HEAD` nor an ancestor of
+  it, fails the story before any work is done rather than after.
+- **Direct writes to `golden_from_jq.json` are refused by the hook.** The corpus
+  is the evidence that the jq-to-Python port changed nothing; it may move by
+  decision, never by accident.
+
+- **A cache directory that is not a version can no longer win.** `sort -V` is a
+  total order over arbitrary strings, not a filter, so a sibling `1.124.0.bak`
+  outranked the real `1.124.0` and a directory named `zz` outranked `1.127.0`.
+  `_resolve_latest_cache_path` now requires three numeric segments before the
+  sort. The damage this was doing was not cosmetic: the recorded behaviour of
+  `cleanup-versions` was to delete the real `1.2.3` install and keep the
+  malformed directory beside it. The idiom moves across all seven surfaces that
+  carry it, the approval hook included, so no inline CLI resolution starts asking
+  for permission again.
+- **A comment about the work no longer counts as the work.** `verify-creates`
+  filtered only `TODO`/`FIXME`/`XXX`/`HACK` markers, so any other comment line
+  satisfied a `creates` entry — twice in the previous phase the prose written to
+  explain a defect became the evidence that the artifact existed. An identity
+  whose only textual evidence is a comment now returns `unconfirmed`, which
+  `execute.md` already treats as undelivered. The narrowness lives in the comment
+  opener rather than in a prose-versus-code test, so `#define parseThing(x)`,
+  `--count;` and `*ptr = f();` keep reading as code while `// f() is called here`
+  does not.
+- **`list-known-gaps` reads the corpus that exists.** A filename suffix became a
+  feature without anything checking that the feature existed, so the corpus
+  reported sixteen features of which the largest — thirty entries under `phase2`
+  — was not one, and `--feature` excluded every entry whose feature had not
+  resolved. A suffix is now believed only when it names a known feature, and the
+  filter also returns the unattributed: an entry with no feature is not another
+  feature's entry, and a planning defect with no owner is still one this plan can
+  repeat. Measured coverage of the real use path went from 26% to 82%.
+- **`open-pr` verifies the branch before switching to it, and says where the
+  title came from.** A tasks file naming a branch that was never executed used to
+  switch to it and fail further downstream with an unrelated error; the ref is now
+  checked with `show-ref --verify refs/heads/`, which — unlike `rev-parse` — also
+  refuses a same-named tag, and the command reports that the plan was generated
+  and never run. `metadata.title` is adopted only when the tasks file's
+  `branchName` matches the PR's branch, so an unrelated feature's file can no
+  longer title this pull request, and all three sources are named in the output.
+- **`verify-probe` stops writing into the caller's directory.** It replicated
+  variable assignments between segments but not `cd`, so a later `mkdir` landed in
+  the executor's own worktree — producing the class of defect the probe exists to
+  find. The `cd` is now carried in the prelude, as `<segment> || exit 1` rather
+  than bare: a `cd` that fails would otherwise leave everything after it running
+  in the caller's directory again, the same defect with nothing in the answer to
+  say the probe never moved. Refusing such a verify was considered and rejected on
+  a measurement — eleven of the plugin's own 258 verifies carry a `cd`, and they
+  are the elaborate ones, for which a refusal could only answer with an empty
+  list indistinguishable from "every assertion discriminates".
+- **The fifth validator runs.** `/aimi:plan`'s Phase 4.5 loop ran four of the five
+  `validate-*` verbs; `validate-waves` appeared nowhere in any command. Against a
+  story depending on another in the same declared wave, all four report
+  `valid: true` — only the fifth sees it. Its verdict is read from `.valid` and
+  not from the exit status, deliberately and with the reason written beside the
+  call: the verb always exits 0 by a contract the suite pins, so `|| exit 1` would
+  have read the zero and waved the file through.
+
+- **Creates Verification judges with the CLI the phase itself produced.** Each
+  participating repository's `verify-creates` call now prefers that repository's
+  own phase-container `aimi-cli.sh` when one exists and is executable, falling
+  back to the resolved CLI otherwise and naming the fallback on one stderr line.
+  A phase that changes the CLI's own logic was previously judged by whatever the
+  global cache had installed — which accepted a comment as evidence for an
+  artifact the changed code correctly located in real source.
+- **`aimi-cli.sh` resolves its own directory before `find_aimi_root` moves the
+  cwd.** `_aimi_script_py` resolved `${BASH_SOURCE[0]:-$0}` at call time, after
+  the cwd had already changed; a relative invocation from inside a nested
+  worktree therefore dispatched to the PARENT checkout's `tasks.py`,
+  `roadmap.py`, `models.py` and `story_merge.py`. A worktree testing its own
+  changed modules silently ran the unchanged ones. The directory is now captured
+  once at the top of the file, keeping the `cd`/`pwd` pair so a script reached
+  through a symlinked directory still resolves correctly.
+- **The KNOWN-GAP extractor matches both spellings executors actually write.**
+  The merge-time trailer grep in `execute.md` widened from `^KNOWN-GAP:` to
+  `^KNOWN-GAP( \([^)]+\))?:`, still anchored to line start. Measured against
+  the corpus: the old pattern matched 35 lines of 114 — the extractor was seeing
+  31% of what executors had written.
+- **`plan.md` reads the whole known-gaps corpus rather than the planned
+  feature's slice.** Phase 1.7b scoped its read by `--feature` whenever a slug
+  resolved. Measured by executing the block: a feature reached 20 of 134 entries
+  and left 114 invisible — nearly all of them describing the pipeline every
+  feature runs through, not the feature they happened to be filed under. A
+  feature with gaps of its own gains entries and loses none (pipeline-audit
+  113 → 134, its 113 a subset).
+
+- **`verify-probe` tells an assertion that has not passed yet from one that
+  never can.** `discriminates` was `status != 0`, so a segment that could never
+  pass — a check whose harness cannot observe what it claims — was reported as
+  discriminating, indistinguishable from a good assertion. The verb now accepts
+  `--previous-file`, the pre-run's own JSON, and names a segment `unsatisfiable`
+  when it failed in both runs. Nothing is inferred from a segment's text; only
+  failing twice separates a broken harness from unfinished work, and a lone run
+  answers exactly what it answered before.
+- **The wave notices an executor that goes idle without reporting.** The wave
+  loop's only fallback presumed the Task returned something usable. It now
+  crosses three facts it already captures — no `result_json`, HEAD unchanged
+  from the captured base, dirty worktree — and routes the story into the two
+  resolutions that already exist (commit rescue, or mark-failed plus
+  cascade-skip) rather than adding a third. The report names which one handled
+  it.
+- **`write-review` names a review file in a flat execution.** The verb required
+  `--feature` and `--phase` unconditionally, so a non-phase run had its design
+  review die with the session — issue #135's defect surviving outside phase
+  mode. A second naming mode, chosen by which flags arrive, derives the path
+  from the active tasks file's basename; exactly one flag is refused rather than
+  guessed.
+- **`open-pr`'s backend issue honors the branch gate the PR title already
+  had.** `metadata.title` is read once and gated against `branchName` for the PR
+  title only; the mismatch branch warned but left the variable populated, so the
+  backend issue could still be titled after an unrelated feature. The mismatch
+  branch now empties it, and the issue call falls back to this branch's own
+  derived title, announcing the source.
+
+### Known limitation
+
+- The fraction is a **ceiling on what was verified, not a measurement of it**.
+  Its input is `verify-probe`'s `discriminates`, and the probe's prelude carries
+  only assignments and `cd`, so an assertion that fails because its
+  `mkdir`/`printf`-built fixture never existed still scores as discriminating.
+  Recorded in the field's own doc comment and in
+  `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`.
+
 ## [1.123.2] - 2026-08-31
 
 ### Fixed

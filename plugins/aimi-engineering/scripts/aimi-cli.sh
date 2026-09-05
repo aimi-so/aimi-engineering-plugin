@@ -10,6 +10,29 @@ set -euo pipefail
 AIMI_DIR=".aimi"
 TASKS_DIR="$AIMI_DIR/tasks"
 
+# Absolute directory containing THIS script, resolved right here at the top --
+# before find_aimi_root (called later, from main()) ever changes the cwd.
+#
+# ${BASH_SOURCE[0]:-$0} can be a RELATIVE path: a caller inside a nested
+# worktree invoking `bash plugins/aimi-engineering/scripts/aimi-cli.sh` hands
+# bash that exact relative string. find_aimi_root then walks UP from the cwd
+# looking for .aimi/ -- and a worktree deliberately has no .aimi/ of its own
+# (see worktree-manager.sh's create_worktree), so the walk does not stop at
+# the worktree, it continues past it into the main checkout and cd's there.
+# Resolving "$(dirname "$script_path")" AFTER that cd, against the NEW cwd,
+# turns a relative BASH_SOURCE into a path rooted at the main checkout instead
+# of the worktree the caller actually stood in -- every sibling module this
+# script dispatches to would then be the main checkout's copy, silently.
+# Capturing the directory here, before find_aimi_root runs, resolves the
+# relative path against the invocation directory instead, which is the one
+# still guaranteed to be where the caller stood.
+#
+# `cd ... && pwd` (rather than a bare string join) is what keeps this correct
+# when the script is reached through a symlinked directory -- e.g. the plugin
+# cache path a Claude Code install resolves through -- since cd follows the
+# symlink and pwd then reports the real directory underneath it.
+_AIMI_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
 # ============================================================================
 # Utility Functions
 # ============================================================================
@@ -36,6 +59,14 @@ resolve_path() {
 find_aimi_root() {
   local dir
   dir=$(pwd)
+  # The directory the caller was standing in, captured BEFORE the cd below.
+  # verify-probe runs a story's verify segments here rather than at
+  # PROJECT_ROOT, because that is where the executor runs the verify itself:
+  # step 0c cds to WORKTREE_PATH (or PROJECT_PATH) and step 4 runs the verify
+  # from there. Probing at PROJECT_ROOT would measure the main checkout while
+  # the real run measures the worktree -- a probe that reports on a different
+  # tree than the check it is probing is worse than no probe.
+  AIMI_INVOCATION_DIR="$dir"
   while true; do
     if [ -d "$dir/.aimi" ]; then
       cd "$dir"
@@ -175,14 +206,12 @@ check_python3() {
 # for the roadmap verbs, story_merge.py for story-merge, tasks.py for the
 # tasks.json verbs, models.py for the models.json readers and their writer.
 #
-# Same ${BASH_SOURCE[0]:-$0} idiom cmd_version already uses to find plugin.json
-# one directory up. It has to be resolved rather than assumed because this file
-# is invoked through a cached path, through $AIMI_PLUGIN_DIR, and from a
-# worktree, and only its own location is reliable in all three.
+# Built on $_AIMI_SCRIPT_DIR, captured at the top of this file before
+# find_aimi_root can move the cwd -- see that assignment's own comment for why
+# resolving ${BASH_SOURCE[0]:-$0} HERE, at call time, would be too late: every
+# verb using this helper dispatches after find_aimi_root has already run.
 _aimi_script_py() {
-  local script_path
-  script_path="${BASH_SOURCE[0]:-$0}"
-  printf '%s/%s\n' "$(cd "$(dirname "$script_path")" && pwd)" "$1"
+  printf '%s/%s\n' "$_AIMI_SCRIPT_DIR" "$1"
 }
 
 # The fourteen roadmap call sites name their module through this, so none of
@@ -201,6 +230,16 @@ _aimi_tasks_py() {
 # Same, for the four models.json READER verbs.
 _aimi_models_py() {
   _aimi_script_py models.py
+}
+
+# Same again, for the one SHELL library that sits beside this script:
+# lib/extract-command-blocks.sh, the single fence parser measure-command-file
+# borrows from test-command-blocks.sh. _aimi_script_py's name says "py" but its
+# body only joins this script's own directory to a relative name, and
+# re-deriving that directory here is the exact duplication splitting the
+# resolver out was meant to stop.
+_aimi_blocks_lib() {
+  _aimi_script_py lib/extract-command-blocks.sh
 }
 
 # python3 for a models READER, or the verb's own documented fallback.
@@ -323,12 +362,40 @@ _extract_version_from_path() {
 # existence test on the first element is for -- `-e` for an ordinary path, `-L`
 # so a dangling symlink still counts as the match `ls -d` would have printed.
 #
-# The ORDERING is untouched: the same sed/sort -V/tail/cut comparator as before,
-# still keyed on each candidate's own version segment rather than on the whole
-# path. Every out-of-file copy of that idiom (the --help EXAMPLES block,
-# cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
+# The ORDERING is otherwise untouched: the same sed/sort -V/tail/cut comparator
+# as before, still keyed on each candidate's own version segment rather than on
+# the whole path. Every out-of-file copy of that idiom (the --help EXAMPLES
+# block, cli-path-resolution.md, review.md, validate-bug.md, resolve-pr-parallel's
 # _resolve-cli.sh, and the two literal patterns in hooks/auto-approve-cli.sh
 # that must match them) therefore still agrees with this function.
+#
+# A VERSION SEGMENT ONLY COUNTS WHEN IT LOOKS LIKE A VERSION, and that grep is
+# the newest line in the pipeline. `sort -V` is a total order over arbitrary
+# strings, not a filter: it happily ranks a directory that is not a version at
+# all, and ranks it ABOVE the real ones. Measured against the installed plugin
+# before this line existed -- a sibling directory named `1.124.0.bak` beside
+# `1.124.0` made check-version answer "latestVersion": "1.124.0.bak", and
+# `printf '1.124.0\n1.124.0.bak' | sort -V | tail -1` picks the `.bak` on its
+# own; a directory named `zz` beats `1.127.0` outright. Those names are not
+# hypothetical: a `cp -a` backup before an upgrade, an editor's leftover, a
+# half-extracted download all land right beside the versions in the same cache
+# entry. The damage is not only a wrong version STRING -- cmd_cleanup_versions
+# rm -rf's every directory this function does not pick, so the backup was kept
+# and the real install deleted. Two golden recordings show exactly that
+# (cv-versao-malformada-cc, clv-versao-malformada-cc, both now excused by name
+# in tests/test_version_cache.py's NUMERIC_VERSION_FILTER).
+#
+# The shape admitted is deliberately narrow -- three numeric segments and
+# nothing else, anchored at the start and terminated by the separator space the
+# sed above just inserted, so `1.124.0.bak` fails on the fourth segment rather
+# than passing on its first three. This plugin has only ever published plain
+# `major.minor.patch`, so nothing real is excluded; a pre-release suffix would
+# have to widen this and the six copies of it together.
+#
+# `grep` exits 1 when nothing matches, which under `set -o pipefail` is exactly
+# the empty-glob answer this function already documents: the `|| newest=""`
+# below catches it, and a cache holding no version-shaped directory reads as
+# "nothing installed" rather than as an abort.
 _resolve_latest_cache_path() {
   local config_dir="$1" suffix="$2"
   local -a candidates=()
@@ -340,6 +407,7 @@ _resolve_latest_cache_path() {
   newest=$(
     printf '%s\n' "${candidates[@]}" \
       | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+      | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " \
       | sort -V \
       | tail -1 \
       | cut -d' ' -f2-
@@ -508,6 +576,84 @@ _validate_plugin_dir() {
 # Detect if running inside Claude Code (CLAUDECODE=1 is set by Claude Code in every session)
 _is_claude_code_host() {
   [ "${CLAUDECODE:-}" = "1" ]
+}
+
+# Validate and resolve AIMI_DEV_DIR -- the LAYER 0 development override, ahead
+# of AIMI_PLUGIN_DIR and honored on EVERY host.
+#
+# Usage: dev_dir=$(_dev_dir_path) || <the value was invalid>
+#   Prints the stripped directory when the override is set and valid.
+#   Prints nothing and returns 0 when it is unset -- "no override" is a normal
+#   answer, not a failure.
+#   Prints one diagnostic to stderr and returns 1 when it is set and invalid.
+#
+# WHY THE CLAUDECODE GATE IS ABSENT, and why that asymmetry with
+# AIMI_PLUGIN_DIR is the point rather than an oversight. AIMI_PLUGIN_DIR names
+# where the compound-plugin converter INSTALLED the plugin, so inside Claude
+# Code -- which has an install of its own under the plugin cache -- honoring it
+# would let another host's install win, and _validate_cached_cli_path,
+# cmd_check_version, cmd_cleanup_versions and cmd_prime_cache all skip it for
+# that reason. AIMI_DEV_DIR names a tree the operator is DELIBERATELY testing.
+# A gate would make it work in exactly the host where nobody needs it and do
+# nothing in the one where the whole workflow lives, so it has none.
+#
+# IT NEVER `exit`s, and that is not a style choice: every caller reads it
+# through `$( )`, and an `exit` inside a command substitution kills the
+# SUBSHELL while the parent carries on with an empty value -- the silent
+# shadowing this override exists to make impossible. The refusal travels as an
+# exit status the caller must handle instead.
+#
+# The four validity checks are _validate_plugin_dir's regime, in its order,
+# with a fifth that AIMI_PLUGIN_DIR has no need of:
+#   1. absolute -- a RELATIVE value makes "$AIMI_DEV_DIR/scripts/aimi-cli.sh"
+#      resolve against the caller's CWD, handing execution to any repository
+#      that happens to ship an executable scripts/aimi-cli.sh of its own.
+#   2. the directory exists.
+#   3. scripts/aimi-cli.sh under it is executable -- an override that names a
+#      tree with no CLI in it is a typo, and answering "no override" for it
+#      would hide the typo behind the installed plugin.
+#   4/5. NOT under a `/.worktrees/` segment, checked on the given string and
+#      then on its symlink-resolved target -- the same refusal, in the same
+#      order and for the same reason, that write_global_cli_cache applies (see
+#      its header ~line 730): a worktree copy is ephemeral, and pointing a
+#      whole shell session at one leaves every later call at exit 127 once the
+#      worktree is cleaned up. The resolved check is what catches the shape
+#      that defeated the string check there -- a symlink into a worktree whose
+#      own name carries no `.worktrees/` segment -- and is best-effort in the
+#      same way: a path that cannot be resolved falls back to the string
+#      verdict rather than being refused.
+_dev_dir_path() {
+  if [ -z "${AIMI_DEV_DIR:-}" ]; then
+    return 0
+  fi
+  if [ "${AIMI_DEV_DIR#/}" = "$AIMI_DEV_DIR" ]; then
+    echo "Error: AIMI_DEV_DIR must be an absolute path, got: $AIMI_DEV_DIR" >&2
+    return 1
+  fi
+  if [ ! -d "$AIMI_DEV_DIR" ]; then
+    echo "Error: AIMI_DEV_DIR directory does not exist: $AIMI_DEV_DIR" >&2
+    return 1
+  fi
+  local dev_dir="${AIMI_DEV_DIR%/}"
+  if [ ! -x "$dev_dir/scripts/aimi-cli.sh" ]; then
+    echo "Error: AIMI_DEV_DIR/scripts/aimi-cli.sh is not executable: $dev_dir/scripts/aimi-cli.sh" >&2
+    return 1
+  fi
+  case "$dev_dir" in
+    */.worktrees/*)
+      echo "Error: AIMI_DEV_DIR must not name a git worktree copy (a path under .worktrees/ vanishes on cleanup): $dev_dir" >&2
+      return 1
+      ;;
+  esac
+  local resolved_dev=""
+  resolved_dev=$(resolve_path "$dev_dir" 2>/dev/null) || resolved_dev=""
+  case "$resolved_dev" in
+    */.worktrees/*)
+      echo "Error: AIMI_DEV_DIR resolves into a git worktree copy (a path under .worktrees/ vanishes on cleanup): $dev_dir -> $resolved_dev" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$dev_dir"
 }
 
 # Resolve the Aimi config directory (XDG-compliant, host-agnostic).
@@ -881,12 +1027,18 @@ write_global_worktree_cache() {
 # Exact twin of _validate_cached_cli_path immediately above -- same three
 # admission routes in the same order, same reason the versioned-cache arm's
 # own `return 0` must run before _validate_directory_source_identity's
-# equality check (and its jq call) ever does. NOTE, per this story's notes:
-# nothing in this CLI calls write_global_worktree_cache or
-# read_global_worktree_cache in production today (grep confirms it -- only
-# their own definitions, test-aimi-cli-fixtures.sh, and tests call them), so
-# this widening is symmetry for a reader with no writer yet, not an
-# end-to-end round trip.
+# equality check (and its jq call) ever does.
+#
+# THE WRITER THIS COMMENT USED TO SAY DID NOT EXIST NOW DOES. It said the
+# widening was "symmetry for a reader with no writer yet", and that was true
+# for as long as it stood: nothing called write_global_worktree_cache, so the
+# worktree-path file on disk existed only where somebody had written it by
+# hand -- which is how it came to name a version the cli-path had already
+# moved off. _persist_worktree_pointer_for below is the writer, and
+# cmd_check_version (on --fix), cmd_cleanup_versions and cmd_prime_cache are
+# the three verbs that call it, each one immediately beside its existing
+# write_global_cli_cache call so the two pointers cannot name different
+# installs.
 _validate_cached_worktree_path() {
   local cached_path="$1"
   local plugin_dir
@@ -927,6 +1079,80 @@ read_global_worktree_cache() {
   local cached_path
   cached_path=$(cat "$legacy_file" 2>/dev/null) || return 0
   _validate_cached_worktree_path "$cached_path"
+}
+
+# _worktree_manager_beside: the worktree-manager.sh that belongs to a given
+# aimi-cli.sh path. Prints it, or prints nothing -- always returns 0, like
+# every other helper in this family.
+#
+# The two scripts are fixed siblings inside one install root:
+#   <root>/scripts/aimi-cli.sh
+#   <root>/skills/git-worktree/scripts/worktree-manager.sh
+# so the manager is a pure function of the CLI path. That is the whole point.
+# The two global pointers used to be written by different things at different
+# times -- cli-path by this CLI, worktree-path by a human or by
+# cli-path-resolution.md's Layer 2 one-liner -- so they could name different
+# installs, and did: after a `check-version --fix` the cli-path moved to the
+# new version and the worktree-path stayed on the old one. Deriving the second
+# from the first at the moment the first is written is what makes that
+# impossible rather than unlikely.
+#
+# THE EXISTENCE TEST IS THE CONTRACT, not politeness. The failure this exists
+# to stop is a pointer that outlived the directory it named: the old version
+# was pruned, $WORKTREE_MGR became a path to nothing, and every guard around
+# it only asked whether the VARIABLE was empty. Refusing to persist a path
+# that is not there is the write-side half of that fix; the read-side half is
+# the `[ -x ]` check the command call sites now carry beside their `:?` guard.
+#
+# It also keeps this whole family invisible to an install that has no worktree
+# manager beside its CLI -- a fake cache entry in a test fixture, an OpenCode
+# plugin dir carrying only scripts/ -- which is why adding these calls changed
+# no recording in tests/golden_from_jq.json's version_cache_cases.
+_worktree_manager_beside() {
+  local cli_path="$1"
+  [ -n "$cli_path" ] || return 0
+  case "$cli_path" in
+    */scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  local candidate="${cli_path%/scripts/aimi-cli.sh}/skills/git-worktree/scripts/worktree-manager.sh"
+  [ -f "$candidate" ] || return 0
+  printf '%s\n' "$candidate"
+}
+
+# _persist_worktree_pointer_for: write the global worktree-path pointer for the
+# install that <cli_path> belongs to. Silent no-op when that install carries no
+# manager beside its CLI.
+#
+# NEVER FAILS ITS CALLER. Each of the three is a verb whose own answer -- the
+# JSON object it prints and the exit status it returns -- is a contract, and
+# none of them should change because a SECONDARY pointer could not be written.
+# So the write's own non-zero (a config dir that cannot be created, a read-only
+# aimi-config) is swallowed here, having already printed its own line on
+# stderr from write_global_worktree_cache.
+#
+# The already-current short-circuit reads the raw file rather than calling
+# read_global_worktree_cache, and the reason is the same one cmd_prime_cache
+# gives for its own raw read: that reader runs _validate_cached_worktree_path's
+# whitelist, which answers empty for a path shape it does not admit, so on a
+# directory-source install every single run would decide the file was wrong
+# and rewrite a value that was already correct.
+_persist_worktree_pointer_for() {
+  local cli_path="$1"
+  local manager
+  manager=$(_worktree_manager_beside "$cli_path")
+  if [ -z "$manager" ]; then
+    return 0
+  fi
+  local cache_file current=""
+  cache_file=$(_global_worktree_cache_path)
+  if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
+    current=$(cat "$cache_file" 2>/dev/null) || current=""
+  fi
+  if [ "$current" = "$manager" ]; then
+    return 0
+  fi
+  write_global_worktree_cache "$manager" || return 0
 }
 
 # Validate story ID format (US-NNN or US-NNNa)
@@ -1489,6 +1715,27 @@ cmd_get_story() {
 # caller -- that is now _resolve_latest_cache_path's own contract rather than
 # something this call site has to arrange.
 _resolve_skills_base_dir() {
+  # Layer 0: AIMI_DEV_DIR, ahead of the host split below and with no
+  # CLAUDECODE gate -- see _dev_dir_path's header for why that gate is absent
+  # here and present for AIMI_PLUGIN_DIR. This is what makes the override
+  # actually useful rather than merely announced: a maintainer testing a
+  # branch is usually testing a SKILL.md, and every agent /aimi:execute spawns
+  # reads its skills from whatever this function answers. Resolving the CLI
+  # from the dev tree while the spawned agents read the installed tree's
+  # SKILL.md is the "two different installs answering in one session" defect
+  # this function's own header already records, one variable over.
+  #
+  # The `-d` test is what keeps it honest: a dev tree with no skills/ falls
+  # through to the ordinary host resolution rather than answering a path to
+  # nothing. An invalid AIMI_DEV_DIR cannot reach here -- main() has already
+  # exited 1 on it -- so the `|| dev_dir=""` covers only the re-consultation
+  # cost, not a second refusal.
+  local dev_dir=""
+  dev_dir=$(_dev_dir_path) || dev_dir=""
+  if [ -n "$dev_dir" ] && [ -d "$dev_dir/skills" ]; then
+    printf '%s\n' "$dev_dir/skills"
+    return 0
+  fi
   if _is_claude_code_host; then
     local config_dir
     config_dir=$(_claude_config_dir)
@@ -1559,6 +1806,123 @@ cmd_get_story_context() {
     --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
 }
 
+# Probe a story's implementation.verify ONE ASSERTION AT A TIME.
+#
+# The executor's pre-run answers "does this whole verify already pass before
+# the work?". This answers the finer question the `set -e` in front of most
+# verifies makes unanswerable: WHICH of its assertions already pass. Prints a
+# JSON array of {segment, exit, discriminates, unsatisfiable}; an absent or
+# empty verify is an empty array at exit 0.
+#
+# --previous-file names a PRIOR run's own JSON array -- the executor's
+# pre-implementation call to this same verb, on this same story -- so a
+# segment non-zero in both runs can be told apart from one that merely has
+# not passed yet. It goes through resolve_path/validate_path_in_project like
+# --tasks-file, because it too arrives as a CLI argument. Omitted, or naming a
+# segment this run's script does not carry, every entry's `unsatisfiable` is
+# false: see tasks.py's _match_previous for what the comparison actually does.
+#
+# The same five gates every other tasks verb runs, and the same one crossing --
+# the decomposition, the per-segment run and the shape are tasks.py's. The only
+# thing bash adds is the working directory, and it adds it because
+# find_aimi_root's cd has already moved the process by the time any verb runs:
+# AIMI_INVOCATION_DIR is the caller's own cwd, captured before that cd. It is
+# not run through validate_path_in_project, because it is not an argument -- it
+# is this process's own starting directory, and find_aimi_root walked UP from
+# it to reach a root, so it is a descendant of one by construction.
+#
+# No lock: this reads the document and writes nothing to it.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --previous-file <path> (optional; a prior run's own output)
+cmd_verify_probe() {
+  local tasks_file positional=() previous_file="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--previous-file" ]; then
+      i=$((i + 1))
+      previous_file="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  local previous_args=()
+  if [ -n "$previous_file" ]; then
+    previous_file=$(resolve_path "$previous_file")
+    validate_path_in_project "$previous_file"
+    previous_args=(--previous-file "$previous_file")
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" verify-probe \
+    --tasks-file "$tasks_file" --story-id "$story_id" \
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}"
+}
+
+# List every planning defect a previous executor recorded in .aimi/known-gaps/.
+#
+# Those files are the only diagnosis this pipeline produces for free, and until
+# now nothing read them back: /aimi:plan rediscovered a defect weeks after an
+# executor had already written it down. This verb is the reader.
+#
+# NOT a tasks.json verb despite living in tasks.py: it reads a sibling
+# directory of the same .aimi/ root and takes no --tasks-file at all. It is
+# there because that is where the .aimi/ document rules live, and putting a
+# second parser beside it would be the duplication the port removed.
+#
+# No lock and no path confinement: --feature and --since are filter strings,
+# not paths, and the ONE path involved is "$AIMI_DIR/known-gaps", which is
+# find_aimi_root's own export rather than an argument. validate_path_in_project
+# rules arguments; there is no argument here for it to rule.
+#
+# Flags: --feature <name> (exact match), --since <YYYY-MM-DD> (inclusive)
+cmd_list_known_gaps() {
+  local feature="" since=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature)
+        shift
+        feature="${1:-}"
+        ;;
+      --since)
+        shift
+        since="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  check_python3
+  local args=(list-known-gaps --aimi-dir "$AIMI_DIR")
+  [ -n "$feature" ] && args+=(--feature "$feature")
+  [ -n "$since" ] && args+=(--since "$since")
+  python3 "$(_aimi_tasks_py)" "${args[@]}"
+}
+
 # Mark a story as in-progress
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
@@ -1604,9 +1968,29 @@ cmd_mark_in_progress() {
 
 # Mark a story as complete
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --evidence <json> (optional; a JSON OBJECT recording how this story's
+#          own verify discriminated. It lands DEEP at .verification.evidence,
+#          beside strategy/status/url/expect, never as a top-level patch that
+#          would replace them. Absent or empty means absent: the document then
+#          gets the identical {"status": "completed"} patch it always got, which
+#          is what /aimi:next's flagless call site keeps relying on. Documented
+#          here rather than on the usage line below, because that line is
+#          recorded byte for byte as mark-complete-sem-id's stderr in
+#          scripts/tests/golden_from_jq.json.)
 cmd_mark_complete() {
-  local tasks_file positional=()
-  _parse_positional_tasks_file tasks_file positional "$@"
+  local tasks_file positional=() evidence="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--evidence" ]; then
+      i=$((i + 1))
+      evidence="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
@@ -1625,11 +2009,19 @@ cmd_mark_complete() {
   # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
+  # Built only when there is something to say, so the flagless call site sends
+  # the identical argv it always sent. No confinement call: --evidence is a JSON
+  # text, not a path, and tasks.py is the one place it is parsed.
+  local evidence_args=()
+  if [ -n "$evidence" ]; then
+    evidence_args=(--evidence "$evidence")
+  fi
+
   check_python3
   (
     _lock "${tasks_file}.lock"
     python3 "$(_aimi_tasks_py)" mark-complete \
-      --tasks-file "$tasks_file" --story-id "$story_id"
+      --tasks-file "$tasks_file" --story-id "$story_id" "${evidence_args[@]}"
   ) 200>"${tasks_file}.lock"
 
   clear_state_file "current-story"
@@ -1933,6 +2325,49 @@ cmd_normalize_status() {
     (
       _lock "${tasks_file}.lock"
       python3 "$(_aimi_tasks_py)" normalize-status --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# Normalize wave fields: recompute every story's wave from dependsOn (roots=1,
+# others=max(dep waves)+1 -- story_merge.py's own compute_waves rule, imported
+# rather than restated in tasks.py). wave is documented (commands/plan.md) as
+# DERIVED and informational only; nothing in dispatch reads it, so this verb
+# exists to correct a stale number by hand, never to give dispatch something
+# new to read. Leaves validate_waves and its exit-0-always contract untouched.
+cmd_normalize_waves() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-waves <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  # One crossing, inside the lock. Same shape, and same reason, as
+  # cmd_normalize_verification above.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-waves --tasks-file "$tasks_file"
     ) 200>"${tasks_file}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -11332,6 +11767,40 @@ cmd_check_version() {
   local config_dir
   config_dir=$(_claude_config_dir)
 
+  # ---- Layer 0 first: under AIMI_DEV_DIR this verb reports and stops.
+  #
+  # A STATUS OF ITS OWN, and NO --fix, and the second half is the reason the
+  # first half exists. commands/references/cli-path-resolution.md has every
+  # command call `check-version --quiet --fix` immediately after resolving a
+  # path, so --fix is not a rare maintenance gesture -- it runs constantly.
+  # What it does is write the resolved install into `.aimi/cli-path` AND into
+  # the GLOBAL cli-path cache, which is read by every later session in every
+  # project on this machine. Under a dev override the install in hand is a
+  # development tree, so a --fix here would persist that tree globally: the
+  # override would stop being a per-shell experiment and become the machine's
+  # plugin, outliving the shell that set the variable. That is exactly the
+  # damage this override exists to avoid, so the answer is reported and
+  # nothing is written.
+  #
+  # Placed above the converter branch and above every resolution below, so no
+  # stale/fixed/current comparison is even computed: those compare the STORED
+  # pointer against the INSTALLED one, and under an override neither is the
+  # tree actually running. Exit 0 -- callers treat non-zero from this verb as
+  # "stale, act on it", and there is nothing here for them to act on. The
+  # notice naming the path was already printed by main().
+  #
+  # _dev_dir_path is re-consulted rather than memoized because a command
+  # substitution runs in a subshell: a global that main() set inside one would
+  # not survive back into this process. The checks are a handful of test
+  # builtins and at most one realpath, on a verb that already runs jq.
+  local dev_dir=""
+  dev_dir=$(_dev_dir_path) || dev_dir=""
+  if [ -n "$dev_dir" ]; then
+    jq -n --arg path "$dev_dir/scripts/aimi-cli.sh" \
+      '{status: "dev-override", path: $path, message: "AIMI_DEV_DIR is set; staleness is not meaningful against a development tree and --fix would persist it into the global cache"}'
+    return 0
+  fi
+
   # When AIMI_PLUGIN_DIR is set and NOT inside Claude Code, the converter manages the lifecycle
   local plugin_dir
   plugin_dir=$(_validate_plugin_dir)
@@ -11354,6 +11823,37 @@ cmd_check_version() {
   latest_path=$(_resolve_latest_cache_path "$config_dir" "scripts/aimi-cli.sh")
   if [ -z "$latest_path" ]; then
     latest_path=$(_resolve_directory_source_path "$config_dir" "scripts/aimi-cli.sh")
+  fi
+
+  # ---- The SECOND pointer, healed here rather than in the fix branch below.
+  #
+  # This verb is what commands/references/cli-path-resolution.md calls right
+  # after every path resolution, so --fix is the curation entry point for the
+  # whole pointer family -- not only for the one pointer whose staleness this
+  # verb reports. It sits ABOVE the `unknown` early return and outside the
+  # stored-vs-latest comparison on purpose: worktree-path can be missing or
+  # stale while cli-path is already `current`, and healing it only in the
+  # `fixed` branch would leave exactly the divergence this exists to close.
+  # _persist_worktree_pointer_for is idempotent and reads one file when there
+  # is nothing to do, so paying for it on every --fix is cheaper than being
+  # wrong about when it is needed.
+  #
+  # THE FALLBACK IS THE RUNNING SCRIPT, and only when nothing is installed.
+  # An empty latest_path means both the versioned-cache glob and the
+  # directory-source resolver came up empty -- there is no install to derive a
+  # sibling from -- but this script is nonetheless executing from somewhere,
+  # and on a host running the plugin straight out of a checkout that somewhere
+  # has the manager beside it. Restricting the fallback to the empty case is
+  # what keeps a RESOLVED-but-manager-less install (a fake cache entry, an
+  # OpenCode plugin dir with only scripts/) writing nothing at all, rather
+  # than silently pointing the pointer at whatever tree this process happens
+  # to have been launched from.
+  if [ "$fix" = true ]; then
+    local worktree_source="$latest_path"
+    if [ -z "$worktree_source" ]; then
+      worktree_source=$(resolve_path "$0" 2>/dev/null) || worktree_source=""
+    fi
+    _persist_worktree_pointer_for "$worktree_source"
   fi
 
   # Case: glob AND directory-source fallback both returned empty — no
@@ -11501,6 +12001,13 @@ cmd_cleanup_versions() {
   # Update cli-path state to point to the latest version
   write_state "cli-path" "$latest_path"
   write_global_cli_cache "$latest_path"
+  # And the worktree pointer with it. This verb is where the divergence was
+  # actually PRODUCED: the rm -rf loop above has just deleted every version
+  # directory it did not keep, so any worktree-path still naming one of them
+  # is now a path to nothing. Re-pointing it at the kept version in the same
+  # breath as the cli-path is the difference between a stale pointer and a
+  # dangling one.
+  _persist_worktree_pointer_for "$latest_path"
 
   jq -n --argjson removed "$removed" --arg kept "$latest_version" \
     '{removed: $removed, kept: $kept}'
@@ -11750,6 +12257,11 @@ cmd_prime_cache() {
   local existing_cache
   existing_cache=$(read_global_cli_cache)
   if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
+    # already_current is about the CLI pointer alone. The worktree pointer can
+    # be absent or stale while this one is right -- that asymmetry is exactly
+    # what this story is about -- so prime it here too, before the early
+    # return, rather than only on the path that writes.
+    _persist_worktree_pointer_for "$resolved_path"
     jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
       '{status:"already_current",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache already points to this path" + $note)}'
     return 0
@@ -11786,6 +12298,13 @@ cmd_prime_cache() {
       '{status:"error",path:null,host:$host,version:null,message:$msg}'
     return 1
   fi
+
+  # The cli-path is persisted and verified; give the worktree pointer the same
+  # install in the same call. Placed after the read-back above so a resolution
+  # that write_global_cli_cache declined has already answered error and
+  # returned -- the two pointers are never left naming different installs, not
+  # even for the length of one failed run.
+  _persist_worktree_pointer_for "$resolved_path"
 
   jq -n --arg path "$resolved_path" --arg host "$host_label" --arg ver "$resolved_version" --arg note "$origin_note" \
     '{status:"ok",path:$path,host:$host,version:(if $ver == "" then null else $ver end),message:("Cache primed successfully" + $note)}'
@@ -14032,6 +14551,99 @@ cmd_roadmap_write_handoff() {
 }
 
 # ============================================================================
+# write-review — persist a review to disk
+# ============================================================================
+# A review that exists only in the transcript of the session that produced it
+# is not a review: the next session, the next reader and the PR that cites it
+# all arrive after that transcript is gone. This verb is the one path that puts
+# one on disk.
+#
+# Three deliberate differences from roadmap-write-handoff, its nearest sibling:
+#
+#   1. It requires no roadmap.json. A review is written ABOUT an execution, not
+#      derived FROM one -- nothing here reads a stored phase.
+#   2. The body is written VERBATIM, not through rm_sanitize. The handoff's
+#      fields are bullets re-read as structured contract text; a review is a
+#      markdown document, and backticks and code fences are its content rather
+#      than an injection vector to strip. "Write in one invocation, read in
+#      another, get the same content back" is this verb's entire contract, and a
+#      sanitizer would quietly break it for exactly the reviews worth keeping.
+#   3. It takes no lock. mktemp-then-mv is what makes a concurrent reader see
+#      one whole document or the other, never half of one -- the same reasoning
+#      write_aimi_models_config states for models.json, and for the same reason:
+#      nothing else writes this file.
+#
+# TWO NAMING MODES, chosen by which flags arrived. A phase execution HAS a
+# feature and a phase -- --feature and --phase name the file exactly as before,
+# at .aimi/reviews/<feature>-phase-<N>.md, validated as a filename would be
+# (the same two helpers every roadmap verb uses). A flat (non-phase) execution
+# has neither of those things -- there is no roadmap, no feature slug, no phase
+# id to name a file with -- so it derives the review's name from what a flat
+# execution DOES have: the basename of its own active tasks file. Inventing a
+# feature/phase pair for a layout that has none would point the review at a
+# phase that does not exist; deriving from the tasks file basename names it
+# after something that genuinely identifies this run instead.
+#
+# A single flag with no partner is refused rather than guessed: --phase alone
+# cannot borrow --feature's flat-mode meaning, and --feature alone cannot
+# invent a phase number, so half a pair is treated as a mistake rather than as
+# "flat mode plus a hint".
+#
+# The path is confined by validate_path_in_project, the standing authority over
+# every path arriving as a CLI ARGUMENT -- no second check is invented here.
+cmd_write_review() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: write-review: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  local reviews_dir review_path
+  reviews_dir="$AIMI_DIR/reviews"
+
+  if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+    if [ -z "$feature" ] || [ -z "$phase_id" ]; then
+      echo "Error: write-review: --feature and --phase must be given together, or neither at all (flat mode) -- got one without the other" >&2
+      exit 1
+    fi
+    _roadmap_validate_feature "$feature" "write-review"
+    _roadmap_validate_phase_id "$phase_id" "write-review"
+    review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+  else
+    local tasks_file
+    tasks_file=$(get_tasks_file) || exit 1
+    review_path="$reviews_dir/$(basename "$tasks_file" .json).md"
+  fi
+
+  validate_path_in_project "$review_path"
+
+  local body
+  body=$(cat)
+  if [ -z "$body" ]; then
+    # Refusing beats writing an empty file: a zero-byte review reads on disk
+    # exactly like a review that was never written, and the caller who piped
+    # nothing here would never learn which of the two happened.
+    echo "Error: write-review: nothing was read from stdin — refusing to write an empty review" >&2
+    exit 1
+  fi
+
+  mkdir -p "$reviews_dir"
+  local tmp_file
+  tmp_file=$(mktemp "${review_path}.XXXXXX")
+  printf '%s\n' "$body" > "$tmp_file" && mv "$tmp_file" "$review_path"
+
+  jq -n --arg path "$review_path" '{review: $path}'
+}
+
+# ============================================================================
 # Contract Validation Subcommands (validate-contracts, roadmap-sweep)
 # ============================================================================
 # Cross-check a feature's roadmap.json creates[]/needs[] contracts: an unmet
@@ -14440,6 +15052,130 @@ cmd_estimate_payload() {
     }'
 }
 
+# Usage: measure-command-file <path>
+#
+# Report one markdown file's structural size as JSON: how many bytes and lines
+# it has, how many of those bytes are prose and how many are inside a fence,
+# and how many fences there are — in total, and of those how many are ```bash.
+#
+#   {bytes, lines, prose_bytes, fence_bytes, bash_fence_bytes, fences, bash_fences}
+#
+# NOTHING HERE PARSES A FENCE. The parse is lib/extract-command-blocks.sh's
+# extract_blocks() in its listing form — the same awk test-command-blocks.sh
+# and capture-command-block-jq.sh already run — and this function only adds up
+# what it reports. That reuse is the entire point of the verb rather than an
+# implementation detail of it: the measurement this replaces was an awk written
+# on the spot for a roadmap, never reviewed and never tested, and because it
+# was anchored at the start of the line it silently skipped every INDENTED
+# fence and reported 45 bash blocks in plan.md where the shared parser finds
+# 50. A wrong number that becomes a planning input is worse than no number. A
+# second fence parser in this tree is how that comes back, so there is not one.
+#
+# The file need not live under commands/. The measurement is structural and
+# nothing in it reads the directory the path is in.
+#
+# `fences` counts TOP-LEVEL fences: a fence opened inside another fence is
+# content of the outer one, the same rule that keeps a ```bash nested in
+# execute.md's pseudo-code fence out of the extracted blocks. `bash_fences` is
+# the subset whose info string is exactly `bash`, `bash_fence_bytes` likewise a
+# subset of `fence_bytes`, and `prose_bytes + fence_bytes == bytes` always —
+# including for a file whose last line carries no trailing newline, which the
+# extractor's two tail flags exist to let this reconcile.
+cmd_measure_command_file() {
+  local file_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh measure-command-file <path>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -n "$file_path" ]; then
+          echo "Error: measure-command-file: one path at a time (unexpected: $1)" >&2
+          exit 1
+        fi
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ]; then
+    echo "Usage: aimi-cli.sh measure-command-file <path>" >&2
+    exit 1
+  fi
+
+  # Confinement FIRST, before this path is stat'd, opened or handed to awk.
+  # It arrived as a CLI ARGUMENT, which makes validate_path_in_project the sole
+  # authority over it — no second check is written beside it, here or anywhere.
+  validate_path_in_project "$file_path"
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: measure-command-file: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  local blocks_lib
+  blocks_lib=$(_aimi_blocks_lib)
+  if [ ! -f "$blocks_lib" ]; then
+    echo "Error: measure-command-file: block-extraction library not found: $blocks_lib" >&2
+    exit 1
+  fi
+  # shellcheck source=lib/extract-command-blocks.sh
+  . "$blocks_lib"
+
+  local summary
+  summary=$(extract_blocks "$file_path" | grep '^SUMMARY' | head -1) || summary=""
+  if [ -z "$summary" ]; then
+    echo "Error: measure-command-file: the extractor reported no summary for $file_path" >&2
+    exit 1
+  fi
+
+  # Nine integers separated by spaces, so the default IFS reads them and this
+  # function reassigns nothing. That is the extractor's side of the same rule
+  # test_no_delimiter_survives_anywhere pins for the models readers: a record
+  # crossing a process boundary is a string, and a delimiter that any field
+  # could contain is a truncation waiting to happen. Numbers cannot contain a
+  # space; a markdown heading can, which is why the BLOCK lines this ignores
+  # are tab-separated and this one is not.
+  local tag bytes lines prose fence bash_fence fences bash_fences last_fence last_bash
+  read -r tag bytes lines prose fence bash_fence fences bash_fences \
+    last_fence last_bash <<< "$summary"
+
+  # awk charges every record one newline, so a file whose last line carries
+  # none measures exactly one byte over. Reconcile against the real size and
+  # put the difference back in the bucket that last line was counted in, so
+  # prose_bytes + fence_bytes == bytes survives a file with no final newline
+  # rather than reporting a partition that does not add up.
+  local real_bytes residue
+  real_bytes=$(_file_size_bytes "$file_path")
+  residue=$((real_bytes - bytes))
+  if [ "$residue" -ne 0 ] && [ "$last_fence" = "1" ]; then
+    fence=$((fence + residue))
+    [ "$last_bash" = "1" ] && bash_fence=$((bash_fence + residue))
+  fi
+  prose=$((real_bytes - fence))
+
+  jq -n \
+    --argjson bytes "$real_bytes" \
+    --argjson lines "$lines" \
+    --argjson prose "$prose" \
+    --argjson fence "$fence" \
+    --argjson bashFence "$bash_fence" \
+    --argjson fences "$fences" \
+    --argjson bashFences "$bash_fences" \
+    '{
+      bytes: $bytes,
+      lines: $lines,
+      prose_bytes: $prose,
+      fence_bytes: $fence,
+      bash_fence_bytes: $bashFence,
+      fences: $fences,
+      bash_fences: $bashFences
+    }'
+}
+
 # Display help
 cmd_help() {
   cat << 'EOF'
@@ -14497,6 +15233,11 @@ COMMANDS:
                               Already-set status values are preserved (uses //= operator).
                               Writes atomically (tmp + mv). Exits 0 on success.
                               Reports count of stories with status field after heal.
+    normalize-waves <file>    Recompute every story's wave from dependsOn (roots=1, others=
+                              max(dep waves)+1 -- story_merge.py's own compute_waves rule).
+                              wave is DERIVED and informational only; dispatch never reads it.
+                              Writes atomically (tmp + mv). Exits 0 on success.
+                              Reports count of stories whose wave value actually changed.
     validate-ids [--tasks-file <path>]
                               Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value'] [--tasks-file <path>]
@@ -14524,6 +15265,29 @@ COMMANDS:
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
+    verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
+                              Run a story's implementation.verify ONE ASSERTION AT A TIME and
+                              report which ones already pass. Output: a JSON array of
+                              {segment, exit, discriminates, unsatisfiable}; discriminates is
+                              false for an assertion that passed, i.e. one that does not tell
+                              the before-state from the after-state. --previous-file names a
+                              prior run's own output (e.g. the pre-implementation call to this
+                              same verb); a segment non-zero in both runs gets
+                              unsatisfiable:true plus a note pointing at the harness, not the
+                              code -- omitted or unmatched, unsatisfiable is false. Segments
+                              run in the CALLER's directory, in order, carrying the verify's
+                              own variable assignments; `set` lines, comments and assignments
+                              are not reported. An absent or empty verify is [] at exit 0.
+    list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
+                              Read every planning defect a previous executor recorded in
+                              .aimi/known-gaps/ and print them as a JSON array of
+                              {date, storyId, feature, text, file}. Needs no frontmatter:
+                              a `KNOWN-GAP:` line, a `KNOWN-GAP (US-NNN):` line and a file
+                              of bare prose all parse, and EVERY file yields at least one
+                              entry. feature comes from the file name's slug, else from the
+                              tasks file planned on the same date, else null -- never
+                              dropped. Both filters are exact; --since drops a dated-less
+                              entry.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -15259,6 +16023,26 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
+    write-review [--feature <slug> --phase <N>]
+                              Read a review as markdown on stdin and atomically
+                              write it to disk, so the review outlives the
+                              session that produced it. With --feature and
+                              --phase (a phase execution), writes to
+                              .aimi/reviews/<slug>-phase-<N>.md. With neither
+                              flag (a flat execution, which has no feature/phase
+                              pair to name a file with), writes to
+                              .aimi/reviews/<active tasks file's basename>.md
+                              instead -- one flag without its partner is
+                              refused rather than guessed. The body is stored
+                              verbatim -- backticks and code fences are a
+                              review's content, not something to strip -- and an
+                              empty stdin is refused rather than written. Needs
+                              no roadmap.json: a review is written about an
+                              execution, not derived from one. Re-running
+                              replaces the file. This is the only path that may
+                              create or overwrite it -- direct Write/Edit tool
+                              calls on anything under .aimi/reviews/ are blocked
+                              by guard-runtime-state.py.
     roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
@@ -15319,6 +16103,23 @@ COMMANDS:
                               phase along a semantic seam in the roadmap or trimming scope.
                               Exits 0 for any valid input (even over budget); exits 1 only
                               when --outline is missing or a given path does not exist.
+    measure-command-file <path>
+                              Structural size of one markdown file, as
+                              {bytes, lines, prose_bytes, fence_bytes, bash_fence_bytes,
+                               fences, bash_fences}.
+                              The fence parse is lib/extract-command-blocks.sh's
+                              extract_blocks() -- the same one test-command-blocks.sh
+                              runs -- so a measurement written here can never disagree
+                              with the blocks that suite sees. fences counts top-level
+                              fences (one nested inside another is content of the outer);
+                              bash_fences is the subset whose info string is exactly bash;
+                              prose_bytes + fence_bytes == bytes.
+                              Works on any markdown file, not only commands/ -- the
+                              measurement is structural. Path confinement is the same
+                              validate_path_in_project every path ARGUMENT crosses, run
+                              before the file is opened. Exits 1 on a missing path
+                              argument, a file that does not exist, or a path outside
+                              the project root.
     help                      Show this help message
 
 ENVIRONMENT:
@@ -15337,15 +16138,32 @@ ENVIRONMENT:
     CLAUDE_CONFIG_DIR  Override Claude config directory (default: ~/.claude)
                        Must be an absolute path when set.
     AIMI_PLUGIN_DIR    Plugin install directory set by compound-plugin converter;
-                       bypasses Claude cache resolution.
+                       bypasses Claude cache resolution. SKIPPED inside Claude
+                       Code (CLAUDECODE=1), so the Claude cache wins there.
+    AIMI_DEV_DIR       Layer 0 development override: a plugin checkout to run
+                       instead of the installed copy. Honored on EVERY host --
+                       no CLAUDECODE gate, unlike AIMI_PLUGIN_DIR above. Must be
+                       an absolute path to an existing directory whose
+                       scripts/aimi-cli.sh is executable, and must not sit under
+                       a .worktrees/ segment. Every invocation prints one
+                       unconditional stderr notice naming the path, and
+                       check-version answers status "dev-override" without
+                       attempting --fix, so the global cli-path cache is never
+                       repointed at a development tree.
 
 EXAMPLES:
-    # Resolve CLI path first (honors CLAUDE_CONFIG_DIR).
+    # Layer 0 first: the development override, honored on any host.
+    if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+
+    # Otherwise resolve the installed CLI path (honors CLAUDE_CONFIG_DIR).
     # Sort on the VERSION segment, never on the whole path and never plain `ls`:
     # `ls` collates 1.121.3 before 1.9.0, and a whole-path sort orders by
-    # marketplace-entry directory first. Canonical rule: _resolve_latest_cache_path.
+    # marketplace-entry directory first. The grep is not decoration: sort -V
+    # ranks a non-version directory too, and ranks it ABOVE the real ones --
+    # a sibling named 1.124.0.bak wins without it. Canonical rule:
+    # _resolve_latest_cache_path.
     CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d' ' -f2-)
+    AIMI_CLI=$(ls "$CONFIG_DIR"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d' ' -f2-)
 
     # Initialize a new session
     $AIMI_CLI init-session
@@ -15388,6 +16206,35 @@ EOF
 # ============================================================================
 
 main() {
+  # ---- Layer 0: the AIMI_DEV_DIR announcement, before anything is dispatched.
+  #
+  # UNCONDITIONAL, and that word is the whole requirement rather than a
+  # stylistic preference. The defect this override closes is a real install
+  # silently SHADOWED by a development tree: a maintainer exports AIMI_DEV_DIR
+  # for one experiment, forgets it in a shell profile, and every later session
+  # runs code that is not what is installed while every diagnostic keeps
+  # naming the version the installed plugin reports. So the line is printed on
+  # the SUCCESS path, on every verb, once per process -- not only when
+  # something goes wrong, because nothing going wrong is precisely the failure
+  # mode.
+  #
+  # It sits above the skip-list case rather than inside a verb, so `version`,
+  # `help` and the forge verbs -- which return before find_aimi_root ever runs
+  # -- carry it too. stderr, never stdout: every verb below has a stdout
+  # contract a caller parses, and this must not enter one of them.
+  #
+  # A value that is set but invalid is fatal HERE, at exit 1, rather than
+  # falling through to the installed plugin. Falling through would be the
+  # silent shadowing again with the sign flipped -- the operator asked for the
+  # dev tree and would get the install without being told.
+  local _dev_dir=""
+  if ! _dev_dir=$(_dev_dir_path); then
+    exit 1
+  fi
+  if [ -n "$_dev_dir" ]; then
+    echo "Notice: AIMI_DEV_DIR override is active; aimi resolution points at $_dev_dir/scripts/aimi-cli.sh (development tree, shadowing any installed plugin)." >&2
+  fi
+
   # Skip auto-discovery for commands that don't touch .aimi/
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
@@ -15456,6 +16303,7 @@ main() {
     validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
     normalize-status)         cmd_normalize_status "${2:-}" ;;
+    normalize-waves)          cmd_normalize_waves "${2:-}" ;;
     validate-ids)             shift; cmd_validate_ids "$@" ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         shift; cmd_gate_fail "$@" ;;
@@ -15467,6 +16315,8 @@ main() {
     get-branch)        shift; cmd_get_branch "$@" ;;
     get-story)         shift; cmd_get_story "$@" ;;
     get-story-context) shift; cmd_get_story_context "$@" ;;
+    verify-probe)      shift; cmd_verify_probe "$@" ;;
+    list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
@@ -15499,11 +16349,13 @@ main() {
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
+    write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;
     phase-overlap)         shift; cmd_phase_overlap "$@" ;;
     roadmap-sweep)         shift; cmd_roadmap_sweep "$@" ;;
     estimate-payload)      shift; cmd_estimate_payload "$@" ;;
+    measure-command-file)  shift; cmd_measure_command_file "$@" ;;
     help|--help|-h)    cmd_help ;;
     *)
       echo "Unknown command: $1" >&2

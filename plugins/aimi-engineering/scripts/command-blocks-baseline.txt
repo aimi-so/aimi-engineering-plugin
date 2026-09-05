@@ -1,17 +1,33 @@
 # command-blocks-baseline.txt — known findings for test-command-blocks.sh
 #
-# Format, tab-separated:  <check>  <command file>  <key>
-#   check : syntax | portability | loop-scope | unassigned
-#   key   : the block's enclosing heading (syntax, portability)
-#           the variable name             (loop-scope, unassigned)
+# Format, tab-separated:  <check>  <file>  <key>  # <reason>
+#   check  : syntax | portability | loop-scope | unassigned | argument-gate
+#   file   : relative to commands/, or `skills/`-prefixed and relative to the
+#            plugin directory — the two roots the extractor reports against
+#   key    : the block's enclosing heading (syntax, portability)
+#            the variable name             (loop-scope, unassigned)
+#   reason : REQUIRED, one line, on the entry itself
 #
 # Blocks are keyed by heading rather than by a marker in the markdown because
 # install.sh translates command bodies for OpenCode by pure string
 # substitution — anything embedded in the file itself would ship to users.
 #
-# A line here is a promise that someone looked. The suite fails when a listed
-# finding stops firing, so this file shrinks as things are fixed; it cannot
-# quietly accumulate. Delete the line when you fix the thing.
+# A line here is a promise that someone looked, and the reason field is what
+# makes that promise per-line instead of per-section. The suite strips the
+# field before matching, so it changes no key; it exists because a paragraph
+# above a list is free to describe the list and then stop being true of the
+# entry someone appended to the bottom of it. The section prose below still
+# explains each class — the field says what THIS line is.
+#
+# The suite fails when a listed finding stops firing, so this file shrinks as
+# things are fixed; it cannot quietly accumulate. Delete the line when you fix
+# the thing.
+#
+# skills/ joined the corpus after everything above it was already here: a
+# SKILL.md is executed exactly the way a command file is, and until then no
+# static analysis reached one at all. Four entries arrived with it, each in
+# the section for its own class rather than in a section of their own — they
+# are the same four kinds of finding, not a new kind.
 
 # --- syntax -----------------------------------------------------------------
 # Not defects. Three blocks use the <angle-bracket> placeholder convention,
@@ -19,10 +35,11 @@
 # ```bash block whose heredoc body itself contains ``` fences, so extraction
 # truncates it mid-command-substitution. ([BRACKET] placeholders, the far more
 # common convention in these files, parse fine and need no entry here.)
-syntax	deepen.md	Step 2b: Read Research Depth (block 1)
-syntax	deepen.md	3b: Freshness Check (block 1)
-syntax	deepen.md	Step 5.5: Post-Enrichment Validation (block 1)
-syntax	open-pr.md	5b. Create the PR (block 1)
+syntax	deepen.md	Step 2b: Read Research Depth (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
+syntax	deepen.md	3b: Freshness Check (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
+syntax	deepen.md	Step 5.5: Post-Enrichment Validation (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
+syntax	open-pr.md	5b. Create the PR (block 1)	# heredoc body carries fences of its own, so extraction truncates it mid-command-substitution
+syntax	skills/agent-browser/SKILL.md	Navigation (block 1)	# usage listing: `agent-browser open <url>` is the same <angle-bracket> placeholder convention as the deepen.md entries above
 
 # --- loop-scope -------------------------------------------------------------
 # SUSPECTED LIVE DEFECT, not accepted noise. The exact shape of blocking
@@ -43,7 +60,7 @@ syntax	open-pr.md	5b. Create the PR (block 1)
 # was the sibling entry here: it was the exact defect described above, fixed
 # by folding SPLIT_WORKTREE_PATH into the same per-member JSON record that
 # Derive and Validate Split Branch Names assigns inside its own loop.
-loop-scope	plan.md	PROJECT_PATH
+loop-scope	plan.md	PROJECT_PATH	# SUSPECTED LIVE DEFECT: only the Phase 3e validation loop ~100 lines earlier assigns it. Fix and delete, do not renew
 
 # --- unassigned -------------------------------------------------------------
 # Names read by a block that nothing in the same file ever assigns. Most are
@@ -57,31 +74,34 @@ loop-scope	plan.md	PROJECT_PATH
 # (execute.md:1040, blocking finding B10 — assigned only by an English
 # sentence) and SPLIT_BRANCH_ARGS (the variable the `mapfile` failed to fill).
 # Both are gone. That is what this list is for: a NEW name means a new one.
-unassigned	brainstorm.md	renderBundlePending
-unassigned	execute.md	ARTIFACTS_JSON
-unassigned	execute.md	CONTRACTS_JSON
-unassigned	execute.md	DECISIONS_JSON
-unassigned	execute.md	DEFERRED_JSON
-unassigned	execute.md	DEVIATIONS_JSON
-unassigned	execute.md	SERVE_URL
-unassigned	init.md	AIMI_CLI
-unassigned	next.md	CONTAINER_ROOT
-unassigned	next.md	PROJECT_PATH
-unassigned	open-pr.md	INCLUDE_BACKEND_SPEC
-unassigned	open-pr.md	s
-unassigned	plan.md	BUNDLE_OVERRIDE
-unassigned	plan.md	entry
-unassigned	plan.md	overflow
-unassigned	plan.md	ROOT
-unassigned	plan.md	token
-unassigned	plan.md	topicSlug
-unassigned	references/container-execution.md	AIMI_ROOT
-unassigned	references/container-execution.md	CONTAINER_BASE
-unassigned	references/container-execution.md	EXEC_BRANCH
-unassigned	references/container-execution.md	EXEC_ROOT
-unassigned	references/container-execution.md	RAW_URL
-unassigned	references/interactivity.md	AIMI_CLI
-unassigned	status.md	AIMI_CLI
+unassigned	brainstorm.md	renderBundlePending	# bundle-detection verdict the surrounding prose resolves; no block assigns it
+unassigned	execute.md	ARTIFACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	execute.md	CONTRACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	execute.md	DECISIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	execute.md	DEFERRED_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	execute.md	DEVIATIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	execute.md	SERVE_URL	# adopted from `serve start`'s stdout per references/container-execution.md; assigned there, read here
+unassigned	init.md	AIMI_CLI	# this file documents CLI resolution rather than performing it; legitimately caller-supplied
+unassigned	next.md	CONTAINER_ROOT	# supplied by the orchestrator that invokes this flow, never by next.md itself
+unassigned	next.md	PROJECT_PATH	# supplied by the orchestrator that invokes this flow, never by next.md itself
+unassigned	open-pr.md	INCLUDE_BACKEND_SPEC	# flag the prose decides -- `<if $INCLUDE_BACKEND_SPEC=1, append ...>` -- not a shell assignment
+unassigned	open-pr.md	s	# single letter from pseudo-code, not a shell variable
+unassigned	plan.md	BUNDLE_OVERRIDE	# optional bundle root the surrounding prose resolves before detect-design-bundle is called
+unassigned	plan.md	entry	# ${entry.idx} inside a commented pseudo-code line; never a shell expansion
+unassigned	plan.md	overflow	# ${overflow} inside a commented pseudo-code line; never a shell expansion
+unassigned	plan.md	ROOT	# search root the surrounding prose assigns before this block runs
+unassigned	plan.md	token	# ${token} inside a commented pseudo-code line; never a shell expansion
+unassigned	plan.md	topicSlug	# ${topicSlug} inside an illustrative staging/tasks path the prose fills in
+unassigned	references/container-execution.md	AIMI_ROOT	# reference file describing the mechanics; the calling command assigns this
+unassigned	references/container-execution.md	CONTAINER_BASE	# reference file describing the mechanics; the calling command assigns this
+unassigned	references/container-execution.md	EXEC_BRANCH	# reference file describing the mechanics; the calling command assigns this
+unassigned	references/container-execution.md	EXEC_ROOT	# reference file describing the mechanics; the calling command assigns this
+unassigned	references/container-execution.md	RAW_URL	# reference file describing the mechanics; the calling command assigns this
+unassigned	references/interactivity.md	AIMI_CLI	# this file documents CLI resolution rather than performing it; legitimately caller-supplied
+unassigned	status.md	AIMI_CLI	# this file documents CLI resolution rather than performing it; legitimately caller-supplied
+unassigned	skills/resolve-pr-parallel/SKILL.md	AIMI_CLI	# this file documents CLI resolution rather than performing it; legitimately caller-supplied
+unassigned	skills/story-executor/SKILL.md	PROJECT_PATH	# inside the worker prompt TEMPLATE: [PROJECT_PATH] is filled in by the spawning orchestrator
+unassigned	skills/story-executor/SKILL.md	WORKTREE_PATH	# inside the worker prompt TEMPLATE: [WORKTREE_PATH] is filled in by the spawning orchestrator
 
 # --- argument-gate ----------------------------------------------------------
 # Pre-existing at the time check 5 was added (US-008, which fixed review.md's
@@ -95,10 +115,10 @@ unassigned	status.md	AIMI_CLI
 # They are still worth fixing — a gate in the same block is cheap — but each
 # needs its own read of what that block actually does with the value, which is
 # why they are recorded here rather than blanket-patched.
-argument-gate	brainstorm.md	Step 0.5: Resolve Interactivity Mode (block 1)
-argument-gate	brainstorm.md	Step 0.7: Detect Claude Design Bundle (block 1)
-argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)
-argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)
-argument-gate	execute.md	Parse --phase Override (block 1)
-argument-gate	open-pr.md	Parse --branch Argument (block 1)
-argument-gate	plan.md	Parse --phase Override (block 1)
+argument-gate	brainstorm.md	Step 0.5: Resolve Interactivity Mode (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
+argument-gate	brainstorm.md	Step 0.7: Detect Claude Design Bundle (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
+argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
+argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
+argument-gate	execute.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
+argument-gate	open-pr.md	Parse --branch Argument (block 1)	# parses $ARGUMENTS for a branch name and hands it to aimi-cli.sh, which validates it again
+argument-gate	plan.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
