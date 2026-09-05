@@ -748,6 +748,141 @@ def test_a_number_written_back_is_rendered_the_way_jq_rendered_it():
     assert '"priority": 3.0' not in json.dumps(WRITE["normalize-status-corpus"]["file"])
 
 
+# --- mark-complete --evidence: one deep write, and the ways it says no -------
+#
+# The flag records how a story's own verify discriminated, and the one thing it
+# must never do is travel inside the patch: that patch is applied by
+# jq_add_object, a TOP-LEVEL merge, so a `{"verification": {...}}` entry would
+# replace the whole object and take strategy, status, url and expect with it.
+# Every test below is about that boundary. None of them is in the golden and
+# none of them can be: the corpus was recorded from jq, before the flag existed,
+# and the flagless path these tests also pin is exactly what keeps those 14
+# recordings valid.
+
+EVIDENCE = {"exit": 0, "preExit": 1, "segments": 7, "discriminating": 5}
+EVIDENCE_TEXT = json.dumps(EVIDENCE)
+
+
+def _evidence_file(tmp_path, story):
+    path = str(tmp_path / "2020-01-01-evidence-tasks.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3", "userStories": [story]}, handle)
+    return path
+
+
+def _mark_complete(path, *extra):
+    """Through main(), not through the op, so a refusal arrives as the exit
+    status bash sees rather than as the exception main() is there to catch."""
+    argv = ["tasks.py", "mark-complete", "--tasks-file", path, "--story-id", "US-001"]
+    return T.main(argv + list(extra))
+
+
+def _reread(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)["userStories"][0]
+
+
+def test_mark_complete_evidence_lands_deep_beside_what_it_must_not_replace(tmp_path):
+    path = _evidence_file(
+        tmp_path,
+        {
+            "id": "US-001",
+            "status": "in_progress",
+            "verification": {
+                "strategy": "ci",
+                "status": "pending",
+                "url": "https://ci.example.com/run/1",
+                "expect": "green",
+            },
+        },
+    )
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    story = _reread(path)
+    assert story["status"] == "completed"
+    assert story["verification"] == {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/1",
+        "expect": "green",
+        "evidence": EVIDENCE,
+    }
+
+
+def test_mark_complete_evidence_is_absent_without_the_flag(tmp_path):
+    """The /aimi:next call site, which has no executor payload to pass and never
+    will. Without the flag the patch is identically {"status": "completed"}."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path) == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_treats_an_empty_string_as_absent(tmp_path):
+    """One rule, held on both sides of the crossing: bash builds no flag when the
+    value is empty, and this is the half that holds when something else does."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path, "--evidence", "") == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_builds_the_intermediate(tmp_path):
+    """jq_setpath's own semantics, the ones update-field-cria-intermediarios
+    records -- a story with no verification gets one built around the evidence."""
+    path = _evidence_file(tmp_path, {"id": "US-001", "status": "in_progress"})
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    assert _reread(path)["verification"] == {"evidence": EVIDENCE}
+
+
+@pytest.mark.parametrize("raw", ["nao json", "[1,2]", '"texto"', "7", "null"])
+def test_mark_complete_evidence_refuses_a_payload_that_is_not_an_object(raw, tmp_path):
+    """Refused BEFORE the document is read, so the file cannot be half-written.
+
+    A payload that is not an object is one the reader of this field cannot use,
+    and it would degrade to "unrecorded" in silence instead of failing here,
+    where somebody is looking.
+    """
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", raw)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "a refusal writes nothing"
+
+
+def test_mark_complete_evidence_refuses_a_string_typed_verification(tmp_path):
+    """The update-field-intermediario-nao-objeto rule, reached from here: a path
+    THROUGH a non-object refuses, and the refusal happens before the write, so
+    the story's own status is still the one it had."""
+    story = {"id": "US-001", "status": "in_progress", "verification": "manual"}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", EVIDENCE_TEXT)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "not even the status patch survives the refusal"
+
+
+def test_mark_complete_evidence_is_the_only_mark_verb_that_takes_it(tmp_path):
+    """The gate is `status == "completed"`, the same shape --notes has for
+    failed. mark-failed passed the same flag ignores it rather than growing a
+    second field nothing reads."""
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    argv = ["tasks.py", "mark-failed", "--tasks-file", path, "--story-id", "US-001"]
+    assert T.main(argv + ["--evidence", EVIDENCE_TEXT]) == 0
+    written = _reread(path)
+    assert written["status"] == "failed"
+    assert written["verification"] == {"strategy": "ci"}
+
+
 # ---------------------------------------------------------------------------
 # The four validators: a verdict and an exit status, over an adversarial corpus
 # ---------------------------------------------------------------------------

@@ -9964,6 +9964,131 @@ PRESERVEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_mark_complete_evidence_flag() {
+  echo ""
+  echo "=== Testing mark-complete --evidence writes deep at verification.evidence ==="
+
+  # Five stories, one per rule the flag has to obey. The point of the fixture is
+  # the verification OBJECT: the patch mark-complete already applies is a
+  # top-level merge, so an evidence that travelled inside it would replace this
+  # object wholesale. strategy and status are here to be looked at afterwards.
+  local evidence_fixture="$TASKS_DIR/9999-99-92-evidence-test.json"
+  cat > "$evidence_fixture" << 'EVIDENCEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Evidence flag test",
+    "type": "feat",
+    "branchName": "feat/evidence-test",
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Verification object, with the flag",
+      "description": "Gets the evidence",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/1",
+        "expect": "green"
+      }
+    },
+    {
+      "id": "US-002",
+      "title": "Verification object, no flag",
+      "description": "The /aimi:next call site",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": { "strategy": "ci", "status": "pending" }
+    },
+    {
+      "id": "US-003",
+      "title": "Verification object, empty flag",
+      "description": "Empty is absent",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": { "strategy": "ci", "status": "pending" }
+    },
+    {
+      "id": "US-004",
+      "title": "No verification at all",
+      "description": "The intermediate is built",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0
+    },
+    {
+      "id": "US-005",
+      "title": "Verification is a string",
+      "description": "Refuses without writing",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": "manual"
+    }
+  ]
+}
+EVIDENCEEOF
+
+  local payload='{"exit":0,"preExit":1,"segments":7,"discriminating":5}'
+
+  # The flag lands deep, and lands BESIDE what was already there.
+  local output
+  output=$("$CLI" mark-complete US-001 --tasks-file "$evidence_fixture" --evidence "$payload")
+  assert_eq '{"id":"US-001","status":"completed"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-complete evidence: stdout is unchanged by the flag"
+  assert_eq "$(printf '%s' "$payload" | jq -Sc '.')" \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .verification.evidence' "$evidence_fixture")" \
+    "mark-complete evidence: the object lands whole at verification.evidence"
+  assert_eq "ci" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$evidence_fixture")" \
+    "mark-complete evidence: verification.strategy survives the deep write"
+  assert_eq "pending" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.status' "$evidence_fixture")" \
+    "mark-complete evidence: verification.status survives the deep write"
+
+  # The flagless call site — /aimi:next's, permanently — adds no key at all.
+  "$CLI" mark-complete US-002 --tasks-file "$evidence_fixture" > /dev/null
+  assert_eq "false" \
+    "$(jq -r '.userStories[] | select(.id == "US-002") | .verification | has("evidence")' "$evidence_fixture")" \
+    "mark-complete evidence: no flag adds no evidence key"
+
+  # Empty is absent, and it is one rule holding on both sides of the crossing.
+  "$CLI" mark-complete US-003 --tasks-file "$evidence_fixture" --evidence "" > /dev/null
+  assert_eq "false" \
+    "$(jq -r '.userStories[] | select(.id == "US-003") | .verification | has("evidence")' "$evidence_fixture")" \
+    "mark-complete evidence: an empty --evidence writes nothing"
+
+  # The intermediate is built, the update-field-cria-intermediarios semantics.
+  "$CLI" mark-complete US-004 --tasks-file "$evidence_fixture" --evidence "$payload" > /dev/null
+  assert_eq "$(printf '{"evidence":%s}' "$payload" | jq -Sc '.')" \
+    "$(jq -Sc '.userStories[] | select(.id == "US-004") | .verification' "$evidence_fixture")" \
+    "mark-complete evidence: a story with no verification gets the intermediate"
+
+  # A path THROUGH a non-object refuses, and refuses before the write.
+  local refuse_code=0
+  "$CLI" mark-complete US-005 --tasks-file "$evidence_fixture" --evidence "$payload" \
+    > /dev/null 2>&1 || refuse_code=$?
+  assert_exit_code "1" "$refuse_code" \
+    "mark-complete evidence: a string-typed verification refuses"
+  assert_eq "in_progress" \
+    "$(jq -r '.userStories[] | select(.id == "US-005") | .status' "$evidence_fixture")" \
+    "mark-complete evidence: that refusal left the story's status on disk untouched"
+
+  rm -f "$evidence_fixture"
+}
+
 # ============================================================================
 # Git Fixture Helpers (for setup-branch tests)
 # ============================================================================
@@ -11161,6 +11286,7 @@ main() {
   test_validate_tasks_designspec_outside_project_root_refused
   test_validate_tasks_businessspec_outside_project_root_refused
   test_mark_complete_preserves_new_fields
+  test_mark_complete_evidence_flag
   test_update_field_nested_path
   test_update_field_single_segment
   test_update_field_refuses_non_identifier_path

@@ -3426,6 +3426,28 @@ MARK_STATUS = {
 }
 
 
+def _evidence_object(raw, verb):
+    """--evidence's text, deserialized ONCE, and refused unless it is an object.
+
+    The field exists to be READ BACK -- the phase's own coverage fraction counts
+    `verification.evidence.discriminating` as an int -- so a payload that is not
+    an object is refused here, loudly and before any write, rather than stored
+    and silently skipped by whoever reads it next. Refusing at exit 1 is the
+    same policy jq_setpath already applies to a verification that is not an
+    object: say no, write nothing.
+    """
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        die("Error: " + verb + ": --evidence is not valid JSON")
+    if not isinstance(value, dict):
+        die(
+            "Error: " + verb + ": --evidence must be a JSON object, got "
+            + _json_type(value)
+        )
+    return value
+
+
 def _mark_op(verb):
     """One locked mark, read-decide-write in the single crossing bash makes.
 
@@ -3442,15 +3464,32 @@ def _mark_op(verb):
             die(
                 "Usage: tasks.py " + verb + " --tasks-file <path> --story-id <id>"
                 + (" [--notes <text>]" if status == "failed" else "")
+                + (" [--evidence <json>]" if status == "completed" else "")
             )
         patch = {"status": status}
         if status == "failed":
             # jq's `--arg notes "$notes"`: always a string, "" when the caller
             # gave none, and it lands beside status in one merge.
             patch["notes"] = _flag(argv, "--notes") or ""
+        # The evidence does NOT travel in the patch. `patch` goes through
+        # jq_add_object, a top-level `. + {…}`, so a {"verification": {…}} entry
+        # would REPLACE the whole verification object and take strategy, status,
+        # url and expect with it. It is assigned deep instead, below, by the same
+        # jq_setpath writer update-field uses -- and parsed here, before the
+        # document is read, so a payload that is not an object refuses without
+        # touching the file.
+        evidence = None
+        if status == "completed":
+            raw = _flag(argv, "--evidence")
+            # An empty --evidence is an absent one, the same rule bash applies
+            # on its side when it decides whether to build the flag at all.
+            if raw:
+                evidence = _evidence_object(raw, verb)
         docs = read_docs(path, verb)
         for doc in docs:
             mark_stories(doc, story_id, patch)
+            if evidence is not None:
+                assign_field(doc, story_id, ["verification", "evidence"], evidence)
         write_docs_atomically(path, docs)
         return 0
 
