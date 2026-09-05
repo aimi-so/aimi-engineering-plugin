@@ -62,7 +62,7 @@ review.md	22577
 references/scope-contexts.md	20743
 deepen.md	18029
 
-skills/story-executor/SKILL.md	45381
+skills/story-executor/SKILL.md	47938
 skills/task-planner/SKILL.md	23042
 
 agents/research/aimi-foundation-architect.md	20651
