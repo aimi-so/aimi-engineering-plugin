@@ -156,6 +156,16 @@ import tempfile
 # commit rather than being imported out of whichever file happened to hold it.
 from roadmap import TERMINAL_STORY_STATUSES, _json_type, jq_numbers, jq_sort_key
 
+# compute_waves is the WRITER's own rule -- roots at 1, everyone else at
+# max(dependency waves) + 1. normalize_waves (below) recomputes a stale
+# `wave` field with this same import rather than restating the rule from
+# prose: two implementations of one rule drift, and story_merge.py is the
+# one this verb exists to agree with. computed_waves further down in this
+# file is a DIFFERENT function -- validate_waves' own read-only twin, which
+# returns a dict and omits any story a cycle or a dangling dependency never
+# reaches. This import is the writer; that one stays the checker.
+from story_merge import compute_waves
+
 # THE default, in the one place it is now written.
 #
 # A FOURTH copy lives in hooks/pre-bash-dispatcher.py's worktree-budget handler
@@ -2545,6 +2555,47 @@ def normalize_verification(doc):
     )
 
 
+def normalize_waves(doc):
+    """Recompute every story's `wave` from `dependsOn`, in place.
+
+    The rule is compute_waves' own -- roots at 1, everyone else at
+    max(dependency waves) + 1 -- imported at the top of this file and called
+    here unchanged. `wave` is documented (commands/plan.md) as DERIVED and
+    informational only: nothing in dispatch reads it (list_ready does not
+    mention it, and validate_waves is the one place in this file that does),
+    so this verb exists to correct a stale number by hand, never to hand
+    dispatch a new one to read.
+
+    Unlike the two normalizers above, compute_waves needs every story's `id`
+    as a plain dict key rather than through the null-tolerant jq_index --
+    that plain `story["id"]` is exactly what makes it the writer's own rule
+    and not a restatement, so the one precondition it assumes is guarded
+    here instead of inside it: a story whose id is missing, null, or not a
+    string raises the same MalformedTasks a null-keyed userStories map
+    raises everywhere else in this file, before compute_waves ever runs.
+    dependsOn is left to compute_waves' own `// []` equivalent, the same as
+    at every other call site.
+
+    Returns the count of stories whose stored wave this write actually
+    changed -- computed by comparing before and after with jq_equal, read
+    off the document AFTER compute_waves ran, the same shape the other two
+    normalizers already report in and for the same reason: a second read
+    once the lock has released could see a document another writer already
+    changed.
+    """
+    stories = _stories(doc)
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        if not isinstance(story_id, str):
+            raise MalformedTasks(
+                ".userStories: cannot use " + _json_type(story_id) + " as an object key"
+            )
+    before = [story.get("wave") for story in stories]
+    compute_waves(stories)
+    doc["userStories"] = stories
+    return sum(1 for story, prior in zip(stories, before) if not jq_equal(story.get("wave"), prior))
+
+
 def _report_project(story):
     """The `project` a visual story reports through verification-report --
     a STRING passes through unchanged, everything else -- absent, null, or any
@@ -4123,6 +4174,23 @@ def op_research_paths(argv):
 # pass. It decomposes the verify, runs each piece on its own, and reports the
 # exit status of each. `discriminates` is false for exactly the pieces that
 # already pass -- the ones a reader should look at.
+#
+# ONE MEASUREMENT IS NOT ENOUGH, EITHER. `discriminates` computed from a
+# single run cannot tell "the work is not done yet" from "this assertion can
+# never pass" -- a segment that is non-zero here is non-zero for either
+# reason, and the story that motivated this verb spent three fifteen-minute
+# suite runs re-testing a check of the second kind because nothing told them
+# apart. The fix is not to guess from the segment's TEXT -- it is to use the
+# second measurement the story-executor already takes: it runs the verify
+# once before implementing anything and once after. `--previous-file` accepts
+# the FIRST run's own JSON array (this verb's own prior output, written
+# somewhere the caller can hand back), and a segment whose exit is non-zero
+# in BOTH the recorded previous run and this one is named `unsatisfiable` --
+# possibly a broken harness rather than unfinished work, with a `note`
+# pointing at that. Without `--previous-file`, or with a segment the file
+# does not mention, `unsatisfiable` is `false`: failing once is exactly what
+# unfinished work looks like, and only two failures in a row rules it out.
+# `discriminates` itself is unchanged by any of this -- see _match_previous.
 
 # The keywords that open and close a compound command. While one is open no
 # separator inside it splits, so an `if ... ; then ... ; fi` stays ONE segment
@@ -4505,6 +4573,69 @@ def probe_verify(text, cwd):
     return results
 
 
+def _read_previous_probe(path):
+    """The prior run's own probe output, tolerated rather than required.
+
+    `path` is `None` when the caller passed no `--previous-file` at all --
+    the ordinary shape of a story's FIRST probe call, before any second run
+    exists to compare against. A path that is set but unreadable or not a
+    JSON array degrades the same way: this comparison is a diagnostic layered
+    on top of `discriminates`, never a gate, so a bad `--previous-file` must
+    never be why the probe itself fails.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
+
+
+# The phrase named in the acceptance criteria: a segment failing both runs
+# points at the HARNESS, not at unfinished work, because unfinished work
+# fails once and a broken check fails no matter how much gets written.
+_UNSATISFIABLE_NOTE = (
+    "fails before and after the change -- check the harness, not the code"
+)
+
+
+def _match_previous(previous, current):
+    """Attach `unsatisfiable` to every entry of `current`, comparing each
+    against the matching entry of a PRIOR run recorded before this story's
+    own work landed.
+
+    Matched by SEGMENT TEXT rather than by position: `implementation.verify`
+    is the same script on both calls, so an untouched segment is byte-for-byte
+    identical across the two runs even though its exit status may change once
+    the story's own code exists. A segment repeated verbatim within one verify
+    is paired positionally against its own repeats in `previous` -- first
+    occurrence with first, second with second -- since nothing else tells two
+    identical segments apart.
+
+    `unsatisfiable` is `true` for exactly the entries this verb exists to
+    name: non-zero THIS run and non-zero the PREVIOUS run for the same
+    segment. Every other entry -- no `previous` at all, no matching segment,
+    or a previous exit of zero -- gets `false`, because a single failure is
+    what a story not yet implemented looks like, and only two failures in a
+    row for the same segment rules that reading out. `discriminates` is never
+    touched here: it was already computed from THIS run alone, and a segment
+    that passes now stays `discriminates: false` whatever `previous` says.
+    """
+    pending = {}
+    for entry in previous or []:
+        pending.setdefault(entry.get("segment"), []).append(entry.get("exit"))
+    for entry in current:
+        queue = pending.get(entry["segment"])
+        previous_exit = queue.pop(0) if queue else None
+        failed_both = entry["exit"] != 0 and previous_exit not in (None, 0)
+        entry["unsatisfiable"] = failed_both
+        if failed_both:
+            entry["note"] = _UNSATISFIABLE_NOTE
+    return current
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -4518,8 +4649,12 @@ def op_verify_probe(argv):
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
     cwd = _flag(argv, "--cwd")
+    previous_file = _flag(argv, "--previous-file")
     if not path or story_id is None:
-        die("Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> [--cwd <dir>]")
+        die(
+            "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
+            "[--cwd <dir>] [--previous-file <path>]"
+        )
     text = ""
     for doc in read_docs(path, "verify-probe"):
         for story in stories_with_id(doc, story_id):
@@ -4530,7 +4665,9 @@ def op_verify_probe(argv):
                 break
         if text:
             break
-    _emit(probe_verify(text, cwd or os.getcwd()))
+    results = probe_verify(text, cwd or os.getcwd())
+    _match_previous(_read_previous_probe(previous_file), results)
+    _emit(results)
     return 0
 
 
@@ -4962,6 +5099,7 @@ _OPS = {
     "set-execution-mode": op_set_execution_mode,
     "normalize-status": _normalize_op("normalize-status", normalize_status),
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
+    "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
     "cascade-skip": op_cascade_skip,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

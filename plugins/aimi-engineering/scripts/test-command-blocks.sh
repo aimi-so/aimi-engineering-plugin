@@ -1356,7 +1356,7 @@ check_baseline_current() {
 }
 
 main() {
-  echo "Extracting bash-fenced blocks from commands/ and skills/..."
+  echo "Extracting bash-fenced blocks from commands/, skills/, and agents/..."
   extract_blocks
   scan_blocks
   load_baseline

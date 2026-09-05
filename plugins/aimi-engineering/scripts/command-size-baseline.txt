@@ -1,13 +1,14 @@
 # command-size-baseline.txt — grandfathered byte budgets for commands/
-# (including commands/references/) and for skills/**/SKILL.md, enforced by
-# test-command-size.sh.
+# (including commands/references/), for skills/**/SKILL.md, and for
+# agents/**/*.md, enforced by test-command-size.sh.
 #
 # Format, tab-separated:  <path>  <budget in bytes>
 #
 # A path with no prefix is relative to commands/ (`execute.md`,
-# `references/forge-contract.md`); a path starting with `skills/` is relative
-# to the plugin directory. Two roots rather than one so that the twelve
-# budgets recorded before skills/ joined the corpus did not have to move —
+# `references/forge-contract.md`); a path starting with `skills/` or
+# `agents/` is relative to the plugin directory. Two relpath roots rather
+# than one so that the twelve budgets recorded before skills/ joined the
+# corpus did not have to move, and the same two roots absorb agents/ too —
 # see test-command-size.sh's header for the rule and where it is applied.
 #
 # Every line is a promise that someone measured this exact file's size and
@@ -33,6 +34,11 @@
 # 613 lines are already over create-agent-skills' 300-line guidance, and this
 # suite measures bytes and cannot see that at all.
 #
+# The two agents/ entries joined the same way, on the day command_block_files()
+# widened to reach agents/**/*.md: of 33 agent definition files, these were the
+# only two already over DEFAULT_CEILING, grandfathered at their measured size
+# (wc -c against the base tree) rather than a rounded-up one.
+#
 # Measured against the source .md files under commands/, never against
 # install.sh's OpenCode translation. translate_command_body() prepends a
 # fixed ~4862-byte agent-invocation preamble to some command bodies and not
@@ -43,10 +49,10 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	375811
-plan.md	311193
+execute.md	379328
+plan.md	311699
 brainstorm.md	128637
-open-pr.md	62605
+open-pr.md	64058
 references/forge-contract.md	45757
 references/container-execution.md	33972
 references/visual-variants.md	26960
@@ -56,5 +62,8 @@ review.md	22577
 references/scope-contexts.md	20743
 deepen.md	18029
 
-skills/story-executor/SKILL.md	43690
+skills/story-executor/SKILL.md	45381
 skills/task-planner/SKILL.md	23042
+
+agents/research/aimi-foundation-architect.md	20651
+agents/workflow/aimi-story-expander.md	29882

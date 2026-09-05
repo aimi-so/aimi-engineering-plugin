@@ -19,11 +19,14 @@
 # THE CORPUS
 #
 # command_block_files() is the single definition of what this analysis covers:
-# every commands/**/*.md, plus every skills/**/SKILL.md. The second half was
-# added because a SKILL.md is executed exactly the way a command file is -- an
-# agent runs its ```bash fences literally -- while the find here was anchored
-# at $COMMANDS_DIR alone, so skills/ was reached by no static analysis at all.
-# The one net this repo has had a hole in it the shape of every skill.
+# every commands/**/*.md, every skills/**/SKILL.md, plus every agents/**/*.md.
+# The second half was added because a SKILL.md is executed exactly the way a
+# command file is -- an agent runs its ```bash fences literally -- while the
+# find here was anchored at $COMMANDS_DIR alone, so skills/ was reached by no
+# static analysis at all. The third half closes the identical hole for
+# agents/: a Task-spawned agent is invoked from one of these files and runs
+# its ```bash fences the same way a command or a skill does, and until now
+# nothing scanned them either.
 #
 # Only SKILL.md is taken from skills/, never its references/*.md. A skill's
 # SKILL.md is the file the host loads and runs; the reference files beside it
@@ -31,13 +34,25 @@
 # with commands/references/ (install.sh copies those verbatim into command
 # bodies' reach, which is why they are in scope there and not here).
 #
-# Two roots, two relpath rules, one index. A commands file is reported
-# relative to $COMMANDS_DIR -- `plan.md`, `references/forge-contract.md` --
-# exactly as it always was, so no baseline key moved. A skills file is
-# reported relative to the plugin directory, so it arrives already prefixed:
-# `skills/story-executor/SKILL.md`. The prefix is what keeps the two halves
+# agents/ takes the commands/ shape instead: every *.md under it recursively,
+# references/ included. An agent definition has no SKILL.md-style single
+# entry point distinguishing itself from its own reference files the way a
+# skill directory does, so there is no narrower rule to apply here than the
+# one commands/ already uses.
+#
+# Two roots, two relpath rules, one index -- agents/ needed a third discovery
+# root but not a third relpath rule. A commands file is reported relative to
+# $COMMANDS_DIR -- `plan.md`, `references/forge-contract.md` -- exactly as it
+# always was, so no baseline key moved. A skills file, and now an agents file,
+# is reported relative to the plugin directory, so each arrives already
+# prefixed: `skills/story-executor/SKILL.md`, `agents/research/
+# aimi-foundation-architect.md`. The prefix is what keeps every half
 # distinguishable in a shared baseline without a fourth column saying which
-# root a line came from.
+# root a line came from -- agents/ and skills/ share the same plugin-root
+# prefix rule (the awk's ROOT2) because both sit at the same level under the
+# plugin directory; only the corpus-discovery side (command_block_files())
+# needed its own root, since agents/**/*.md and skills/**/SKILL.md walk
+# different find patterns.
 #
 # ADDRESSING (unchanged from the sole prior definition)
 #
@@ -64,11 +79,12 @@
 #     variables are globals the caller must set before calling; this file
 #     defines no defaults for them, on purpose, so a caller that forgets one
 #     fails loudly on an empty path rather than silently writing into the
-#     wrong place. $SKILLS_DIR is the one addition and it is optional twice
-#     over: left UNSET it is derived as $COMMANDS_DIR/../skills, and set to
-#     the EMPTY STRING it turns the skills half of the corpus off. The two
-#     are told apart with ${SKILLS_DIR+set}, not ${SKILLS_DIR:-}, so "off"
-#     is a thing a caller can actually say.
+#     wrong place. $SKILLS_DIR and $AGENTS_DIR are each optional twice over,
+#     the same way: left UNSET, $SKILLS_DIR is derived as $COMMANDS_DIR/../skills
+#     and $AGENTS_DIR as $COMMANDS_DIR/../agents; set to the EMPTY STRING,
+#     either turns its half of the corpus off. Both are told apart from unset
+#     with ${SKILLS_DIR+set} / ${AGENTS_DIR+set}, not ${VAR:-}, so "off" is a
+#     thing a caller can actually say.
 #
 #   extract_blocks                       (the corpus form)
 #     The same no-argument call with NONE of $BLOCKS_DIR, $WORK_DIR and
@@ -76,7 +92,8 @@
 #     -- from $COMMANDS_DIR when set, otherwise from this file's own location
 #     -- and streams the listing form's TSV to stdout instead. It answers
 #     "what does the static analysis actually cover?", which had no answer
-#     before skills/ joined the corpus and became a question worth asking.
+#     before skills/ (and, later, agents/) joined the corpus and became a
+#     question worth asking.
 #
 #     This does NOT weaken the no-defaults rule above. That rule is about a
 #     caller who forgets one of the three write targets and silently writes
@@ -228,20 +245,23 @@ _command_blocks_plugin_root() {
 
 # The corpus, written down once so no caller can carry a second definition of
 # what "the files this analysis covers" means. Sorted as one list rather than
-# two concatenated ones; `commands` sorts before `skills` under a shared
-# parent, so every command block keeps the id it had before skills/ arrived.
+# three concatenated ones; `agents` sorts before `commands` sorts before
+# `skills` under a shared parent -- ids shift for agents/ once, on this story's
+# own landing, since it now sorts first.
 command_block_files() {
-  local commands_root="$1" skills_root="$2"
+  local commands_root="$1" skills_root="$2" agents_root="$3"
   {
     [ -n "$commands_root" ] && [ -d "$commands_root" ] && find "$commands_root" -name '*.md'
     [ -n "$skills_root" ] && [ -d "$skills_root" ] && find "$skills_root" -name 'SKILL.md'
+    [ -n "$agents_root" ] && [ -d "$agents_root" ] && find "$agents_root" -name '*.md'
   } 2>/dev/null | sort
 }
 
-# Resolves the two corpus roots and the plugin root the skills relpaths are
-# reported against, into _CB_COMMANDS_ROOT / _CB_SKILLS_ROOT / _CB_PLUGIN_ROOT.
-# ${SKILLS_DIR+set} rather than ${SKILLS_DIR:-}: an explicitly EMPTY $SKILLS_DIR
-# means "do not scan skills", which is a different answer from "not told".
+# Resolves the three corpus roots and the plugin root the skills/agents
+# relpaths are reported against, into _CB_COMMANDS_ROOT / _CB_SKILLS_ROOT /
+# _CB_AGENTS_ROOT / _CB_PLUGIN_ROOT. ${SKILLS_DIR+set} / ${AGENTS_DIR+set}
+# rather than ${VAR:-}: an explicitly EMPTY $SKILLS_DIR or $AGENTS_DIR means
+# "do not scan this half", which is a different answer from "not told".
 _command_blocks_resolve_roots() {
   _CB_COMMANDS_ROOT="${COMMANDS_DIR:-}"
   if [ -n "$_CB_COMMANDS_ROOT" ]; then
@@ -255,6 +275,12 @@ _command_blocks_resolve_roots() {
     _CB_SKILLS_ROOT="$SKILLS_DIR"
   else
     _CB_SKILLS_ROOT="$_CB_PLUGIN_ROOT/skills"
+  fi
+
+  if [ -n "${AGENTS_DIR+set}" ]; then
+    _CB_AGENTS_ROOT="$AGENTS_DIR"
+  else
+    _CB_AGENTS_ROOT="$_CB_PLUGIN_ROOT/agents"
   fi
 }
 
@@ -270,7 +296,7 @@ extract_blocks() {
   # CONTRACT block above for why this does not soften the no-defaults rule.
   if [ -z "${BLOCKS_DIR:-}" ] && [ -z "${WORK_DIR:-}" ] && [ -z "${INDEX:-}" ]; then
     # shellcheck disable=SC2046
-    _list_command_blocks $(command_block_files "$_CB_COMMANDS_ROOT" "$_CB_SKILLS_ROOT")
+    _list_command_blocks $(command_block_files "$_CB_COMMANDS_ROOT" "$_CB_SKILLS_ROOT" "$_CB_AGENTS_ROOT")
     return
   fi
 
@@ -280,5 +306,5 @@ extract_blocks() {
   # shellcheck disable=SC2046
   awk -v OUTDIR="$BLOCKS_DIR" -v ROOT="$_CB_COMMANDS_ROOT" -v ROOT2="$_CB_PLUGIN_ROOT" -v LIST=0 \
     -f "$WORK_DIR/extract.awk" \
-    $(command_block_files "$_CB_COMMANDS_ROOT" "$_CB_SKILLS_ROOT") > "$INDEX"
+    $(command_block_files "$_CB_COMMANDS_ROOT" "$_CB_SKILLS_ROOT" "$_CB_AGENTS_ROOT") > "$INDEX"
 }

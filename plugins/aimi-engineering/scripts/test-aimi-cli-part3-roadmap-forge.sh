@@ -3768,7 +3768,12 @@ test_write_review_refuses_before_it_writes() {
 
   local out exit_code
   out=$(printf 'x\n' | "$CLI" write-review --phase 3 2>&1) && exit_code=0 || exit_code=$?
-  assert_exit_code "1" "$exit_code" "write-review: refuses a missing --feature"
+  assert_exit_code "1" "$exit_code" "write-review: refuses --phase without --feature (a mixed pair, not flat mode)"
+  assert_contains "must be given together" "$out" "write-review: says why --phase alone was refused"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review: refuses --feature without --phase (the mirror mixture)"
+  assert_contains "must be given together" "$out" "write-review: says why --feature alone was refused"
 
   out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase "one" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "write-review: refuses a non-numeric --phase"
@@ -3794,14 +3799,64 @@ test_write_review_refuses_before_it_writes() {
   _wr_cleanup "$feature"
 }
 
+# A flat (non-phase) execution has no roadmap and no feature/phase pair -- the
+# two validators write-review used to call unconditionally would die on both
+# being empty (issue: write-review names a review with no feature/phase pair).
+# Run in an isolated directory (mirrors test_init_session_file_flag_nested_path)
+# because the fix reads the SESSION's own active tasks file via
+# get_tasks_file(), which is state this suite's shared .aimi/ must not leak
+# into other tests, and vice versa.
+test_write_review_flat_mode_derives_from_tasks_basename() {
+  echo ""
+  echo "=== write-review: a flat execution (no --feature/--phase) derives its own name ==="
+
+  local iso_dir
+  iso_dir=$(mktemp -d)
+  mkdir -p "$iso_dir/.aimi/tasks"
+
+  local flat_file="$iso_dir/.aimi/tasks/2026-09-04-flat-tasks.json"
+  cat > "$flat_file" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "feat: Flat", "type": "feat", "branchName": "feat/flat", "maxConcurrency": 2},
+  "userStories": []
+}
+EOF
+
+  pushd "$iso_dir" >/dev/null
+  "$CLI" init-session --file "$flat_file" >/dev/null 2>&1
+
+  local output exit_code
+  output=$(printf '## Design Review\n\nok\n' | "$CLI" write-review 2>&1) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "write-review flat mode: accepts an execution with neither flag"
+
+  # The path must come from the tasks file's OWN basename -- never an invented
+  # feature/phase pair, which would point the review at a phase that does not
+  # exist. find_aimi_root rewrites AIMI_DIR to an absolute path before any verb
+  # runs, so the reported path is absolute -- iso_dir is known here, so assert
+  # the exact value rather than the substring-contains style
+  # test_write_review_survives_the_session uses against the shared suite tree.
+  local absolute_path reported_path
+  absolute_path="$iso_dir/.aimi/reviews/2026-09-04-flat-tasks.md"
+  reported_path=$(printf '%s' "$output" | jq -r '.review')
+  assert_eq "$absolute_path" "$reported_path" "write-review flat mode: names the review after the active tasks file's basename"
+  assert_eq "true" "$([ -f "$absolute_path" ] && echo true || echo false)" "write-review flat mode: the review exists on disk"
+  assert_eq "$(printf '## Design Review\n\nok')" "$(cat "$absolute_path")" "write-review flat mode: reads back the same content in a second invocation"
+
+  rm -rf "$iso_dir"
+}
+
 test_write_review_registered_in_help_and_dispatcher() {
   echo ""
   echo "=== write-review: listed in help with its flags and routed by the dispatcher ==="
 
   local help_out
   help_out=$("$CLI" help 2>&1)
-  assert_contains "write-review --feature <slug> --phase <N>" "$help_out" "help: documents write-review with its flags"
-  assert_contains ".aimi/reviews/<slug>-phase-<N>.md" "$help_out" "help: names the path write-review writes"
+  assert_contains "write-review [--feature <slug> --phase <N>]" "$help_out" "help: documents write-review with its optional flags"
+  assert_contains ".aimi/reviews/<slug>-phase-<N>.md" "$help_out" "help: names the phase-execution path write-review writes"
+  assert_contains ".aimi/reviews/<active tasks file's basename>.md" "$help_out" "help: names the flat-execution path write-review writes"
 
   # The dispatcher must route it: an unrouted verb answers "Unknown command".
   local dispatch_out
@@ -8456,6 +8511,7 @@ main() {
   echo "--- write-review Tests (phase 3 US-009) ---"
   test_write_review_survives_the_session
   test_write_review_refuses_before_it_writes
+  test_write_review_flat_mode_derives_from_tasks_basename
   test_write_review_registered_in_help_and_dispatcher
 
   # Detect Forge Tests (US-001) -- the foundational contract every later

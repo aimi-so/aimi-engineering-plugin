@@ -1811,8 +1811,16 @@ cmd_get_story_context() {
 # The executor's pre-run answers "does this whole verify already pass before
 # the work?". This answers the finer question the `set -e` in front of most
 # verifies makes unanswerable: WHICH of its assertions already pass. Prints a
-# JSON array of {segment, exit, discriminates}; an absent or empty verify is an
-# empty array at exit 0.
+# JSON array of {segment, exit, discriminates, unsatisfiable}; an absent or
+# empty verify is an empty array at exit 0.
+#
+# --previous-file names a PRIOR run's own JSON array -- the executor's
+# pre-implementation call to this same verb, on this same story -- so a
+# segment non-zero in both runs can be told apart from one that merely has
+# not passed yet. It goes through resolve_path/validate_path_in_project like
+# --tasks-file, because it too arrives as a CLI argument. Omitted, or naming a
+# segment this run's script does not carry, every entry's `unsatisfiable` is
+# false: see tasks.py's _match_previous for what the comparison actually does.
 #
 # The same five gates every other tasks verb runs, and the same one crossing --
 # the decomposition, the per-segment run and the shape are tasks.py's. The only
@@ -1825,13 +1833,25 @@ cmd_get_story_context() {
 #
 # No lock: this reads the document and writes nothing to it.
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --previous-file <path> (optional; a prior run's own output)
 cmd_verify_probe() {
-  local tasks_file positional=()
-  _parse_positional_tasks_file tasks_file positional "$@"
+  local tasks_file positional=() previous_file="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--previous-file" ]; then
+      i=$((i + 1))
+      previous_file="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>]" >&2
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>]" >&2
     exit 1
   fi
 
@@ -1845,10 +1865,17 @@ cmd_verify_probe() {
   fi
   validate_story_exists "$story_id" "$tasks_file"
 
+  local previous_args=()
+  if [ -n "$previous_file" ]; then
+    previous_file=$(resolve_path "$previous_file")
+    validate_path_in_project "$previous_file"
+    previous_args=(--previous-file "$previous_file")
+  fi
+
   check_python3
   python3 "$(_aimi_tasks_py)" verify-probe \
     --tasks-file "$tasks_file" --story-id "$story_id" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}"
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}"
 }
 
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
@@ -2270,6 +2297,49 @@ cmd_normalize_status() {
     (
       _lock "${tasks_file}.lock"
       python3 "$(_aimi_tasks_py)" normalize-status --tasks-file "$tasks_file"
+    ) 200>"${tasks_file}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# Normalize wave fields: recompute every story's wave from dependsOn (roots=1,
+# others=max(dep waves)+1 -- story_merge.py's own compute_waves rule, imported
+# rather than restated in tasks.py). wave is documented (commands/plan.md) as
+# DERIVED and informational only; nothing in dispatch reads it, so this verb
+# exists to correct a stale number by hand, never to give dispatch something
+# new to read. Leaves validate_waves and its exit-0-always contract untouched.
+cmd_normalize_waves() {
+  local tasks_file="$1"
+
+  if [ -z "$tasks_file" ]; then
+    echo "Usage: aimi-cli.sh normalize-waves <tasks-file-path>" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$tasks_file" ]; then
+    echo "Error: tasks file not found: $tasks_file" >&2
+    exit 1
+  fi
+
+  if [ ! -r "$tasks_file" ]; then
+    echo "Error: tasks file not readable: $tasks_file" >&2
+    exit 1
+  fi
+
+  # Validate input is valid JSON
+  if ! jq empty "$tasks_file" 2>/dev/null; then
+    echo "Error: invalid JSON in tasks file: $tasks_file" >&2
+    exit 1
+  fi
+
+  # One crossing, inside the lock. Same shape, and same reason, as
+  # cmd_normalize_verification above.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" normalize-waves --tasks-file "$tasks_file"
     ) 200>"${tasks_file}.lock"
   ) || exit $?
   printf '%s\n' "$out"
@@ -14453,20 +14523,17 @@ cmd_roadmap_write_handoff() {
 }
 
 # ============================================================================
-# write-review — persist a phase's design review to disk
+# write-review — persist a review to disk
 # ============================================================================
 # A review that exists only in the transcript of the session that produced it
 # is not a review: the next session, the next reader and the PR that cites it
 # all arrive after that transcript is gone. This verb is the one path that puts
-# one on disk, at .aimi/reviews/<feature>-phase-<N>.md.
+# one on disk.
 #
 # Three deliberate differences from roadmap-write-handoff, its nearest sibling:
 #
-#   1. It requires no roadmap.json. A review is written ABOUT a phase, not
-#      derived FROM one -- nothing here reads a stored phase -- so demanding a
-#      roadmap would refuse the flat single-scope-context layout for no gain.
-#      --feature and --phase are validated as a filename would be (the same two
-#      helpers every roadmap verb uses), and that is the whole of what they are.
+#   1. It requires no roadmap.json. A review is written ABOUT an execution, not
+#      derived FROM one -- nothing here reads a stored phase.
 #   2. The body is written VERBATIM, not through rm_sanitize. The handoff's
 #      fields are bullets re-read as structured contract text; a review is a
 #      markdown document, and backticks and code fences are its content rather
@@ -14477,6 +14544,22 @@ cmd_roadmap_write_handoff() {
 #      one whole document or the other, never half of one -- the same reasoning
 #      write_aimi_models_config states for models.json, and for the same reason:
 #      nothing else writes this file.
+#
+# TWO NAMING MODES, chosen by which flags arrived. A phase execution HAS a
+# feature and a phase -- --feature and --phase name the file exactly as before,
+# at .aimi/reviews/<feature>-phase-<N>.md, validated as a filename would be
+# (the same two helpers every roadmap verb uses). A flat (non-phase) execution
+# has neither of those things -- there is no roadmap, no feature slug, no phase
+# id to name a file with -- so it derives the review's name from what a flat
+# execution DOES have: the basename of its own active tasks file. Inventing a
+# feature/phase pair for a layout that has none would point the review at a
+# phase that does not exist; deriving from the tasks file basename names it
+# after something that genuinely identifies this run instead.
+#
+# A single flag with no partner is refused rather than guessed: --phase alone
+# cannot borrow --feature's flat-mode meaning, and --feature alone cannot
+# invent a phase number, so half a pair is treated as a mistake rather than as
+# "flat mode plus a hint".
 #
 # The path is confined by validate_path_in_project, the standing authority over
 # every path arriving as a CLI ARGUMENT -- no second check is invented here.
@@ -14495,12 +14578,23 @@ cmd_write_review() {
     shift
   done
 
-  _roadmap_validate_feature "$feature" "write-review"
-  _roadmap_validate_phase_id "$phase_id" "write-review"
-
   local reviews_dir review_path
   reviews_dir="$AIMI_DIR/reviews"
-  review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+
+  if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+    if [ -z "$feature" ] || [ -z "$phase_id" ]; then
+      echo "Error: write-review: --feature and --phase must be given together, or neither at all (flat mode) -- got one without the other" >&2
+      exit 1
+    fi
+    _roadmap_validate_feature "$feature" "write-review"
+    _roadmap_validate_phase_id "$phase_id" "write-review"
+    review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+  else
+    local tasks_file
+    tasks_file=$(get_tasks_file) || exit 1
+    review_path="$reviews_dir/$(basename "$tasks_file" .json).md"
+  fi
+
   validate_path_in_project "$review_path"
 
   local body
@@ -15111,6 +15205,11 @@ COMMANDS:
                               Already-set status values are preserved (uses //= operator).
                               Writes atomically (tmp + mv). Exits 0 on success.
                               Reports count of stories with status field after heal.
+    normalize-waves <file>    Recompute every story's wave from dependsOn (roots=1, others=
+                              max(dep waves)+1 -- story_merge.py's own compute_waves rule).
+                              wave is DERIVED and informational only; dispatch never reads it.
+                              Writes atomically (tmp + mv). Exits 0 on success.
+                              Reports count of stories whose wave value actually changed.
     validate-ids [--tasks-file <path>]
                               Validate all story IDs match US-NNN format
     gate-pass <id> [--option 'value'] [--tasks-file <path>]
@@ -15138,15 +15237,19 @@ COMMANDS:
                               (for subagent self-brief). Output keys: story, metadata, skills,
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
-    verify-probe <id> [--tasks-file <path>]
+    verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
                               report which ones already pass. Output: a JSON array of
-                              {segment, exit, discriminates}; discriminates is false for an
-                              assertion that passed, i.e. one that does not tell the
-                              before-state from the after-state. Segments run in the CALLER's
-                              directory, in order, carrying the verify's own variable
-                              assignments; `set` lines, comments and assignments are not
-                              reported. An absent or empty verify is [] at exit 0.
+                              {segment, exit, discriminates, unsatisfiable}; discriminates is
+                              false for an assertion that passed, i.e. one that does not tell
+                              the before-state from the after-state. --previous-file names a
+                              prior run's own output (e.g. the pre-implementation call to this
+                              same verb); a segment non-zero in both runs gets
+                              unsatisfiable:true plus a note pointing at the harness, not the
+                              code -- omitted or unmatched, unsatisfiable is false. Segments
+                              run in the CALLER's directory, in order, carrying the verify's
+                              own variable assignments; `set` lines, comments and assignments
+                              are not reported. An absent or empty verify is [] at exit 0.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
@@ -15892,19 +15995,26 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
-    write-review --feature <slug> --phase <N>
-                              Read a phase's design review as markdown on stdin
-                              and atomically write it to
-                              .aimi/reviews/<slug>-phase-<N>.md, so the review
-                              outlives the session that produced it. The body is
-                              stored verbatim -- backticks and code fences are a
+    write-review [--feature <slug> --phase <N>]
+                              Read a review as markdown on stdin and atomically
+                              write it to disk, so the review outlives the
+                              session that produced it. With --feature and
+                              --phase (a phase execution), writes to
+                              .aimi/reviews/<slug>-phase-<N>.md. With neither
+                              flag (a flat execution, which has no feature/phase
+                              pair to name a file with), writes to
+                              .aimi/reviews/<active tasks file's basename>.md
+                              instead -- one flag without its partner is
+                              refused rather than guessed. The body is stored
+                              verbatim -- backticks and code fences are a
                               review's content, not something to strip -- and an
                               empty stdin is refused rather than written. Needs
-                              no roadmap.json: a review is written about a phase,
-                              not derived from one. Re-running replaces the file.
-                              This is the only path that may create or overwrite
-                              it -- direct Write/Edit tool calls on anything under
-                              .aimi/reviews/ are blocked by guard-runtime-state.py.
+                              no roadmap.json: a review is written about an
+                              execution, not derived from one. Re-running
+                              replaces the file. This is the only path that may
+                              create or overwrite it -- direct Write/Edit tool
+                              calls on anything under .aimi/reviews/ are blocked
+                              by guard-runtime-state.py.
     roadmap-claim --feature <slug> --session-id <id> --session-pid <pid> [--phase <id>]
                               Atomic locked read-modify-write. Auto-releases any
                               claim whose recorded pid fails a signal-zero liveness
@@ -16165,6 +16275,7 @@ main() {
     validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;
     normalize-status)         cmd_normalize_status "${2:-}" ;;
+    normalize-waves)          cmd_normalize_waves "${2:-}" ;;
     validate-ids)             shift; cmd_validate_ids "$@" ;;
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         shift; cmd_gate_fail "$@" ;;
