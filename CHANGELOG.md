@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.131.0] - 2026-09-05
+
+Phase 3 of verification-integrity: the completion record gains negative space.
+Closes the first and third items of issue #136 — a record that could not tell a
+checked run from an empty one, and artifacts that carried no version to slice by.
+
+### Added
+
+- **The executor returns the verify evidence it already computes.** The
+  `<result_json>` Result Contract gains an eighth key, `verify`, carrying the
+  real verify's exit, the step-1.5 pre-run's exit, how many segments
+  `verify-probe` returned and how many of them discriminated. Step 1.5 already
+  measured all four and wrote them to a throwaway file that died with the
+  worker. The object is omitted entirely when the story declares no verify —
+  that absence is itself the signal, and zero is never used to mean "not
+  measured", because zero is a real measured pass.
+- **`mark-complete` accepts an optional `--evidence` and persists it at
+  `verification.evidence`.** The write goes deep, through the same `jq_setpath`
+  writer `update-field` uses: the shallow `. + {…}` patch the four mark-* verbs
+  share would have replaced the whole `verification` object and destroyed
+  `strategy`, `status`, `url` and `expect`. Without the flag the verb applies
+  the identical `{"status": "completed"}` patch it always did and the crossing
+  stays silent, so the 14 recorded `mark-complete` cases in
+  `tests/golden_from_jq.json` are byte-unchanged. `/aimi:next` keeps calling it
+  flagless forever, which is what makes that no-op load-bearing rather than
+  tidy.
+- **`verification-report` names which completed stories discriminated.** A
+  fourth top-level key, `discriminating`, partitions completed stories into
+  `checked`, `blind` and `unrecorded` beside a null-safe `fraction`. Absent
+  evidence reads as `unrecorded`, never as `blind`: a story completed before the
+  field existed was not shown to have zero discriminating assertions — nothing
+  was recorded, and reporting a confident zero there would be a worse lie than
+  the silence it replaces. `unrecorded` stays outside the denominator, so a
+  legacy file answers `null` rather than `0`. The count is read as a plain
+  non-negative int with `bool` rejected first, since `isinstance(True, int)`.
+- **`metadata.pluginVersion` stamps the writing install into every tasks.json.**
+  Shared across split files rather than resolved per file: `branchName` and
+  `baseRef` are per-file because they name a repository, but a version names the
+  writer, and one `/aimi:plan` invocation has one writer however many
+  repositories it splits across. Omitted entirely when it cannot be resolved,
+  the same rule and the same reason as `baseRef`.
+
+### Changed
+
+- **`/aimi:execute` carries the evidence from executor to record to report.**
+  The wave loop reads `result_json.verify` beside the `knownGaps` extraction and
+  passes it to the one `mark-complete` call already there, omitting the flag
+  entirely — never empty — when the worker recorded nothing. The completion
+  report prints `verification-evidence: discriminating=N completed=M`
+  unconditionally, plus a `closed unchecked` line when `checked` is zero and
+  completed stories exist. Printing only when the number is good would have
+  reproduced the exact defect this phase removes.
+
+### Known limitation
+
+- The fraction is a **ceiling on what was verified, not a measurement of it**.
+  Its input is `verify-probe`'s `discriminates`, and the probe's prelude carries
+  only assignments and `cd`, so an assertion that fails because its
+  `mkdir`/`printf`-built fixture never existed still scores as discriminating.
+  Recorded in the field's own doc comment and in
+  `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`.
+
 ## [1.130.0] - 2026-09-04
 
 Phase 2 of verification-integrity: the narrow-trigger holes, and the two
