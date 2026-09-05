@@ -1968,9 +1968,29 @@ cmd_mark_in_progress() {
 
 # Mark a story as complete
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --evidence <json> (optional; a JSON OBJECT recording how this story's
+#          own verify discriminated. It lands DEEP at .verification.evidence,
+#          beside strategy/status/url/expect, never as a top-level patch that
+#          would replace them. Absent or empty means absent: the document then
+#          gets the identical {"status": "completed"} patch it always got, which
+#          is what /aimi:next's flagless call site keeps relying on. Documented
+#          here rather than on the usage line below, because that line is
+#          recorded byte for byte as mark-complete-sem-id's stderr in
+#          scripts/tests/golden_from_jq.json.)
 cmd_mark_complete() {
-  local tasks_file positional=()
-  _parse_positional_tasks_file tasks_file positional "$@"
+  local tasks_file positional=() evidence="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--evidence" ]; then
+      i=$((i + 1))
+      evidence="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
@@ -1989,11 +2009,19 @@ cmd_mark_complete() {
   # Before the lock. See cmd_mark_in_progress for why it stays there.
   validate_story_exists "$story_id" "$tasks_file"
 
+  # Built only when there is something to say, so the flagless call site sends
+  # the identical argv it always sent. No confinement call: --evidence is a JSON
+  # text, not a path, and tasks.py is the one place it is parsed.
+  local evidence_args=()
+  if [ -n "$evidence" ]; then
+    evidence_args=(--evidence "$evidence")
+  fi
+
   check_python3
   (
     _lock "${tasks_file}.lock"
     python3 "$(_aimi_tasks_py)" mark-complete \
-      --tasks-file "$tasks_file" --story-id "$story_id"
+      --tasks-file "$tasks_file" --story-id "$story_id" "${evidence_args[@]}"
   ) 200>"${tasks_file}.lock"
 
   clear_state_file "current-story"

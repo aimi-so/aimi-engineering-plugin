@@ -3227,9 +3227,31 @@ while true:
                   GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"
                   printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
                 fi
+                # --- Extract verify evidence: the FOURTH result_json field this
+                # command consumes, beside .commit, .failureCause and .knownGaps ---
+                # The story-executor Result Contract carries `verify`
+                # ({exit, preExit, segments, discriminating}) — the count of verify
+                # segments that behaved differently before the story's work than
+                # after. Empty here is a real answer and a common one: an executor
+                # whose payload predates that contract, a payload recovered by the
+                # fallback parse rather than read as JSON, or a story whose verify
+                # never ran. It is NOT the same as a zeroed evidence object, and the
+                # call below is written so the two can never collapse into each other.
+                VERIFY_EVIDENCE_JSON="${result_payload_by_id[full_story.id].verify or ''}"
                 ```
 
-                $AIMI_CLI mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE]
+                $AIMI_CLI mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE] --evidence "$VERIFY_EVIDENCE_JSON"
+
+                # Pass `--evidence` ONLY when `VERIFY_EVIDENCE_JSON` is non-empty. When it is empty the flag is omitted ENTIRELY — the call is exactly `mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE]`, never `--evidence ""`, never `--evidence {}`, and never `--verify-evidence`: the flag is spelled `--evidence` and `cmd_mark_complete` parses no other spelling, so a `--verify-evidence` reached for on the strength of the variable name falls through to the positional parser and is read as a second story id.
+                # Two reasons the flagless argv has to stay byte-identical rather than
+                # gaining an always-passed empty flag. It is the argv the pre-existing
+                # golden `mark-complete` recordings replay, so a flag that is always
+                # present rewrites all of them for nothing. And an empty evidence object
+                # would persist at `verification.evidence` as "we looked and found
+                # nothing" — precisely the conflation this reporting exists to remove:
+                # `tasks.py`'s `_report_discriminating` routes a missing count to
+                # `unrecorded` and a real 0 to `blind`, and those are two different
+                # statements about the same run.
 
                 # --- Post-merge visual verification for visual stories ---
                 # Session lifecycle: see Visual Follow Lifecycle section.
@@ -3954,7 +3976,9 @@ Only reached when `verify-creates` exited 0 and returned neither a `missing` nor
 
 - **Decisions Made** — one bullet per notable implementation decision surfaced by this phase's stories (their `implementation.approach` text, gate resolutions, or explicit deviations the story-executor agents reported). Empty array if nothing stood out.
 - **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `handoff_lists_artifact` (in `roadmap.py`) searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
-- **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap. Empty array if none.
+- **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap, **plus exactly one line carrying this phase's verification-evidence fraction**, spelled the way Step 5 prints it: `verification-evidence: discriminating=<n> completed=<m>`. That line is present on **every** run — full, partial or zero — for the same reason Step 5's own `## Verification Evidence` section is unconditional, and `handoff.md` is where it matters most: the handoff is the durable per-phase record a later phase reads, and a record that only mentions evidence when there was some cannot tell a checked phase from an unchecked one. One line, never a table, and never omitted at zero. So this array is no longer empty when no gap file exists — it holds that one line alone.
+  - **It rides in `deviations` rather than in a key of its own because a sixth key would be silently dropped.** `roadmap.py`'s `HANDOFF_FIELDS` is a fixed five — `decisions`, `artifacts`, `deviations`, `deferred`, `contracts` — and a payload carrying a sixth writes successfully while the number simply never reaches `handoff.md`. Widening that tuple is `roadmap.py`'s change to make, not this command's.
+  - **The two counts come from the payloads this run already has, not from a second CLI call.** Sum the per-story `VERIFY_EVIDENCE_JSON` values Step 4 read off each worker's `result_json`: `m` is the number of this phase's stories marked complete this run, and `n` is how many of them carried a `verify` object whose `discriminating` is 1 or more (an empty `VERIFY_EVIDENCE_JSON` counts toward `m` only — it is unrecorded evidence, not a recorded zero). This step runs **before** Step 5 captures `COMPLETION_VERIF_REPORT`, and it deliberately does not open a `verification-report` call of its own to fetch a number already in hand. The consequence is worth knowing when the two lines differ: the handoff counts what THIS run completed, Step 5's section counts every completed story in the file, so a resumed phase legitimately reports a smaller `m` here than the report prints below.
 - **Deferred Items** — one bullet per this phase's own story left in `skipped` status, if any. Empty array if none.
 - **Contracts Delivered** — one bullet per `creates` entry restating the identity now available to dependent phases (`"<identity> — contract fulfilled, available to phases depending on [PHASE_ID]"`), mirroring Artifacts Created's identities but phrased for downstream `needs` resolution.
 
@@ -4437,6 +4461,23 @@ fi
 PENDING_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.pending // [] | length' 2>/dev/null)
 PENDING_VERIF_IDS=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.pending // [] | join(", ")' 2>/dev/null)
 printf 'pending-verification: count=%s ids=%s\n' "${PENDING_VERIF_COUNT:-0}" "${PENDING_VERIF_IDS:-}"
+# The `discriminating` partition is read off the SAME captured payload, never a
+# second `verification-report` call: one read cannot disagree with itself about
+# one file, and two reads across a phase this long can. `// 0` carries the same
+# meaning `.pending // []` carries above — a CLI predating the partition answers
+# {visual, pending, malformed} with no `discriminating` key, and it must report
+# zero rather than abort a completion report over an additive section.
+# `completed` is the whole partition (checked + blind + unrecorded), not
+# `fraction`'s denominator: `unrecorded` stays out of that denominator on
+# purpose, and leaving it out here too would hide exactly the legacy run this
+# section exists to make visible — every story completed, nothing recorded.
+EVIDENCE_CHECKED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '(.discriminating.checked | length) // 0' 2>/dev/null)
+EVIDENCE_COMPLETED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '((.discriminating.checked | length) + (.discriminating.blind | length) + (.discriminating.unrecorded | length)) // 0' 2>/dev/null)
+# Unconditional. Printed on every run, whatever the numbers are.
+printf 'verification-evidence: discriminating=%s completed=%s\n' "${EVIDENCE_CHECKED:-0}" "${EVIDENCE_COMPLETED:-0}"
+if [ "${EVIDENCE_CHECKED:-0}" -eq 0 ] && [ "${EVIDENCE_COMPLETED:-0}" -gt 0 ]; then
+  printf 'verification-evidence: closed unchecked — %s completed stor(y|ies), not one of them carrying a discriminating assertion\n' "${EVIDENCE_COMPLETED:-0}"
+fi
 ```
 
 In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
@@ -4487,6 +4528,26 @@ that closes with its checks unlooked-at and says nothing about it.
 ```
 
 If `PENDING_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `pending` partition reads as zero), omit the `## Pending Verification` section entirely.
+
+Append, on **every** run — never omitted, never conditional on the numbers being good:
+```
+## Verification Evidence
+
+discriminating=[EVIDENCE_CHECKED] completed=[EVIDENCE_COMPLETED]
+
+[EVIDENCE_CHECKED] of [EVIDENCE_COMPLETED] completed stor(y|ies) recorded a
+verify that discriminated — at least one assertion that behaved differently
+before the story's work than after it. The rest either recorded an honest zero
+or recorded nothing at all.
+```
+
+When `EVIDENCE_CHECKED` is 0 and `EVIDENCE_COMPLETED` is greater than 0, append this paragraph to that same section — the identical condition the `closed unchecked` printf above carries, restated here so the streamed line and the written section can never disagree about one run:
+```
+This phase closed unchecked. Every story is complete and not one of them left
+evidence that anything was actually verified.
+```
+
+**This section deliberately does NOT take `## Pending Verification`'s omit-at-zero rule, and a later edit must not tidy the two into consistency.** They look like neighbours and they are opposites. Zero pending verifications is genuinely nothing to report — nobody declared a check that nobody judged, so the section has no subject. Zero *discriminating* verifications is the single loudest thing this report can say: it means the phase closed with no evidence that anything was checked, and that is exactly the run a silent report makes indistinguishable from a flawless one. "33/33 completed, 0 unmet" is equally compatible with both, which is the defect this section exists to remove; a line that only prints when the number is good would rebuild it. The absence has to be as visible as the presence, so the numbers print whatever they are.
 
 If `DESIGN_REVIEW_BUFFERS` is non-empty, append:
 ```

@@ -748,6 +748,141 @@ def test_a_number_written_back_is_rendered_the_way_jq_rendered_it():
     assert '"priority": 3.0' not in json.dumps(WRITE["normalize-status-corpus"]["file"])
 
 
+# --- mark-complete --evidence: one deep write, and the ways it says no -------
+#
+# The flag records how a story's own verify discriminated, and the one thing it
+# must never do is travel inside the patch: that patch is applied by
+# jq_add_object, a TOP-LEVEL merge, so a `{"verification": {...}}` entry would
+# replace the whole object and take strategy, status, url and expect with it.
+# Every test below is about that boundary. None of them is in the golden and
+# none of them can be: the corpus was recorded from jq, before the flag existed,
+# and the flagless path these tests also pin is exactly what keeps those 14
+# recordings valid.
+
+EVIDENCE = {"exit": 0, "preExit": 1, "segments": 7, "discriminating": 5}
+EVIDENCE_TEXT = json.dumps(EVIDENCE)
+
+
+def _evidence_file(tmp_path, story):
+    path = str(tmp_path / "2020-01-01-evidence-tasks.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3", "userStories": [story]}, handle)
+    return path
+
+
+def _mark_complete(path, *extra):
+    """Through main(), not through the op, so a refusal arrives as the exit
+    status bash sees rather than as the exception main() is there to catch."""
+    argv = ["tasks.py", "mark-complete", "--tasks-file", path, "--story-id", "US-001"]
+    return T.main(argv + list(extra))
+
+
+def _reread(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)["userStories"][0]
+
+
+def test_mark_complete_evidence_lands_deep_beside_what_it_must_not_replace(tmp_path):
+    path = _evidence_file(
+        tmp_path,
+        {
+            "id": "US-001",
+            "status": "in_progress",
+            "verification": {
+                "strategy": "ci",
+                "status": "pending",
+                "url": "https://ci.example.com/run/1",
+                "expect": "green",
+            },
+        },
+    )
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    story = _reread(path)
+    assert story["status"] == "completed"
+    assert story["verification"] == {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/1",
+        "expect": "green",
+        "evidence": EVIDENCE,
+    }
+
+
+def test_mark_complete_evidence_is_absent_without_the_flag(tmp_path):
+    """The /aimi:next call site, which has no executor payload to pass and never
+    will. Without the flag the patch is identically {"status": "completed"}."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path) == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_treats_an_empty_string_as_absent(tmp_path):
+    """One rule, held on both sides of the crossing: bash builds no flag when the
+    value is empty, and this is the half that holds when something else does."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path, "--evidence", "") == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_builds_the_intermediate(tmp_path):
+    """jq_setpath's own semantics, the ones update-field-cria-intermediarios
+    records -- a story with no verification gets one built around the evidence."""
+    path = _evidence_file(tmp_path, {"id": "US-001", "status": "in_progress"})
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    assert _reread(path)["verification"] == {"evidence": EVIDENCE}
+
+
+@pytest.mark.parametrize("raw", ["nao json", "[1,2]", '"texto"', "7", "null"])
+def test_mark_complete_evidence_refuses_a_payload_that_is_not_an_object(raw, tmp_path):
+    """Refused BEFORE the document is read, so the file cannot be half-written.
+
+    A payload that is not an object is one the reader of this field cannot use,
+    and it would degrade to "unrecorded" in silence instead of failing here,
+    where somebody is looking.
+    """
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", raw)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "a refusal writes nothing"
+
+
+def test_mark_complete_evidence_refuses_a_string_typed_verification(tmp_path):
+    """The update-field-intermediario-nao-objeto rule, reached from here: a path
+    THROUGH a non-object refuses, and the refusal happens before the write, so
+    the story's own status is still the one it had."""
+    story = {"id": "US-001", "status": "in_progress", "verification": "manual"}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", EVIDENCE_TEXT)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "not even the status patch survives the refusal"
+
+
+def test_mark_complete_evidence_is_the_only_mark_verb_that_takes_it(tmp_path):
+    """The gate is `status == "completed"`, the same shape --notes has for
+    failed. mark-failed passed the same flag ignores it rather than growing a
+    second field nothing reads."""
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    argv = ["tasks.py", "mark-failed", "--tasks-file", path, "--story-id", "US-001"]
+    assert T.main(argv + ["--evidence", EVIDENCE_TEXT]) == 0
+    written = _reread(path)
+    assert written["status"] == "failed"
+    assert written["verification"] == {"strategy": "ci"}
+
+
 # ---------------------------------------------------------------------------
 # The four validators: a verdict and an exit status, over an adversarial corpus
 # ---------------------------------------------------------------------------
@@ -3749,7 +3884,12 @@ def test_verification_report_passes_a_string_project_through_unchanged():
 def test_verification_report_ignores_a_well_formed_non_visual_object():
     """`.strategy != "visual"` on an otherwise well-formed verification object
     is neither visual NOR malformed -- the object-typed branch of the old
-    scan's `type == "object"` guard, which this partition never reaches."""
+    scan's `type == "object"` guard, which this partition never reaches.
+
+    The assertion below is WHOLE-DICT on purpose, and it is the only one in
+    this file that is: it pins the report's top-level SHAPE, so a new key is
+    a deliberate edit here rather than something a key-scoped sibling would
+    let through unnoticed. The `discriminating` entry arrived that way."""
     doc = {
         "userStories": [
             {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
@@ -3762,6 +3902,15 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         # it -- the pending partition is scoped by status, never by strategy.
         "pending": ["US-001"],
         "malformed": {"repairable": [], "unrepairable": []},
+        # this story carries no `status` of its own, so it is not completed
+        # and enters none of the three lists -- and with an empty denominator
+        # the fraction is None rather than 0.
+        "discriminating": {
+            "checked": [],
+            "blind": [],
+            "unrecorded": [],
+            "fraction": None,
+        },
     }
 
 
@@ -3869,6 +4018,106 @@ def test_pending_stays_inside_the_object_branch_across_story_01s_corpus(fixture)
         assert verification.get("status") == "pending"
     malformed = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
     assert malformed.isdisjoint(report["pending"])
+
+
+def test_verification_report_partitions_completed_stories_by_discriminating_evidence():
+    """The fourth key, and the distinction it exists to hold: absent evidence
+    is `unrecorded`, a recorded 0 is `blind`, and the two are never the same
+    answer. `blind` says somebody looked and nothing discriminated;
+    `unrecorded` says nothing was ever written down -- which is what every
+    story predating the field reads as, and reporting a confident zero for it
+    would be a lie about exactly the runs issue #136 calls unreadable.
+
+    Scope is a story's OWN `status == "completed"`, the same rule and the
+    same reason as `roadmap.py:_completed_story_ids`: a verification judges
+    work that was done, and `cascade-skip` writes `status: "skipped"` without
+    touching `verification`. So the pending story below carries a perfectly
+    good count and enters no list at all.
+
+    Three shapes are checked by name because each is a way the count could be
+    faked rather than read. `{"discriminating": true}` is `unrecorded`, not
+    the count 1 -- Python says `isinstance(True, int)` and jq does not, and a
+    boolean nobody meant as a number must not reach `checked`. A float, a
+    string, a negative int, an absent key and a non-object `evidence` are
+    `unrecorded` too: that tolerance is what makes a field-name disagreement
+    between this reader and its writers surface as "nothing was recorded"
+    rather than as a fabricated zero. And `unrecorded` stays OUT of
+    `fraction`'s denominator, so a legacy file answers `None` where a run of
+    honest zeros answers `0`.
+    """
+    doc = {
+        "userStories": [
+            # completed, no verification at all -- the legacy shape
+            {"id": "US-001", "status": "completed"},
+            {
+                "id": "US-002",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 3}},
+            },
+            {
+                "id": "US-003",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 0}},
+            },
+            {
+                "id": "US-004",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": True}},
+            },
+            # a real count, but the work is not done -- in no list
+            {
+                "id": "US-005",
+                "status": "pending",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 7}},
+            },
+            {
+                "id": "US-006",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": "probed"},
+            },
+        ]
+    }
+    report = T.verification_report(doc)["discriminating"]
+    assert report["checked"] == ["US-002"]
+    assert report["blind"] == ["US-003"]
+    assert report["unrecorded"] == ["US-001", "US-004", "US-006"]
+    # one checked over one checked plus one blind; US-005 and the three
+    # unrecorded ids are outside the denominator entirely
+    assert report["fraction"] == 0.5
+    every_id = report["checked"] + report["blind"] + report["unrecorded"]
+    assert len(every_id) == len(set(every_id)) and "US-005" not in every_id
+
+    # every count that is not a plain non-negative integer reads as "never
+    # recorded" -- including an `evidence` that is not an object at all
+    def report_for(evidence):
+        story = {"id": "US-001", "status": "completed", "verification": {}}
+        if evidence is not ...:
+            story["verification"]["evidence"] = evidence
+        return T.verification_report({"userStories": [story]})["discriminating"]
+
+    for evidence in (
+        ...,
+        None,
+        "probed",
+        ["discriminating"],
+        {},
+        {"segments": 3},
+        {"discriminating": 1.0},
+        {"discriminating": "2"},
+        {"discriminating": -1},
+        {"discriminating": None},
+    ):
+        assert report_for(evidence) == {
+            "checked": [],
+            "blind": [],
+            "unrecorded": ["US-001"],
+            "fraction": None,
+        }, evidence
+
+    # the two fraction boundaries: nothing recorded has NO fraction, a run of
+    # honest zeros has a fraction of zero
+    assert report_for(...)["fraction"] is None
+    assert report_for({"discriminating": 0})["fraction"] == 0
 
 
 # ---------------------------------------------------------------------------
