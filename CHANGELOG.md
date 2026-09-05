@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.130.0] - 2026-09-04
+
+Phase 2 of verification-integrity: the narrow-trigger holes, and the two
+decisions that were open for want of a decision rather than a fix.
+
+### Fixed
+
+- **`verify-probe` tells an assertion that has not passed yet from one that
+  never can.** `discriminates` was `status != 0`, so a segment that could never
+  pass — a check whose harness cannot observe what it claims — was reported as
+  discriminating, indistinguishable from a good assertion. The verb now accepts
+  `--previous-file`, the pre-run's own JSON, and names a segment `unsatisfiable`
+  when it failed in both runs. Nothing is inferred from a segment's text; only
+  failing twice separates a broken harness from unfinished work, and a lone run
+  answers exactly what it answered before.
+- **The wave notices an executor that goes idle without reporting.** The wave
+  loop's only fallback presumed the Task returned something usable. It now
+  crosses three facts it already captures — no `result_json`, HEAD unchanged
+  from the captured base, dirty worktree — and routes the story into the two
+  resolutions that already exist (commit rescue, or mark-failed plus
+  cascade-skip) rather than adding a third. The report names which one handled
+  it.
+- **`write-review` names a review file in a flat execution.** The verb required
+  `--feature` and `--phase` unconditionally, so a non-phase run had its design
+  review die with the session — issue #135's defect surviving outside phase
+  mode. A second naming mode, chosen by which flags arrive, derives the path
+  from the active tasks file's basename; exactly one flag is refused rather than
+  guessed.
+- **`open-pr`'s backend issue honors the branch gate the PR title already
+  had.** `metadata.title` is read once and gated against `branchName` for the PR
+  title only; the mismatch branch warned but left the variable populated, so the
+  backend issue could still be titled after an unrelated feature. The mismatch
+  branch now empties it, and the issue call falls back to this branch's own
+  derived title, announcing the source.
+
+### Changed
+
+- **`wave` is documented as derived, and rebuildable.** The schema now states
+  that `wave` comes from `dependsOn`, is informational, and is never consumed by
+  dispatch — measured: it is read zero times as a field outside `validate_waves`
+  itself, and `list-ready` never mentions it. A new `normalize-waves` verb
+  recomputes it beside the three existing `normalize-*`, importing
+  `compute_waves` from `story_merge.py` rather than restating the writer's rule.
+- **The static-analysis corpus reaches `agents/`.** `command_block_files()`
+  gained a third root, walked recursively like `commands/`. Measured by invoking
+  the extractor rather than by grep: 33 agent files, 8 carrying a bash fence,
+  all parsing clean — the block baseline gained no entries. The two files over
+  the size ceiling are grandfathered at their measured sizes.
+
+
 ## [1.129.0] - 2026-09-04
 
 Phase 1 of verification-integrity: what a phase judges with, and what a plan is
