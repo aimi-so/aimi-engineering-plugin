@@ -962,7 +962,7 @@ For each identified scope context, draft one phase entry in an in-memory `phases
 - `name` — short phase name.
 - `slug` — derived from `name` via the five-step algorithm in `commands/references/topic-slug.md`.
 - `goal` — an outcome statement, not a task list, per the "Goal and Success Criteria" section of `scope-contexts.md`.
-- `successCriteria` — 2 to 5 observable criteria per `scope-contexts.md`.
+- `successCriteria` — 2 to 5 observable criteria per `scope-contexts.md`. A criterion that states a number must carry the command that produced it — see Step 4's numeric-criteria check, which blocks Approve until it does.
 - `dependsOn` — list of other phases' `id` values this phase's stories cannot start before.
 - `creates` / `needs` — artifact contracts per the "Creates/Needs Contracts" section of `scope-contexts.md`.
 - `areas` — coarse top-level directories/globs per the "Coarse File-Area Declaration" section of `scope-contexts.md`.
@@ -1085,6 +1085,41 @@ For each item in the session requirements set, check whether it is referenced �
 - **One or more orphans:** list each orphan to the user by its source (e.g., "Constraints: rate limiting on the public API") and block Approve — the option is rejected and the gate is re-presented (Step 3) until the user resolves every orphan via Add, Rename, or Merge.
 
 This is a **hard block**, stricter than the advisory-only `outlineWarnings` pattern in `commands/plan.md` Phase 3b/3c (which surfaces warnings but never rejects Approve).
+
+**Numeric criteria carry the command that produced them.** Run this as part of
+the same check, under the same hard block — it is not a second gate. For every
+`successCriteria` string in the current `phases` array that states a number (a
+count, a byte size, a percentage, a duration), the criterion is not acceptable
+until the number is backed by the command that produced it, recorded in the
+criterion's own ` ```measure ` block per
+`${CLAUDE_PLUGIN_ROOT}/commands/references/sanitization.md` §
+*Measure-Block Execution Allowlist*:
+
+```measure
+$ grep -rlc '^---$' commands/ | wc -l
+31
+```
+
+- **Backed** — the number matches the block's recorded output. The criterion
+  passes; nothing is asked.
+- **Unbacked** — ask the user for the command, once, in the same AskUserQuestion
+  turn that lists orphans, and offer a third answer beside supplying it: restate
+  the criterion without the number. A criterion the user cannot measure is
+  observable prose, which is what `scope-contexts.md` asked for in the first
+  place. Approve stays unavailable until every numeric criterion is either
+  backed or restated.
+
+This exists because of a concrete failure, not a hypothetical: a phase criterion
+asserted that **35** preambles would stop existing when only **31** were ever
+convertible, no step in the pipeline compared the two, the roadmap carried the
+wrong target into planning, and a human found it by re-counting at the end. The
+command was cheap; nobody was asked for it.
+
+**Agent mode:** when `INTERACTIVE_MODE=agent` this check does not prompt — the
+Non-Interactive Fast Path skips Step 4 entirely. Each unbacked numeric criterion
+is instead written through to the `phases:` frontmatter with the number marked
+`UNVERIFIED` inline, so `/aimi:plan` inherits the doubt rather than a figure
+that looks checked.
 
 ### Step 5: Collapse Rule
 

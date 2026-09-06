@@ -804,6 +804,151 @@ test_merge_all_replays_stderr_on_successful_merge() {
 }
 
 # ============================================================================
+# Create Sentinel / Base Derivation Tests
+# ============================================================================
+#
+# create_worktree prints two different things on its two branches: the reuse
+# branch prints the bare path, the creation branch prints an indented
+# "  Path:" and an ANSI-wrapped `cd`. Neither branch ever stated the BASE.
+# These tests assert the machine-readable pair on BOTH branches, and assert
+# BEHAVIOUR (what the command emits, what the tree stands on) rather than the
+# presence of a string in the source file.
+
+# Both branches must emit exactly one WORKTREE_PATH= and one WORKTREE_BASE=,
+# and the base must be the real sha of the tree, identical across a create
+# and the reuse that follows it.
+test_create_emits_sentinels_on_both_branches() {
+  echo ""
+  echo "=== Testing create emits WORKTREE_PATH=/WORKTREE_BASE= on both branches ==="
+
+  setup_wtm_fixture
+
+  local branch="sentinel-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  local fresh_out reuse_out
+  fresh_out=$(bash "$WTM" create "$branch" 2>&1)
+  reuse_out=$(bash "$WTM" create "$branch" 2>&1)
+
+  assert_eq "1" "$(printf '%s\n' "$fresh_out" | grep -c '^WORKTREE_PATH=')" \
+    "create sentinels: creation branch emits exactly one WORKTREE_PATH= line"
+  assert_eq "1" "$(printf '%s\n' "$fresh_out" | grep -c '^WORKTREE_BASE=')" \
+    "create sentinels: creation branch emits exactly one WORKTREE_BASE= line"
+  assert_eq "1" "$(printf '%s\n' "$reuse_out" | grep -c '^WORKTREE_PATH=')" \
+    "create sentinels: reuse branch emits exactly one WORKTREE_PATH= line"
+  assert_eq "1" "$(printf '%s\n' "$reuse_out" | grep -c '^WORKTREE_BASE=')" \
+    "create sentinels: reuse branch emits exactly one WORKTREE_BASE= line"
+
+  # The path is absolute and is the worktree that actually got created.
+  assert_eq "$worktree_path" \
+    "$(printf '%s\n' "$fresh_out" | sed -n 's/^WORKTREE_PATH=//p')" \
+    "create sentinels: creation branch reports the absolute worktree path"
+  assert_eq "$worktree_path" \
+    "$(printf '%s\n' "$reuse_out" | sed -n 's/^WORKTREE_PATH=//p')" \
+    "create sentinels: reuse branch reports the same absolute worktree path"
+
+  # The base is the FULL sha the worktree actually stands on -- the fact a
+  # wrong-base-at-a-right-path failure needs and a path alone cannot give.
+  local real_head fresh_base reuse_base
+  real_head=$(git -C "$worktree_path" rev-parse HEAD)
+  fresh_base=$(printf '%s\n' "$fresh_out" | sed -n 's/^WORKTREE_BASE=//p')
+  reuse_base=$(printf '%s\n' "$reuse_out" | sed -n 's/^WORKTREE_BASE=//p')
+
+  assert_eq "$real_head" "$fresh_base" \
+    "create sentinels: creation branch reports the sha the worktree stands on"
+  assert_eq "$real_head" "$reuse_base" \
+    "create sentinels: reuse branch reports the same sha"
+  assert_eq "40" "${#fresh_base}" \
+    "create sentinels: the sha is full-length, not abbreviated"
+
+  # Existing human output is unchanged -- the sentinels are pure addition.
+  assert_contains "Worktree already exists at: $worktree_path" "$reuse_out" \
+    "create sentinels: reuse branch keeps its existing human line"
+  assert_contains "Path: $worktree_path" "$fresh_out" \
+    "create sentinels: creation branch keeps its existing indented Path line"
+
+  teardown_wtm_fixture
+}
+
+# The default base is the branch `create` is invoked on, never the literal
+# "main". This is the regression under test: a story worktree cut from main
+# instead of from its phase branch is correct by path and wrong by content,
+# and nothing downstream notices until a verb that exists on the intended
+# base answers "Unknown command".
+test_create_defaults_from_current_branch() {
+  echo ""
+  echo "=== Testing create defaults its base to the current branch, not main ==="
+
+  setup_wtm_fixture
+
+  # A second commit on a non-main branch, so "current branch" and "main"
+  # resolve to genuinely different shas.
+  git checkout -q -b phase-base
+  echo "phase work" > phase.txt
+  git add phase.txt
+  git commit -q -m "phase-only commit"
+
+  local main_sha phase_sha
+  main_sha=$(git rev-parse main)
+  phase_sha=$(git rev-parse phase-base)
+  assert_eq "false" "$([[ "$main_sha" == "$phase_sha" ]] && echo true || echo false)" \
+    "create default base: fixture really has two distinct shas"
+
+  local out
+  out=$(bash "$WTM" create derived-branch 2>&1)
+
+  assert_contains "From: phase-base" "$out" \
+    "create default base: reports the current branch as the base it used"
+  assert_not_contains "From: main" "$out" \
+    "create default base: does not fall back to the literal main"
+
+  local emitted_base
+  emitted_base=$(printf '%s\n' "$out" | sed -n 's/^WORKTREE_BASE=//p')
+  assert_eq "$phase_sha" "$emitted_base" \
+    "create default base: the new worktree stands on the current branch's sha"
+
+  # An explicit --from still wins over the derived default.
+  local explicit_out explicit_base
+  explicit_out=$(bash "$WTM" create explicit-branch --from main 2>&1)
+  explicit_base=$(printf '%s\n' "$explicit_out" | sed -n 's/^WORKTREE_BASE=//p')
+  assert_eq "$main_sha" "$explicit_base" \
+    "create default base: an explicit --from still overrides the derived default"
+  assert_contains "From: main" "$explicit_out" \
+    "create default base: --from is what gets reported when given"
+
+  teardown_wtm_fixture
+}
+
+# The absence of .aimi/ IS the assertion. find_aimi_root stops at the first
+# directory containing .aimi/, so a worktree that has one becomes PROJECT_ROOT
+# instead of the main repository -- and the tasks file, which lives in the
+# main repository, is then outside that root, so validate_path_in_project
+# refuses the get-story-context every story executor runs as its first action.
+test_create_does_not_create_aimi_in_worktree() {
+  echo ""
+  echo "=== Testing create leaves no .aimi/ inside the worktree ==="
+
+  setup_wtm_fixture
+
+  local branch="no-aimi-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  bash "$WTM" create "$branch" >/dev/null 2>&1
+
+  assert_eq "true" "$([[ -d "$worktree_path" ]] && echo true || echo false)" \
+    "no .aimi in worktree: the worktree itself was created"
+  assert_eq "false" "$([[ -d "$worktree_path/.aimi" ]] && echo true || echo false)" \
+    "no .aimi in worktree: create left no .aimi/ behind"
+
+  # The fixture's main repo DOES have .aimi/tasks -- so this proves create
+  # declined to make one, not that the fixture simply has none anywhere.
+  assert_eq "true" "$([[ -d "$WTM_FIXTURE_REPO/.aimi" ]] && echo true || echo false)" \
+    "no .aimi in worktree: the main repository still has its own .aimi/"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -820,6 +965,9 @@ main() {
   echo "--- Create/Remove Tests ---"
   test_create_remove_recreate_with_keep_branch
   test_create_remove_default_removes_branch
+  test_create_emits_sentinels_on_both_branches
+  test_create_defaults_from_current_branch
+  test_create_does_not_create_aimi_in_worktree
 
   echo ""
   echo "--- Serve Status Tests ---"

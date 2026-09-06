@@ -34,8 +34,15 @@ set -uo pipefail
 # test (which now blocks, because its only read is inside that lock), mutates
 # the document underneath it, and only then releases. The verb therefore reads
 # what the mutation left behind — not because the timing worked out, but
-# because the lock orders it. Every concurrent test here uses that one helper;
-# the single-writer control does not, and is the poorer for nothing.
+# because the lock orders it. Every test that races a verb against a CHANGING
+# document uses that one helper; the single-writer control does not, and is the
+# poorer for nothing.
+#
+# The two tests at the bottom of this file race two verbs against EACH OTHER
+# instead, over a document nothing else touches, and they take the lock for a
+# different job: as a starting gate that holds both until both are queued, with
+# no mutation to apply. Same lock, same reason it needs no sleep, second helper
+# — run_two_against_a_held_gate, beside the first.
 #
 # It did not always: the cascade-skip test used to sleep 0.10s into a window
 # measured in seconds, which is what an UNLOCKED quadratic `reduce
@@ -83,6 +90,12 @@ set -uo pipefail
 # as proof. Twelve consecutive runs were the bar against the jq; eight
 # consecutive runs were the bar against the port, all of them 18 passed, 0
 # failed, exit 0.
+#
+# Those figures are the record of what was measured then, and they are left as
+# found. The mark-complete and update-field tests took the count from 18 to 29
+# and paid the same bar for it: eight consecutive runs, all of them 29 passed,
+# 0 failed, exit 0. A run reporting any other total is reporting a change to
+# this file, not noise.
 #
 # PORTABILITY: no `mapfile`, no `readarray`, no associative arrays, no
 # indexing into an array by number — same rules the dispatcher header states,
@@ -225,10 +238,11 @@ file_exists() { [ -e "$1" ]; }
 # releasing it. The verb blocks on the lock, so what it goes on to read is
 # what the mutation left behind — ordered by the lock, not by timing.
 #
-# All four tests use this now, which is why it lives here beside the other
-# fixture helpers rather than under one test's banner. The cascade-skip test
-# used to sleep into an unlocked window instead; there is no unlocked window
-# left to sleep into.
+# All four of the mutation tests use this now, which is why it lives here
+# beside the other fixture helpers rather than under one test's banner. The
+# cascade-skip test used to sleep into an unlocked window instead; there is no
+# unlocked window left to sleep into. The two two-verb tests at the bottom of
+# the file do not mutate anything and use run_two_against_a_held_gate below.
 run_against_a_held_lock() {
   local tasks_file="$1"
   local mutation="$2"
@@ -263,6 +277,102 @@ run_against_a_held_lock() {
   HELD_LOCK_MARKED=0
   [ -e "$marked" ] && HELD_LOCK_MARKED=1
   HELD_LOCK_OUT="$tasks_file.verbout"
+}
+
+
+# How many processes are BLOCKED waiting for the lock on $1 — the counting
+# form of verb_waits_for_lock.
+#
+# The tests below queue TWO verbs behind one gate rather than one, and
+# "somebody is waiting" cannot tell a pair that collided from a pair that ran
+# one after the other. A test that cannot tell those apart proves nothing about
+# concurrency, which is the same failure mode the header's probe paragraph is
+# about. Same /proc/locks source and the same unreadable-file fallback: 0,
+# which the poll reads as "not yet" and pays for with a timeout rather than
+# with a wrong answer.
+lock_waiter_count() {
+  local lock_file="$1"
+  [ -r /proc/locks ] || { printf '0\n'; return 0; }
+  local inode
+  inode=$(stat -c '%i' "$lock_file" 2>/dev/null) || { printf '0\n'; return 0; }
+  [ -n "$inode" ] || { printf '0\n'; return 0; }
+  local n
+  n=$(grep -c -- "-> FLOCK .*:${inode} " /proc/locks 2>/dev/null) || n=0
+  printf '%s\n' "$n"
+}
+
+# The counting form of tmp_sibling_exists, for the same reason and over the
+# same glob.
+tmp_sibling_count() {
+  local tasks_file="$1"
+  find "$(dirname "$tasks_file")" -maxdepth 1 -name "$(basename "$tasks_file").??????" -print 2>/dev/null | wc -l | tr -d ' '
+}
+
+# True once BOTH verbs have demonstrably passed the point where a pre-lock read
+# would have happened. The two-verb form of verb_past_its_read_point, and it
+# keeps both of that predicate's arms for exactly the reasons stated there: the
+# sibling arm answers for a verb that reads outside the lock, the waiter arm
+# for one that reads inside it, and dropping either costs the same thing here
+# as it costs there.
+both_verbs_past_their_read_point() {
+  local tasks_file="$1"
+  [ "$(tmp_sibling_count "$tasks_file")" -ge 2 ] ||
+    [ "$(lock_waiter_count "$tasks_file.lock")" -ge 2 ]
+}
+
+# Runs TWO $CLI invocations against one document, released together from a gate
+# this suite holds. The gate mutates nothing: what is under test here is what
+# the two verbs do to EACH OTHER, not what one of them does to a document
+# changed underneath it, so there is no mutation to apply and the lock is a
+# starting line rather than an interleaving.
+#
+# The two arguments are FUNCTION NAMES, one per invocation. The suite's own
+# portability rules forbid indexing an array by number, and two verbs with
+# differently shaped argument lists cannot share one flat "$@" without it. A
+# named function per side also puts each invocation next to the test that
+# depends on it, spelled the way it would be typed.
+#
+# Both are launched only once the gate is genuinely held, and the gate is only
+# released once both are demonstrably queued behind it — the premise every test
+# below asserts rather than assumes, in the same shape as HELD_LOCK_MARKED.
+run_two_against_a_held_gate() {
+  local tasks_file="$1"
+  local first="$2"
+  local second="$3"
+
+  local ready="$tasks_file.ready"
+  local queued="$tasks_file.queued"
+  rm -f "$ready" "$queued"
+
+  (
+    flock -x 9
+    : > "$ready"
+    if wait_for both_verbs_past_their_read_point "$tasks_file"; then
+      : > "$queued"
+    fi
+  ) 9>"$tasks_file.lock" &
+  local holder=$!
+
+  # Same reason as run_against_a_held_lock: launching before the gate is held
+  # lets a verb sail straight through and test nothing.
+  wait_for file_exists "$ready"
+
+  local rc1=0 rc2=0
+  "$first" > "$tasks_file.out1" 2>&1 &
+  local pid1=$!
+  "$second" > "$tasks_file.out2" 2>&1 &
+  local pid2=$!
+
+  wait "$holder"
+  wait "$pid1" || rc1=$?
+  wait "$pid2" || rc2=$?
+
+  HELD_GATE_RC1="$rc1"
+  HELD_GATE_RC2="$rc2"
+  HELD_GATE_QUEUED=0
+  [ -e "$queued" ] && HELD_GATE_QUEUED=1
+  HELD_GATE_OUT1="$tasks_file.out1"
+  HELD_GATE_OUT2="$tasks_file.out2"
 }
 
 # ============================================================================
@@ -537,6 +647,162 @@ EOF
 }
 
 # ============================================================================
+# mark-complete: two executors finishing at once
+# ============================================================================
+
+# NOTHING BELOW THIS BANNER INVERTED, AND NOTHING BELOW IT SHOULD EVER NEED TO.
+# Everything above records a race that was open and is now closed, and its
+# assertions changed value in the commit that closed it. These two record a
+# guarantee that must not open, so the day one of them changes value is the day
+# something broke.
+#
+# They are here because the scenario is not hypothetical: wave 1 of phase 2 ran
+# four story executors against one tasks.json, each calling mark-complete on
+# its own story as it finished. Four writers, one document, no coordination
+# between them beyond the lock.
+#
+# The guarantee is read-modify-write atomicity, and it is a property of the
+# whole DOCUMENT rather than of one story's field. tasks.py reads the entire
+# file, mutates the one story in memory and writes the whole thing back — so
+# two of those overlapping with a read taken outside the lock is a lost update
+# by construction: the second writer's in-memory document never contained the
+# first's completion, the write puts it back on disk without it, and the
+# executor whose completion was erased is told it succeeded. Nothing else in
+# the tree would notice; the story simply looks unfinished the next time
+# somebody asks.
+#
+# What prevents it is the one-crossing-inside-the-lock shape stated as an
+# invariant in plugins/aimi-engineering/CLAUDE.md. That invariant is checked
+# structurally by test_every_locked_tasks_verb_crosses_into_python_exactly_once
+# in scripts/tests/test_tasks.py, which counts crossings; this test is the
+# behavioural half, and it is the one that answers "and what does that buy?".
+#
+# IT DISCRIMINATES, AND THAT WAS MEASURED RATHER THAN ASSUMED — the same bar
+# the header sets for the inverted tests. Run these five assertions against a
+# stand-in mark-complete whose read happens before the lock and whose write
+# happens inside it (the two-crossing shape the invariant forbids) and four of
+# them still pass: the gate premise holds, and BOTH verbs exit 0. The one that
+# goes red is the loser's status on disk — still "in_progress", the value the
+# fixture started at, because the winner's write put back a document that never
+# saw it. That is the whole shape of a lost update, and it is why the exit-code
+# assertions are not the ones carrying the weight here.
+test_two_mark_completes_both_land() {
+  echo ""
+  echo "=== mark-complete: two stories completed at once, neither write lost ==="
+
+  local dir="$TEST_DIR/mark-complete-race"
+  local tasks_file
+  tasks_file=$(build_small_fixture "$dir" <<'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {"title": "ref: mark-complete race", "type": "ref", "branchName": "ref/mark-complete-race", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 4},
+  "userStories": [
+    {"id": "US-001", "title": "Story one", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "in_progress", "dependsOn": [], "notes": ""},
+    {"id": "US-002", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "in_progress", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  )
+
+  cd "$dir" || return
+
+  run_two_against_a_held_gate "$tasks_file" \
+    race_mark_complete_first race_mark_complete_second
+
+  # The premise, asserted rather than assumed — exactly as the tests above
+  # assert HELD_LOCK_MARKED. Two marks that happened to run one after the other
+  # would satisfy every assertion below while exercising nothing.
+  assert_eq "1" "$HELD_GATE_QUEUED" \
+    "mark-complete race: both marks were in flight against the same document"
+  assert_exit_code "0" "$HELD_GATE_RC1" "mark-complete race: the first mark exits 0"
+  assert_exit_code "0" "$HELD_GATE_RC2" "mark-complete race: the second mark exits 0"
+
+  local us1 us2
+  us1=$(jq -r '.userStories[] | select(.id == "US-001") | .status' "$tasks_file")
+  us2=$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$tasks_file")
+  assert_eq "completed" "$us1" \
+    "mark-complete race: the first story is completed on disk"
+  assert_eq "completed" "$us2" \
+    "mark-complete race: and so is the second — neither write is lost"
+}
+
+# One invocation each, named so run_two_against_a_held_gate can launch them.
+# They inherit the fixture directory the test cd'd into, which is what
+# get_tasks_file resolves against.
+race_mark_complete_first() { "$CLI" mark-complete US-001; }
+race_mark_complete_second() { "$CLI" mark-complete US-002; }
+
+# ============================================================================
+# update-field: two writers, one field
+# ============================================================================
+
+# THE WEAKER GUARANTEE, AND IT IS WEAKER ON PURPOSE. Two mark-completes touch
+# different stories, so "both survive" is the whole of what correctness means
+# there. Two update-fields writing the SAME field of the SAME story are asking
+# for incompatible things, and no lock can grant both: one of the two values
+# has to be the one on disk afterwards.
+#
+# So this test asserts the pair of properties that ARE owed. The field holds
+# one of the two values WHOLE — an arbitrary winner is fine, a blend of the two
+# is not — and the document is still parseable, with the rest of the story
+# intact. Both are properties of the atomic write (tasks.py writes a temp file
+# and renames it) rather than of the ordering, and both are what a reader
+# concurrent with either writer depends on.
+#
+# Do not tighten this into "the second invocation wins". Which invocation the
+# kernel grants the lock to first is not this suite's to decide, and asserting
+# an order it does not control is how a deterministic suite becomes a flaky
+# one.
+test_two_update_fields_leave_one_winner() {
+  echo ""
+  echo "=== update-field: two writers on one field, one whole winner ==="
+
+  local dir="$TEST_DIR/update-field-race"
+  local tasks_file
+  tasks_file=$(build_small_fixture "$dir" <<'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {"title": "ref: update-field race", "type": "ref", "branchName": "ref/update-field-race", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-001", "title": "Contended story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "in_progress", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  )
+
+  cd "$dir" || return
+
+  run_two_against_a_held_gate "$tasks_file" \
+    race_update_notes_first race_update_notes_second
+
+  assert_eq "1" "$HELD_GATE_QUEUED" \
+    "update-field race: both writers were in flight against the same field"
+  assert_exit_code "0" "$HELD_GATE_RC1" "update-field race: the first write exits 0"
+  assert_exit_code "0" "$HELD_GATE_RC2" "update-field race: the second write exits 0"
+
+  local parse_rc=0
+  jq empty "$tasks_file" > /dev/null 2>&1 || parse_rc=$?
+  assert_exit_code "0" "$parse_rc" \
+    "update-field race: the document on disk is still valid JSON"
+
+  local notes whole="no"
+  notes=$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$tasks_file")
+  case "$notes" in
+    first-writer | second-writer) whole="yes" ;;
+  esac
+  assert_eq "yes" "$whole" \
+    "update-field race: the field holds one of the two values whole, not a blend"
+
+  local title
+  title=$(jq -r '.userStories[] | select(.id == "US-001") | .title' "$tasks_file")
+  assert_eq "Contended story" "$title" \
+    "update-field race: and the rest of the story survives the losing write"
+}
+
+race_update_notes_first() { "$CLI" update-field US-001 notes first-writer; }
+race_update_notes_second() { "$CLI" update-field US-001 notes second-writer; }
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -569,6 +835,11 @@ main() {
   echo ""
   echo "--- reset-orphaned Tests ---"
   test_reset_orphaned_report_is_what_was_written
+
+  echo ""
+  echo "--- mark-complete / update-field Tests ---"
+  test_two_mark_completes_both_land
+  test_two_update_fields_leave_one_winner
 
   echo ""
   echo "================================================"

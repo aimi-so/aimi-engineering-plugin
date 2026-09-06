@@ -45,9 +45,16 @@ RESOLUTION_LINE_RE = re.compile(
         | :\s"\$\{(AIMI_CLI|WORKTREE_MGR):\?
         | if\s\[\s-[zn]\s"\$(AIMI_CLI|WORKTREE_MGR)"
         | if\s\[\s-z\s"\$\{CLAUDECODE:-\}"\s\]\s&&
+        | if\s\[\s-n\s"\$AIMI_DEV_DIR"\s\]\s&&
     )""",
     re.VERBOSE,
 )
+# The last alternative is Layer 0-dev, and it needed its own branch rather than
+# riding on the CLAUDECODE one above it: that layer deliberately has NO
+# CLAUDECODE gate (see _dev_dir_path in scripts/aimi-cli.sh), so its line opens
+# on the variable itself and would otherwise be invisible to this scanner --
+# present in commands/, never fed to the hook, and silently uncovered by the
+# one test here whose whole value is that it derives its corpus from the tree.
 
 
 def _is_complete_single_line_command(line: str) -> bool:
@@ -200,6 +207,24 @@ LEGACY_FORMS = [
     "AIMI_CLI=$(cat ~/.claude/aimi-engineering-cli-path 2>/dev/null)",
     'if [ -n "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; '
     'then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi',
+    # The Layer 2 glob as it was spelled before the numeric version filter was
+    # added to it. The tree no longer emits these, so collect_resolution_lines
+    # cannot reach them -- and that is exactly why they are written out here.
+    # A command body that entered a conversation before the upgrade is still
+    # run verbatim afterwards, and the only thing the hook can do with a line
+    # it stops recognizing is prompt the user for it. Patterns 7L and 8L in
+    # auto-approve-cli.sh exist for these two strings alone.
+    'if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(bash -c \'ls '
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    "/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | "
+    'sed -E "s#.*/aimi-engineering/([^/]+)/.*#\\1 &#" | sort -V | tail -1 | '
+    "cut -d\" \" -f2-'); fi",
+    'if [ -z "$WORKTREE_MGR" ]; then WORKTREE_MGR=$(bash -c \'ls '
+    "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    "/plugins/cache/*/aimi-engineering/*/skills/git-worktree/scripts/"
+    "worktree-manager.sh 2>/dev/null | "
+    'sed -E "s#.*/aimi-engineering/([^/]+)/.*#\\1 &#" | sort -V | tail -1 | '
+    "cut -d\" \" -f2-'); fi",
 ]
 
 
@@ -229,6 +254,13 @@ ADVERSARIAL = [
         'AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}'
         '/cli-path" 2>/dev/null); rm -rf /',
         id="valid-prefix-with-a-chained-command",
+    ),
+    pytest.param(
+        'AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}'
+        '/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}'
+        '/aimi-engineering-cli-path" 2>/dev/null); : "${AIMI_CLI:?AIMI_CLI is empty '
+        '— re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"; rm -rf /',
+        id="canonical-single-line-form-with-a-chained-command",
     ),
     pytest.param(
         'if [ -n "$AIMI_CLI" ]; then _aimi_cfg="/etc"; mkdir -p "$_aimi_cfg" && '

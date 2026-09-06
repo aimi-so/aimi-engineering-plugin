@@ -12,7 +12,7 @@ Automatically detect the parent branch, build the PR title and description from 
 
 ## Project Conventions
 
-This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4), with the internal `US-NNN` story tags stripped from every commit subject it renders (see Step 4b's story-tag strip). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available, falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice. Both title and body strip the internal `US-NNN` story tags `/aimi:execute` writes per commit.
+This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4), with the internal `US-NNN` story tags stripped from every commit subject it renders (see Step 4b's story-tag strip). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available *and that tasks file's `branchName` is this PR's branch*, falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice, without letting an unrelated active session title it after some other feature. Whichever source wins says so on stderr. Both title and body strip the internal `US-NNN` story tags `/aimi:execute` writes per commit.
 
 For project-specific PR structure (e.g., required Test Plan section, issue-link footer, checklists), use GitHub's standard mechanism:
 
@@ -345,12 +345,22 @@ No message is printed for the "already correct" half of Case A — `$CURRENT_BRA
 
 ```bash
 if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$' && [ "$CANDIDATE_BRANCH" != "$CURRENT_BRANCH" ]; then
+  if ! git show-ref --verify --quiet "refs/heads/$CANDIDATE_BRANCH"; then
+    echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", but no such branch exists in this repository." >&2
+    echo "The plan was generated and never executed — there is no branch to open a PR from." >&2
+    echo "Run /aimi:execute first, then re-run this command." >&2
+    exit 1
+  fi
   echo "Resolved feature branch from the active tasks file: $CANDIDATE_BRANCH (HEAD was on $CURRENT_BRANCH)" >&2
   CURRENT_BRANCH="$CANDIDATE_BRANCH"
 fi
 ```
 
 The correction is reported (to stderr, matching the Case A warning's own `>&2` convention) rather than applied silently: once the trigger also covers the stacked-base case, `$CURRENT_BRANCH` being swapped is no longer obviously "HEAD was on the default branch" — the swapped-from value is itself a plausible-looking feature branch, and a silent substitution there would be a surprise rather than a correction. Naming both branches makes it auditable in the transcript instead.
+
+**The ref is confirmed before it is adopted, and the confirmation lives in this same block.** `metadata.branchName` records the branch a plan *intends* to run on; `/aimi:execute` is what creates it. A plan that was generated and never executed therefore names a branch that does not exist, and adopting it unchecked pushed the failure downstream to Step 2e's `git log "$BASE_BRANCH".."$CURRENT_BRANCH"` — which reports an unknown revision, an error about a range rather than about the one thing that is actually wrong. Stopping here says what happened and what to do about it. `git show-ref --verify refs/heads/<name>` is the check rather than `rev-parse --verify`, because only a local branch will do: HEAD is about to be treated as if it were on this branch, and a remote-tracking ref or a tag that happened to share the name is not a branch this repository can diff or push. Case A needs no equivalent check — it never swaps `$CURRENT_BRANCH`, so the branch it proceeds with is the one already checked out.
+
+**Why it is inside the `if`, not in a block of its own:** each fenced block runs in its own shell, so `$CANDIDATE_BRANCH` does not survive to a later one. A check placed after this block would test an empty variable and pass vacuously — the same defect the `--branch` parse guards against by validating in the block that assigns.
 
 Store the resolved value as `$CURRENT_BRANCH`.
 
@@ -497,23 +507,31 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 
 Derive a **feature-level** PR title — one that describes the whole change, not just the first story's slice, and that never leaks an internal `US-NNN` story tag from the per-story commits `/aimi:execute` produces. Three sources, in order of preference:
 
-1. **Tasks metadata title.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2.
+1. **Tasks metadata title — only when that tasks file is this branch's.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2. It is adopted **only when the same metadata's `branchName` equals `$CURRENT_BRANCH`**: "a tasks file is discoverable" and "this PR is that tasks file's feature" are different claims, and `metadata` answers the session's active tasks file, not this branch's. Opening a PR for one feature while another is the active session — the ordinary state after switching work — otherwise titles this PR after a feature it shares no commit with, and the title is the one part of a PR nobody re-reads against the diff. A mismatch falls through to source 2, which is derived from this branch's own commits and so cannot describe anything else.
 2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
 3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
 # Source 1: feature-level metadata title (guarded, like Step 4c). The
-# `metadata` subcommand emits the metadata object itself, so the title is at
-# the top level (`.title`), not nested under `.metadata`.
-METADATA_TITLE=$($AIMI_CLI metadata 2>/dev/null | jq -r '.title // empty' 2>/dev/null)
+# `metadata` subcommand emits the metadata object itself, so the title and the
+# branch are at the top level (`.title`, `.branchName`), not nested under
+# `.metadata`. One call, read twice — the two fields must describe one document.
+METADATA_JSON=$($AIMI_CLI metadata 2>/dev/null)
+METADATA_TITLE=$(printf '%s' "$METADATA_JSON" | jq -r '.title // empty' 2>/dev/null)
+METADATA_BRANCH=$(printf '%s' "$METADATA_JSON" | jq -r '.branchName // empty' 2>/dev/null)
 # Ignore story-merge's pre-patch skeleton placeholder — never a real title.
 if [ "$METADATA_TITLE" = "feat: merged tasks" ]; then
   METADATA_TITLE=""
 fi
 
-if [ -n "$METADATA_TITLE" ]; then
+if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
   PR_TITLE="$METADATA_TITLE"
+  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH)." >&2
 else
+  if [ -n "$METADATA_TITLE" ]; then
+    echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
+    METADATA_TITLE=""
+  fi
   # Source 2: first commit subject, with any internal story tag stripped.
   PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
   PR_TITLE=$(printf '%s' "$PR_TITLE" | sed -E \
@@ -522,11 +540,18 @@ else
   # Source 3: branch name when there are no commits ahead of base.
   if [ -z "$PR_TITLE" ]; then
     PR_TITLE="$CURRENT_BRANCH"
+    echo "PR title from the branch name — no commits ahead of $BASE_BRANCH to read a subject from." >&2
+  else
+    echo "PR title from the first commit on $CURRENT_BRANCH." >&2
   fi
 fi
 ```
 
 Store as `$PR_TITLE`.
+
+**Each of the three sources announces itself.** Whichever one wins, one `PR title from …` line goes to stderr, so the transcript records which of the three produced the title that was opened. Only source 1 can be silently wrong — sources 2 and 3 read this branch — so the mismatch that rejects it prints a second line naming the branch it found, which is what makes "why is this titled after another feature" answerable without re-reading the tasks file. The placeholder special-case above is deliberately upstream of all of this: it empties `$METADATA_TITLE` before the branch comparison, so a skeleton title falls to source 2 as it always has and the mismatch note stays quiet about a title that was never a title.
+
+**The mismatch branch empties `$METADATA_TITLE` too, not only the placeholder special-case above.** `$PR_TITLE` is not this gate's only consumer — Step 5c's backend issue title reads `$METADATA_TITLE` as well (see Step 4c and Step 5c below), and it never re-checks `branchName` itself. Emptying the variable here, right beside the note that already explains why, means that check never needs writing a second time at the point of use: every downstream reader of `$METADATA_TITLE` sees the same "not this feature" verdict this gate already reached, the same way the placeholder case already made source 2 the answer for both without either consumer needing to know why.
 
 ### 4b. PR Description
 
@@ -561,9 +586,9 @@ $AIMI_CLI metadata 2>/dev/null || true
 Capture the JSON output (if any). Parse it directly from the result:
 
 - If the CLI exits non-zero or emits no output, set `INCLUDE_BACKEND_SPEC=0` and skip this section entirely.
-- Otherwise read `metadata.frontendOnly`, `metadata.backendSpec`, and `metadata.title` from the JSON.
+- Otherwise read `metadata.frontendOnly` and `metadata.backendSpec` from the JSON.
 - Set `INCLUDE_BACKEND_SPEC=1` only when `frontendOnly` is exactly `true` AND `backendSpec` is a non-null object.
-- Store `metadata.title` as `$METADATA_TITLE` for use in Step 5c.
+- Step 5c's backend issue title reads `$METADATA_TITLE` as already computed by Step 4a — this section takes no second copy of `metadata.title`. When Step 4a's branchName gate discarded it (mismatch or placeholder), it is already empty here too, and Step 5c falls back to `$PR_TITLE` for the same reason Step 4a itself did.
 
 When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata.backendSpec` (no LLM generation). Contains four subsections:
 
@@ -782,7 +807,13 @@ if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
 <if businessContext is a plain string (legacy), render as a single paragraph instead>
 EOF
 )
-  ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $METADATA_TITLE" --body "$ISSUE_BODY")
+  if [ -n "$METADATA_TITLE" ]; then
+    ISSUE_TITLE_SOURCE="$METADATA_TITLE"
+  else
+    ISSUE_TITLE_SOURCE="$PR_TITLE"
+    echo "Backend issue title from \$PR_TITLE (this branch's own derivation) — metadata.title was empty or discarded by Step 4a's branchName gate." >&2
+  fi
+  ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $ISSUE_TITLE_SOURCE" --body "$ISSUE_BODY")
   ISSUE_STATUS=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.status')
   if [ "$ISSUE_STATUS" = "created" ]; then
     ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.url')
@@ -805,7 +836,7 @@ EOF
 fi
 ```
 
-Where `$METADATA_TITLE` is `metadata.title` from Step 4c, `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
+Where `$ISSUE_TITLE_SOURCE` is `$METADATA_TITLE` from Step 4a when Step 4a's branchName gate kept it, or `$PR_TITLE` when that gate discarded it (mismatch or placeholder) — the issue title always says which source it came from on stderr, the same guarantee Step 4a already gives the PR title. `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
 
 **Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 

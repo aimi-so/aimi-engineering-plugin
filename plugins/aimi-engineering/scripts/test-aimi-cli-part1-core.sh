@@ -26,6 +26,7 @@ set -uo pipefail
 #   - AIMI_PLUGIN_DIR Tests
 #   - Claude Code Host Detection Tests
 #   - Auto-Discovery Tests
+#   - PROJECT_ROOT-From-A-Worktree Tests
 #   - Global Cache Tests
 #   - XDG Cache Location Tests
 #   - prime-cache Tests
@@ -1261,10 +1262,13 @@ test_get_story_context() {
   story_id=$(echo "$output" | jq -r '.story.id')
   assert_eq "US-001" "$story_id" "get-story-context story.id matches requested ID"
 
-  # Metadata is verbatim from the tasks file
-  local branch_name
-  branch_name=$(echo "$output" | jq -r '.metadata.branchName')
-  assert_eq "feat/test-feature" "$branch_name" "get-story-context metadata.branchName matches tasks file"
+  # Metadata is PROJECTED, not verbatim: only the keys with a measured reader in
+  # skills/story-executor/ survive (STORY_CONTEXT_METADATA_KEYS in tasks.py).
+  # branchName is read from the tasks file by other verbs and never out of this
+  # payload, so it is dropped -- and this assertion used to demand the opposite.
+  local has_branch
+  has_branch=$(echo "$output" | jq '.metadata | has("branchName")')
+  assert_eq "false" "$has_branch" "get-story-context metadata drops branchName (no reader in the executor)"
 
   # (2) Invalid-format ID exits non-zero and writes to stderr
   local stderr_output
@@ -1828,11 +1832,17 @@ test_version() {
 # should answer for "newest installed version". Tests below compare the CLI's
 # answer against this, so it must key on the VERSION SEGMENT for the same
 # reason the CLI does -- `ls | tail -1` collates 1.121.3 before 1.9.0, and a
-# whole-path `sort -V` orders by marketplace-entry directory first.
+# whole-path `sort -V` orders by marketplace-entry directory first -- and it
+# must FILTER by version shape for the same reason too: `sort -V` ranks a
+# directory that is not a version at all, and ranks it above the real ones.
+# A twin that kept the unfiltered pipeline would agree with the defect rather
+# than with the fix, and every comparison below would pass while measuring the
+# wrong answer.
 _test_latest_installed_cli_path() {
   local config_dir="$1"
   ls "$config_dir"/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null \
     | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" \
+    | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " \
     | sort -V \
     | tail -1 \
     | cut -d' ' -f2-
@@ -2182,6 +2192,338 @@ test_version_verbs_empty_plugin_cache_glob() {
     "cleanup-versions (empty glob): stderr is empty"
   assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
     "cleanup-versions (empty glob): the branch returns before write_global_cli_cache, so still no cli-path"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# A version segment only counts when it looks like a version.
+#
+# `sort -V` is a TOTAL ORDER over arbitrary strings, not a filter. Anything
+# sitting beside the real version directories inside one marketplace cache
+# entry gets ranked with them, and ranks ABOVE them: measured against the
+# installed plugin before the fix, a sibling named `1.124.0.bak` made
+# check-version answer "latestVersion": "1.124.0.bak", and a directory named
+# `zz` beat `1.127.0` outright. Those names arrive by ordinary accident -- a
+# `cp -a` backup taken before an upgrade, an editor's leftover, a half-extracted
+# download.
+#
+# The fixture uses BOTH shapes on purpose. `1.124.0.bak` is the near miss (its
+# first three segments are a real version, so a filter anchored only at the
+# start would still admit it) and `zz` is the far one; a fixture with only one
+# of them lets a half-right filter pass.
+#
+# THE VERB THAT MATTERS MOST HERE IS cleanup-versions, not check-version.
+# check-version reporting the wrong string is cosmetic; cleanup-versions rm
+# -rf's every directory the same resolver does not pick, so before the filter
+# it KEPT the backup and DELETED the real install, then wrote the backup's path
+# into the global cli-path cache. That is asserted against the filesystem
+# below, not against stdout.
+# ----------------------------------------------------------------------------
+test_version_resolution_ignores_non_version_directories() {
+  echo ""
+  echo "=== Testing the numeric version filter (a .bak sibling must not win) ==="
+
+  local root cfg aimi_cfg out ec
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+
+  _make_cached_version "$cfg" "mk1" "1.124.0"
+  _make_cached_version "$cfg" "mk1" "1.124.0.bak"
+  _make_cached_version "$cfg" "mk1" "1.127.0"
+  _make_cached_version "$cfg" "mk1" "zz"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>/dev/null) || true
+
+  assert_contains '"latestVersion": "1.127.0"' "$out" \
+    "check-version: the newest NUMERIC version wins over a .bak sibling and a zz directory"
+  case "$out" in
+    *1.124.0.bak*) echo -e "${RED}✗${NC} check-version: the .bak sibling hijacked resolution"; ((TESTS_FAILED++)) ;;
+    *) echo -e "${GREEN}✓${NC} check-version: the .bak sibling appears nowhere in the answer"; ((TESTS_PASSED++)) ;;
+  esac
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache 2>/dev/null) || true
+  assert_contains '"version": "1.127.0"' "$out" \
+    "prime-cache: primes the newest numeric version, not the lexicographically last name"
+
+  # The one verb that deletes. Before the filter this kept `zz` and removed
+  # 1.127.0 -- so the assertion that matters is which directory SURVIVED.
+  out=$(_run_cleanup_versions_isolated "$cfg" "$aimi_cfg") || true
+  assert_contains '"kept": "1.127.0"' "$out" \
+    "cleanup-versions: keeps the newest numeric version"
+  assert_eq "yes" "$([ -d "$cfg/plugins/cache/mk1/aimi-engineering/1.127.0" ] && echo yes || echo no)" \
+    "cleanup-versions: the real install still exists on disk"
+  assert_eq "no" "$([ -d "$cfg/plugins/cache/mk1/aimi-engineering/1.124.0.bak" ] && echo yes || echo no)" \
+    "cleanup-versions: the .bak sibling was pruned rather than enthroned"
+
+  # A cache holding NOTHING version-shaped is the empty glob again: grep exits
+  # 1, `|| newest=""` catches it, and the documented unknown branch answers.
+  # Without that the verb would abort under `set -o pipefail`.
+  local bare="$root/bare-config"
+  _make_cached_version "$bare" "mk1" "backup"
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$bare" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet 2>/dev/null) && ec=0 || ec=$?
+  assert_exit_code "0" "$ec" \
+    "check-version (no version-shaped directory): grep's empty match is the empty glob, not an abort"
+  assert_contains '"status": "unknown"' "$out" \
+    "check-version (no version-shaped directory): answers the documented unknown status"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# AIMI_DEV_DIR: the Layer 0 development override.
+#
+# Three properties, each with its own reason for existing:
+#
+#   1. THE NOTICE IS UNCONDITIONAL. The defect being closed is a real install
+#      silently shadowed by a development tree, so the line has to appear on
+#      the SUCCESS path of every verb -- `version` included, which returns
+#      before find_aimi_root ever runs. A notice that only appeared on failure
+#      would be absent in exactly the case that motivates the feature.
+#
+#   2. check-version ANSWERS dev-override AND DOES NOT --fix. --fix writes the
+#      resolved install into the GLOBAL cli-path cache, read by every later
+#      session in every project on the machine. Under an override that would
+#      persist a development tree machine-wide, outliving the shell that set
+#      the variable. The assertion that carries this is the one about the cache
+#      FILE, not the one about the status string.
+#
+#   3. AN INVALID VALUE IS FATAL. Falling through to the installed plugin would
+#      be the same silent shadowing with the sign flipped: the operator asked
+#      for the dev tree and would get the install without being told.
+#
+# NO CLAUDECODE GATE, unlike AIMI_PLUGIN_DIR -- asserted here in both host
+# shapes, because that asymmetry is the single most likely thing for a later
+# edit to "tidy up" into consistency with its neighbour.
+# ----------------------------------------------------------------------------
+test_dev_dir_override() {
+  echo ""
+  echo "=== Testing AIMI_DEV_DIR (layer 0 development override) ==="
+
+  local root dev out err ec
+  root=$(mktemp -d)
+  dev="$root/dev-checkout"
+  err="$root/stderr"
+  mkdir -p "$dev/scripts" "$dev/skills"
+  cp "$CLI" "$dev/scripts/aimi-cli.sh"
+  chmod +x "$dev/scripts/aimi-cli.sh"
+
+  # --- 1. The unconditional notice, on a verb that never reaches .aimi/ ---
+  out=$(env AIMI_DEV_DIR="$dev" bash "$CLI" version 2>"$err") && ec=0 || ec=$?
+  assert_exit_code "0" "$ec" "AIMI_DEV_DIR: the verb still succeeds under the override"
+  assert_stderr_contains "$dev/scripts/aimi-cli.sh" "$(cat "$err")" \
+    "AIMI_DEV_DIR: stderr names the path it resolved"
+  assert_stderr_contains "AIMI_DEV_DIR override is active" "$(cat "$err")" \
+    "AIMI_DEV_DIR: the notice is printed on the SUCCESS path, not only on failure"
+  assert_eq "0" "$(env AIMI_DEV_DIR="$dev" bash "$CLI" version 2>/dev/null | grep -c 'AIMI_DEV_DIR' || true)" \
+    "AIMI_DEV_DIR: the notice goes to stderr and never pollutes a verb's stdout contract"
+
+  # Honored on EVERY host: CLAUDECODE set or unset, the notice is the same.
+  assert_stderr_contains "AIMI_DEV_DIR override is active" \
+    "$(env CLAUDECODE=1 AIMI_DEV_DIR="$dev" bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_DEV_DIR: honored inside Claude Code too -- no CLAUDECODE gate"
+
+  # And absent when the variable is not set, so the notice cannot become noise.
+  assert_eq "" "$(env -u AIMI_DEV_DIR bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_DEV_DIR: unset means no notice at all"
+
+  # --- 2. check-version reports and refuses to --fix ---
+  local cfg aimi_cfg
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  _make_cached_version "$cfg" "mk1" "1.127.0"
+
+  out=$(env -u AIMI_PLUGIN_DIR CLAUDECODE=1 AIMI_DEV_DIR="$dev" \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix 2>/dev/null) && ec=0 || ec=$?
+
+  assert_exit_code "0" "$ec" \
+    "check-version (dev override): exits 0 -- there is no staleness for a caller to act on"
+  assert_contains '"status": "dev-override"' "$out" \
+    "check-version (dev override): answers a status of its own"
+  assert_contains "$dev/scripts/aimi-cli.sh" "$out" \
+    "check-version (dev override): names the development tree it is running from"
+  assert_eq "no" "$([ -e "$aimi_cfg/cli-path" ] && echo yes || echo no)" \
+    "check-version --fix (dev override): the GLOBAL cli-path cache was not repointed at the dev tree"
+
+  # --- 3. Every invalid value refuses loudly rather than falling through ---
+  local wt="$root/repo/.worktrees/branch-x"
+  mkdir -p "$wt/scripts"
+  cp "$CLI" "$wt/scripts/aimi-cli.sh"
+  chmod +x "$wt/scripts/aimi-cli.sh"
+
+  local noexec="$root/no-exec"
+  mkdir -p "$noexec/scripts"
+  printf '#!/usr/bin/env bash\n' > "$noexec/scripts/aimi-cli.sh"
+  chmod 0644 "$noexec/scripts/aimi-cli.sh"
+
+  local label value
+  for label in relative missing not-executable worktree; do
+    case "$label" in
+      relative)       value="dev-checkout" ;;
+      missing)        value="$root/does-not-exist" ;;
+      not-executable) value="$noexec" ;;
+      worktree)       value="$wt" ;;
+    esac
+    env AIMI_DEV_DIR="$value" bash "$CLI" version >/dev/null 2>"$err" && ec=0 || ec=$?
+    assert_exit_code "1" "$ec" \
+      "AIMI_DEV_DIR ($label): refused at exit 1 rather than falling through to the install"
+    assert_stderr_contains "AIMI_DEV_DIR" "$(cat "$err")" \
+      "AIMI_DEV_DIR ($label): the refusal names the variable on stderr"
+  done
+
+  # --- 4. Guard-rail: the AIMI_PLUGIN_DIR rule did NOT change ---
+  # It stays SKIPPED under CLAUDECODE, which is the opposite of the rule above
+  # and must stay that way. An invalid AIMI_PLUGIN_DIR is silent here.
+  assert_eq "" "$(env CLAUDECODE=1 AIMI_PLUGIN_DIR=/does/not/exist bash "$CLI" version 2>&1 >/dev/null)" \
+    "AIMI_PLUGIN_DIR: still skipped under CLAUDECODE=1, unchanged by the new layer"
+
+  rm -rf "$root"
+}
+
+# ----------------------------------------------------------------------------
+# The SECOND global pointer: ~/.config/aimi/worktree-path
+#
+# It had a reader everywhere and no writer anywhere. `_validate_cached_worktree_
+# path` validated it, `read_global_worktree_cache` read it, next.md and
+# container-execution.md re-read it at the top of every Bash call -- and
+# `write_global_worktree_cache` was called by nothing in production, so the file
+# on disk existed only where a human had written it by hand. That is how it came
+# to name a version the cli-path had already moved off: a `check-version --fix`
+# repointed cli-path at the new install, worktree-path stayed on the old one,
+# `cleanup-versions` then deleted the old one, and $WORKTREE_MGR became a path
+# to nothing while every guard around it still only asked whether the VARIABLE
+# was empty.
+#
+# These two tests assert the write side of that fix. The read side is the
+# `[ -x "$WORKTREE_MGR" ]` half of the guard in commands/, checked by
+# hooks/tests/test_auto_approve_cli.py's corpus scan.
+# ----------------------------------------------------------------------------
+
+# Like _make_cached_version, but also plants the worktree-manager.sh sibling a
+# real install carries. _make_cached_version deliberately does NOT -- every
+# fixture and every golden case built on it resolves no manager, which is why
+# adding these calls changed no recording in version_cache_cases.
+_make_cached_version_with_manager() {
+  local cache_root="$1" entry="$2" version="$3"
+  _make_cached_version "$cache_root" "$entry" "$version"
+  local mgr_dir="$cache_root/plugins/cache/$entry/aimi-engineering/$version/skills/git-worktree/scripts"
+  mkdir -p "$mgr_dir"
+  printf '#!/usr/bin/env bash\n' > "$mgr_dir/worktree-manager.sh"
+  chmod +x "$mgr_dir/worktree-manager.sh"
+}
+
+_cached_manager_path() {
+  printf '%s\n' "$1/plugins/cache/$2/aimi-engineering/$3/skills/git-worktree/scripts/worktree-manager.sh"
+}
+
+test_worktree_pointer_written_by_the_version_verbs() {
+  echo ""
+  echo "=== Testing the global worktree-path pointer is written and cured beside the cli-path ==="
+
+  "$CLI" clear-state > /dev/null
+  "$CLI" init-session > /dev/null
+
+  local root cfg aimi_cfg mgr_old mgr_new
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  _make_cached_version_with_manager "$cfg" "abc123" "1.2.3"
+  mgr_old=$(_cached_manager_path "$cfg" "abc123" "1.2.3")
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: absent before the run -- this file used to have no writer at all"
+
+  # A stale state cli-path puts check-version on its `fixed` branch, the same
+  # fake-path idiom test_check_version_fix uses.
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_old" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: writes the worktree-path pointer for the install it resolved"
+
+  # The invariant itself, stated as an assertion rather than as a comment: both
+  # pointers name ONE install directory. Four dirnames strip
+  # skills/git-worktree/scripts/worktree-manager.sh, two strip
+  # scripts/aimi-cli.sh.
+  local cli_root mgr_root
+  cli_root=$(dirname "$(dirname "$(cat "$aimi_cfg/cli-path" 2>/dev/null)")")
+  mgr_root=$(dirname "$(dirname "$(dirname "$(dirname "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)")")")")
+  assert_eq "$cli_root" "$mgr_root" \
+    "check-version --fix: both global pointers name the same install directory"
+
+  # The recorded divergence, reproduced: a newer install appears, the pointer
+  # still names the old one, and --fix moves it.
+  _make_cached_version_with_manager "$cfg" "abc123" "1.3.0"
+  mgr_new=$(_cached_manager_path "$cfg" "abc123" "1.3.0")
+  echo "/fake/old/1.0.0/scripts/aimi-cli.sh" > "$AIMI_DIR/cli-path"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" check-version --quiet --fix > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "check-version --fix: cures a worktree-path left behind on an older version"
+
+  # cleanup-versions is where the dangle was produced -- it deletes the version
+  # the pointer used to name. Point it back at 1.2.3 first so the prune has
+  # something to invalidate.
+  printf '%s\n' "$mgr_old" > "$aimi_cfg/worktree-path"
+  _run_cleanup_versions_isolated "$cfg" "$aimi_cfg" > /dev/null
+
+  assert_eq "no" "$([ -e "$(dirname "$(dirname "$(dirname "$(dirname "$mgr_old")")")")" ] && echo yes || echo no)" \
+    "cleanup-versions: pruned the 1.2.3 directory the pointer named"
+  assert_eq "$mgr_new" "$(cat "$aimi_cfg/worktree-path" 2>/dev/null)" \
+    "cleanup-versions: re-points worktree-path at the version it kept, not at the one it deleted"
+
+  # prime-cache, the third writer, on a config dir that has never been primed.
+  local fresh_aimi_cfg
+  fresh_aimi_cfg="$root/aimi-config-fresh"
+  mkdir -p "$fresh_aimi_cfg"
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$fresh_aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "$mgr_new" "$(cat "$fresh_aimi_cfg/worktree-path" 2>/dev/null)" \
+    "prime-cache: primes the worktree pointer, not only the cli one"
+
+  rm -rf "$root"
+}
+
+test_worktree_pointer_needs_a_manager_beside_the_cli() {
+  echo ""
+  echo "=== Testing the worktree pointer is silent when the install carries no manager ==="
+
+  local root cfg aimi_cfg
+  root=$(mktemp -d)
+  cfg="$root/claude-config"
+  aimi_cfg="$root/aimi-config"
+  mkdir -p "$aimi_cfg"
+  # _make_cached_version plants scripts/aimi-cli.sh and nothing else.
+  _make_cached_version "$cfg" "abc123" "1.2.3"
+
+  env -u AIMI_PLUGIN_DIR CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$cfg" AIMI_CONFIG_DIR="$aimi_cfg" \
+    bash "$CLI" prime-cache > /dev/null 2>&1
+
+  assert_eq "no" "$([ -e "$aimi_cfg/worktree-path" ] && echo yes || echo no)" \
+    "worktree-path: nothing is persisted when no manager sits beside the resolved CLI"
+  # And the run really did happen -- the silence above is the manager's absence,
+  # not a verb that did nothing.
+  assert_eq "$cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh" \
+    "$(cat "$aimi_cfg/cli-path" 2>/dev/null)" \
+    "worktree-path: the same run still wrote cli-path, so the silence is the missing manager"
 
   rm -rf "$root"
 }
@@ -2643,6 +2985,303 @@ test_auto_discovery_not_found() {
   assert_contains ".aimi/ directory not found" "$output" "auto-discovery: error message mentions .aimi/ not found"
 
   rm -rf "$no_aimi_dir"
+}
+
+# ============================================================================
+# PROJECT_ROOT-From-A-Worktree Tests
+# ============================================================================
+#
+# THE RULE, IN ONE SENTENCE: find_aimi_root walks UP from the CWD and stops at
+# the FIRST directory that contains .aimi/. A worktree with no .aimi/ of its
+# own therefore resolves PROJECT_ROOT to the MAIN repository, and a
+# --tasks-file living in that repository is inside it. Create .aimi/ in the
+# worktree and the worktree itself becomes PROJECT_ROOT -- the main
+# repository's tasks file is then OUTSIDE it, and validate_path_in_project
+# refuses it. The path never changed; the root moved out from under it.
+#
+# WHY BOTH SIDES ARE ASSERTED. The regression this exists to catch does not
+# make the resolving case stop resolving -- it makes the refusing case start
+# refusing. A test pinning only the side that passes today would stay green
+# straight through it, so the second assertion is the entire point of the pair.
+#
+# ITS OTHER HALF IS A COMMENT, AND THEY CITE EACH OTHER ON PURPOSE.
+# create_worktree, in skills/git-worktree/scripts/worktree-manager.sh,
+# deliberately creates no .aimi/ in a worktree, and its comment names this
+# section. That comment is the only place someone stands while about to break
+# this: they are there to add the `mkdir -p "$worktree_path/.aimi"` this
+# measures the cost of. An explanation with no test ages alone; a test the
+# explanation does not name is unfindable from the one place it is needed.
+#
+# WHAT IT COST TO NOT HAVE THIS. Two phase-2 stories lost the per-assertion
+# half of executor step 1.5 to this and both filed the cause wrong -- they
+# recorded that a worktree cannot reach the main repository's tasks file at
+# all, when the measurement is that it reaches it perfectly until something
+# creates .aimi/ beside it.
+
+# Builds a throwaway repository standing in for a main checkout -- .aimi/tasks/
+# with one story in it -- plus one worktree of its own. .aimi/ stays untracked,
+# exactly as it is in the real repository (.gitignore:2), which is why
+# `git worktree add` never reproduces it and why side one below can exist.
+setup_worktree_project_root_fixture() {
+  WT_PR_MAIN=$(cd "$(mktemp -d)" && pwd -P)
+  WT_PR_TREE="$WT_PR_MAIN/.worktrees/probe"
+  WT_PR_TASKS="$WT_PR_MAIN/.aimi/tasks/2026-01-01-probe-tasks.json"
+
+  git init -q "$WT_PR_MAIN" >/dev/null 2>&1
+  mkdir -p "$WT_PR_MAIN/.aimi/tasks"
+  cat > "$WT_PR_TASKS" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Worktree PROJECT_ROOT probe",
+    "type": "feature",
+    "branchName": "feat/worktree-project-root-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["The story is readable from the main repository."],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  # The commit exists only so `git worktree add` has a revision to attach to.
+  # The identity is passed per-command rather than left to ambient config: a
+  # missing user.email would fail the commit, and the failure would surface
+  # three lines later as an unexplained `worktree add`.
+  echo "probe" > "$WT_PR_MAIN/README.md"
+  git -C "$WT_PR_MAIN" add README.md >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" \
+    -c user.email=test@example.com -c user.name="Test" \
+    commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$WT_PR_MAIN" worktree add -q --detach "$WT_PR_TREE" HEAD >/dev/null 2>&1
+}
+
+teardown_worktree_project_root_fixture() {
+  git -C "$WT_PR_MAIN" worktree remove --force "$WT_PR_TREE" >/dev/null 2>&1
+  rm -rf "$WT_PR_MAIN"
+  unset WT_PR_MAIN
+  unset WT_PR_TREE
+  unset WT_PR_TASKS
+}
+
+test_worktree_project_root_resolution() {
+  echo ""
+  echo "=== Testing PROJECT_ROOT resolution from inside a worktree ==="
+
+  setup_worktree_project_root_fixture
+
+  local output exit_code
+
+  # --- Side one: the worktree has no .aimi/ of its own ---
+  # Every `cd` here is confined to a command substitution and guarded by the
+  # `&&` that follows it, and nothing in this test ever creates a directory
+  # relative to the CWD -- the mkdir below is absolute. A cd that failed can
+  # therefore only lose the assertion, never write .aimi/ somewhere it would
+  # then have to be found and removed.
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" \
+    "worktree PROJECT_ROOT: with NO .aimi/ in the worktree, find_aimi_root walks up past it to the main repository, so that repository's tasks file is inside PROJECT_ROOT and resolves"
+  assert_contains '"id": "US-001"' "$output" \
+    "worktree PROJECT_ROOT: the read really reached the main repository's tasks file — an exit 0 alone would not say that"
+
+  # --- Side two: the identical command, with .aimi/ created in the worktree ---
+  mkdir -p "$WT_PR_TREE/.aimi"
+  output=$(cd "$WT_PR_TREE" && "$CLI" get-story-context US-001 --tasks-file "$WT_PR_TASKS" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" \
+    "worktree PROJECT_ROOT: creating .aimi/ IN the worktree makes find_aimi_root stop there instead of at the main repository, and the same tasks file is refused"
+  assert_contains "Path escapes project root" "$output" \
+    "worktree PROJECT_ROOT: the refusal is validate_path_in_project's, and it fires because PROJECT_ROOT moved — the path itself is byte-identical to side one's"
+  assert_contains "Project root: $WT_PR_TREE" "$output" \
+    "worktree PROJECT_ROOT: the root it reports IS the worktree, which is the causal claim itself — find_aimi_root stops at the FIRST directory holding .aimi/, so an .aimi/ here outranks the main repository's"
+
+  teardown_worktree_project_root_fixture
+}
+
+# ============================================================================
+# Script Self-Location Resolution Tests
+# ============================================================================
+#
+# THE RULE, IN ONE SENTENCE: aimi-cli.sh must resolve the directory holding
+# its own sibling modules (roadmap.py, tasks.py, models.py, story_merge.py,
+# lib/extract-command-blocks.sh) BEFORE find_aimi_root can move the cwd, so a
+# RELATIVE invocation from inside a nested worktree still runs that
+# worktree's own copies rather than whatever copies sit at the directory
+# find_aimi_root's walk-up lands on.
+#
+# This is a DIFFERENT bug from the PROJECT_ROOT-From-A-Worktree section
+# above. That section is about which .aimi/tasks/ file a worktree's own
+# invocation is allowed to read. This one is about which SCRIPT FILES a
+# worktree's own invocation actually runs — the two are independent, and a
+# worktree with no .aimi/ of its own is exactly the case that exercises both.
+#
+# WHAT IT COST TO NOT HAVE THIS. A phase-4 pipeline-audit story measured a
+# fix as a no-op: the CLI, invoked by a relative path from inside its own
+# worktree, kept reporting the UNFIXED numbers, because it was silently
+# running the main checkout's tasks.py instead of the worktree's own —
+# while the worktree's tasks.py, the one actually carrying the fix, was
+# never reached at all. No error, no warning: just the wrong tree's answer.
+
+# Builds a throwaway repository standing in for a main checkout, carrying a
+# REAL copy of the modules under test (aimi-cli.sh + tasks.py + roadmap.py +
+# sanitize.py — tasks.py's own import chain, see tasks.py's `from roadmap
+# import ...`), plus one worktree of its own. Marks the WORKTREE's own copy
+# of tasks.py with a stderr marker after the worktree is created, so the
+# main checkout's copy stays byte-identical to $SCRIPT_DIR's and only the
+# worktree's copy can print it.
+setup_worktree_module_resolution_fixture() {
+  WT_MOD_MAIN=$(cd "$(mktemp -d)" && pwd -P)
+  WT_MOD_TREE="$WT_MOD_MAIN/.worktrees/probe"
+  WT_MOD_TASKS="$WT_MOD_MAIN/.aimi/tasks/2026-01-01-module-probe-tasks.json"
+  WT_MOD_SCRIPTS_MAIN="$WT_MOD_MAIN/plugins/aimi-engineering/scripts"
+  WT_MOD_SCRIPTS_TREE="$WT_MOD_TREE/plugins/aimi-engineering/scripts"
+
+  git init -q "$WT_MOD_MAIN" >/dev/null 2>&1
+  mkdir -p "$WT_MOD_MAIN/.aimi/tasks" "$WT_MOD_SCRIPTS_MAIN"
+  cat > "$WT_MOD_TASKS" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Worktree module-resolution probe",
+    "type": "feature",
+    "branchName": "feat/worktree-module-resolution-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["The story is readable regardless of which copy of tasks.py answered."],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  cp "$CLI" "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" "$WT_MOD_SCRIPTS_MAIN/"
+  chmod +x "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
+
+  echo "probe" > "$WT_MOD_MAIN/README.md"
+  git -C "$WT_MOD_MAIN" add README.md plugins >/dev/null 2>&1
+  git -C "$WT_MOD_MAIN" \
+    -c user.email=test@example.com -c user.name="Test" \
+    commit -m "Initial commit" >/dev/null 2>&1
+  git -C "$WT_MOD_MAIN" worktree add -q --detach "$WT_MOD_TREE" HEAD >/dev/null 2>&1
+
+  # Mark the WORKTREE's own tasks.py only, after the worktree checkout exists
+  # (worktrees have independent working directories, so this never touches
+  # $WT_MOD_SCRIPTS_MAIN's copy).
+  sed -i '1i import sys as _wt_marker_sys; print("MARCADOR-WT", file=_wt_marker_sys.stderr)' \
+    "$WT_MOD_SCRIPTS_TREE/tasks.py"
+}
+
+teardown_worktree_module_resolution_fixture() {
+  git -C "$WT_MOD_MAIN" worktree remove --force "$WT_MOD_TREE" >/dev/null 2>&1
+  rm -rf "$WT_MOD_MAIN"
+  unset WT_MOD_MAIN
+  unset WT_MOD_TREE
+  unset WT_MOD_TASKS
+  unset WT_MOD_SCRIPTS_MAIN
+  unset WT_MOD_SCRIPTS_TREE
+}
+
+test_relative_invocation_from_nested_worktree_uses_its_own_modules() {
+  echo ""
+  echo "=== Testing that a relative invocation from inside a nested worktree runs that worktree's own sibling modules ==="
+
+  setup_worktree_module_resolution_fixture
+
+  local output_abs output_rel
+
+  # --- Guard rail: absolute-path invocation, from the main repo and from
+  # inside the worktree, must keep seeing the worktree's own modules exactly
+  # as it does today. ---
+  output_abs=$(cd "$WT_MOD_TREE" && bash "$WT_MOD_SCRIPTS_TREE/aimi-cli.sh" get-story-context US-001 --tasks-file "$WT_MOD_TASKS" 2>&1)
+  assert_contains "MARCADOR-WT" "$output_abs" \
+    "nested worktree module resolution: ABSOLUTE invocation runs the worktree's own tasks.py (guard rail — must pass before and after this fix)"
+
+  # --- The fix: a RELATIVE invocation, from inside the worktree, must reach
+  # the SAME worktree's own tasks.py rather than the main checkout's. ---
+  output_rel=$(cd "$WT_MOD_TREE" && bash plugins/aimi-engineering/scripts/aimi-cli.sh get-story-context US-001 --tasks-file "$WT_MOD_TASKS" 2>&1)
+  assert_contains "MARCADOR-WT" "$output_rel" \
+    "nested worktree module resolution: RELATIVE invocation must also run the worktree's own tasks.py, not the main checkout's — this is the assertion that fails on the unfixed tree"
+
+  teardown_worktree_module_resolution_fixture
+}
+
+test_script_reached_through_symlinked_directory_resolves_siblings() {
+  echo ""
+  echo "=== Testing module resolution when the script is reached through a symlinked directory ==="
+
+  local real_dir link_dir tasks_file output exit_code
+
+  real_dir=$(cd "$(mktemp -d)" && pwd -P)
+  mkdir -p "$real_dir/.aimi/tasks" "$real_dir/plugins/aimi-engineering/scripts"
+  tasks_file="$real_dir/.aimi/tasks/2026-01-01-symlink-probe-tasks.json"
+  cat > "$tasks_file" << 'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {
+    "title": "Symlink probe",
+    "type": "feature",
+    "branchName": "feat/symlink-probe",
+    "researchDepth": "quick",
+    "maxConcurrency": 1
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Probe story",
+      "description": "Exists so get-story-context has something to return.",
+      "acceptanceCriteria": ["ok"],
+      "status": "pending",
+      "dependsOn": [],
+      "wave": 1
+    }
+  ]
+}
+EOF
+
+  cp "$CLI" "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+  # tasks.py imports compute_waves from story_merge.py (normalize-waves' own
+  # rule, read from the writer rather than restated) -- so story_merge.py is
+  # now one of tasks.py's siblings this fixture must provision, the same as
+  # roadmap.py and sanitize.py already are.
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
+    "$SCRIPT_DIR/story_merge.py" \
+    "$real_dir/plugins/aimi-engineering/scripts/"
+  chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
+
+  link_dir="$(mktemp -u)-symlink"
+  ln -s "$real_dir" "$link_dir"
+
+  # This is the shape the Claude Code plugin cache exposes: the resolved CLI
+  # path can be reached through a symlinked directory. Guard rail — this
+  # already works today and must keep working.
+  output=$(cd "$link_dir" && "$link_dir/plugins/aimi-engineering/scripts/aimi-cli.sh" get-story-context US-001 --tasks-file "$tasks_file" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" \
+    "symlinked script directory: invocation through the symlink still resolves its sibling modules (guard rail — must pass before and after this fix)"
+  assert_contains '"id": "US-001"' "$output" \
+    "symlinked script directory: get-story-context still reaches tasks.py through the symlink and returns the story"
+
+  rm -f "$link_dir"
+  rm -rf "$real_dir"
 }
 
 # ============================================================================
@@ -4844,6 +5483,38 @@ test_verification_report_visual_and_malformed_shape() {
       "dependsOn": [],
       "notes": "",
       "verification": 42
+    },
+    {
+      "id": "US-004",
+      "title": "Completed with discriminating evidence",
+      "description": "A recorded count of 1 or more -- checked",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 4,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "passed", "evidence": {"discriminating": 2}}
+    },
+    {
+      "id": "US-005",
+      "title": "Completed with a recorded zero",
+      "description": "Somebody looked and nothing discriminated -- blind",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 5,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": "",
+      "verification": {"strategy": "test", "status": "passed", "evidence": {"discriminating": 0}}
+    },
+    {
+      "id": "US-006",
+      "title": "Completed with no verification at all",
+      "description": "Nothing was ever written down -- unrecorded, never a zero",
+      "acceptanceCriteria": ["Passes"],
+      "priority": 6,
+      "status": "completed",
+      "dependsOn": [],
+      "notes": ""
     }
   ]
 }
@@ -4860,6 +5531,14 @@ EOF
   assert_eq "US-002" "$(printf '%s' "$output" | jq -r '.malformed.repairable[0]')" "verification-report: bare string is repairable"
   assert_eq "US-003" "$(printf '%s' "$output" | jq -r '.malformed.unrepairable[0]')" "verification-report: a number is NOT repairable"
 
+  # The fourth key. US-004/005/006 are the only completed stories, so the
+  # three pending ones above appear in none of the lists -- and US-006, whose
+  # verification is absent entirely, is unrecorded rather than a zero in blind.
+  assert_eq "US-004" "$(printf '%s' "$output" | jq -r '.discriminating.checked[0]')" "verification-report: a recorded count of 1 or more is checked"
+  assert_eq "US-005" "$(printf '%s' "$output" | jq -r '.discriminating.blind[0]')" "verification-report: a recorded zero is blind"
+  assert_eq '["US-006"]' "$(printf '%s' "$output" | jq -c '.discriminating.unrecorded')" "verification-report: absent evidence is unrecorded, and only completed stories are partitioned"
+  assert_eq "0.5" "$(printf '%s' "$output" | jq -r '.discriminating.fraction')" "verification-report: fraction is checked over checked-plus-blind, unrecorded excluded"
+
   rm -f "$fixture_file"
 }
 
@@ -4874,6 +5553,9 @@ test_verification_report_defaults_to_get_tasks_file() {
   output=$("$CLI" verification-report 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "verification-report: exits 0 with no --tasks-file"
   assert_eq "0" "$(printf '%s' "$output" | jq '.visual | length')" "verification-report: session tasks file has no visual stories"
+  # The empty-denominator boundary, read through `jq -r` so a JSON null is the
+  # string "null" rather than an empty string an absent key would also give.
+  assert_eq "null" "$(printf '%s' "$output" | jq -r '.discriminating.fraction')" "verification-report: no evidence anywhere has NO fraction, never a fraction of zero"
 }
 
 test_verification_report_rejects_a_path_outside_the_project() {
@@ -9325,6 +10007,131 @@ PRESERVEOF
   echo "$TASKS_FILE" > "$AIMI_DIR/current-tasks"
 }
 
+test_mark_complete_evidence_flag() {
+  echo ""
+  echo "=== Testing mark-complete --evidence writes deep at verification.evidence ==="
+
+  # Five stories, one per rule the flag has to obey. The point of the fixture is
+  # the verification OBJECT: the patch mark-complete already applies is a
+  # top-level merge, so an evidence that travelled inside it would replace this
+  # object wholesale. strategy and status are here to be looked at afterwards.
+  local evidence_fixture="$TASKS_DIR/9999-99-92-evidence-test.json"
+  cat > "$evidence_fixture" << 'EVIDENCEEOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {
+    "title": "feat: Evidence flag test",
+    "type": "feat",
+    "branchName": "feat/evidence-test",
+    "maxConcurrency": 2
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Verification object, with the flag",
+      "description": "Gets the evidence",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/1",
+        "expect": "green"
+      }
+    },
+    {
+      "id": "US-002",
+      "title": "Verification object, no flag",
+      "description": "The /aimi:next call site",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": { "strategy": "ci", "status": "pending" }
+    },
+    {
+      "id": "US-003",
+      "title": "Verification object, empty flag",
+      "description": "Empty is absent",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": { "strategy": "ci", "status": "pending" }
+    },
+    {
+      "id": "US-004",
+      "title": "No verification at all",
+      "description": "The intermediate is built",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0
+    },
+    {
+      "id": "US-005",
+      "title": "Verification is a string",
+      "description": "Refuses without writing",
+      "acceptanceCriteria": ["Passes"],
+      "status": "in_progress",
+      "dependsOn": [],
+      "wave": 0,
+      "verification": "manual"
+    }
+  ]
+}
+EVIDENCEEOF
+
+  local payload='{"exit":0,"preExit":1,"segments":7,"discriminating":5}'
+
+  # The flag lands deep, and lands BESIDE what was already there.
+  local output
+  output=$("$CLI" mark-complete US-001 --tasks-file "$evidence_fixture" --evidence "$payload")
+  assert_eq '{"id":"US-001","status":"completed"}' "$(printf '%s' "$output" | jq -Sc '.')" \
+    "mark-complete evidence: stdout is unchanged by the flag"
+  assert_eq "$(printf '%s' "$payload" | jq -Sc '.')" \
+    "$(jq -Sc '.userStories[] | select(.id == "US-001") | .verification.evidence' "$evidence_fixture")" \
+    "mark-complete evidence: the object lands whole at verification.evidence"
+  assert_eq "ci" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$evidence_fixture")" \
+    "mark-complete evidence: verification.strategy survives the deep write"
+  assert_eq "pending" \
+    "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.status' "$evidence_fixture")" \
+    "mark-complete evidence: verification.status survives the deep write"
+
+  # The flagless call site — /aimi:next's, permanently — adds no key at all.
+  "$CLI" mark-complete US-002 --tasks-file "$evidence_fixture" > /dev/null
+  assert_eq "false" \
+    "$(jq -r '.userStories[] | select(.id == "US-002") | .verification | has("evidence")' "$evidence_fixture")" \
+    "mark-complete evidence: no flag adds no evidence key"
+
+  # Empty is absent, and it is one rule holding on both sides of the crossing.
+  "$CLI" mark-complete US-003 --tasks-file "$evidence_fixture" --evidence "" > /dev/null
+  assert_eq "false" \
+    "$(jq -r '.userStories[] | select(.id == "US-003") | .verification | has("evidence")' "$evidence_fixture")" \
+    "mark-complete evidence: an empty --evidence writes nothing"
+
+  # The intermediate is built, the update-field-cria-intermediarios semantics.
+  "$CLI" mark-complete US-004 --tasks-file "$evidence_fixture" --evidence "$payload" > /dev/null
+  assert_eq "$(printf '{"evidence":%s}' "$payload" | jq -Sc '.')" \
+    "$(jq -Sc '.userStories[] | select(.id == "US-004") | .verification' "$evidence_fixture")" \
+    "mark-complete evidence: a story with no verification gets the intermediate"
+
+  # A path THROUGH a non-object refuses, and refuses before the write.
+  local refuse_code=0
+  "$CLI" mark-complete US-005 --tasks-file "$evidence_fixture" --evidence "$payload" \
+    > /dev/null 2>&1 || refuse_code=$?
+  assert_exit_code "1" "$refuse_code" \
+    "mark-complete evidence: a string-typed verification refuses"
+  assert_eq "in_progress" \
+    "$(jq -r '.userStories[] | select(.id == "US-005") | .status' "$evidence_fixture")" \
+    "mark-complete evidence: that refusal left the story's status on disk untouched"
+
+  rm -f "$evidence_fixture"
+}
+
 # ============================================================================
 # Git Fixture Helpers (for setup-branch tests)
 # ============================================================================
@@ -10271,11 +11078,15 @@ main() {
   test_check_version_quiet_fix
   test_check_version_backward_compat
   test_version_verbs_empty_plugin_cache_glob
+  test_version_resolution_ignores_non_version_directories
+  test_dev_dir_override
   test_check_version_directory_source_fallback
   test_version_verbs_config_dir_metacharacters
   test_cleanup_versions
   test_cleanup_versions_keeps_newest_version
   test_cleanup_versions_sorts_on_version_segment
+  test_worktree_pointer_written_by_the_version_verbs
+  test_worktree_pointer_needs_a_manager_beside_the_cli
   test_resolve_skills_base_dir_picks_newest_version
   if [ -n "$_saved_plugin_dir" ]; then
     export AIMI_PLUGIN_DIR="$_saved_plugin_dir"
@@ -10317,6 +11128,15 @@ main() {
   echo "--- Auto-Discovery Tests ---"
   test_auto_discovery_from_subdirectory
   test_auto_discovery_not_found
+
+  echo ""
+  echo "--- PROJECT_ROOT-From-A-Worktree Tests ---"
+  test_worktree_project_root_resolution
+
+  echo ""
+  echo "--- Script Self-Location Resolution Tests ---"
+  test_relative_invocation_from_nested_worktree_uses_its_own_modules
+  test_script_reached_through_symlinked_directory_resolves_siblings
 
   # Global cache tests — run with isolated CLAUDE_CONFIG_DIR
   # Unset AIMI_PLUGIN_DIR to test non-converter code paths
@@ -10509,6 +11329,7 @@ main() {
   test_validate_tasks_designspec_outside_project_root_refused
   test_validate_tasks_businessspec_outside_project_root_refused
   test_mark_complete_preserves_new_fields
+  test_mark_complete_evidence_flag
   test_update_field_nested_path
   test_update_field_single_segment
   test_update_field_refuses_non_identifier_path

@@ -34,6 +34,17 @@ engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
 
+A FOURTH rule then changed and it is the only one that MOVED this block rather
+than being absorbed by a table or a strip: `metadata` is now projected onto the
+keys with a measured reader (tasks.py's STORY_CONTEXT_METADATA_KEYS) instead of
+copied whole, so 43 of the 45 non-empty recordings lost the keys nothing reads.
+They were not recaptured and not regenerated: each recorded payload was
+re-parsed, its metadata narrowed by the new rule and the rest re-rendered by the
+same writer, after that writer was shown to reproduce all 45 byte for byte
+first. `_comment_story_context` states it beside what it cost, and the
+assertions live under "DECISION 4" below -- including the one the corpus cannot
+make, because no fixture in it ever carried a `metadata.decisions`.
+
 `validate_tasks_cases` carries two fields the others have no use for: `files`,
 the spec fixtures written inside the project root, and `outside`, the ones
 written one directory ABOVE it. The second exists for two recordings alone, and
@@ -737,6 +748,141 @@ def test_a_number_written_back_is_rendered_the_way_jq_rendered_it():
     assert '"priority": 3.0' not in json.dumps(WRITE["normalize-status-corpus"]["file"])
 
 
+# --- mark-complete --evidence: one deep write, and the ways it says no -------
+#
+# The flag records how a story's own verify discriminated, and the one thing it
+# must never do is travel inside the patch: that patch is applied by
+# jq_add_object, a TOP-LEVEL merge, so a `{"verification": {...}}` entry would
+# replace the whole object and take strategy, status, url and expect with it.
+# Every test below is about that boundary. None of them is in the golden and
+# none of them can be: the corpus was recorded from jq, before the flag existed,
+# and the flagless path these tests also pin is exactly what keeps those 14
+# recordings valid.
+
+EVIDENCE = {"exit": 0, "preExit": 1, "segments": 7, "discriminating": 5}
+EVIDENCE_TEXT = json.dumps(EVIDENCE)
+
+
+def _evidence_file(tmp_path, story):
+    path = str(tmp_path / "2020-01-01-evidence-tasks.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3", "userStories": [story]}, handle)
+    return path
+
+
+def _mark_complete(path, *extra):
+    """Through main(), not through the op, so a refusal arrives as the exit
+    status bash sees rather than as the exception main() is there to catch."""
+    argv = ["tasks.py", "mark-complete", "--tasks-file", path, "--story-id", "US-001"]
+    return T.main(argv + list(extra))
+
+
+def _reread(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)["userStories"][0]
+
+
+def test_mark_complete_evidence_lands_deep_beside_what_it_must_not_replace(tmp_path):
+    path = _evidence_file(
+        tmp_path,
+        {
+            "id": "US-001",
+            "status": "in_progress",
+            "verification": {
+                "strategy": "ci",
+                "status": "pending",
+                "url": "https://ci.example.com/run/1",
+                "expect": "green",
+            },
+        },
+    )
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    story = _reread(path)
+    assert story["status"] == "completed"
+    assert story["verification"] == {
+        "strategy": "ci",
+        "status": "pending",
+        "url": "https://ci.example.com/run/1",
+        "expect": "green",
+        "evidence": EVIDENCE,
+    }
+
+
+def test_mark_complete_evidence_is_absent_without_the_flag(tmp_path):
+    """The /aimi:next call site, which has no executor payload to pass and never
+    will. Without the flag the patch is identically {"status": "completed"}."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path) == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_treats_an_empty_string_as_absent(tmp_path):
+    """One rule, held on both sides of the crossing: bash builds no flag when the
+    value is empty, and this is the half that holds when something else does."""
+    story = {
+        "id": "US-001",
+        "status": "in_progress",
+        "verification": {"strategy": "ci", "status": "pending"},
+    }
+    path = _evidence_file(tmp_path, story)
+    assert _mark_complete(path, "--evidence", "") == 0
+    assert _reread(path) == dict(story, status="completed")
+
+
+def test_mark_complete_evidence_builds_the_intermediate(tmp_path):
+    """jq_setpath's own semantics, the ones update-field-cria-intermediarios
+    records -- a story with no verification gets one built around the evidence."""
+    path = _evidence_file(tmp_path, {"id": "US-001", "status": "in_progress"})
+    assert _mark_complete(path, "--evidence", EVIDENCE_TEXT) == 0
+    assert _reread(path)["verification"] == {"evidence": EVIDENCE}
+
+
+@pytest.mark.parametrize("raw", ["nao json", "[1,2]", '"texto"', "7", "null"])
+def test_mark_complete_evidence_refuses_a_payload_that_is_not_an_object(raw, tmp_path):
+    """Refused BEFORE the document is read, so the file cannot be half-written.
+
+    A payload that is not an object is one the reader of this field cannot use,
+    and it would degrade to "unrecorded" in silence instead of failing here,
+    where somebody is looking.
+    """
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", raw)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "a refusal writes nothing"
+
+
+def test_mark_complete_evidence_refuses_a_string_typed_verification(tmp_path):
+    """The update-field-intermediario-nao-objeto rule, reached from here: a path
+    THROUGH a non-object refuses, and the refusal happens before the write, so
+    the story's own status is still the one it had."""
+    story = {"id": "US-001", "status": "in_progress", "verification": "manual"}
+    path = _evidence_file(tmp_path, story)
+    with pytest.raises(SystemExit) as refusal:
+        _mark_complete(path, "--evidence", EVIDENCE_TEXT)
+    assert refusal.value.code == 1
+    assert _reread(path) == story, "not even the status patch survives the refusal"
+
+
+def test_mark_complete_evidence_is_the_only_mark_verb_that_takes_it(tmp_path):
+    """The gate is `status == "completed"`, the same shape --notes has for
+    failed. mark-failed passed the same flag ignores it rather than growing a
+    second field nothing reads."""
+    story = {"id": "US-001", "status": "in_progress", "verification": {"strategy": "ci"}}
+    path = _evidence_file(tmp_path, story)
+    argv = ["tasks.py", "mark-failed", "--tasks-file", path, "--story-id", "US-001"]
+    assert T.main(argv + ["--evidence", EVIDENCE_TEXT]) == 0
+    written = _reread(path)
+    assert written["status"] == "failed"
+    assert written["verification"] == {"strategy": "ci"}
+
+
 # ---------------------------------------------------------------------------
 # The four validators: a verdict and an exit status, over an adversarial corpus
 # ---------------------------------------------------------------------------
@@ -1217,6 +1363,115 @@ def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
     }
 
 
+# ---------------------------------------------------------------------------
+# normalize-waves: a brand-new verb, so these are hand-written rather than a
+# golden replay -- there is no jq implementation it ports and none to compare
+# against. The rule itself is asserted only by import (compute_waves lives in
+# story_merge.py and is not re-derived here); what these pin is the wrapper
+# around it -- the write, the reported count, and the one precondition it
+# guards before compute_waves ever runs.
+# ---------------------------------------------------------------------------
+
+
+def _run_normalize_waves(tmp_path, stories):
+    """One live normalize-waves over a document written for the occasion.
+
+    Mirrors _run_validate_waves, but the fixture path is passed POSITIONALLY
+    -- the same shape normalize-status/normalize-verification already take --
+    and the file is read back afterward because this verb, unlike
+    validate-waves, writes it.
+    """
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    fixture = os.path.join(tasks_dir, "2020-01-01-normalize-waves-tasks.json")
+    with open(fixture, "w", encoding="utf-8") as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "normalize-waves", fixture],
+        cwd=root, capture_output=True, text=True, timeout=120,
+    )
+    with open(fixture, encoding="utf-8") as fh:
+        written = json.load(fh)
+    return proc, written
+
+
+def test_normalize_waves_recomputes_by_the_writers_own_rule(tmp_path):
+    """The rule this verb exists to apply -- story_merge.compute_waves' own,
+    roots at 1 and everyone else at max(dependency waves) + 1 -- imported at
+    the top of tasks.py and never restated here. Three stale stored waves (9,
+    9, 3) all correct, and the reported count is the number that changed."""
+    stale = [
+        _wave_story("US-001", [], 9),
+        _wave_story("US-002", ["US-001"], 9),
+        _wave_story("US-003", ["US-001"], 3),
+    ]
+    proc, written = _run_normalize_waves(tmp_path, stale)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"normalized": 3}
+    assert {s["id"]: s["wave"] for s in written["userStories"]} == {
+        "US-001": 1, "US-002": 2, "US-003": 2,
+    }
+
+
+def test_normalize_waves_is_idempotent_and_the_count_is_a_change_count():
+    """A second run over an already-correct document reports zero -- the
+    count answers "how many waves were stale", not "how many stories exist",
+    which is what makes it useful rather than a story tally in disguise."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": [], "wave": 1},
+        {"id": "US-002", "dependsOn": ["US-001"], "wave": 2},
+    ]}
+    assert T.normalize_waves(doc) == 0
+    assert [s["wave"] for s in doc["userStories"]] == [1, 2]
+
+
+def test_normalize_waves_then_validate_waves_reports_clean(tmp_path):
+    """The two guardrails meeting: normalize-waves corrects a stale document,
+    and validate-waves -- untouched by this story, still exiting 0 always --
+    then reports it valid with no errors over the very file just written."""
+    stale = [_wave_story("US-001", []), _wave_story("US-002", ["US-001"], 99)]
+    proc, _ = _run_normalize_waves(tmp_path, stale)
+    assert proc.returncode == 0, proc.stderr
+    root = os.path.realpath(str(tmp_path))
+    verdict_proc = subprocess.run(
+        ["bash", CLI, "validate-waves"], cwd=root, capture_output=True, text=True, timeout=120,
+    )
+    assert verdict_proc.returncode == 0
+    assert json.loads(verdict_proc.stdout) == {"valid": True, "errors": []}
+
+
+def test_normalize_waves_a_cyclic_story_lands_on_zero_like_the_writer_does():
+    """compute_waves never omits a story the way its read-only twin does --
+    every story in a cycle still gets a numeric wave, stuck at 0 forever,
+    because the writer must put SOMETHING in the field. Reproduced here
+    rather than asserted only by import, because this is the one shape where
+    the writer and the validator visibly disagree (0 vs "never assigned"),
+    and a reader relying on this file alone should be able to see it."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": ["US-002"], "wave": 9},
+        {"id": "US-002", "dependsOn": ["US-001"], "wave": 9},
+    ]}
+    T.normalize_waves(doc)
+    assert [s["wave"] for s in doc["userStories"]] == [0, 0]
+
+
+def test_normalize_waves_refuses_a_missing_id_before_touching_any_story():
+    """compute_waves indexes `story["id"]` directly -- a plain dict subscript,
+    not the null-tolerant jq_index -- so a story with no id would otherwise
+    raise a raw KeyError instead of this file's one caught exception. The
+    guard runs over every story before compute_waves touches any of them, so
+    a later story's own wave is provably untouched by the refusal."""
+    doc = {"userStories": [
+        {"id": "US-001", "dependsOn": [], "wave": 9},
+        {"dependsOn": ["US-001"], "wave": 9},
+    ]}
+    with pytest.raises(T.MalformedTasks) as excinfo:
+        T.normalize_waves(doc)
+    assert "cannot use null as an object key" in str(excinfo.value)
+    assert doc["userStories"][0]["wave"] == 9, "refused before any story was rewritten"
+
+
 def test_the_places_a_naive_python_would_have_diverged_from_jq():
     """Four rules that are not Python's, each with the recorded case behind it."""
     # `unique` inside validate-deps' cycle reduce, over a heterogeneous dependsOn.
@@ -1538,6 +1793,205 @@ def test_every_one_of_the_fifteen_rules_has_a_case_that_trips_it_and_one_that_do
     for label in ("url-null", "url-vazia", "url-numero", "url-sem-verificacao"):
         assert valid(label), label
     assert len(_vt_errors("url-duas-ruins")) == 2
+
+
+def _replay_line_anchor(criterion, tmp_path):
+    """One story, one criterion, through the real CLI.
+
+    Built here rather than read out of the golden because R16 is the one rule in
+    validate_tasks bash never ran -- there is no jq recording of it to replay,
+    and adding one to `validate_tasks_cases` would be recording the Python,
+    which is the one thing that file must never hold. schemaVersion 3.3 is
+    load-bearing: R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [
+            {
+                "id": "US-001",
+                "title": "Story US-001",
+                "description": "As a user, I want US-001.",
+                "acceptanceCriteria": [criterion],
+                "status": "pending",
+                "priority": 1,
+                "dependsOn": [],
+                "wave": 0,
+            }
+        ],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_line_numbered_anchor_in_an_acceptance_criterion_warns_exactly_once(tmp_path):
+    """R16's warning half, and the channel it uses is the assertion.
+
+    It names the anchor, and it reaches `warn` rather than `errors`: the verdict
+    stays valid and the exit status stays 0. That is the whole point of the rule
+    living in validate_tasks -- a line number is fragile, not invalid, and an
+    error here would refuse plans that pass today.
+    """
+    actual = _replay_line_anchor("o bloco em commands/execute.md:2766 precisa mudar", tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "acceptanceCriteria cites a line number: commands/execute.md:2766"
+        " — the tree moves and the anchor does not\n"
+    )
+
+
+def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
+    """The exclusion, asserted from both sides so it cannot pass vacuously.
+
+    LINE_ANCHOR on its own DOES fire on this string -- the first assertion says
+    so -- and the rule still emits nothing, because R2/R3/R4 already validate a
+    citation by its literal against its section and bind the `L(...)` capture to
+    a `_line_number` nothing reads. Warning here would be warning about the one
+    anchor in the file that is checked by content.
+    """
+    citation = '"o alvo em commands/execute.md:2766" (DesignSpec § 2.1 L2766)'
+    assert T.LINE_ANCHOR.search(citation), "a matcher without the exclusion fires on it"
+    actual = _replay_line_anchor(citation, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+_ABSENT = object()
+
+
+def _replay_implementation(implementation, tmp_path, files=None):
+    """One story through the real CLI, carrying `implementation` as given.
+
+    R17's own replay, built here for the reason _replay_line_anchor is built
+    here: bash never ran this rule either, so there is no jq recording to
+    replay, and adding one to `validate_tasks_cases` would be recording the
+    Python. schemaVersion 3.3 is load-bearing for the same reason too -- R1
+    returns before validate_tasks on anything older, so the warning would never
+    fire and the test would pass on nothing.
+
+    THESE THREE CASES ARE THE ONLY COVERAGE R17 HAS, and that is a measured
+    claim rather than a cautious one: not one of the 121 recordings in
+    `validate_tasks_cases` carries an `implementation` object at all, so the
+    corpus cannot reach this rule even once. `_ABSENT` is a sentinel because
+    `None` is a value the schema allows and the absent case has to be distinct
+    from it. `files` seeds real files under PROJECT_ROOT, which is how a case
+    says "this directory exists" -- the rule asks about the PARENT, so a
+    fixture only ever has to create a sibling of the path under test.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    if implementation is not _ABSENT:
+        story["implementation"] = implementation
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": files or {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def test_a_story_with_no_implementation_reaches_r17_and_says_nothing(tmp_path):
+    """`implementation` is optional in schema v3.3, so absent is not a finding.
+
+    The story still reaches the rule -- R17 iterates every story unconditionally
+    and it is the jq_type guard, not a pre-filter, that ends this one. Silence
+    on both channels is the assertion, because a warning here would fire on the
+    majority of every tasks file the plugin has ever written.
+    """
+    actual = _replay_implementation(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_implementation_that_is_a_string_is_stopped_by_the_type_guard(tmp_path):
+    """The guard's own test, and it is shown to be load-bearing, not assumed.
+
+    The second assertion is the point: reading `.files` off this same scalar
+    WITHOUT the guard raises, and MalformedTasks out of validate_tasks is an
+    abort of the whole run -- exit 1 on a document that is merely unusual. That
+    is the regression the comment beside .project in validate_stories records,
+    reproduced here against the real function rather than restated in prose.
+    """
+    scalar = "isto e uma string, nao um objeto"
+    actual = _replay_implementation(scalar, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+    with pytest.raises(T.MalformedTasks):
+        T.jq_index(scalar, "files", ".userStories[].implementation")
+
+
+def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(tmp_path):
+    """R17's warning half, plus the half that keeps it from passing on nothing.
+
+    The same story shape is run twice and only the path changes: `src/` exists
+    because the fixture seeded a sibling into it, `nao/existe/` does not. One
+    warns, one is silent, so the rule is shown to discriminate rather than to
+    fire on every path it is handed.
+
+    The FILE is missing in both runs. That is the rule's whole design -- a story
+    that creates `src/novo.py` is the ordinary case, and checking the file
+    instead of its parent would refuse every scaffolding story in the corpus.
+
+    The verdict stays `valid` and the exit stays 0: this reaches `warn`, never
+    `errors`, because a plan may legitimately describe a directory it is about
+    to create and refusing that would be worse than not checking at all.
+    """
+    seeded = {"src/existente.py": "# um vizinho, so para criar src/\n"}
+
+    quiet = _replay_implementation(
+        {"files": ["src/novo.py"], "approach": "a", "verify": "true"}, tmp_path, seeded
+    )
+    assert quiet["exit"] == 0
+    assert quiet["stderr"] == "", "the file is absent too -- only the parent is checked"
+
+    loud = _replay_implementation(
+        {"files": ["nao/existe/de/jeito/nenhum/x.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        seeded,
+    )
+    assert loud["exit"] == 0
+    assert loud["stdout"] == '{"valid": true, "errors": []}\n', "a warning, never an error"
+    assert loud["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert loud["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "implementation.files names a directory that does not exist: "
+        "nao/existe/de/jeito/nenhum/x.py"
+        " — the file may be new, the directory it lands in may not\n"
+    )
 
 
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
@@ -2055,6 +2509,169 @@ def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
     actual, _ = _context_stdout("skills-tres", tmp_path)
     assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
     assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+# ---------------------------------------------------------------------------
+# DECISION 4: metadata is projected, not copied whole
+# ---------------------------------------------------------------------------
+#
+# The corpus MOVED for this rule -- 43 of its 45 non-empty recordings lost the
+# metadata keys nothing reads -- and `_comment_story_context` says how. What the
+# corpus cannot say is the thing that motivated the change: no fixture in it has
+# ever carried a `metadata.decisions`, so the assertion that discriminates is
+# hand-written here, against a document written for it.
+
+
+def _synthetic_context_case(metadata):
+    """One story and the given metadata, in the shape _replay_context rebuilds.
+
+    Reuses the replay machinery rather than a second runner, so these tests go
+    through the same bash wrapper, the same crossing and the same argv the 57
+    recordings do -- the projection is asserted on the payload a story executor
+    would actually receive, not on projected_metadata() called directly.
+    """
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [{
+            "id": "US-001", "title": "Story US-001",
+            "description": "As a user, I want US-001.",
+            "acceptanceCriteria": ["Typecheck passes"], "status": "pending",
+            "priority": 1, "dependsOn": [], "wave": 0,
+        }],
+    }
+    return {
+        "args": ["get-story-context", "US-001"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, indent=2) + "\n",
+            "files": {}, "repeat": {}, "state": {}, "plugin_dir": True, "env": {},
+        },
+    }
+
+
+def _projected(metadata, tmp_path):
+    actual = _replay_context(_synthetic_context_case(metadata), tmp_path)
+    assert actual["exit"] == 0, actual["stderr"]
+    return json.loads(actual["stdout"])["metadata"]
+
+
+def test_decisions_stops_travelling_and_a_key_with_a_reader_survives(tmp_path):
+    """DECISION 4, and the one assertion that discriminates this story's change.
+
+    metadata.decisions is the largest block a plan writes -- one object per
+    resolved question, carrying that question's own prose -- and it was copied
+    into the first payload of every spawned story executor, none of which has
+    ever read it. prototypePaths sits in the same object and IS read, nine times
+    in SKILL.md, so a projection that dropped both would be a regression wearing
+    this story's name: both halves are asserted here, on one document.
+    """
+    metadata = _projected({
+        "branchName": "x/y",
+        "maxConcurrency": 3,
+        "decisions": [{"anchor": "a", "source": "b", "text": "c", "resolution": "d"}],
+        "prototypePaths": ["p.html"],
+    }, tmp_path)
+    assert "decisions" not in metadata, "the block that motivated the projection"
+    assert metadata["prototypePaths"] == ["p.html"], "a key WITH a reader survives"
+    assert metadata == {"prototypePaths": ["p.html"]}
+
+
+def test_the_projection_keeps_the_documents_own_key_order(tmp_path):
+    """Payload SHAPE is the contract here (this is parsed by an agent), and the
+    three keys are projected in the order the DOCUMENT wrote them, not in the
+    order the constant lists them."""
+    metadata = _projected({
+        "prototypePaths": ["p.html"],
+        "branchName": "x/y",
+        "designTokens": {"color": "#fff"},
+        "decisions": [],
+        "designBundle": {"root": ".aimi/design/b"},
+    }, tmp_path)
+    assert list(metadata) == ["prototypePaths", "designTokens", "designBundle"]
+
+
+def test_a_key_the_document_omits_does_not_become_null(tmp_path):
+    """PRESENCE, not truthiness, in both directions.
+
+    A projected key the document never wrote is absent, because inventing it as
+    null would make the payload claim the document said something it did not --
+    and a consumer that has to tell "absent" from "null" is one that will get it
+    wrong. A projected key the document wrote AS null survives as null, for the
+    same reason read the other way: `designBundle: null` is a real value, and
+    bundle-null records a document that carries it.
+    """
+    assert _projected({"prototypePaths": ["p.html"]}, tmp_path / "one") == {
+        "prototypePaths": ["p.html"]
+    }
+    assert _projected({"designBundle": None}, tmp_path / "two") == {"designBundle": None}
+
+
+def test_a_document_with_no_metadata_answers_exactly_what_it_did_before(tmp_path):
+    """`null`, not `{}` and not an omitted key -- unchanged by the projection.
+
+    metadata-ausente and metadata-null are the two recordings the move did NOT
+    touch, and the reason is a contract rather than an accident: a document that
+    carries no metadata says nothing, which is not the same statement as "every
+    projected key was missing". Both are replayed here so the pair is asserted
+    rather than inferred from the diff.
+    """
+    for label in ("metadata-ausente", "metadata-null"):
+        _, payload = _context_stdout(label, tmp_path / label)
+        assert payload["metadata"] is None, label
+        assert '"metadata": null' in CONTEXT[label]["stdout"], label + ": recorded too"
+
+    # And the key a caller still reaches for is jq's null either way, which is
+    # what keeps the narrowing from breaking a reader nobody has found yet.
+    assert _projected({"maxConcurrency": 3}, tmp_path / "narrowed") == {}
+
+
+def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
+    """The constant is the single place the set is written down.
+
+    The grep that produced it lives in the comment beside it in tasks.py rather
+    than in an assertion here, deliberately: skills/story-executor/SKILL.md is
+    owned by another story in this same wave, and a test that grepped a file
+    being edited beside it would go red for a reason that has nothing to do with
+    this rule. Re-run the grep the comment records when a reader is added.
+    """
+    assert T.STORY_CONTEXT_METADATA_KEYS == (
+        "designBundle", "designTokens", "prototypePaths"
+    )
+    assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
+
+
+def test_the_moved_recordings_carry_no_key_the_projection_would_drop():
+    """The corpus's own half of decision 4, over all 45 non-empty recordings.
+
+    The move was mechanical -- each recorded payload re-parsed, its metadata
+    narrowed, the rest re-rendered byte for byte -- so the property to check
+    afterwards is that nothing survived it that the live rule would remove. A
+    recording that still carried `branchName` would mean the replay test is
+    comparing the new code against a recording of the old rule.
+    """
+    seen = 0
+    for case in CONTEXT.values():
+        for payload in _payloads(case["stdout"]):
+            metadata = payload["metadata"]
+            if metadata is None:
+                continue
+            assert set(metadata) <= set(T.STORY_CONTEXT_METADATA_KEYS), case["label"]
+            seen += 1
+    assert seen, "the corpus has payloads with a metadata object"
+
+
+def _payloads(stdout):
+    """The recorded stdout's JSON values -- id-duplicado holds two."""
+    decoder = json.JSONDecoder()
+    index, values = 0, []
+    while True:
+        while index < len(stdout) and stdout[index] in " \n\t\r":
+            index += 1
+        if index >= len(stdout):
+            return values
+        value, index = decoder.raw_decode(stdout, index)
+        values.append(value)
 
 
 def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
@@ -2752,16 +3369,34 @@ def test_tasks_py_takes_no_lock_of_its_own():
 def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     """One writer, and the writer is atomic.
 
-    open() appears four times and ALL FOUR are read mode. The second arrived
+    open() appears seven times and ALL SEVEN are read mode. The second arrived
     with validate-tasks, the one verb that reads a file other than the tasks
     file -- the DesignSpec or BusinessSpec named in metadata.designBundle,
     discovered after the crossing and therefore unreachable from bash's own
     confinement. The third and fourth arrived with get-story-context for the
     same reason: a SKILL.md under the skills base directory bash resolved, and
     the brainstorm named by metadata.brainstormPath. Each is read-only and each
-    is scoped to its own call site, which is what this asserts: a FIFTH open, or
-    any of these four in a writing mode, is a new capability and has to be
-    argued for rather than appear.
+    is scoped to its own call site, which is what this asserts: an EIGHTH
+    open, or any of these seven in a writing mode, is a new capability and has
+    to be argued for rather than appear.
+
+    The fifth and sixth arrived TOGETHER with list-known-gaps, and they are the
+    first two that open a file this module was not handed a path to: a gap file
+    the verb found by listing .aimi/known-gaps/, and a tasks document it found
+    listing .aimi/tasks and .aimi/archive to resolve that gap's feature. Both
+    are reads, both fail silently to a null answer rather than to a refusal,
+    and both are bounded -- the listing that produces them stops two
+    directories down and never uses a recursive traversal helper, because the
+    test above bans every one of them by name and that ban is worth more than
+    the four lines it costs to avoid.
+
+    The SEVENTH arrived with verify-probe's `--previous-file`: a PRIOR run's
+    own JSON array, named by a path bash already ran through
+    validate_path_in_project like --tasks-file, and read by
+    _read_previous_probe. It degrades to `None` on ANY failure -- missing,
+    unreadable, not JSON, not a list -- rather than raising, because this read
+    backs a diagnostic comparison layered on top of `discriminates`, never a
+    gate, and a bad --previous-file must not be why the probe itself refuses.
 
     The single BYTE-writing path is write_docs_atomically, a NamedTemporaryFile
     in the TARGET's own directory followed by os.replace -- never a
@@ -2777,12 +3412,13 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     in it and has to change this test to arrive.
     """
     code = _code()
-    assert code.count("open(") == 4
+    assert code.count("open(") == 7
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 4
+    assert 'open(full, "r", encoding="utf-8")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 7
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -2801,7 +3437,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
         "os.unlink(handle.name)",
         "os.unlink(path)",
     ]
-    # Twenty-nine os.path calls, and the module still names no path of its own
+    # Thirty-seven os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
     # write_docs_atomically, two are validate-tasks' isfile() per spec, eight
     # are confined_spec_path resolving and comparing, three arrived with
@@ -2816,8 +3452,38 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # arrived as an argument or was concatenated onto one that did -- the skills
     # base directory, PROJECT_ROOT, the archive directory and the tasks-file
     # list are all bash's answers, handed in as flags or as arguments.
-    assert code.count("os.path.") == 29
+    #
+    # The next six arrived with list-known-gaps and they are the first that
+    # name a DIRECTORY of their own: "known-gaps", "tasks" and "archive", each
+    # joined onto the --aimi-dir bash handed in, plus one join and one isdir()
+    # in the bounded listing that walks them. That is a real widening and it is
+    # written down rather than absorbed: the rule those three still keep is the
+    # one this comment is about -- no path is named that is not rooted in an
+    # argument -- and what changed is that a leaf name below one now is. A
+    # SEVENTH such name, or any of these three moving off --aimi-dir, is the
+    # thing to argue about.
+    #
+    # The last two arrived with R17 and they name NOTHING of their own: a
+    # dirname() and an isdir() over whatever confined_spec_path already
+    # resolved, which is PROJECT_ROOT concatenated with a string the document
+    # supplied. So the count moves while the rule this comment is about does
+    # not -- R17 reads a directory the tasks file named, never one tasks.py
+    # chose. It is also the second isdir() in the module, and the first that
+    # asks whether a path the plan CITES is real rather than whether one the
+    # CLI walks is.
+    #
+    # The final two are a join and the module's THIRD isdir(), and they name
+    # even less than R17's pair: they walk the children of `.aimi/tasks` --
+    # already joined onto --aimi-dir two lines above and already walked by the
+    # bounded listing -- to collect the feature DIRECTORY NAMES that are there.
+    # The names come off the disk rather than out of this module, which is the
+    # whole point of the read: it is what lets a file-name suffix be checked
+    # against the features that exist instead of being believed on sight. No
+    # new root, no new leaf, one more directory predicate over a directory
+    # --aimi-dir already reaches.
+    assert code.count("os.path.") == 39
     assert code.count("os.path.isfile(") == 7
+    assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
@@ -2926,6 +3592,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
+        "cmd_normalize_waves",
         "cmd_cascade_skip",
         "cmd_reset_orphaned",
         "cmd_gate_pass",
@@ -3092,10 +3759,15 @@ def test_verification_report_url_matches_story_01s_object_fixtures():
     with_url = json.loads(_CB_CASES["site-023"]["verification-object-with-url"]["input"])
     no_url = json.loads(_CB_CASES["site-023"]["verification-object-no-url"]["input"])
     assert T.verification_report(with_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": "http://localhost:4000/y"}
+        {
+            "id": "US-001",
+            "project": None,
+            "url": "http://localhost:4000/y",
+            "status": "pending",
+        }
     ]
     assert T.verification_report(no_url)["visual"] == [
-        {"id": "US-001", "project": None, "url": ""}
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
     ]
 
 
@@ -3155,7 +3827,9 @@ def test_verification_report_closes_the_array_valued_project_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_closes_the_non_string_url_hazard():
@@ -3178,7 +3852,9 @@ def test_verification_report_closes_the_non_string_url_hazard():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": None, "url": ""}]
+    assert report["visual"] == [
+        {"id": "US-001", "project": None, "url": "", "status": "pending"}
+    ]
 
 
 def test_verification_report_passes_a_string_project_through_unchanged():
@@ -3195,20 +3871,253 @@ def test_verification_report_passes_a_string_project_through_unchanged():
         ]
     }
     report = T.verification_report(doc)
-    assert report["visual"] == [{"id": "US-001", "project": "apps/web", "url": "http://x/y"}]
+    assert report["visual"] == [
+        {
+            "id": "US-001",
+            "project": "apps/web",
+            "url": "http://x/y",
+            "status": "pending",
+        }
+    ]
 
 
 def test_verification_report_ignores_a_well_formed_non_visual_object():
     """`.strategy != "visual"` on an otherwise well-formed verification object
     is neither visual NOR malformed -- the object-typed branch of the old
-    scan's `type == "object"` guard, which this partition never reaches."""
+    scan's `type == "object"` guard, which this partition never reaches.
+
+    The assertion below is WHOLE-DICT on purpose, and it is the only one in
+    this file that is: it pins the report's top-level SHAPE, so a new key is
+    a deliberate edit here rather than something a key-scoped sibling would
+    let through unnoticed. The `discriminating` entry arrived that way."""
     doc = {
         "userStories": [
             {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
         ]
     }
     report = T.verification_report(doc)
-    assert report == {"visual": [], "malformed": {"repairable": [], "unrepairable": []}}
+    assert report == {
+        "visual": [],
+        # non-visual, but its verification WAS declared and nobody looked at
+        # it -- the pending partition is scoped by status, never by strategy.
+        "pending": ["US-001"],
+        "malformed": {"repairable": [], "unrepairable": []},
+        # this story carries no `status` of its own, so it is not completed
+        # and enters none of the three lists -- and with an empty denominator
+        # the fraction is None rather than 0.
+        "discriminating": {
+            "checked": [],
+            "blind": [],
+            "unrecorded": [],
+            "fraction": None,
+        },
+    }
+
+
+def test_pending_names_every_declared_status_whatever_the_strategy():
+    """The partition is scoped by `.verification.status`, not by strategy: a
+    test story and a visual story left at "pending" both enter, in document
+    order, and a story someone HAS judged -- passed, failed, skipped -- does
+    not. There is no recorded jq site to replay this against; no command-layer
+    program ever asked this question, which is why the completed gate had
+    nothing to read."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "pending"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": "pending"}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "passed"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": "failed"}},
+            {"id": "US-005", "verification": {"strategy": "test", "status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-001", "US-002"]
+
+
+def test_pending_excludes_a_story_that_declared_no_verification_at_all():
+    """The boundary the partition exists inside: absent and null verifications
+    are NOT pending. They are the shape every legacy phase is made of -- the
+    stories written before the field existed -- and counting them would fail
+    each of those phases at its completed gate for a verification nobody ever
+    promised. Only the object branch is reached; `_status_defaulted`'s
+    `//= "pending"` is about a STORY's own status and has no counterpart here.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001"},
+            {"id": "US-002", "verification": None},
+            {"id": "US-003", "verification": {"strategy": "test", "status": "pending"}},
+        ]
+    }
+    assert T.verification_report(doc)["pending"] == ["US-003"]
+
+
+def test_pending_matches_the_literal_and_never_a_near_miss():
+    """`jq_equal(status, "pending")` -- the same total-order comparison the
+    strategy test uses, so a boolean, a number or an array named where a
+    status belongs is not "pending" by Python's own looser rules either. The
+    malformed partition never sees these: the verification itself is a
+    well-formed object, only its `status` is not a string."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "test", "status": "Pending"}},
+            {"id": "US-002", "verification": {"strategy": "test", "status": ["pending"]}},
+            {"id": "US-003", "verification": {"strategy": "test", "status": True}},
+            {"id": "US-004", "verification": {"strategy": "test", "status": ""}},
+            {"id": "US-005", "verification": {"strategy": "test"}},
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["pending"] == []
+    assert report["malformed"] == {"repairable": [], "unrepairable": []}
+
+
+def test_a_visual_entrys_status_reports_what_was_declared_and_collapses_the_rest():
+    """The field a caller wanting "did the visual check pass?" used to reopen
+    the file for. A string passes through (`passed` here, and the empty string
+    survives as itself); every other shape -- absent, null, an array --
+    collapses to `None`, the same divergence `_report_project` makes, so no
+    entry can claim a status the `pending` list refuses to count."""
+    doc = {
+        "userStories": [
+            {"id": "US-001", "verification": {"strategy": "visual", "status": "passed"}},
+            {"id": "US-002", "verification": {"strategy": "visual", "status": ""}},
+            {"id": "US-003", "verification": {"strategy": "visual"}},
+            {"id": "US-004", "verification": {"strategy": "visual", "status": None}},
+            {"id": "US-005", "verification": {"strategy": "visual", "status": ["a"]}},
+        ]
+    }
+    assert [entry["status"] for entry in T.verification_report(doc)["visual"]] == [
+        "passed",
+        "",
+        None,
+        None,
+        None,
+    ]
+
+
+@pytest.mark.parametrize("fixture", _CB_FIXTURES)
+def test_pending_stays_inside_the_object_branch_across_story_01s_corpus(fixture):
+    """The two new partitions read against every fixture story 01 recorded,
+    rather than against hand-written documents alone: whatever a fixture
+    holds, a `pending` id always belongs to a story whose verification is an
+    OBJECT carrying the literal, and never to one of the malformed ids the
+    same run reports. Nothing here regenerates a recording -- the corpus is
+    read for its INPUTS, and the verdict is this verb's own."""
+    if fixture == "malformed-document":
+        pytest.skip("unparseable JSON -- read_docs' refusal, not this verb's")
+    doc = json.loads(_CB_CASES["site-001"][fixture]["input"])
+    if fixture == "userstories-absent":
+        with pytest.raises(T.MalformedTasks):
+            T.verification_report(doc)
+        return
+    report = T.verification_report(doc)
+    by_id = {story.get("id"): story for story in doc["userStories"]}
+    for story_id in report["pending"]:
+        verification = by_id[story_id]["verification"]
+        assert isinstance(verification, dict)
+        assert verification.get("status") == "pending"
+    malformed = set(report["malformed"]["repairable"] + report["malformed"]["unrepairable"])
+    assert malformed.isdisjoint(report["pending"])
+
+
+def test_verification_report_partitions_completed_stories_by_discriminating_evidence():
+    """The fourth key, and the distinction it exists to hold: absent evidence
+    is `unrecorded`, a recorded 0 is `blind`, and the two are never the same
+    answer. `blind` says somebody looked and nothing discriminated;
+    `unrecorded` says nothing was ever written down -- which is what every
+    story predating the field reads as, and reporting a confident zero for it
+    would be a lie about exactly the runs issue #136 calls unreadable.
+
+    Scope is a story's OWN `status == "completed"`, the same rule and the
+    same reason as `roadmap.py:_completed_story_ids`: a verification judges
+    work that was done, and `cascade-skip` writes `status: "skipped"` without
+    touching `verification`. So the pending story below carries a perfectly
+    good count and enters no list at all.
+
+    Three shapes are checked by name because each is a way the count could be
+    faked rather than read. `{"discriminating": true}` is `unrecorded`, not
+    the count 1 -- Python says `isinstance(True, int)` and jq does not, and a
+    boolean nobody meant as a number must not reach `checked`. A float, a
+    string, a negative int, an absent key and a non-object `evidence` are
+    `unrecorded` too: that tolerance is what makes a field-name disagreement
+    between this reader and its writers surface as "nothing was recorded"
+    rather than as a fabricated zero. And `unrecorded` stays OUT of
+    `fraction`'s denominator, so a legacy file answers `None` where a run of
+    honest zeros answers `0`.
+    """
+    doc = {
+        "userStories": [
+            # completed, no verification at all -- the legacy shape
+            {"id": "US-001", "status": "completed"},
+            {
+                "id": "US-002",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 3}},
+            },
+            {
+                "id": "US-003",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 0}},
+            },
+            {
+                "id": "US-004",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": {"discriminating": True}},
+            },
+            # a real count, but the work is not done -- in no list
+            {
+                "id": "US-005",
+                "status": "pending",
+                "verification": {"strategy": "test", "evidence": {"discriminating": 7}},
+            },
+            {
+                "id": "US-006",
+                "status": "completed",
+                "verification": {"strategy": "test", "evidence": "probed"},
+            },
+        ]
+    }
+    report = T.verification_report(doc)["discriminating"]
+    assert report["checked"] == ["US-002"]
+    assert report["blind"] == ["US-003"]
+    assert report["unrecorded"] == ["US-001", "US-004", "US-006"]
+    # one checked over one checked plus one blind; US-005 and the three
+    # unrecorded ids are outside the denominator entirely
+    assert report["fraction"] == 0.5
+    every_id = report["checked"] + report["blind"] + report["unrecorded"]
+    assert len(every_id) == len(set(every_id)) and "US-005" not in every_id
+
+    # every count that is not a plain non-negative integer reads as "never
+    # recorded" -- including an `evidence` that is not an object at all
+    def report_for(evidence):
+        story = {"id": "US-001", "status": "completed", "verification": {}}
+        if evidence is not ...:
+            story["verification"]["evidence"] = evidence
+        return T.verification_report({"userStories": [story]})["discriminating"]
+
+    for evidence in (
+        ...,
+        None,
+        "probed",
+        ["discriminating"],
+        {},
+        {"segments": 3},
+        {"discriminating": 1.0},
+        {"discriminating": "2"},
+        {"discriminating": -1},
+        {"discriminating": None},
+    ):
+        assert report_for(evidence) == {
+            "checked": [],
+            "blind": [],
+            "unrecorded": ["US-001"],
+            "fraction": None,
+        }, evidence
+
+    # the two fraction boundaries: nothing recorded has NO fraction, a run of
+    # honest zeros has a fraction of zero
+    assert report_for(...)["fraction"] is None
+    assert report_for({"discriminating": 0})["fraction"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -3337,6 +4246,8 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "status",
         "metadata",
         "verification-report",
+        "verify-probe",
+        "list-known-gaps",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -3359,6 +4270,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "set-execution-mode",
         "normalize-status",
         "normalize-verification",
+        "normalize-waves",
         "cascade-skip",
         "reset-orphaned",
         "archive-task",
@@ -3929,3 +4841,963 @@ def test_a_missing_branchname_is_still_the_word_null():
         assert SESSION[label]["state_after"]["current-branch"] == "null\n", label
     assert T.document_line([{"metadata": {}}], "metadata", "branchName") == "null"
     assert T.document_scalar([{"metadata": {}}], "branchName") == ""
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: which of a verify's assertions already passed
+# ---------------------------------------------------------------------------
+#
+# NO GOLDEN BLOCK, and there could not be one: this verb had no jq predecessor
+# to capture, so nothing here is evidence that a port changed nothing. What it
+# asserts instead is the two properties the verb exists for -- that a segment
+# which already passes is reported as not discriminating, and that a separator
+# inside a quoted string is not a separator -- plus the two the decomposition
+# must never violate, which are that nothing is eval'd and that a failure
+# branch is never run.
+
+
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None):
+    """A one-story project whose story carries `verify`, probed through the CLI.
+
+    `files` are created relative to the project root before the run, and `cwd`
+    names the directory to invoke from -- the two things the probe's answer
+    depended on before `unsatisfiable` existed. `previous` is the THIRD: a
+    JSON-serializable array (typically a prior call's own `probed` return
+    value) written to a file inside the project and passed as
+    `--previous-file`, the same way the story-executor hands the
+    pre-implementation run's output to the post-implementation one.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    for name in files:
+        target = os.path.join(root, name)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("marker\n")
+    story = {
+        "id": "US-001",
+        "title": "s",
+        "description": "d",
+        "acceptanceCriteria": ["x"],
+        "priority": 1,
+        "status": "pending",
+        "dependsOn": [],
+    }
+    if verify is not None:
+        story["implementation"] = {"verify": verify}
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"title": "t", "branchName": "b"},
+        "userStories": [story],
+    }
+    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    args = ["bash", CLI, "verify-probe", "US-001", "--tasks-file", tasks_file]
+    if previous is not None:
+        previous_file = os.path.join(root, ".aimi", "tasks", "previous.json")
+        with open(previous_file, "w", encoding="utf-8") as handle:
+            json.dump(previous, handle)
+        args += ["--previous-file", previous_file]
+    proc = subprocess.run(
+        args,
+        cwd=os.path.join(root, cwd) if cwd else root,
+        env=_isolated_env(base),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return root, json.loads(proc.stdout)
+
+
+def test_an_absent_or_empty_verify_probes_to_an_empty_array(tmp_path):
+    """`implementation` is optional in schema v3.3 and a story is allowed to
+    carry no verify. Three shapes of nothing, one answer, and never a refusal --
+    a caller that had to tell "no verify" from "the verb broke" would end up
+    reimplementing the check it delegated."""
+    for verify in (None, "", "   \n\n  "):
+        _, probed = _probe(tmp_path, verify)
+        assert probed == [], repr(verify)
+
+
+def test_three_segments_where_only_the_first_already_passes(tmp_path):
+    """The shape of the case this verb was built from: a verify whose first
+    assertion holds before a line is written and whose remaining two do not.
+
+    The script as a whole FAILS here, which is exactly why the pre-run at the
+    script level says nothing -- and under `set -e` it would stop at the second
+    segment, so the third never runs at all.
+    """
+    _, probed = _probe(
+        tmp_path,
+        "set -euo pipefail\n"
+        "test -f ja-existe.txt\n"
+        "test -f ainda-nao.txt\n"
+        "grep -q 'ainda-nao' ja-existe.txt\n",
+        files=("ja-existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == [
+        "test -f ja-existe.txt",
+        "test -f ainda-nao.txt",
+        "grep -q 'ainda-nao' ja-existe.txt",
+    ]
+    assert [entry["discriminates"] for entry in probed] == [False, True, True]
+    assert len([e for e in probed if not e["discriminates"]]) == 1
+    assert probed[0]["exit"] == 0 and probed[1]["exit"] != 0
+
+
+def test_a_separator_inside_quotes_does_not_split_a_segment():
+    """The whole reason this is a scanner and not a `split`. Every one of these
+    holds a `;`, an `&&` or a `||` that belongs to the STRING, and a naive cut
+    would hand bash four fragments none of which parse."""
+    for text in (
+        "echo 'a;b && c || d'",
+        'echo "a;b && c || d"',
+        "grep -q 'x;y' file.txt",
+        "awk '/a/{print;exit} /b/{next}' file.txt",
+        "echo $(printf 'a;b')",
+        "echo `printf 'a;b'`",
+    ):
+        assert [s for _, s in T.verify_segments(text)] == [text], text
+
+
+def test_a_group_a_subshell_and_a_compound_command_each_stay_one_segment():
+    """`{ ...; }`, `( ...; )` and `if ...; then ...; fi` are single commands, so
+    cutting inside one produces a fragment that is a syntax error rather than an
+    assertion. `${VAR}` and `${x#y}` must not be mistaken for the first of
+    those, which is why the brace and the `#` are only special at word start."""
+    for text in (
+        "{ echo a; echo b; }",
+        "( cd x; echo b )",
+        "if test -f a; then echo yes; fi",
+        "for f in a b; do echo $f; done",
+        'echo "${VAR}" && echo "${x#y}"',
+    ):
+        segments = [s for _, s in T.verify_segments(text)]
+        assert segments == [text] or segments == text.split(" && "), text
+
+
+def test_comments_and_set_lines_and_assignments_are_never_reported(tmp_path):
+    """AC: a segment that is only `set -e` or an assignment does not appear.
+
+    A comment does not either -- it would otherwise become a segment that runs
+    as `# ...`, exits 0, and is reported as an assertion that already passes,
+    which is the exact false positive this verb exists to avoid producing.
+    """
+    _, probed = _probe(
+        tmp_path,
+        "set -euo pipefail\n"
+        "# a comment holding a ; and an && and a ||\n"
+        "F=existe.txt\n"
+        "export G=existe.txt\n"
+        "test -f \"$F\"\n",
+        files=("existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == ['test -f "$F"']
+    assert probed[0]["discriminates"] is False, "the assignment was carried, not lost"
+
+
+def test_an_assignment_is_carried_into_every_assertion_after_it(tmp_path):
+    """Without the prelude this is the failure mode that would make the verb
+    useless on real verifies: `S=<path>` then `grep -q x "$S"` would run with an
+    empty `$S`, fail for that reason alone, and be reported as discriminating --
+    hiding the very assertion the story wants surfaced."""
+    _, probed = _probe(
+        tmp_path,
+        'S=doc.md\ngrep -q marker "$S"\ngrep -q ausente "$S"\n',
+        files=("doc.md",),
+    )
+    assert [entry["exit"] for entry in probed] == [0, 1]
+    assert [entry["discriminates"] for entry in probed] == [False, True]
+
+
+def test_the_operand_after_a_double_pipe_is_neither_run_nor_reported(tmp_path):
+    """`check || { echo FAIL; exit 1; }` is ONE assertion with a failure branch.
+
+    The branch runs only when the check has already failed, so its exit status
+    says nothing about the tree -- and running it standalone is the one
+    decomposition here with teeth. `|| mkdir` proves it by consequence rather
+    than by opinion: the directory must not exist afterwards.
+    """
+    root, probed = _probe(
+        tmp_path,
+        "test -f existe.txt || { echo 'FAIL; really'; exit 1; }\n"
+        "test -d criado || mkdir criado\n",
+        files=("existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == [
+        "test -f existe.txt",
+        "test -d criado",
+    ]
+    assert not os.path.exists(os.path.join(root, "criado")), "a failure branch ran"
+
+
+def test_the_operand_after_a_double_ampersand_is_a_further_assertion():
+    """The opposite case, and the reason the separator is carried at all rather
+    than `||` simply being dropped from the cut list: what follows `&&` is
+    reached only because the thing before it passed, so it IS an assertion."""
+    parsed = T.verify_segments("test -f a && test -f b")
+    assert parsed == [("", "test -f a"), ("&&", "test -f b")]
+    assert T.verify_segments("test -f a || test -f b") == [
+        ("", "test -f a"),
+        ("||", "test -f b"),
+    ]
+
+
+def test_the_segments_run_where_the_CALLER_stood_not_at_the_project_root(tmp_path):
+    """find_aimi_root cds to the root holding .aimi/ before any verb runs, and
+    probing there would measure the main checkout while the executor's own
+    verify measures the worktree it cd'd into at step 0c. A probe that reports
+    on a different tree than the check it is probing is worse than no probe."""
+    _, from_root = _probe(tmp_path, "test -f so-aqui.txt\n", files=("sub/so-aqui.txt",))
+    assert from_root[0]["discriminates"] is True
+    _, from_sub = _probe(
+        tmp_path, "test -f so-aqui.txt\n", files=("sub/so-aqui.txt",), cwd="sub"
+    )
+    assert from_sub[0]["discriminates"] is False
+
+
+def test_a_cd_moves_the_probe_and_not_the_callers_directory(tmp_path):
+    """AC: a verify whose segments include a `cd` stops leaving artifacts where
+    the caller stood.
+
+    The defect this closes: `cd` ran as a segment of its own, changed nothing
+    that outlived it, and the `mkdir` after it landed in `cwd` -- the story
+    executor's own worktree, since step 1.5 probes from there. The probe was
+    manufacturing the class of defect it exists to find. Both halves are
+    asserted, because "nothing in the caller's tree" is also what a probe that
+    silently ran nothing would produce.
+    """
+    root, probed = _probe(
+        tmp_path,
+        "cd sub\nmkdir -p criado\ntest -d criado\n",
+        files=("sub/marcador.txt",),
+    )
+    assert not os.path.exists(
+        os.path.join(root, "criado")
+    ), "the probe wrote into the caller's directory"
+    assert os.path.isdir(
+        os.path.join(root, "sub", "criado")
+    ), "the cd was not carried: the mkdir landed nowhere the real script would"
+    assert [entry["segment"] for entry in probed] == [
+        "mkdir -p criado",
+        "test -d criado",
+    ], "the cd is carried like an assignment, so it is not reported either"
+
+
+def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
+    """GUARDRAIL, and it passed before this branch existed as well as after.
+
+    Carrying the `cd` may act only where there IS one. A verify without one has
+    to produce the same array as before, field for field -- same count, same
+    exit, same discriminates -- so this compares whole entries rather than any
+    single field of them. `unsatisfiable` is the one field this branch added,
+    and with no `--previous-file` it is `false` on every entry -- a single
+    failure proves nothing about a second run that never happened.
+    """
+    _, probed = _probe(
+        tmp_path,
+        'set -eu\nF=existe.txt\ntest -f "$F"\ntest -f ausente.txt\ntrue\n',
+        files=("existe.txt",),
+    )
+    assert probed == [
+        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+    ]
+
+
+def test_a_cd_that_fails_aborts_instead_of_falling_back_to_the_caller(tmp_path):
+    """A `cd` into a directory that is not there must not degrade into "carry
+    on where the caller stood" -- that is this defect again and quieter, since
+    nothing in the answer would say the probe never moved. The abort reports
+    what follows as discriminating, the safe direction, and writes nothing."""
+    root, probed = _probe(tmp_path, "cd nao-existe\nmkdir -p criado\n")
+    assert not os.path.exists(os.path.join(root, "criado"))
+    assert [entry["discriminates"] for entry in probed] == [True]
+
+
+def test_the_probe_wrapper_crosses_once_takes_no_lock_and_runs_the_same_gates():
+    """Bash keeps the argument, its format, which file is current and whether
+    the story is in it -- and adds exactly one thing, the caller's directory.
+    Nothing here reads the document, and a reader takes no lock.
+
+    `--previous-file` is a CLI argument like `--tasks-file`, so it goes
+    through `validate_path_in_project` too -- the count of two below is what
+    tells "both paths confined" from "one of them forgotten"."""
+    body = _executable(dict(_wrappers())["cmd_verify_probe"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    for kept in ("validate_story_id", "validate_path_in_project", "get_tasks_file",
+                 "validate_story_exists", "check_python3", "--previous-file"):
+        assert kept in body, kept
+    assert body.count("validate_path_in_project") == 2, "tasks_file and previous_file"
+    assert 'AIMI_INVOCATION_DIR:-$PWD' in body
+
+
+def test_nothing_in_the_decomposition_reaches_eval():
+    """AC: the parser respects quotes rather than asking a shell to split for
+    it. `eval` on a verify string would run the whole script the probe is
+    supposed to be taking apart -- once per segment."""
+    source = "\n".join(
+        line
+        for line in _code().split("\n")
+        if not line.lstrip().startswith("#")
+    )
+    start = source.index("def verify_segments")
+    end = source.index("def op_verify_probe")
+    assert "eval" not in source[start:end]
+
+
+# ---------------------------------------------------------------------------
+# verify-probe --previous-file: the second measurement point (US-005)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: `discriminates` computed from ONE run cannot tell
+# "the work is not done yet" (fails once, would pass after the story lands)
+# from "this assertion can never pass" (fails no matter what gets written).
+# The story-executor already runs a story's verify twice -- once before any
+# work, once after -- so the fix is to let this verb COMPARE those two runs
+# rather than guess from a segment's text. These tests exercise that
+# comparison; the tests above it are unchanged because `discriminates` itself
+# is unchanged by any of this.
+
+
+def test_a_segment_failing_both_runs_is_named_possibly_unsatisfiable(tmp_path):
+    """AC: a segment non-zero in the recorded PREVIOUS run and non-zero again
+    THIS run is `unsatisfiable: true`, with a note pointing at the harness
+    rather than at the story's own code -- exactly the case a `set -e` script
+    hides behind its first failure, and the one the phase-1 incident this
+    story cites paid three fifteen-minute suite runs to not have."""
+    _, before = _probe(tmp_path, "true\nfalse\n")
+    _, after = _probe(tmp_path, "true\nfalse\n", previous=before)
+    assert [entry["unsatisfiable"] for entry in after] == [False, True]
+    assert "harness" in after[1]["note"]
+    assert "code" in after[1]["note"]
+    assert "note" not in after[0]
+
+
+def test_an_unmatched_segment_is_not_named_unsatisfiable(tmp_path):
+    """A segment with no entry in PREVIOUS at all -- because the verify itself
+    grew a new assertion between the two runs -- looks exactly like ordinary
+    unfinished work, not a broken harness: nothing to compare it against, so
+    `unsatisfiable` stays false however many times it just failed."""
+    previous = [{"segment": "true", "exit": 0}]
+    _, after = _probe(tmp_path, "true\ntest -f nope.txt\n", previous=previous)
+    assert [entry["segment"] for entry in after] == ["true", "test -f nope.txt"]
+    assert [entry["unsatisfiable"] for entry in after] == [False, False]
+
+
+def test_a_segment_passing_both_runs_stays_discriminates_false(tmp_path):
+    """GUARDRAIL (AC): the semantics of `discriminates` do not change for a
+    reader who already consumes it -- a segment that passed before continues
+    to read `discriminates: false` once `--previous-file` is in play, not
+    just when it is absent."""
+    _, before = _probe(tmp_path, "true\n")
+    _, after = _probe(tmp_path, "true\n", previous=before)
+    assert after == [
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False}
+    ]
+
+
+def test_a_regression_is_not_unsatisfiable_only_a_double_failure_is(tmp_path):
+    """The other direction a naive "non-zero now" heuristic would get wrong: the
+    IDENTICAL segment text, PASSING in the recorded previous run and failing
+    now because the story's own work broke something along the way -- a
+    regression, not a harness that can never observe its own claim.
+    `unsatisfiable` requires non-zero on BOTH sides of the pair; one side
+    passing rules it out, whichever side it is."""
+    root, before = _probe(tmp_path, "test -f existe.txt\n", files=("existe.txt",))
+    assert before == [
+        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False}
+    ]
+    os.remove(os.path.join(root, "existe.txt"))
+    _, after = _probe(tmp_path, "test -f existe.txt\n", previous=before)
+    assert after == [
+        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False}
+    ]
+
+
+def test_a_repeated_segment_is_paired_positionally_against_its_own_repeats(tmp_path):
+    """Two occurrences of an identical segment text are told apart only by the
+    order they appear in among their OWN repeats, a different segment sitting
+    between them notwithstanding: the first PREVIOUS "false" pairs with the
+    first current one, the second PREVIOUS "false" -- which passed -- pairs
+    with the second current one, so a flip from failing to passing is not
+    borrowed from the wrong occurrence."""
+    previous = [
+        {"segment": "false", "exit": 1},
+        {"segment": "true", "exit": 0},
+        {"segment": "false", "exit": 0},  # the SECOND "false" occurrence passed
+    ]
+    _, after = _probe(tmp_path, "false\ntrue\nfalse\n", previous=previous)
+    assert [entry["exit"] for entry in after] == [1, 0, 1]
+    assert [entry["unsatisfiable"] for entry in after] == [True, False, False]
+
+
+def test_an_unreadable_or_malformed_previous_file_degrades_to_no_comparison(tmp_path):
+    """AC (guardrail): a bad `--previous-file` is a diagnostic input, not a
+    gate -- the probe must still answer, with every `unsatisfiable` false,
+    rather than fail the whole call over a file it cannot use."""
+    root, probed = _probe(tmp_path, "false\n")
+    assert probed[0]["unsatisfiable"] is False
+    bogus = os.path.join(root, ".aimi", "tasks", "not-json.txt")
+    with open(bogus, "w", encoding="utf-8") as handle:
+        handle.write("not json at all")
+    proc = subprocess.run(
+        ["bash", CLI, "verify-probe", "US-001", "--tasks-file",
+         os.path.join(root, ".aimi", "tasks", "p-tasks.json"),
+         "--previous-file", bogus],
+        cwd=root,
+        env=_isolated_env(os.path.dirname(root)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)[0]["unsatisfiable"] is False
+
+
+def test_match_previous_never_touches_discriminates_directly():
+    """Unit-level guardrail on `_match_previous` itself: it is additive only,
+    called after `discriminates` is already computed from THIS run alone, and
+    must not overwrite it for any entry regardless of what `previous` says."""
+    current = [{"segment": "x", "exit": 0, "discriminates": False}]
+    T._match_previous([{"segment": "x", "exit": 1}], current)
+    assert current[0]["discriminates"] is False
+    assert current[0]["unsatisfiable"] is False  # exit is 0 this run
+
+
+def test_read_previous_probe_tolerates_absence_and_bad_shape(tmp_path):
+    """Unit-level guardrail on `_read_previous_probe`: no path, a missing
+    path, and a JSON value that parses but is not an array all answer `None`
+    -- the same "nothing to compare against" outcome, never a raised
+    exception the caller would have to catch."""
+    assert T._read_previous_probe(None) is None
+    assert T._read_previous_probe(os.path.join(str(tmp_path), "missing.json")) is None
+    obj_path = os.path.join(str(tmp_path), "obj.json")
+    with open(obj_path, "w", encoding="utf-8") as handle:
+        json.dump({"not": "a list"}, handle)
+    assert T._read_previous_probe(obj_path) is None
+
+
+# ---------------------------------------------------------------------------
+# list-known-gaps: the corpus every executor writes and no plan has read
+# ---------------------------------------------------------------------------
+#
+# NO GOLDEN BLOCK, for verify-probe's reason: there was no jq predecessor to
+# capture. What these assert instead is the one property the verb exists for --
+# that NOTHING is dropped. Every other rule here is downstream of it: the three
+# body shapes all parse because a parser that knew only the prefixed form would
+# lose two thirds of the real corpus, and an unresolved feature is null rather
+# than a discarded file for the same reason.
+
+
+def _gaps(tmp_path, gaps, tasks=(), archive=(), flags=()):
+    """A project whose .aimi/ holds `gaps` (name -> body) and the tasks
+    documents the feature index resolves a date from.
+
+    `tasks` and `archive` are (relative path, document) pairs written under
+    .aimi/tasks/ and .aimi/archive/ -- both are walked, because a gap written
+    in July belongs to a feature whose tasks file was archived weeks ago.
+
+    That same walk is also what makes a feature name EXIST, so several tests
+    below write a tasks file for no reason but to register the name their gap's
+    slug uses. Their dates are deliberately far from the gap dates: the point is
+    the name, and a date collision would resolve the gap through the index and
+    prove nothing about the slug. A path that is not a `*-tasks.json` registers
+    only its directory, which is its own case.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    gaps_dir = os.path.join(root, ".aimi", "known-gaps")
+    os.makedirs(gaps_dir, exist_ok=True)
+    for name, body in gaps.items():
+        with open(os.path.join(gaps_dir, name), "w", encoding="utf-8") as handle:
+            handle.write(body)
+    for where, entries in ((("tasks",), tasks), (("archive",), archive)):
+        for relative, document in entries:
+            target = os.path.join(root, ".aimi", *where, relative)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                json.dump(document, handle)
+    proc = subprocess.run(
+        ["bash", CLI, "list-known-gaps", *flags],
+        cwd=root,
+        env=_isolated_env(base),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_THREE_SHAPES = {
+    "2026-07-30-US-003.md": "KNOWN-GAP: bash -c wrapping\nKNOWN-GAP: subshells\n",
+    "2026-08-16-US-001.md": 'KNOWN-GAP (US-003): "Typecheck passes" has no counterpart here.\n',
+    "2026-07-26-US-001.md": "Both gaps the worker reported were already addressed.\n",
+}
+
+
+def test_all_three_body_shapes_parse_and_no_file_yields_nothing(tmp_path):
+    """The corpus has no frontmatter anywhere -- which is why the frontmatter-
+    first learnings researcher cannot see it -- and comes in three forms:
+    `KNOWN-GAP:`, `KNOWN-GAP (US-NNN):`, and bare prose with no prefix at all.
+
+    Twenty of the thirty-two real files are the bare form. Recognising only the
+    prefixed one would silently drop two thirds of the corpus, which is the very
+    defect this verb exists to close, so the floor asserted here is the one the
+    story's own verify measures against the directory: at least one entry per
+    file."""
+    entries = _gaps(tmp_path, _THREE_SHAPES)
+    assert {entry["file"] for entry in entries} == set(_THREE_SHAPES)
+    assert len(entries) >= len(_THREE_SHAPES)
+    texts = {entry["file"]: entry["text"] for entry in entries if entry["file"] != "2026-07-30-US-003.md"}
+    assert texts["2026-08-16-US-001.md"] == '"Typecheck passes" has no counterpart here.'
+    assert texts["2026-07-26-US-001.md"].startswith("Both gaps the worker reported")
+    assert [e["text"] for e in entries if e["file"] == "2026-07-30-US-003.md"] == [
+        "bash -c wrapping",
+        "subshells",
+    ]
+
+
+def test_a_hard_wrapped_gap_stays_one_entry_and_keeps_its_lines(tmp_path):
+    """A KNOWN-GAP line opens a block and everything after it joins that block
+    until the next one opens. The bodies carry tables, fences and indented
+    lists, so the text is kept verbatim below the prefix rather than re-flowed:
+    this file is the only copy of the record that exists."""
+    body = (
+        "KNOWN-GAP (US-004): adding a verb to tasks.py means registering it in\n"
+        "test_every_op_is_named_after_the_verb_that_calls_it.\n"
+        "\n"
+        "    indented evidence\n"
+        "KNOWN-GAP (US-004): two executors died on an API server error.\n"
+    )
+    entries = _gaps(tmp_path, {"2026-09-03-US-004.md": body})
+    assert len(entries) == 2
+    assert entries[0]["text"].split("\n") == [
+        "adding a verb to tasks.py means registering it in",
+        "test_every_op_is_named_after_the_verb_that_calls_it.",
+        "",
+        "    indented evidence",
+    ]
+    assert entries[1]["text"] == "two executors died on an API server error."
+
+
+def test_prose_before_the_first_prefix_is_an_entry_rather_than_a_loss(tmp_path):
+    """No file in the corpus has such a preamble today. The rule is here so the
+    first one that does is not dropped -- dropping it is the failure mode."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-08-07-US-003.md": "context nobody prefixed\nKNOWN-GAP: the prefixed one\n"},
+    )
+    assert [entry["text"] for entry in entries] == [
+        "context nobody prefixed",
+        "the prefixed one",
+    ]
+
+
+def test_the_parenthetical_story_id_wins_over_the_file_name(tmp_path):
+    """2026-08-16-US-001.md really does carry gaps about US-002 and US-003: the
+    US-001 executor recorded what it found about its siblings. The
+    parenthetical is the more specific attribution for that entry, and the file
+    name is the fallback for a line that carries none."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-16-US-001.md": (
+                "KNOWN-GAP: mine\n"
+                "KNOWN-GAP (US-002): my sibling's\n"
+                "KNOWN-GAP (not-a-story): malformed, so the file name stands\n"
+            )
+        },
+    )
+    assert [entry["storyId"] for entry in entries] == ["US-001", "US-002", "US-001"]
+
+
+def test_a_declared_feature_beats_the_slug_the_name_would_have_guessed(tmp_path):
+    """The measurement this rule exists for: at the close of phase 2,
+    `--feature pipeline-audit` returned 10 of 95 entries, because the files
+    that mattered were named `...-phase2.md`, `...-golden-compara-stderr.md`
+    and `...-worktree-nasceu-de-main.md`. Every one of those slugs is a
+    DESCRIPTION of the gap sitting where the name had room for one, and no
+    reader can tell the two apart from the name alone.
+
+    The two sources are made to CONTRADICT here rather than merely to coexist:
+    a file named `...-slug-errado.md` declaring `feature: pipeline-audit` must
+    answer the declaration. A test where they agree passes against the old
+    derivation too and would prove nothing.
+
+    `slug-errado` is registered as a REAL feature so the contradiction survives
+    the rule that a slug naming no feature is not one: with nothing on disk by
+    that name the slug would lose to the null and this would pass without the
+    declaration ever being read."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-002-slug-errado.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: o executor nao commitou.\n"
+            )
+        },
+        archive=[("2026-01-05-slug-errado-tasks.json", _dated("2026-01-05"))],
+    )
+    assert [entry["feature"] for entry in entries] == ["pipeline-audit"]
+    # The fence is metadata, not prose: left in the body it would surface as a
+    # preamble entry of its own -- the bare-prose rule doing exactly the right
+    # thing to the wrong input -- and the gap would arrive with a sibling that
+    # says `---`.
+    assert [entry["text"] for entry in entries] == ["o executor nao commitou."]
+
+
+def test_the_declaration_is_what_scopes_the_filter_two_files_one_day_one_story(
+    tmp_path,
+):
+    """Why this is frontmatter and not a stricter naming rule.
+    `<date>-US-NNN-<feature>.md` admits ONE file per story, date and feature,
+    and the corpus already holds two US-004 files written on the same day.
+    Renaming both to carry the feature collides and loses one; declaring it
+    inside them lets both say `pipeline-audit` and both be returned."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-004-verify-testou-exit-code.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: exit code nao carrega o deny.\n"
+            ),
+            "2026-09-04-US-004-golden-compara-stderr.md": (
+                "---\nfeature: pipeline-audit\n---\nKNOWN-GAP: o golden compara stderr.\n"
+            ),
+        },
+        flags=("--feature", "pipeline-audit"),
+    )
+    assert len(entries) == 2
+    assert {entry["file"] for entry in entries} == {
+        "2026-09-04-US-004-verify-testou-exit-code.md",
+        "2026-09-04-US-004-golden-compara-stderr.md",
+    }
+
+
+def test_only_a_well_formed_leading_fence_is_metadata_and_the_rest_is_evidence(
+    tmp_path,
+):
+    """A gap file is the only copy of the record it holds, so the fence match
+    is narrow on purpose: three near-misses stay prose and keep every byte.
+
+    An unterminated fence, a fence that does not open on the very first line,
+    and a block carrying a line that is not `key: value` are all bodies that
+    merely begin with a horizontal rule. Each keeps the slug the name gives it
+    -- the fallback, still answering.
+
+    All four names are registered as real features, `declarada` included, so the
+    two outcomes stay distinguishable: were the fence read as metadata every
+    file would answer `declarada`, and were the slug rule the one breaking they
+    would answer null. Leaving any of them unregistered would collapse one of
+    those two into the other."""
+    gaps = {
+        "2026-09-04-US-001-sem-fecho.md": "---\nfeature: declarada\nKNOWN-GAP: a.\n",
+        "2026-09-04-US-002-nao-na-primeira-linha.md": (
+            "preambulo\n---\nfeature: declarada\n---\nKNOWN-GAP: b.\n"
+        ),
+        "2026-09-04-US-003-nao-e-par-chave-valor.md": (
+            "---\nfeature: declarada\numa frase solta\n---\nKNOWN-GAP: c.\n"
+        ),
+    }
+    entries = _gaps(
+        tmp_path,
+        gaps,
+        archive=[
+            ("2026-01-01-declarada-tasks.json", _dated("2026-01-01")),
+            ("2026-01-02-sem-fecho-tasks.json", _dated("2026-01-02")),
+            ("2026-01-03-nao-na-primeira-linha-tasks.json", _dated("2026-01-03")),
+            ("2026-01-04-nao-e-par-chave-valor-tasks.json", _dated("2026-01-04")),
+        ],
+    )
+    resolved = {entry["file"]: entry["feature"] for entry in entries}
+    assert resolved == {
+        "2026-09-04-US-001-sem-fecho.md": "sem-fecho",
+        "2026-09-04-US-002-nao-na-primeira-linha.md": "nao-na-primeira-linha",
+        "2026-09-04-US-003-nao-e-par-chave-valor.md": "nao-e-par-chave-valor",
+    }
+    assert "---" in "\n".join(entry["text"] for entry in entries)
+
+
+def test_a_known_gap_line_inside_the_fence_is_the_record_and_never_metadata(
+    tmp_path,
+):
+    """`KNOWN-GAP: text` IS a `key: value` pair by the shape rule, so it is the
+    one pair that needs a clause of its own: consumed as metadata it would take
+    the record with it and leave a file whose gap had vanished. The whole block
+    is disqualified instead, and the slug answers -- losing a declaration is
+    recoverable, losing the gap is not.
+
+    `fence-com-gap` is registered as a real feature so that "the slug answers"
+    is what this asserts, rather than the null a slug naming nothing reaches."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-007-fence-com-gap.md": (
+                "---\nfeature: pipeline-audit\nKNOWN-GAP: o registro em si.\n---\ndepois\n"
+            )
+        },
+        archive=[("2026-01-06-fence-com-gap-tasks.json", _dated("2026-01-06"))],
+    )
+    assert any("o registro em si." in entry["text"] for entry in entries)
+    assert [entry["feature"] for entry in entries] == ["fence-com-gap"] * len(entries)
+
+
+def test_a_frontmatter_naming_no_feature_falls_through_to_null_not_to_a_drop(
+    tmp_path,
+):
+    """Two files whose only difference is whether the fence carries the key.
+    Neither has a slug and neither has a tasks file to resolve a date against,
+    so both land on the SAME null -- the rule phase 1 wrote, which declaring a
+    feature elsewhere in the block does not revoke. The fence is still stripped
+    from the body in both, because it is metadata whatever keys it holds."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-04-US-005.md": "---\nautor: quem escreveu\n---\nKNOWN-GAP: a.\n",
+            "2026-09-04-US-006.md": "KNOWN-GAP: b.\n",
+        },
+    )
+    assert [entry["feature"] for entry in entries] == [None, None]
+    assert [entry["text"] for entry in entries] == ["a.", "b."]
+
+
+def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path):
+    """Both real slug shapes: one with a story id before it, one with no story
+    id at all. The second resolves storyId to null and is still an entry.
+
+    This is the FALLBACK and it is not deprecated: 49 files on disk carry no
+    frontmatter, none of them will retroactively gain one, and a fallback that
+    stopped answering for them would drop the corpus the verb exists to keep.
+
+    Both slugs name a feature that exists here, which is the condition the
+    fallback gained. The two real names in the corpus were chosen precisely
+    because they read like descriptions -- what changed is that a slug is now
+    checked, not that a real one stopped answering."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-04-US-006-roadmap-amend-no-git-trace.md": "a\n",
+            "2026-08-04-verify-creates-excludes-miss-this-repo.md": "b\n",
+        },
+        archive=[
+            ("2026-01-07-roadmap-amend-no-git-trace-tasks.json", _dated("2026-01-07")),
+            (
+                "2026-01-08-verify-creates-excludes-miss-this-repo-tasks.json",
+                _dated("2026-01-08"),
+            ),
+        ],
+    )
+    resolved = {entry["file"]: (entry["storyId"], entry["feature"]) for entry in entries}
+    assert resolved["2026-08-04-US-006-roadmap-amend-no-git-trace.md"] == (
+        "US-006",
+        "roadmap-amend-no-git-trace",
+    )
+    assert resolved["2026-08-04-verify-creates-excludes-miss-this-repo.md"] == (
+        None,
+        "verify-creates-excludes-miss-this-repo",
+    )
+
+
+def _dated(created_at):
+    return {"schemaVersion": "3.3", "metadata": {"title": "t", "createdAt": created_at}}
+
+
+def test_the_feature_comes_from_the_tasks_file_planned_on_the_same_date(tmp_path):
+    """Two sources, because the corpus needs both: a flat archived file names
+    its date and feature in its own name, and a phase-layout file names neither
+    -- its feature is the directory under tasks/ and its date is
+    metadata.createdAt."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-08-08-US-002.md": "a\n", "2026-09-03-US-004.md": "b\n"},
+        tasks=[
+            (
+                os.path.join("pipeline-audit", "phase-1-x", "pipeline-audit-phase-1-tasks.json"),
+                _dated("2026-09-03"),
+            )
+        ],
+        archive=[("2026-08-08-identity-contract-tasks.json", _dated("2026-08-08"))],
+    )
+    resolved = {entry["file"]: entry["feature"] for entry in entries}
+    assert resolved["2026-08-08-US-002.md"] == "identity-contract"
+    assert resolved["2026-09-03-US-004.md"] == "pipeline-audit"
+
+
+def test_a_slug_naming_no_feature_is_not_one_and_the_date_answers_instead(tmp_path):
+    """The measurement this rule exists for. On 2026-09-04 the LARGEST feature
+    in the 114-entry corpus was `phase2` -- 30 entries, more than any real
+    feature held -- invented whole from the suffix of files named
+    `2026-09-03-US-001-phase2.md`. Nothing named `phase2` was ever planned:
+    those gaps are from phase 2 of `pipeline-audit`, and the date said so all
+    along, which is where the first file here lands.
+
+    The second file is the same invented suffix on a date nothing was planned
+    on. It falls to null, not back to the suffix: a name no feature answers to
+    is not made true by having nothing else to say.
+
+    The third keeps this from being a test of "reject every suffix". A slug
+    that DOES name a feature still answers, and it answers over the index --
+    the precedence phase 3 established, which validating the slug does not
+    reorder. Were the index consulted first this file would say
+    `pipeline-audit`."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-09-03-US-001-phase2.md": "inventada, mas a data resolve\n",
+            "2026-08-16-US-001-phase2.md": "inventada, e a data nao resolve\n",
+            "2026-09-03-US-002-split-by-project.md": "sufixo que e feature mesmo\n",
+        },
+        tasks=[
+            (
+                os.path.join(
+                    "pipeline-audit", "phase-2-x", "pipeline-audit-phase-2-tasks.json"
+                ),
+                _dated("2026-09-03"),
+            )
+        ],
+        archive=[("2026-07-27-split-by-project-tasks.json", _dated("2026-07-27"))],
+    )
+    assert {entry["file"]: entry["feature"] for entry in entries} == {
+        "2026-09-03-US-001-phase2.md": "pipeline-audit",
+        "2026-08-16-US-001-phase2.md": None,
+        "2026-09-03-US-002-split-by-project.md": "split-by-project",
+    }
+
+
+def test_a_feature_directory_carrying_no_tasks_file_yet_is_still_a_feature(tmp_path):
+    """A roadmap's feature directory exists from the moment `roadmap-init`
+    writes `roadmap.json` into it, and holds nothing else until
+    `/aimi:plan --phase 1` materialises the first phase file. A gap recorded in
+    that window names a feature that exists, so the directory counts on its own
+    terms: deriving the known names from tasks DOCUMENTS alone would call this
+    one invented and null it out."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-09-05-US-001-pipeline-audit.md": "gap no vao entre init e plan\n"},
+        tasks=[(os.path.join("pipeline-audit", "roadmap.json"), {"phases": []})],
+    )
+    assert [entry["feature"] for entry in entries] == ["pipeline-audit"]
+
+
+def test_a_feature_that_does_not_resolve_is_null_rather_than_a_dropped_file(tmp_path):
+    """Two ways to fail to resolve, one answer. A date nothing was planned on,
+    and a date carrying TWO features -- where picking one would attribute a gap
+    to a feature it was never about. Neither drops the file: discarding it is
+    the defect this verb was built to fix."""
+    entries = _gaps(
+        tmp_path,
+        {"2026-07-26-US-001.md": "ambiguous\n", "2026-08-16-US-001.md": "nothing planned\n"},
+        archive=[
+            ("2026-07-26-comunicacao-simples-tasks.json", _dated("2026-07-26")),
+            ("2026-07-26-open-pr-base-branch-detection-tasks.json", _dated("2026-07-26")),
+        ],
+    )
+    assert [entry["feature"] for entry in entries] == [None, None]
+    assert {entry["file"] for entry in entries} == {
+        "2026-07-26-US-001.md",
+        "2026-08-16-US-001.md",
+    }
+
+
+def test_the_filter_takes_the_feature_and_the_unattributed_and_nothing_else(tmp_path):
+    """--feature is what plan.md Phase 1.7b passes to scope the block to the
+    feature being planned, and this ASSERTION INVERTED: the unresolved entry
+    used to be excluded and is now included.
+
+    An entry with no feature is not an entry of some other feature -- it is one
+    whose feature is unknown, and a planning defect with no owner is still a
+    defect this plan can repeat. Eighteen of 114 entries were invisible to
+    every --feature call on 2026-09-04 for the sake of a membership rule that
+    was reading a null as an answer.
+
+    The third file is the boundary, and it is why this is not simply a looser
+    filter: it RESOLVES, to a different real feature, and stays out. What
+    widened is the treatment of the unattributed, never of the
+    attributed-elsewhere."""
+    gaps = {
+        "2026-09-03-US-004.md": "belongs\n",
+        "2026-08-16-US-001.md": "unresolved\n",
+        "2026-08-08-US-002.md": "another feature's\n",
+    }
+    tasks = [
+        (
+            os.path.join("pipeline-audit", "phase-1-x", "pipeline-audit-phase-1-tasks.json"),
+            _dated("2026-09-03"),
+        )
+    ]
+    archive = [("2026-08-08-identity-contract-tasks.json", _dated("2026-08-08"))]
+    scoped = _gaps(
+        tmp_path,
+        gaps,
+        tasks=tasks,
+        archive=archive,
+        flags=("--feature", "pipeline-audit"),
+    )
+    assert [entry["file"] for entry in scoped] == [
+        "2026-08-16-US-001.md",
+        "2026-09-03-US-004.md",
+    ]
+    # The consequence of the rule stated plainly rather than left to be found:
+    # a filter naming no feature at all still answers with the unattributed,
+    # because "unknown" is what those entries mean, not "not yours".
+    absent = _gaps(
+        tmp_path, gaps, tasks=tasks, archive=archive, flags=("--feature", "nao-existe")
+    )
+    assert [entry["file"] for entry in absent] == ["2026-08-16-US-001.md"]
+    assert len(_gaps(tmp_path, gaps, tasks=tasks, archive=archive)) == 3
+
+
+def test_since_is_inclusive_and_an_entry_with_no_date_cannot_answer_it(tmp_path):
+    """A file whose name carries no date has no date to compare, and inventing
+    one for it is the guess this parser refuses everywhere else."""
+    gaps = {
+        "2026-07-30-US-003.md": "old\n",
+        "2026-08-16-US-001.md": "on the boundary\n",
+        "sem-data.md": "undated\n",
+    }
+    assert len(_gaps(tmp_path, gaps)) == 3
+    since = _gaps(tmp_path, gaps, flags=("--since", "2026-08-16"))
+    assert [entry["file"] for entry in since] == ["2026-08-16-US-001.md"]
+
+
+def test_an_absent_directory_is_an_empty_array_and_never_a_refusal(tmp_path):
+    """A repository that has never recorded a gap is the normal early state,
+    and /aimi:plan reads this on every run: a non-zero exit here would turn "no
+    gaps yet" into a planning failure."""
+    assert _gaps(tmp_path, {}) == []
+
+
+def test_only_md_files_are_gaps(tmp_path):
+    """.aimi/known-gaps/ also holds two *.pre.json roadmap snapshots, saved
+    beside the record that explains them. They are evidence, not gaps."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-08-04-US-006-roadmap-amend-no-git-trace.md": "the record\n",
+            "2026-08-04-US-006-roadmap.pre.json": '{"phases": []}\n',
+        },
+    )
+    assert [entry["file"] for entry in entries] == [
+        "2026-08-04-US-006-roadmap-amend-no-git-trace.md"
+    ]
+
+
+def test_the_known_gaps_wrapper_crosses_once_takes_no_lock_and_opens_no_file():
+    """Bash keeps the flags and adds AIMI_DIR, find_aimi_root's own export.
+
+    NO validate_path_in_project, and that is the rule rather than an omission:
+    it governs a path arriving as an ARGUMENT, and this verb takes none --
+    --feature and --since are filter strings. A fresh path check here would be
+    the third confinement authority root CLAUDE.md forbids."""
+    body = _executable(dict(_wrappers())["cmd_list_known_gaps"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    assert "check_python3" in body
+    assert '--aimi-dir "$AIMI_DIR"' in body

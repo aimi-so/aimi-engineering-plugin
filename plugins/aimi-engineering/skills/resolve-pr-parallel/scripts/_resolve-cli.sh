@@ -23,6 +23,25 @@
 
 AIMI_CLI=""
 
+# Layer 0-dev: AIMI_DEV_DIR, the development override, ahead of everything
+# below and honored on EVERY host -- no CLAUDECODE gate, unlike AIMI_PLUGIN_DIR
+# in the next block. The asymmetry is deliberate and is argued once, in
+# commands/references/cli-path-resolution.md: AIMI_PLUGIN_DIR names where a
+# converter installed the plugin, so inside Claude Code (which has an install
+# of its own) honoring it would let another host's install win; AIMI_DEV_DIR
+# names a tree the operator is deliberately testing, so gating it on
+# CLAUDECODE would make it work only where nobody needs it.
+#
+# Four of the five checks are the same ones the two branches below apply, for
+# the same reason -- the absolute-path check especially, since these scripts
+# run from an arbitrary repository's checkout. The fifth has no counterpart
+# there: a path under a `/.worktrees/` segment is refused, exactly as
+# write_global_cli_cache in aimi-cli.sh refuses one, because a worktree copy is
+# ephemeral and every later call would hit exit 127 once it is cleaned up.
+if [ -n "${AIMI_DEV_DIR:-}" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then
+  AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"
+fi
+
 # Layer 0: AIMI_PLUGIN_DIR (OpenCode install) / CLAUDE_PLUGIN_ROOT, skipped
 # for AIMI_PLUGIN_DIR when CLAUDECODE is set so the Claude Code cache always
 # wins there.
@@ -40,10 +59,17 @@ AIMI_CLI=""
 # cli-path-resolution.md (that doc's four-layer strategy is written for
 # command authoring generally, while CLAUDE_PLUGIN_ROOT is specific to this
 # one sourced helper), so this comment is its documentation.
-if [ -z "${CLAUDECODE:-}" ] && [ -n "${AIMI_PLUGIN_DIR:-}" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then
-  AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
-elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ "${CLAUDE_PLUGIN_ROOT#/}" != "$CLAUDE_PLUGIN_ROOT" ] && [ -d "$CLAUDE_PLUGIN_ROOT" ] && [ -x "$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh" ]; then
-  AIMI_CLI="$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh"
+#
+# The `[ -z "$AIMI_CLI" ]` opening this block is what makes Layer 0-dev above
+# an actual layer rather than a value this one immediately overwrites: without
+# it, an operator running a dev tree on an OpenCode host would silently get the
+# installed copy back. Every later layer already guards itself the same way.
+if [ -z "$AIMI_CLI" ]; then
+  if [ -z "${CLAUDECODE:-}" ] && [ -n "${AIMI_PLUGIN_DIR:-}" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then
+    AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ "${CLAUDE_PLUGIN_ROOT#/}" != "$CLAUDE_PLUGIN_ROOT" ] && [ -d "$CLAUDE_PLUGIN_ROOT" ] && [ -x "$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh" ]; then
+    AIMI_CLI="$CLAUDE_PLUGIN_ROOT/scripts/aimi-cli.sh"
+  fi
 fi
 
 # Layer 1: global cache file (new XDG path first, then the legacy path).
@@ -66,11 +92,16 @@ fi
 # collates 1.121.3 before 1.9.0 ('1' < '9' at the third character), and a plain
 # `sort -V` over whole paths would order by marketplace-entry directory first
 # because the glob spans two wildcards. Each candidate is therefore prefixed
-# with its own version segment and the sort keys on that. The canonical rule is
-# _resolve_latest_cache_path in aimi-cli.sh; it is inlined rather than called,
-# because it lives inside the very file this block is resolving.
+# with its own version segment and the sort keys on that. The grep is part of
+# that rule and not an optimization: `sort -V` is a total order over arbitrary
+# strings rather than a filter, so a cache directory that is not a version at
+# all is still ranked -- and ranked ABOVE the real ones. Measured: a sibling
+# named 1.124.0.bak beside 1.124.0 wins, and a directory named zz beats
+# 1.127.0. The canonical rule is _resolve_latest_cache_path in aimi-cli.sh; it
+# is inlined rather than called, because it lives inside the very file this
+# block is resolving.
 if [ -z "$AIMI_CLI" ]; then
-  AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | sort -V | tail -1 | cut -d" " -f2-')
+  AIMI_CLI=$(bash -c 'ls ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh 2>/dev/null | sed -E "s#.*/aimi-engineering/([^/]+)/.*#\1 &#" | grep -E "^[0-9]+\.[0-9]+\.[0-9]+ " | sort -V | tail -1 | cut -d" " -f2-')
   if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then
     AIMI_CLI=""
   fi

@@ -161,7 +161,54 @@ PC_EMPTY_GLOB = {
     ),
 }
 
-KNOWN_DIVERGENCES = {**D2_ABORTS, **D11_AND_D13, **PC_EMPTY_GLOB}
+# The fourth fix: a cache directory that is not a version was still ranked by
+# `sort -V`, and ranked ABOVE the real ones.
+#
+# A table of its own for the same mechanical reason PC_EMPTY_GLOB is: these two
+# recordings share neither of the shapes the guards above assert. They are
+# ordinary successful answers -- exit 0, no stderr -- which is what makes them
+# the most valuable recordings in this file. They are the defect SUCCEEDING,
+# captured in passing more than a year before anyone went looking for it, and
+# the pair of them shows both halves of the damage:
+#
+#   cv-versao-malformada-cc  reported "latestVersion": "nao-e-uma-versao"
+#                            -- cosmetic on its own.
+#   clv-versao-malformada-cc DELETED 1.2.3, KEPT nao-e-uma-versao, and wrote
+#                            the kept directory's path into BOTH cli-path
+#                            files -- not cosmetic at all.
+#
+# The second is the one that matters. cleanup-versions rm -rf's every version
+# directory _resolve_latest_cache_path does not pick, so a wrong pick is not a
+# wrong string, it is the real install deleted and a `1.124.0.bak`-shaped
+# leftover enthroned in its place, with the global cli-path cache repointed at
+# it. Both fields and both trees move for that case; only `stdout` moves for
+# the first.
+NUMERIC_VERSION_FILTER = {
+    "cv-versao-malformada-cc": (
+        'FIXED: was {status:"missing", latestVersion:"nao-e-uma-versao"} -- '
+        "`sort -V` is a total order over arbitrary strings, not a filter, so a "
+        "sibling directory that is not a version outranked the real 1.2.3. "
+        "_resolve_latest_cache_path now requires three numeric segments before "
+        "the sort, so the answer is 1.2.3. Only `stdout` moves; this verb "
+        "writes nothing."
+    ),
+    "clv-versao-malformada-cc": (
+        'FIXED, and this is the recording of the actual damage: {removed:1, '
+        'kept:"nao-e-uma-versao"} with BOTH cli-path files pointed at it means '
+        "cleanup-versions deleted the real 1.2.3 install and kept the "
+        "malformed directory. It now keeps 1.2.3 and prunes the other, so "
+        "`stdout`, both cli-path files and `tree` all move together -- every "
+        "one of them because the verb picked a different directory, not "
+        "because it started doing something new."
+    ),
+}
+
+KNOWN_DIVERGENCES = {
+    **D2_ABORTS,
+    **D11_AND_D13,
+    **PC_EMPTY_GLOB,
+    **NUMERIC_VERSION_FILTER,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +256,18 @@ def _build_root(spec, root):
         else:
             os.makedirs(os.path.join(version_dir, "scripts"), exist_ok=True)
             _write_stub(os.path.join(version_dir, "scripts", "aimi-cli.sh"), entry.get("exec", True))
+        if entry.get("worktree_manager"):
+            # The worktree-manager.sh sibling a REAL install carries, planted
+            # only when a case asks for it. Every pre-existing case leaves it
+            # out, and that is why _persist_worktree_pointer_for -- whose whole
+            # contract is "write nothing when no manager sits beside the
+            # resolved CLI" -- changed not one recording in version_cache_cases.
+            # Placed AFTER the branch above so the symlink case, if a future
+            # case ever combines the two, writes through the symlink rather
+            # than racing os.symlink for the same path.
+            mgr_dir = os.path.join(version_dir, "skills", "git-worktree", "scripts")
+            os.makedirs(mgr_dir, exist_ok=True)
+            _write_stub(os.path.join(mgr_dir, "worktree-manager.sh"), True)
 
     plugin_dir = None
     if spec.get("plugin_dir") is not None:
@@ -223,6 +282,13 @@ def _build_root(spec, root):
     if spec.get("global_cli_path") is not None:
         with open(os.path.join(aimi_config, "cli-path"), "w", encoding="utf-8") as handle:
             handle.write(_expand(spec["global_cli_path"], root, config_dir) + "\n")
+
+    if spec.get("global_worktree_path") is not None:
+        # Seeds the SECOND pointer, so a case can start from the divergence
+        # this file's worktree-pointer section describes: a worktree-path left
+        # naming a version the cli-path has already moved off.
+        with open(os.path.join(aimi_config, "worktree-path"), "w", encoding="utf-8") as handle:
+            handle.write(_expand(spec["global_worktree_path"], root, config_dir) + "\n")
 
     if spec.get("state_cli_path") is not None:
         with open(os.path.join(project, ".aimi", "cli-path"), "w", encoding="utf-8") as handle:
@@ -345,6 +411,15 @@ def replay(spec, root):
         "tree": _tree(root),
         "global_cli_path": _read(os.path.join(root, "aimi-config", "cli-path"), root),
         "state_cli_path": _read(os.path.join(root, "project", ".aimi", "cli-path"), root),
+        # The SECOND global pointer. Deliberately NOT in FIELDS below: the
+        # corpus was captured before anything wrote this file, so no recording
+        # carries the key and comparing it would fail every case on a
+        # KeyError rather than on a behaviour change. `tree` already covers
+        # the regression risk -- a run that started writing worktree-path
+        # where it should not would show the new path there, in a field every
+        # case does compare. This key exists for the hand-written tests below,
+        # which read it directly.
+        "global_worktree_path": _read(os.path.join(root, "aimi-config", "worktree-path"), root),
     }
     _unlock(root)
     return record
@@ -575,6 +650,58 @@ def test_prime_cache_keeps_every_documented_status_and_its_exit_code(tmp_path):
         assert actual["exit"] == code, label
 
 
+@pytest.mark.parametrize(
+    "label", sorted(NUMERIC_VERSION_FILTER), ids=sorted(NUMERIC_VERSION_FILTER)
+)
+def test_each_malformed_version_case_recorded_the_defect_it_is_excused_for(label):
+    """The excuse is only good while the RECORDING still shows the wrong pick.
+
+    The same guard the two tables above carry, with the shape these entries
+    share: an ordinary answer at exit 0 that names `nao-e-uma-versao` as the
+    version it resolved. Repairing the recording to match the fix would destroy
+    the only evidence the defect ever shipped and leave the skip excusing
+    nothing.
+    """
+    case = CASES[label]
+    assert case["exit"] == 0, label + ": the recording is not an ordinary answer"
+    assert "nao-e-uma-versao" in case["stdout"], (
+        label + ": the recording did not pick the malformed directory"
+    )
+
+
+@pytest.mark.parametrize(
+    "label", sorted(NUMERIC_VERSION_FILTER), ids=sorted(NUMERIC_VERSION_FILTER)
+)
+def test_a_directory_that_is_not_a_version_is_never_resolved_as_the_latest(
+    label, tmp_path
+):
+    """And the inversion is asserted, not merely skipped past.
+
+    Both cases now answer 1.2.3 and neither mentions the malformed name
+    anywhere. For cleanup-versions that is checked against the FILESYSTEM as
+    well: the fix is worth nothing if the right version is named on stdout
+    while the wrong directory is the one still on disk.
+    """
+    case = CASES[label]
+    actual = replay(case["input"], str(tmp_path))
+    assert actual["exit"] == 0, label + ": the fix introduced a failure"
+    assert "1.2.3" in actual["stdout"], label + ": did not resolve the real version"
+    assert "nao-e-uma-versao" not in actual["stdout"], (
+        label + ": the malformed directory is still being named"
+    )
+    if case["input"]["args"][0] == "cleanup-versions":
+        survivors = [p for p in actual["tree"] if "aimi-engineering/" in p]
+        assert any("/1.2.3/" in p or p.endswith("/1.2.3/") for p in survivors), (
+            label + ": the real install was deleted anyway"
+        )
+        assert not any("nao-e-uma-versao" in p for p in survivors), (
+            label + ": the malformed directory survived instead"
+        )
+        assert "1.2.3" in (actual["global_cli_path"] or ""), (
+            label + ": the global cli-path still names the wrong install"
+        )
+
+
 def test_the_newest_version_wins_over_the_lexicographically_last(tmp_path):
     """1.9.0 next to 1.10.0 and 1.123.0 -- `ls | tail -1` answers 1.9.0.
 
@@ -585,6 +712,74 @@ def test_the_newest_version_wins_over_the_lexicographically_last(tmp_path):
         actual = replay(CASES[label]["input"], str(tmp_path / label))
         assert "1.123.0" in actual["stdout"], label
         assert "1.9.0" not in actual["stdout"], label
+
+
+def test_a_bak_sibling_never_wins_against_the_version_it_backs_up(tmp_path):
+    """The reproduction that opened this, spelled as a fixture.
+
+    Hand-written rather than replayed, because no recording in the corpus
+    carries this shape: `nao-e-uma-versao` above is the FAR miss -- it looks
+    nothing like a version -- while `1.124.0.bak` is the NEAR one, three
+    correct numeric segments with a suffix. A filter anchored only at the start
+    admits it, and `printf '1.124.0\\n1.124.0.bak' | sort -V | tail -1` picks
+    it unaided, so a fixture with only the far miss would let a half-right
+    filter through. `zz` rides along as a third shape that beats every real
+    version lexicographically.
+
+    All three verbs are checked because they resolve through the same helper
+    and each one does something different with the answer -- report it, prime
+    the global cache with it, or rm -rf everything else.
+    """
+    cache = [
+        {"entry": "mk1", "version": "1.124.0"},
+        {"entry": "mk1", "version": "1.124.0.bak"},
+        {"entry": "mk1", "version": "1.127.0"},
+        {"entry": "mk1", "version": "zz"},
+    ]
+
+    checked = replay({"args": ["check-version"], "cache": cache}, str(tmp_path / "cv"))
+    assert json.loads(checked["stdout"])["latestVersion"] == "1.127.0"
+
+    primed = replay({"args": ["prime-cache"], "cache": cache}, str(tmp_path / "pc"))
+    assert json.loads(primed["stdout"])["version"] == "1.127.0"
+
+    cleaned = replay({"args": ["cleanup-versions"], "cache": cache}, str(tmp_path / "clv"))
+    assert json.loads(cleaned["stdout"])["kept"] == "1.127.0"
+    survivors = [p for p in cleaned["tree"] if "aimi-engineering/" in p]
+    assert any("/1.127.0/" in p or p.endswith("/1.127.0/") for p in survivors)
+    assert not any(".bak" in p for p in survivors), "the backup outlived the install"
+    assert not any("/zz" in p for p in survivors)
+
+
+def test_a_cache_holding_no_version_shaped_directory_reads_as_empty(tmp_path):
+    """grep's empty match is the empty glob, not an abort.
+
+    The filter sits inside a pipeline running under `set -o pipefail`, so a
+    cache where NOTHING matches makes grep exit 1 and the whole pipeline
+    non-zero. That is caught by the helper's existing `|| newest=""` and lands
+    on the documented no-install answer -- the same one an absent
+    plugins/cache/ produces. Without that catch the verb would abort with both
+    streams empty, which is precisely the D2 defect this file was written to
+    record the repair of.
+    """
+    cache = [{"entry": "mk1", "version": "backup"}, {"entry": "mk1", "version": "old"}]
+
+    checked = replay({"args": ["check-version"], "cache": cache}, str(tmp_path / "cv"))
+    assert checked["exit"] == 0
+    assert json.loads(checked["stdout"]) == {
+        "status": "unknown",
+        "message": "No installed version found",
+    }
+
+    cleaned = replay({"args": ["cleanup-versions"], "cache": cache}, str(tmp_path / "clv"))
+    assert cleaned["exit"] == 0
+    assert json.loads(cleaned["stdout"]) == {"removed": 0, "kept": None}
+    # It returns before write_global_cli_cache, so nothing is persisted -- and
+    # before the rm -rf loop, so the unrecognized directories are left alone
+    # rather than swept because they were not picked.
+    assert cleaned["global_cli_path"] is None
+    assert any("backup" in p for p in cleaned["tree"])
+    assert any("/old" in p for p in cleaned["tree"])
 
 
 def test_cleanup_keeps_the_newest_and_deletes_the_rest(tmp_path):
@@ -726,6 +921,143 @@ def test_cleanup_refuses_a_version_dir_that_resolves_outside_the_cache(tmp_path)
 
     # And the symlink entry itself still stands: refusing is not deleting.
     assert any("/1.0.0" in p for p in actual["tree"]), actual["tree"]
+
+
+# ---------------------------------------------------------------------------
+# The SECOND global pointer: aimi-config/worktree-path
+#
+# These cases are hand-written rather than replayed from the corpus, and they
+# have to be: the capture ran against 112d72f, when NOTHING in this CLI called
+# write_global_worktree_cache. `_validate_cached_worktree_path` validated the
+# file, `read_global_worktree_cache` read it, and next.md and
+# container-execution.md re-read it at the top of every Bash call -- while the
+# file on disk existed only where a human had written it by hand. So the corpus
+# cannot contain a before-picture of a write that never happened; what it CAN
+# do, and does, is prove these writes reach no case that has no manager beside
+# its CLI, because every recorded case's `tree` comes back byte-identical.
+#
+# What the pointer's absence cost, and why the tests below are shaped around
+# cleanup-versions rather than around check-version alone: a `check-version
+# --fix` moved cli-path to the new install while worktree-path stayed on the
+# old one, `cleanup-versions` then rm -rf'd the old one, and $WORKTREE_MGR
+# became a path to nothing that every guard around it still let through,
+# because those guards only asked whether the VARIABLE was empty.
+#
+# Every case here builds its own throwaway root through the same `replay` the
+# corpus uses, so the HOME/XDG_CONFIG_HOME/CLAUDE_CONFIG_DIR/AIMI_CONFIG_DIR
+# quarantine this module's header describes applies unchanged. That is not
+# decorative for these four: one of them runs `cleanup-versions`, which rm -rf's
+# every version directory it did not keep.
+# ---------------------------------------------------------------------------
+
+def _manager(entry, version):
+    return (
+        "/TMP/claude-config/plugins/cache/"
+        + entry
+        + "/aimi-engineering/"
+        + version
+        + "/skills/git-worktree/scripts/worktree-manager.sh"
+    )
+
+
+def _cli(entry, version):
+    return (
+        "/TMP/claude-config/plugins/cache/"
+        + entry
+        + "/aimi-engineering/"
+        + version
+        + "/scripts/aimi-cli.sh"
+    )
+
+
+def test_check_version_fix_writes_the_worktree_pointer_for_the_install_it_resolved(tmp_path):
+    """--fix persists the pointer that had no writer at all before.
+
+    `state_cli_path` seeds a stale value so the verb takes its `fixed` branch;
+    the pointer write sits above that branch and does not depend on it, which
+    the next case is what actually pins.
+    """
+    spec = {
+        "args": ["check-version", "--quiet", "--fix"],
+        "cache": [{"entry": "mk1", "version": "1.2.3", "worktree_manager": True}],
+        "state_cli_path": "/fake/old/1.0.0/scripts/aimi-cli.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "fixed", actual["stdout"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.2.3") + "\n"
+    # The invariant itself: both pointers name ONE install directory.
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_fix_heals_the_worktree_pointer_while_the_cli_pointer_is_current(tmp_path):
+    """The divergence this story exists to close, in its exact shape.
+
+    cli-path is already correct -- status comes back `current`, the `fixed`
+    branch never runs -- while worktree-path names an older version. A heal
+    wired into the `fixed` branch would leave this state untouched forever,
+    which is how the two pointers came apart in the first place.
+    """
+    spec = {
+        "args": ["check-version", "--quiet", "--fix"],
+        "cache": [
+            {"entry": "mk1", "version": "1.2.3", "worktree_manager": True},
+            {"entry": "mk1", "version": "1.3.0", "worktree_manager": True},
+        ],
+        "state_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh",
+        "global_worktree_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3"
+        "/skills/git-worktree/scripts/worktree-manager.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "current", actual["stdout"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.3.0") + "\n"
+
+
+def test_cleanup_versions_repoints_the_worktree_pointer_at_the_version_it_kept(tmp_path):
+    """The verb that PRODUCED the dangling path now repairs it in the same run.
+
+    1.2.3 is pruned; a pointer still naming it would be a path to nothing the
+    moment this verb returns. The tree assertion is what proves the prune
+    happened, so the repointing is measured against a real deletion rather
+    than against a directory that was never touched.
+    """
+    spec = {
+        "args": ["cleanup-versions"],
+        "cache": [
+            {"entry": "mk1", "version": "1.2.3", "worktree_manager": True},
+            {"entry": "mk1", "version": "1.3.0", "worktree_manager": True},
+        ],
+        "global_worktree_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3"
+        "/skills/git-worktree/scripts/worktree-manager.sh",
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"]) == {"removed": 1, "kept": "1.3.0"}
+    assert any("/1.2.3" in p for p in actual["tree_before"]), actual["tree_before"]
+    assert not any("/1.2.3" in p for p in actual["tree"]), actual["tree"]
+    assert actual["global_worktree_path"] == _manager("mk1", "1.3.0") + "\n"
+
+
+def test_no_worktree_pointer_is_written_when_the_install_carries_no_manager(tmp_path):
+    """The existence gate, which is what keeps the whole corpus byte-identical.
+
+    An install with only `scripts/` -- every pre-existing fixture in this file,
+    and the shape an OpenCode plugin dir takes -- must persist nothing at all,
+    rather than a path to a file that is not there. The cli-path assertion is
+    the control: the run happened, so the silence is the missing manager and
+    not a verb that did nothing.
+    """
+    spec = {
+        "args": ["prime-cache"],
+        "cache": [{"entry": "mk1", "version": "1.2.3"}],
+    }
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "ok", actual["stdout"]
+    assert actual["global_worktree_path"] is None
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+    assert not any("worktree-path" in p for p in actual["tree"]), actual["tree"]
 
 
 def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):

@@ -842,6 +842,134 @@ def test_the_smell_reaches_metadata_only_when_there_is_one():
     assert "smellWarnings" not in _doc("simbolo-orfao-negativo", ".aimi/tasks/out-tasks.json")["metadata"]
 
 
+# ---------------------------------------------------------------------------
+# Phase 4.3: verify coverage -- the vocabulary is DERIVED from the repository,
+# never hardcoded, and CHECKED-AND-CLEAN stays distinguishable from
+# CANNOT-DETERMINE-THE-VOCABULARY rather than one silently reading as the
+# other.
+# ---------------------------------------------------------------------------
+
+
+def test_repo_command_vocabulary_is_none_with_no_recognized_source_file(tmp_path):
+    """None, never an empty set: an empty set would claim "this repo's tooling
+    runs nothing," which is a finding about the repo, not an admission this
+    function found no package.json/Makefile/Cargo.toml/pyproject.toml/go.mod
+    to read at all."""
+    assert SM.repo_command_vocabulary(str(tmp_path)) is None
+    assert SM.repo_command_vocabulary(str(tmp_path / "no-such-dir")) is None
+
+
+def test_repo_command_vocabulary_reads_pyproject_toml_package_json_and_makefile(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"build": "tsc", "test": "jest"}}), encoding="utf-8"
+    )
+    (tmp_path / "Makefile").write_text("lint:\n\tflake8\n\n.PHONY: lint\n", encoding="utf-8")
+    vocabulary = SM.repo_command_vocabulary(str(tmp_path))
+    assert "pytest" in vocabulary
+    assert "npm run build" in vocabulary
+    assert "npm test" in vocabulary
+    assert "make lint" in vocabulary
+    assert "make .PHONY" not in vocabulary, ".PHONY is not a runnable target"
+
+
+def test_verify_coverage_findings_distinguishes_checked_and_clean_from_cannot_determine(tmp_path):
+    """The two non-finding outcomes constraint 3 requires kept apart. Both
+    stories cite the same command; only their PROJECT differs, so only one of
+    the two groups has a vocabulary to check against."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    clean_story = {
+        "id": "US-001",
+        "project": ".",
+        "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+        "implementation": {"verify": "pytest -q"},
+    }
+    undetermined_story = {
+        "id": "US-002",
+        "project": "other-repo",  # no repo files under tmp_path/other-repo
+        "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+        "implementation": {"verify": "echo nothing"},
+    }
+    findings, undetermined, clean = SM.verify_coverage_findings(
+        [clean_story, undetermined_story], str(tmp_path)
+    )
+    assert findings == []
+    assert clean == ["US-001"]
+    assert undetermined == ["US-002"]
+
+
+def test_verify_coverage_findings_reports_a_command_verify_never_runs(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    story = {
+        "id": "US-001",
+        "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+        "implementation": {"verify": "flake8 ."},
+    }
+    findings, undetermined, clean = SM.verify_coverage_findings([story], str(tmp_path))
+    assert findings == [{"id": "US-001", "commands": ["pytest"]}]
+    assert undetermined == clean == []
+
+
+def test_verify_coverage_findings_is_silent_when_no_criterion_cites_a_command(tmp_path):
+    """No backtick citation anywhere -- neither non-finding state applies. This
+    is what keeps test_an_ordinary_merge_says_nothing_about_the_sidecars_
+    beside_it's default staging stories (acceptanceCriteria: ["Typecheck
+    passes"]) silent on stderr."""
+    story = {
+        "id": "US-001",
+        "acceptanceCriteria": ["Typecheck passes"],
+        "implementation": {"verify": "tsc --noEmit"},
+    }
+    assert SM.verify_coverage_findings([story], str(tmp_path)) == ([], [], [])
+
+
+def test_the_verify_coverage_smell_reaches_metadata_only_for_a_real_divergence(tmp_path):
+    """End to end through the real CLI, mirroring
+    test_the_smell_reaches_metadata_only_when_there_is_one for orphan-symbol."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": {
+                **_staging_story("A"),
+                "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+                "implementation": {
+                    "files": ["src/x.py"],
+                    "approach": "Implement it",
+                    "verify": "flake8 src/x.py",
+                },
+            },
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 4.3 verify-coverage smell detected" in proc.stderr
+    warnings = doc["metadata"]["smellWarnings"]
+    assert warnings[0]["type"] == "verify-coverage"
+    assert warnings[0]["storyId"] == "US-001"
+    assert warnings[0]["commands"] == ["pytest"]
+
+
+def test_the_verify_coverage_smell_never_blocks_in_either_mode(tmp_path):
+    files = {
+        "01-a.json": {
+            **_staging_story("A"),
+            "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+            "implementation": {
+                "files": ["src/x.py"],
+                "approach": "Implement it",
+                "verify": "flake8 src/x.py",
+            },
+        },
+    }
+    for label, extra_args in (("normal", []), ("agent", ["--agent-mode"])):
+        root = tmp_path / label
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+        proc, _doc = _merge(root, files, args=extra_args)
+        assert proc.returncode == 0, (label, proc.stderr)
+        assert "Phase 4.3 verify-coverage smell detected" in proc.stderr
+
+
 def test_a_mock_sync_criterion_moves_to_the_story_that_consumes_the_field():
     stories = _doc("rule22-roteamento", ".aimi/tasks/out-tasks.json")["userStories"]
     schema, consumer = stories[0], stories[1]

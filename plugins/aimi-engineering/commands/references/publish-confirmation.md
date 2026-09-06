@@ -183,6 +183,8 @@ the translation does reach it — and never here.
 
 The same discipline keeps this file free of any fenced code block. It adds no
 executable surface: `test-command-blocks.sh` discovers its inputs with
-`find "$COMMANDS_DIR" -name '*.md'`, so `commands/references/` is squarely in
-its scope and this file is scanned on every run — it simply contributes zero
-blocks, and needs no entry in `scripts/command-blocks-baseline.txt`.
+`lib/extract-command-blocks.sh`'s `command_block_files()`, which takes every
+`*.md` under `commands/` recursively (plus every `skills/**/SKILL.md`), so
+`commands/references/` is squarely in its scope and this file is scanned on
+every run — it simply contributes zero blocks, and needs no entry in
+`scripts/command-blocks-baseline.txt`.
