@@ -5126,6 +5126,184 @@ def test_the_operand_after_a_double_ampersand_is_a_further_assertion():
     ]
 
 
+# ---------------------------------------------------------------------------
+# verify_segments: a heredoc travels with the command that opened it (US-001)
+# ---------------------------------------------------------------------------
+#
+# Measured on the tree before this change: a three-command script whose middle
+# command opens a heredoc came back as SEVEN segments instead of three, and
+# each of `<<'X'`, `<<X` and `<<-X` turned a two-command script into FIVE. The
+# body was being cut as though it were shell -- so a Python line became a
+# command, which is not a miscount but an execution. `_VERIFY_TIMEOUT`'s note
+# in tasks.py records the case that already cost something: a bare `import`
+# line cut out of a Python heredoc, which bash resolved to ImageMagick's
+# blocking screen-capture `import`, and the probe reported the timeout as a
+# verdict.
+
+_HEREDOC_FORMS = {
+    "quoted": "cat <<'X'\na; b\nX\ngrep -q z f\n",
+    "double-quoted": 'cat <<"X"\na; b\nX\ngrep -q z f\n',
+    "unquoted": "cat <<X\na; b\nX\ngrep -q z f\n",
+    "tab-stripping": "cat <<-X\n\ta; b\n\tX\ngrep -q z f\n",
+    "blank before the word": "cat << 'X'\na; b\nX\ngrep -q z f\n",
+    "backslash-quoted": "cat <<\\X\na; b\nX\ngrep -q z f\n",
+}
+
+
+def test_every_heredoc_form_keeps_its_body_in_the_segment_that_opened_it():
+    """AC: all three forms bash accepts -- quoted, unquoted and tab-stripping.
+
+    Two segments, never five: the command plus its whole body, and then the
+    command after the terminator. The body is asserted to be INSIDE the first
+    segment rather than merely absent from the list, because dropping it would
+    also produce two segments -- and would hand the probe a `cat <<'X'` whose
+    body never arrives, which bash refuses with an unexpected EOF.
+    """
+    for name, text in _HEREDOC_FORMS.items():
+        segments = [segment for _, segment in T.verify_segments(text)]
+        assert len(segments) == 2, "%s: %r" % (name, segments)
+        assert "a; b" in segments[0], "%s dropped the body: %r" % (name, segments[0])
+        assert segments[1] == "grep -q z f", name
+
+
+def test_the_terminator_is_consumed_and_never_emitted_as_a_segment():
+    """AC: the terminator line goes with the heredoc.
+
+    Left behind it becomes a segment reading `X`, which runs as a command,
+    fails 127, and is reported as an assertion that DISCRIMINATES -- an
+    invented check nobody wrote, in the list a reader is meant to trust.
+    """
+    for name, text in _HEREDOC_FORMS.items():
+        segments = [segment for _, segment in T.verify_segments(text)]
+        assert not any(s.strip() in ("X", "-X") for s in segments), name
+        assert segments[0].rstrip().endswith("X"), name
+
+
+def test_the_tab_strip_belongs_to_the_dash_form_alone_and_strips_only_tabs():
+    """The note this story carries, asserted rather than trusted: `<<-` strips
+    leading TABS and never spaces. Getting it backwards makes the terminator
+    never match, and the rest of the script vanishes into the body -- which
+    fails loudly, but only where a test looks."""
+    spaces = "cat <<-X\n    X\nX\ngrep -q z f\n"
+    assert [s for _, s in T.verify_segments(spaces)] == [
+        "cat <<-X\n    X\nX",
+        "grep -q z f",
+    ], "a space-indented line closed a <<- heredoc"
+    plain = "cat <<X\n\tX\nX\ngrep -q z f\n"
+    assert [s for _, s in T.verify_segments(plain)] == [
+        "cat <<X\n\tX\nX",
+        "grep -q z f",
+    ], "the plain form stripped tabs it should have kept"
+
+
+def test_the_body_is_read_after_the_rest_of_the_opening_line():
+    """Bash announces a heredoc where the redirect sits and starts reading at
+    the next newline, so everything else on that line -- a second redirect, a
+    second heredoc, a `;` or an `&&` -- still belongs to the same command."""
+    assert [s for _, s in T.verify_segments("cat <<'X' > out.txt\na; b\nX\necho z\n")] == [
+        "cat <<'X' > out.txt\na; b\nX",
+        "echo z",
+    ]
+    assert [s for _, s in T.verify_segments("cat <<'A' <<'B'\nfrom a\nA\nfrom b\nB\necho z\n")] == [
+        "cat <<'A' <<'B'\nfrom a\nA\nfrom b\nB",
+        "echo z",
+    ]
+    # A separator before the body has been read cannot cut: the half carrying
+    # the redirect and the half carrying the body would neither of them run.
+    assert [s for _, s in T.verify_segments("cat <<'X'; echo hi\na; b\nX\necho z\n")] == [
+        "cat <<'X'; echo hi\na; b\nX",
+        "echo z",
+    ]
+    assert [s for _, s in T.verify_segments("cat <<'X' && echo hi\na; b\nX\necho z\n")] == [
+        "cat <<'X' && echo hi\na; b\nX",
+        "echo z",
+    ]
+
+
+def test_a_shift_and_a_here_string_are_not_heredocs():
+    """The two other things `<<` can be. In `$(( a << b ))` and `(( a << b ))`
+    it is a left shift, and reading `b` as a delimiter would swallow every line
+    until one equalled `b` -- the rest of the script, usually. `<<<` is a here
+    STRING: one line, no body, no terminator, and its own second character
+    starts a `<<` that must not be re-read as an opening."""
+    assert [s for _, s in T.verify_segments("x=$(( 1 << 2 ))\necho done\n")] == [
+        "x=$(( 1 << 2 ))",
+        "echo done",
+    ]
+    assert [s for _, s in T.verify_segments("(( a << b ))\necho done\n")] == [
+        "(( a << b ))",
+        "echo done",
+    ]
+    assert [s for _, s in T.verify_segments("grep -q z <<<'a; b'\ngrep -q y f\n")] == [
+        "grep -q z <<<'a; b'",
+        "grep -q y f",
+    ]
+
+
+def test_a_script_with_no_heredoc_is_cut_exactly_as_before():
+    """AC: the controls. Nothing above may be bought with a change to the cut
+    every verify without a heredoc already gets -- same segments, same
+    separators. The separators this scanner exists to find still split, `|`
+    still never does, and a separator inside quotes is still inert."""
+    assert [s for _, s in T.verify_segments("echo a\necho b\n")] == ["echo a", "echo b"]
+    assert T.verify_segments("test -f a && test -f b") == [
+        ("", "test -f a"),
+        ("&&", "test -f b"),
+    ]
+    assert T.verify_segments("test -f a || test -f b") == [
+        ("", "test -f a"),
+        ("||", "test -f b"),
+    ]
+    assert T.verify_segments("test -f a; test -f b") == [
+        ("", "test -f a"),
+        ("", "test -f b"),
+    ]
+    assert [s for _, s in T.verify_segments("grep -q x f | wc -l")] == ["grep -q x f | wc -l"]
+    assert [s for _, s in T.verify_segments("echo 'a; b'")] == ["echo 'a; b'"]
+    assert [s for _, s in T.verify_segments('echo "a && b"')] == ['echo "a && b"']
+    assert [s for _, s in T.verify_segments("cat < in.txt\necho done\n")] == [
+        "cat < in.txt",
+        "echo done",
+    ]
+
+
+def test_the_docstring_names_the_shape_it_now_tracks():
+    """AC: the docstring names the heredoc beside the quoting states it already
+    named. This function is a scanner whose whole correctness argument lives in
+    prose beside it; a state tracked in code and absent from that prose is the
+    one a later edit removes as dead."""
+    doc = T.verify_segments.__doc__
+    assert "HEREDOC" in doc
+    for form in ("<<'X'", '<<"X"', "<<X", "<<-X"):
+        assert form in doc, form
+
+
+def test_a_probed_heredoc_runs_as_one_segment_instead_of_line_by_line(tmp_path):
+    """End to end, through the CLI: the shape this defect was found in -- a
+    Python heredoc between two shell assertions.
+
+    Before this change the body was cut into segments and each line was handed
+    to bash. Now the whole thing is one segment that runs, so the probe's
+    verdict is about the heredoc rather than about `import` being a program.
+    """
+    _, probed = _probe(
+        tmp_path,
+        "test -f ja-existe.txt\n"
+        "python3 - <<'PY'\n"
+        "import sys\n"
+        "print('nao sou shell'); sys.exit(0)\n"
+        "PY\n"
+        "test -f ainda-nao.txt\n",
+        files=("ja-existe.txt",),
+    )
+    assert [entry["segment"] for entry in probed] == [
+        "test -f ja-existe.txt",
+        "python3 - <<'PY'\nimport sys\nprint('nao sou shell'); sys.exit(0)\nPY",
+        "test -f ainda-nao.txt",
+    ]
+    assert [entry["discriminates"] for entry in probed] == [False, False, True]
+
+
 def test_the_segments_run_where_the_CALLER_stood_not_at_the_project_root(tmp_path):
     """find_aimi_root cds to the root holding .aimi/ before any verb runs, and
     probing there would measure the main checkout while the executor's own
