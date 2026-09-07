@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.127.0] - 2026-09-07
+
+### Added
+
+- `run-verdict` classifies a tasks file's execution state as `never-run`,
+  `delivered`, `interrupted` or `undetermined`, so a command can ask whether a
+  plan has already run instead of inferring it. The rule is `roadmap.py`'s own
+  `ground_truth`, imported rather than restated -- that function exists so two
+  readers cannot drift into two answers about one file, and a third copy would
+  reintroduce exactly the drift it prevents. `failed` is asked before either
+  terminal branch, and `completed`/`skipped` are one terminal set, both
+  inherited from it. `interrupted` also covers the case a binary check misses:
+  one story completed with the rest still pending and nothing marked, which is
+  a session killed at a wave boundary, not a run that never started.
+
+### Fixed
+
+- A guard's denial reaches the model with the explanation the guard wrote.
+  `hook_utils.deny()` carried its message at `hookSpecificOutput.userMessage`,
+  which nothing reads; the documented field is a top-level `systemMessage`
+  ("Explanation for Claude"), per plugin-dev's hook-development skill and the
+  hookify plugin's own rule engine. Nine call sites across three guards wrote a
+  careful reason and the model saw a bare refusal. The message is now emitted in
+  both places -- `userMessage` is kept, so the change is a strict widening and
+  every existing consumer keeps working.
+- `/aimi:open-pr` stops reading a delivered plan's missing branch as a plan that
+  never ran. Step 2a Case B asserted one cause for a missing ref and prescribed
+  `/aimi:execute` -- which, for the usual cause, re-runs an already-merged plan.
+  It now asks `run-verdict` and answers four ways: a never-run plan keeps the
+  old message, a delivered one says the tasks file is spent and continues on the
+  checked-out branch instead of aborting, an interrupted one says the run is
+  stuck rather than done, and an undetermined one says so rather than inventing
+  a story about a file it could not read.
+
 ## [1.126.1] - 2026-09-07
 
 ### Fixed
