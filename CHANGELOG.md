@@ -37,6 +37,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `verify-probe` answers "cannot tell" instead of a verdict it cannot support.
+  It runs each verify assertion on its own, carrying forward only `cd` and
+  plain assignments, so a name an earlier segment bound through an `eval`, a
+  subshell or a function call is simply absent when the next assertion reads
+  it. The verdict computed from that run described a world that never existed,
+  and it was wrong in both directions -- an assertion that fails without the
+  state read as discriminating, and one that passes without it read as dead
+  weight, which is the worse of the two because it tells the reader to stop
+  looking. Such a segment is now not run at all: it reports `discriminates:
+  null` with `unresolvedState` naming the missing variables. A segment whose
+  reads are covered keeps its ordinary verdict. The docstring's claim that a
+  `mkdir`/`printf >` fixture is lost is corrected -- filesystem effects
+  persist, because each segment is a real subprocess in the same directory;
+  shell state alone is lost.
+- `verify-probe` refuses to re-enter itself. The verb executes the named
+  story's own verify segments, so a verify that called it back looped instead
+  of answering -- measured at 127 re-entries in 25 seconds before the outer
+  call hit its ceiling. An environment marker now refuses a nested call and
+  names both ways out. The marker rather than an id comparison is what also
+  catches the mutual case, where one story's verify probes a second whose own
+  verify probes the first.
+- A segment `verify-probe` did not run is reported as unknown rather than as a
+  verdict. A segment skipped by the new `--skip-matching` pattern, and one that
+  outlives its per-segment ceiling, both carry `discriminates: null` and say
+  which happened; a timeout previously reported as discriminating, which was
+  the safe direction only while there was no honest one. The ceiling itself is
+  unchanged at 600 seconds, and deliberately: the five-minute limit that
+  stories were reported to blow is the harness's wall clock around the whole
+  verb, not this per-segment cap -- what overran was the sum, which no
+  per-segment cap can bound. `--skip-matching` lets the caller drop the
+  expensive segments from that sum; it moves the cost rather than removing it.
 - Test suites emit colour only to a terminal, and their colour variables now
   hold a real escape byte. Two defects sat in the same three lines, repeated
   across six definition sites covering all ten suites. `'\033[0;32m'` is four
