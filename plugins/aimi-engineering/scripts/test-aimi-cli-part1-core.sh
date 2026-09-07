@@ -704,6 +704,19 @@ test_count_pending() {
   assert_eq "$pre_file" "$post_file" "count-pending leaves tasks.json untouched"
 }
 
+test_run_verdict() {
+  echo ""
+  echo "=== Testing run-verdict ==="
+
+  # Every story in $TASKS_FILE is still "pending" at this point in the
+  # progressive lifecycle sequence (see count-pending above), so run-verdict
+  # answers never-run for the same reason count-pending answers 4.
+  local output
+  output=$("$CLI" run-verdict)
+  assert_eq "never-run" "$(printf '%s' "$output" | jq -r '.verdict')" \
+    "run-verdict: every story pending answers never-run"
+}
+
 test_list_ready() {
   echo ""
   echo "=== Testing list-ready ==="
@@ -11020,6 +11033,7 @@ main() {
   echo ""
   echo "--- Lifecycle Tests ---"
   test_count_pending
+  test_run_verdict
   test_list_ready
   test_next_story
   test_readiness_predicate_has_one_implementation
