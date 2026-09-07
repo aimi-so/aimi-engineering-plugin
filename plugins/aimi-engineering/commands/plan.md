@@ -2420,6 +2420,16 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   lint passes"). A criterion that only a human can confirm does not
   belong in 'verify' — route it to 'gate' instead.
 
+  IMPORTANT — never name 'verify-probe' inside 'verify':
+  Do NOT write 'aimi-cli.sh verify-probe' into 'implementation.verify'.
+  The executor probes a story by RUNNING that verify's segments, so a
+  verify that names the verb re-enters the probe: the CLI refuses, and
+  the story fails for a reason that has nothing to do with its own code.
+  The same loop closes when two stories probe each other. A story that
+  must exercise the verb verifies it from a sibling story's verify or a
+  throwaway fixture, or calls 'probe_verify()' in tasks.py, which is not
+  guarded — the CLI's refusal message is where both ways out are stated.
+
   IMPORTANT — dependsOn encoding:
   Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
   dependencies. Do NOT invent US-NNN IDs. story-merge will remap every

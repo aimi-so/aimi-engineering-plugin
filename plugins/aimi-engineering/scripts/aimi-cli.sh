@@ -1894,6 +1894,10 @@ cmd_verify_probe() {
 
   if [ -z "$story_id" ]; then
     echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>] [--skip-matching <regex>]" >&2
+    echo "  A story's own implementation.verify must NOT name this verb: probing RUNS its" >&2
+    echo "  segments, so a verify that calls it back re-enters the probe and is refused." >&2
+    echo "  Probe from a sibling story's verify or a throwaway fixture, or call" >&2
+    echo "  probe_verify() in tasks.py, which is not guarded." >&2
     exit 1
   fi
 
@@ -15350,7 +15354,12 @@ COMMANDS:
     verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
                  [--skip-matching <regex>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
-                              report which ones already pass. Output: a JSON array of
+                              report which ones already pass. Probing RUNS them, so recursion
+                              is the hazard: a story's own implementation.verify must NOT
+                              name this verb -- it re-enters the probe and is refused. Probe
+                              from a sibling story's verify or a throwaway fixture, or call
+                              probe_verify() in tasks.py, which is not guarded.
+                              Output: a JSON array of
                               {segment, exit, discriminates, unsatisfiable}; discriminates is
                               false for an assertion that passed, i.e. one that does not tell
                               the before-state from the after-state. --previous-file names a
