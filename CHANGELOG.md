@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.129.0] - 2026-09-07
+
+### Added
+
+- `verify-probe` reproduces the shell state a segment would really have
+  inherited, instead of rebuilding a synthetic prelude of assignments.
+  `probe_verify` now runs the segments in order and, after each one, has the
+  shell write `declare -f`, `declare -p`, `set +o` and its working directory
+  to a single sourceable file that the next segment sources. Options are
+  replayed after both declares: a snapshot taken from a shell that ran
+  `set -e` carries `set -o errexit`, and enabling it first aborts the replay
+  on the readonly variables `declare -p` dumps. The dump is armed as an EXIT
+  trap rather than appended below the segment, because a segment may now end
+  inside its own heredoc terminator, where nothing is appendable. Each segment
+  still runs exactly once, so the cost does not rise. Two behaviours move as a
+  result, and only the second changes a verdict: a call to a function an
+  earlier segment defined now exits with the function's own status instead of
+  127, and a pipeline under an earlier `set -o pipefail` now reports non-zero
+  and therefore discriminates, where before it exited 0 and read as dead
+  weight. The snapshot file is created per invocation at mode 0600 -- it holds
+  `declare -p` of a whole environment -- and removed in a `finally`.
+  Filesystem effects remain genuinely irreproducible, and the `null` verdict
+  with its `unresolvedState` list stays the honest answer there.
+
+### Fixed
+
+- `verify_segments` carries a heredoc with the command that opens it. The
+  scanner tracked single quotes, double quotes, command substitution in both
+  spellings, brace groups and subshells, but not heredocs, so a heredoc body
+  was cut as though it were shell: three commands became seven segments, and
+  each of the `<<'X'`, `<<X` and `<<-X` forms turned a two-command script into
+  five. The body now stays inside its own segment and the terminator is
+  consumed with it. Three positions that look like an opener are told apart --
+  `<<<` is a here-string, `$(( a << b ))` and `(( a << b ))` are left shifts,
+  and a separator reached before the body does not cut. Replaying every
+  `implementation.verify` recorded in this repository, the scripts with no
+  heredoc segment identically to before; only the ones with a heredoc change.
+
+### Documentation
+
+- Four sites warn that a story's own `implementation.verify` must never name
+  `verify-probe`: the verb's usage line and its `COMMANDS:` help entry, both
+  places `story-executor/SKILL.md` runs the probe, and the story-expander
+  prompt in `plan.md`. Probing runs a verify's segments, so a verify that
+  names the verb re-enters the probe and is refused -- and the story then
+  fails for a reason that has nothing to do with its own code. The refusal
+  message remains the single place that states the problem in full; these four
+  point at it and name the two ways out.
+
 ## [1.128.0] - 2026-09-07
 
 ### Added
