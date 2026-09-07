@@ -877,6 +877,155 @@ source (businessSpec before designSpec) then by line number, present the
 first 20, and emit a single warning line listing the remaining anchors so
 the user is aware they were skipped from interactive resolution.
 
+### Issue Reference Confirmation Gate
+
+Runs after Phase 0.5 and before Phase 1. `FEATURE_DESCRIPTION` and
+`INTERACTIVE_MODE` are both already resolved by Step 0 at this point, so this
+gate reads nothing the pipeline has not produced yet, and it writes exactly one
+optional key — `metadata.issues`, the forge-confirmed issue numbers this plan
+closes, which `/aimi:open-pr` later renders as `Closes` lines.
+
+The gate is SCAN → RESOLVE → CONFIRM, and every step is there because the step
+before it cannot decide alone. A scan finds number-shaped tokens but cannot tell
+an issue reference from a version fragment. A forge lookup proves a number names
+something real but not that it is work this plan closes — measured on this
+repository, `#149` (open) and `#3` (merged) both resolve `status: found`, so
+existence alone discriminates nothing. State and title are what carry the
+decision, and only a human answers the last question. Do not collapse the three
+steps into two.
+
+**SCAN.** Every `#<digits>` and every bare `<digits>` token in
+`FEATURE_DESCRIPTION` is a candidate. Deduplicate, drop leading zeros, and keep
+only positive integers — issue numbers start at 1:
+
+```bash
+ISSUE_CANDIDATES=$(printf '%s\n' "$FEATURE_DESCRIPTION" \
+  | grep -oE '[0-9]+' \
+  | sed 's/^0*//' \
+  | grep -E '^[1-9][0-9]*$' \
+  | sort -un)
+```
+
+Bare digits are in scope deliberately, and the noise that brings — `v1.2.3`
+contributes `1`, `2` and `3` — is the CONFIRM step's problem, not the scan's. A
+description that names its issue without a `#` is far more common than one that
+names no issue at all, and a candidate nobody confirms costs one forge lookup.
+
+**RESOLVE.** For each candidate, capture the CLI's stdout into a shell variable
+first, then parse that variable with `jq`:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+
+ISSUE_SURVIVORS=""
+while IFS= read -r issue_num; do
+  [ -n "$issue_num" ] || continue
+  ISSUE_JSON=$($AIMI_CLI forge-issue-view --number "$issue_num")
+  issue_row=$(printf '%s' "$ISSUE_JSON" \
+    | jq -r 'select(.status == "found" and .data.state == "open")
+             | "\(.data.number)\t\(.data.title)"')
+  if [ -n "$issue_row" ]; then
+    ISSUE_SURVIVORS="${ISSUE_SURVIVORS}${issue_row}
+"
+  fi
+done <<CANDIDATES
+$ISSUE_CANDIDATES
+CANDIDATES
+printf '%s' "$ISSUE_SURVIVORS"
+```
+
+**Feed the loop from a heredoc, not from `for issue_num in $ISSUE_CANDIDATES`.**
+These blocks run under whatever shell the host hands them, and zsh does not
+word-split an unquoted parameter expansion the way bash does — the `for` form
+iterates **once**, over the entire newline-joined list as a single token, asks
+the forge about a number that does not exist, and comes back with an empty
+survivor list and exit 0. That is the worst available failure: the gate reports
+"no issues named" for a description that named several, and nothing anywhere
+says so. A heredoc splits on newlines identically in both shells and keeps the
+loop in the current shell, so `ISSUE_SURVIVORS` survives `done` — which a
+`| while` pipeline would not.
+
+**Never pipe `$AIMI_CLI forge-issue-view` straight into `grep -qF`, or into any
+other predicate whose exit status you then read.** This exact pipeline already
+has the defect recorded against it, and the reason it is a defect is the
+Degradation Contract in `commands/references/forge-contract.md`: this verb
+soft-fails, so a missing `gh`, an unauthenticated one, or a rate-limited host
+all return exit 0 carrying a `status: "error"` envelope. Chain it into a
+predicate and the pipeline's status is the only signal left — the one signal the
+degradation contract deliberately renders meaningless — so "the issue is open"
+and "the forge never answered" become indistinguishable. Capturing the document
+and branching on `.status` and `.data.state` is the contract's own stated read
+path, and it is the only one that tells those two apart.
+
+Keep a candidate only when its envelope `.status` is `found` **and** its
+`.data.state` is `open`. Everything else leaves quietly:
+
+- `.status` is `not_found` — the number was a version fragment, a line number,
+  or an issue on another repository. Not an error; there was never anything
+  there.
+- `.status` is `error` — offline, no forge configured, no `gh`/`glab`/`tea`,
+  unauthenticated, or rate-limited. The gate **drops that candidate silently**
+  and the plan continues to completion. It never aborts the run and never
+  surfaces a raw CLI error to the user: a plan that cannot reach a forge is
+  still a plan, and the only thing lost is an optional key.
+- `.data.state` is anything but `open` (`closed`, and on a number that names a
+  pull request, `merged`) — a plan does not close what is already closed.
+
+A run in which every candidate is dropped is indistinguishable, from here on,
+from a run whose description named no numbers at all: no picker is presented,
+nothing is logged, and `metadata.issues` is omitted entirely from the written
+tasks.json — never `[]`, never `null`.
+
+**CONFIRM.** When `ISSUE_SURVIVORS` is non-empty, present the whole list in
+**exactly one** AskUserQuestion call — never one call per candidate — as a
+multi-select whose options are the surviving issues, each labelled with its own
+`.data.number` and `.data.title`:
+
+```
+Which issues does this plan close?
+#<number> — <title>
+#<number> — <title>
+…
+```
+
+Selecting none is a valid answer and means the same thing as zero survivors.
+**Cap the picker at four options**, the same cap `/aimi:setup-models` applies to
+its own questions; when more than four survive, sort ascending by number,
+present the first four, and emit one warning line naming the numbers left out so
+the user knows they were not offered. Record the confirmed numbers in working
+memory as `confirmedIssues[]` — an array of positive integers, in ascending
+order, holding **only** what the user selected. A survivor the user did not pick
+is not recorded and leaves no trace.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents
+AskUserQuestion — an unattended run cannot answer one. SCAN and RESOLVE still
+run: both are fully automated and need no user input, the same reason the Phase
+1.8 scope-pruning gates spawn their verifiers under agent mode and defer only
+the question at the end. Only CONFIRM is skipped. It auto-defers with the
+reason literal `agent-mode auto-defer (issue confirmation)`, distinct from every
+other gate's reason literal in this file so the deferral is greppable back to
+this gate, leaves `confirmedIssues[]` empty, and omits `metadata.issues` for that
+run. Emit exactly one log line:
+
+```
+agent-mode: issue-confirmation-gate deferred <N> candidate issue(s)
+```
+
+where `<N>` is the number of surviving open issues that would have been offered.
+
+**It never guesses, and that asymmetry is the whole design.** Confirming nothing
+costs a `Closes` line somebody adds by hand. Confirming wrongly makes
+`/aimi:open-pr` close an issue nobody approved, on a repository where an
+unattended run is exactly the case with no one watching. The two mistakes are
+not the same size, so the gate is built to make only the cheap one.
+
+**Recording.** `confirmedIssues[]` is carried in working memory to Phase 4 and
+written there as `metadata.issues` by **Derive and Patch Metadata Fields** —
+this gate writes no file itself. No validator change is needed for the key:
+nothing in `tasks.py` rejects an unknown `metadata` key, and `issues` is
+documented as optional in `skills/task-planner/references/task-format-v3.md`.
+
 ## Phase 1: Local Research (Parallel)
 
 ### Prepare Research Directory
@@ -2821,6 +2970,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **baseRef**: The commit the plan was written against — the full 40-character SHA printed by `git rev-parse HEAD`, read at Phase 4 time in the repository this file's stories target. **Single-repo/monorepo** (`AIMI_ROOT_IS_GIT_REPO=true`): run it in `$AIMI_ROOT`. **Multi-repo** (`AIMI_ROOT_IS_GIT_REPO=false`): `$AIMI_ROOT` is not a repository at all, so the value comes from the file's own project root — the same `PROJECT_ROOT` the per-project base-branch block above already resolves. Omit the key entirely when no single repository root resolves for the file, or when `git rev-parse HEAD` exits non-zero (an unborn branch has no commit to name): an absent key reads as "this plan predates the field", which a later reader can recover from, where `""` or a placeholder reads as a SHA and cannot. Writing the field is the whole obligation here — comparing it against the branch an executor actually starts from belongs to whoever consumes it, and nothing in this command reads it back.
 - **pluginVersion**: The version of the plugin install that wrote this file — the bare string printed by `$AIMI_CLI version`, using the `$AIMI_CLI` the per-project base-branch block above already resolves (no new resolution idiom belongs here). Ask the CLI that is actually running; **never** read a version out of `.claude-plugin/plugin.json` at a guessed path. The stamp exists to record *which install* produced the artifact, and a development checkout routinely sits at a different version from the installed cache executing this command — Layer 0-dev exists precisely because those two diverge — so a file read names the wrong writer exactly when the answer matters. This is a **shared** value, patched byte-identically into every file in `SPLIT_FILES`: a version names the *writer*, and one `/aimi:plan` invocation has exactly one writer no matter how many repositories it splits across, unlike `branchName` and `baseRef`, which name a *repository* and so resolve per file. Omit the key entirely when `$AIMI_CLI version` exits non-zero or prints an empty string — never `null`, never `""`, never a placeholder such as `unknown`: an absent key reads as "this plan predates the field", which a later reader can recover from, where a placeholder reads as a real version and silently poisons every per-release slice built on it.
+- **issues**: The forge-confirmed issue numbers this plan closes — the `confirmedIssues[]` working memory the **Issue Reference Confirmation Gate** accumulated back in Phase 0, as an array of positive integers in ascending order. Omit the key entirely when that list is empty: when the description named no numbers, when every candidate was dropped by the gate's `found`/`open` filter, when the user confirmed none, and on every `INTERACTIVE_MODE=agent` run, which never confirms any. Never `[]`, never `null`, never a guessed number — the same non-placeholder rule `baseRef` and `pluginVersion` above already follow, and for the sharper reason: this key's consumer is `/aimi:open-pr`, which turns each entry into a `Closes` line that shuts a real issue when the PR merges, so an invented entry does not merely read wrong, it closes someone else's work. This is a **shared** value, patched byte-identically into every file in `SPLIT_FILES` — the issues a plan closes belong to the plan, not to one of the repositories it happens to span.
 - **planPath**: Always `null`
 - **roadmapPath** (when `ROADMAP_MODE=true`): `.aimi/tasks/${featureSlug}/roadmap.json`, relative to `AIMI_ROOT`. Omit the key entirely when `ROADMAP_MODE=false`.
 - **phase** (when `ROADMAP_MODE=true`): `{ id: SELECTED_PHASE_ID, dir: PHASE_DIR }` — `id` is the selected phase's numeric id, `dir` is its `phase-<id>[-<slug>]` directory segment. Omit the key entirely when `ROADMAP_MODE=false`.
@@ -2851,7 +3001,7 @@ SPLIT_AXIS=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then "proje
 SPLIT_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
 ```
 
-Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `type`, `createdAt`, `pluginVersion`, `planPath`, `researchPaths`, `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, `phase`, `decisions`, `maxConcurrency`, and `execution` values the single-file case writes. Two keys resolve per file instead of being shared — `branchName` and `baseRef`:
+Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `type`, `createdAt`, `pluginVersion`, `planPath`, `issues`, `researchPaths`, `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, `phase`, `decisions`, `maxConcurrency`, and `execution` values the single-file case writes. Two keys resolve per file instead of being shared — `branchName` and `baseRef`:
 
 - **SIDE axis** (`MERGE_RETURN` is the `{frontend, backend, frontend_stories, backend_stories}` object — fewer than 2 distinct `.project` values, i.e. single-repo/monorepo): exactly two files, read from its own `.frontend` and `.backend` keys. Assign `type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents (`type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-frontend`/`-backend`) — per the branchName rule above, including its dot-slugified id. When `ROADMAP_MODE=true` these are the two `--phase-aware`-derived files under `.aimi/tasks/${featureSlug}/${PHASE_DIR}/` carrying a single `tasks` segment (see Phase 3e). Behavior here is unchanged from before; only the source of the two paths is. `baseRef` is one value across both files: this axis is by definition a single repository, so `git rev-parse HEAD` in `$AIMI_ROOT` answers for each.
 - **PROJECT axis** (`MERGE_RETURN` is the `[{path, project, branchName, storyCount}, ...]` array — 2 or more distinct `.project` values, i.e. multi-repo): iterate every entry. Patch the file at `.path`, assigning the per-project `branchName` derived by the rule above from that entry's own `.project` / slug, validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before the write. Each entry also carries its **own** `baseRef` — `git rev-parse HEAD` run in that entry's own `PROJECT_ROOT`, the value the per-project base-branch block above already resolves for its `detect-default-branch` call — because on this axis every file names a different repository and one global SHA would be wrong for N−1 of them. Omit the key on any entry whose `git rev-parse HEAD` fails rather than borrowing a sibling's. An entry whose `.storyCount` is `0` is still a real written file — patch it like any other.
@@ -2901,6 +3051,7 @@ Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `typ
     "createdAt": "YYYY-MM-DD (required)",
     "baseRef": "string (optional, 40-char commit SHA this file's stories were planned against — git rev-parse HEAD in the repository they target; on a PROJECT-axis split each file carries its own repo's SHA; omitted entirely when no repository root resolves or the command fails)",
     "pluginVersion": "string (optional, the plugin version that wrote this file — what aimi-cli.sh version printed for the install that ran /aimi:plan; one shared value patched identically into every file of a split, never resolved per file; omitted entirely when that verb fails or prints nothing)",
+    "issues": "number[] (optional, the forge-confirmed issue numbers this plan closes — positive integers in ascending order, written from the Issue Reference Confirmation Gate's confirmedIssues[]; one shared value patched identically into every file of a split; omitted entirely when nothing was confirmed, never [] and never null)",
     "planPath": "null (always null for planner-generated)",
     "roadmapPath": "string (optional, present only when this phase was expanded via Rolling-Wave Phase Selection; relative path to the feature's roadmap.json)",
     "phase": {
