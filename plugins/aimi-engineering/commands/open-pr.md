@@ -527,7 +527,7 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 Derive a **feature-level** PR title — one that describes the whole change, not just the first story's slice, and that never leaks an internal `US-NNN` story tag from the per-story commits `/aimi:execute` produces. Three sources, in order of preference:
 
 1. **Tasks metadata title — only when that tasks file is this branch's.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2. It is adopted **only when the same metadata's `branchName` equals `$CURRENT_BRANCH`**: "a tasks file is discoverable" and "this PR is that tasks file's feature" are different claims, and `metadata` answers the session's active tasks file, not this branch's. Opening a PR for one feature while another is the active session — the ordinary state after switching work — otherwise titles this PR after a feature it shares no commit with, and the title is the one part of a PR nobody re-reads against the diff. A mismatch falls through to source 2, which is derived from this branch's own commits and so cannot describe anything else.
-2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
+2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing `[US-001]` — the form the execute flow emits most often — or ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
 3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
@@ -555,6 +555,7 @@ else
   PR_TITLE=$(git log "$BASE_BRANCH".."$CURRENT_BRANCH" --reverse --pretty=format:'%s' --no-merges | head -1)
   PR_TITLE=$(printf '%s' "$PR_TITLE" | sed -E \
     -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+    -e 's/[[:space:]]*\[(Story[[:space:]]+)?US-[0-9]{3}[a-z]?\][[:space:]]*$//' \
     -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
   # Source 3: branch name when there are no commits ahead of base.
   if [ -z "$PR_TITLE" ]; then
@@ -580,11 +581,12 @@ Build the description from git state with three core sections:
 - **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
 
-**Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets or the **Summary** subject-fallback, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
+**Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets or the **Summary** subject-fallback, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
 
 ```bash
 s_clean=$(printf '%s' "$s" | sed -E \
   -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+  -e 's/[[:space:]]*\[(Story[[:space:]]+)?US-[0-9]{3}[a-z]?\][[:space:]]*$//' \
   -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
 ```
 
