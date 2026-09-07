@@ -3391,12 +3391,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     the four lines it costs to avoid.
 
     The SEVENTH arrived with verify-probe's `--previous-file`: a PRIOR run's
-    own JSON array, named by a path bash already ran through
-    validate_path_in_project like --tasks-file, and read by
-    _read_previous_probe. It degrades to `None` on ANY failure -- missing,
-    unreadable, not JSON, not a list -- rather than raising, because this read
-    backs a diagnostic comparison layered on top of `discriminates`, never a
-    gate, and a bad --previous-file must not be why the probe itself refuses.
+    own JSON array, named by a path bash confines with the same rule as
+    --tasks-file -- path_within_project, not the fatal validate_path_in_project
+    wrapper, since a refused --previous-file must degrade the probe rather
+    than kill it -- and read by _read_previous_probe. It degrades to `None`
+    on ANY failure -- missing, unreadable, not JSON, not a list -- rather than
+    raising, because this read backs a diagnostic comparison layered on top of
+    `discriminates`, never a gate, and a bad --previous-file must not be why
+    the probe itself refuses.
 
     The single BYTE-writing path is write_docs_atomically, a NamedTemporaryFile
     in the TARGET's own directory followed by os.replace -- never a
@@ -5124,17 +5126,21 @@ def test_the_probe_wrapper_crosses_once_takes_no_lock_and_runs_the_same_gates():
     the story is in it -- and adds exactly one thing, the caller's directory.
     Nothing here reads the document, and a reader takes no lock.
 
-    `--previous-file` is a CLI argument like `--tasks-file`, so it goes
-    through `validate_path_in_project` too -- the count of two below is what
-    tells "both paths confined" from "one of them forgotten"."""
+    `--previous-file` is a CLI argument like `--tasks-file`, so it is confined
+    by the same RULE -- but through `path_within_project`, the silent
+    predicate `validate_path_in_project` shares, since a refused
+    `--previous-file` must degrade the probe rather than kill it. The two
+    assertions below are what tells "both paths confined" from "one of them
+    forgotten"."""
     body = _executable(dict(_wrappers())["cmd_verify_probe"])
     assert "jq " not in body and "jq(" not in body
     assert body.count(_TASKS_CROSSING) == 1
     assert "_lock" not in body, "a reader takes no lock"
-    for kept in ("validate_story_id", "validate_path_in_project", "get_tasks_file",
-                 "validate_story_exists", "check_python3", "--previous-file"):
+    for kept in ("validate_story_id", "validate_path_in_project", "path_within_project",
+                 "get_tasks_file", "validate_story_exists", "check_python3", "--previous-file"):
         assert kept in body, kept
-    assert body.count("validate_path_in_project") == 2, "tasks_file and previous_file"
+    assert body.count("validate_path_in_project") == 1, "tasks_file only -- previous_file " \
+        "now degrades via path_within_project rather than the fatal wrapper"
     assert 'AIMI_INVOCATION_DIR:-$PWD' in body
 
 
@@ -5259,6 +5265,54 @@ def test_an_unreadable_or_malformed_previous_file_degrades_to_no_comparison(tmp_
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)[0]["unsatisfiable"] is False
+
+
+def test_a_previous_file_outside_the_project_degrades_to_no_comparison(tmp_path):
+    """The sibling above covers a `--previous-file` that exists, is inside the
+    project and carries invalid content. This one is the other end: readable
+    or not, valid JSON or not, it never gets that far, because bash confines
+    it before python3 is ever started. Same guardrail, different boundary."""
+    root, probed = _probe(tmp_path, "false\n")
+    assert probed[0]["unsatisfiable"] is False
+    outside = os.path.join(os.path.dirname(root), "outside-141.json")
+    proc = subprocess.run(
+        ["bash", CLI, "verify-probe", "US-001", "--tasks-file",
+         os.path.join(root, ".aimi", "tasks", "p-tasks.json"),
+         "--previous-file", outside],
+        cwd=root,
+        env=_isolated_env(os.path.dirname(root)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result and all(entry["unsatisfiable"] is False for entry in result)
+    assert "--previous-file" in proc.stderr, "the refusal must name the flag it discarded"
+
+
+def test_a_previous_file_with_a_missing_parent_degrades_to_no_comparison(tmp_path):
+    """The third way a `--previous-file` can be bad: inside the project, but
+    its own parent directory does not exist either -- the exact shape that
+    used to abort the whole probe, because cmd_verify_probe pre-resolved the
+    flag with resolve_path (pure realpath, which dies on a missing path)
+    before validate_path_in_project's own guard ever got a chance to run."""
+    root, probed = _probe(tmp_path, "false\n")
+    assert probed[0]["unsatisfiable"] is False
+    missing_parent = os.path.join(root, "no-such-dir-141", "x.json")
+    proc = subprocess.run(
+        ["bash", CLI, "verify-probe", "US-001", "--tasks-file",
+         os.path.join(root, ".aimi", "tasks", "p-tasks.json"),
+         "--previous-file", missing_parent],
+        cwd=root,
+        env=_isolated_env(os.path.dirname(root)),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result and all(entry["unsatisfiable"] is False for entry in result)
 
 
 def test_match_previous_never_touches_discriminates_directly():
