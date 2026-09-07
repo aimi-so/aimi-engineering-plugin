@@ -4426,9 +4426,49 @@ _VERIFY_BOUND_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*);?$")
 # the caller's tree. Two strings buy the whole family.
 _VERIFY_CHDIR = ("cd", "pushd", "popd")
 
-# A verify is allowed to be a whole test suite, so this is generous. A segment
-# that outlives it is reported at 124 -- `timeout`'s own status -- which reads
-# as discriminating, the safe direction: a probe must never invent dead weight.
+# A verify is allowed to be a whole test suite, so this default is generous.
+# It is what `probe_verify` applies when its caller names no `timeout`, and it
+# is PER SEGMENT rather than over the whole probe.
+#
+# THE VERDICT A TIMEOUT GETS WAS REVERSED, AND THE OLD REASONING IS KEPT HERE
+# RATHER THAN DELETED, BECAUSE IT WAS SOUND WHEN IT WAS WRITTEN. It said: a
+# segment that outlives this is reported at 124 -- `timeout`'s own status --
+# which reads as discriminating, the safe direction, since a probe must never
+# invent dead weight. That was the best answer AVAILABLE while `discriminates`
+# had two values: between `true` and `false`, only `false` tells a reader to
+# stop looking, so `true` was the wrong answer that costs least. US-001 added
+# the third value, and a third option does not merely widen the choice here --
+# it changes which answer is best. A TIMEOUT MEASURED NOTHING, so `None` is
+# both honest and safe at once, and safe-but-wrong is no longer the best on
+# offer. A timed-out segment now carries `discriminates: None` and `exit:
+# None`, the same shape as a segment whose shell state the prelude never
+# reproduced, for the same reason: neither of them ran.
+#
+# WHICH CEILING ACTUALLY BIT -- measured 2026-09-07, because the record that
+# asked for this fix and this constant disagreed, and the two imply different
+# fixes. `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` says eight
+# stories blew a FIVE-minute ceiling; this constant is 600 seconds. The
+# five-minute one is not this constant, and it is not the plugin's either --
+# there is no 300-second ceiling anywhere under `scripts/`, `hooks/`,
+# `commands/` or `skills/`. It is the HARNESS's wall clock around the whole
+# verb, and since this ceiling is per segment the two never meet: what blew
+# was the SUM of the segments while every individual one finished. This
+# plugin's own recorded probe output says so directly -- every suite segment
+# in `.aimi/tasks/verify-probe-US-00{1,2}.json` carries `exit: 0`, so each RAN
+# TO COMPLETION under this ceiling. Timed on this tree:
+# `test-command-blocks.sh` 4s, `test-command-size.sh` 1s,
+# `pytest scripts/tests/` 435s, `test-aimi-cli.sh` 292s -- every one
+# of them under 600 and the last two each a large share of five minutes on
+# their own. The single `exit: 124` in the corpus
+# (`verify-probe-US-003.json`) is this ceiling firing on an ACCIDENT rather
+# than on a suite: a bare `import` line cut out of a Python heredoc, which
+# bash resolved to ImageMagick's blocking screen-capture `import`.
+#
+# WHAT THAT MEASUREMENT DECIDED: lowering this number would not have helped,
+# which is why it did not move. A per-segment cap cannot bound a sum of
+# segments none of which reaches it. What bounds the sum is running fewer of
+# them -- `skip_matching` -- and a cap the CALLER picks for its own budget,
+# which is why `timeout` became a parameter while this default stayed 600.
 _VERIFY_TIMEOUT = 600
 
 # The name of the environment variable that says "a verify-probe is already
@@ -4835,7 +4875,7 @@ def verify_changes_directory(segment):
     return bool(words) and words[0] in _VERIFY_CHDIR
 
 
-def probe_verify(text, cwd):
+def probe_verify(text, cwd, skip_matching=None, timeout=None):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
     THE ASSIGNMENTS ARE CARRIED, THE ASSERTIONS ARE NOT. A verify names its own
@@ -4925,6 +4965,45 @@ def probe_verify(text, cwd):
     downstream of one of those still gets an ordinary verdict here. They are
     deliberately deferred rather than overlooked -- see this plan's
     `metadata.decisions`, anchor `scope:snapshot-deferred`.
+
+    TWO WAYS TO NOT RUN A SEGMENT ON PURPOSE, AND BOTH ANSWER `None`.
+    `skip_matching` is a regular expression: a segment it matches is NOT run,
+    stays in the report, and carries `discriminates: None` with
+    `skipped: True`. `timeout` is the per-segment ceiling: a segment that
+    outlives it carries `discriminates: None` with `timedOut: True` and the
+    cap that was applied. Both default to today's behaviour -- nothing
+    skipped, and `_VERIFY_TIMEOUT` -- because a caller passing neither must
+    get exactly the answer it got before either existed.
+
+    THEY ARE THE PARAGRAPH ABOVE RESTATED: a segment that did not run cannot
+    be reported as though it had. Skipping is the deliberate case and timing
+    out the accidental one, and until now they landed on OPPOSITE answers --
+    a skipped segment did not exist at all, and a timed-out one was reported
+    at status 124, which reads as a verdict. Routing both to `None` is what
+    makes the report honest. Dropping a skipped segment instead would be its
+    own lie in the other direction: it would make "the caller declined to
+    measure this" indistinguishable from "no such segment is in the verify".
+
+    WHAT `skip_matching` CANNOT REACH IS THE PRELUDE, and that is load-bearing
+    rather than incidental. The pattern is tested only against segments that
+    have already survived the `||`, the `cd` and the assignment branches, so a
+    regex broad enough to match a `cd` or an assignment still leaves it
+    CARRIED. A skip that could drop a `cd` would move every later segment into
+    the caller's own tree -- precisely the defect the carried prelude exists to
+    prevent -- and would do it at the request of someone who only meant to
+    save time.
+
+    THIS IS A MITIGATION AND NOT A CURE, and saying so is part of the fix.
+    `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` records that
+    probing a verify which ends in a suite costs that suite's whole run time
+    once per story. `skip_matching` gives the caller a way to AVOID that cost;
+    it does not remove it, and nothing here makes probing a segment cheaper.
+    The record was itself written because a tool sold as a cheap warning
+    turned out to cost a second full run, so a fix that overstated itself
+    would repeat the defect. The pivot that would actually close it -- reusing
+    the single pre-run the story executor already performs, so a segment that
+    has already run is never re-run -- changes the contract between the
+    executor and this verb and is deliberately left to its own story.
     """
     # THE RE-ENTRANCY MARKER GOES IN FIRST, before `assigned` is seeded, and
     # the order is load-bearing rather than tidy. It is put into THIS process's
@@ -4941,7 +5020,7 @@ def probe_verify(text, cwd):
     previous_marker = os.environ.get(VERIFY_PROBE_ACTIVE_ENV)
     os.environ[VERIFY_PROBE_ACTIVE_ENV] = "1"
     try:
-        return _probe_verify_segments(text, cwd)
+        return _probe_verify_segments(text, cwd, skip_matching, timeout)
     finally:
         if previous_marker is None:
             os.environ.pop(VERIFY_PROBE_ACTIVE_ENV, None)
@@ -4949,12 +5028,22 @@ def probe_verify(text, cwd):
             os.environ[VERIFY_PROBE_ACTIVE_ENV] = previous_marker
 
 
-def _probe_verify_segments(text, cwd):
+def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     """`probe_verify`'s loop, split out so the marker above owns one try/finally
     rather than wrapping a hundred lines of body. See that function's docstring
     for every rule this implements; nothing is decided here."""
     results = []
     prelude = []
+    # Compiled once for the whole run rather than once per segment. A pattern
+    # that does not compile raises HERE -- inside `probe_verify`'s
+    # try/finally, so the re-entrancy marker is still restored on the way out.
+    # The CLI never reaches this raise: `op_verify_probe` refuses a bad regex
+    # by hand, so a mistyped flag gets a message rather than a traceback.
+    skip_pattern = re.compile(skip_matching) if skip_matching else None
+    # `None` means "the caller named no ceiling", which is not the same as a
+    # caller naming zero -- so the default is resolved by an `is None` test
+    # and never by truthiness.
+    limit = _VERIFY_TIMEOUT if timeout is None else timeout
     # The state a segment can count on: what the prelude has assigned so far,
     # seeded with the environment this process already holds -- `subprocess.run`
     # hands that same environment to every segment, so `$HOME` and an exported
@@ -4980,6 +5069,26 @@ def _probe_verify_segments(text, cwd):
                 prelude.append(segment)
                 assigned |= verify_assigns(segment)
             continue
+        # THE SKIP IS TESTED HERE AND NOWHERE EARLIER -- after `||`, after the
+        # `cd` and after the assignments -- so the pattern can only ever reach
+        # a segment that would otherwise have been RUN and REPORTED. See
+        # probe_verify's docstring for why a skip able to reach the prelude
+        # would be a defect rather than a feature.
+        #
+        # It is also tested BEFORE the missing-state check below. Both answer
+        # `None`, but for different reasons, and only one of them is true
+        # here: the caller said do not run this. Naming an `unresolvedState`
+        # on a segment nobody was going to run would report the wrong cause.
+        if skip_pattern is not None and skip_pattern.search(segment):
+            results.append(
+                {
+                    "segment": segment,
+                    "exit": None,
+                    "discriminates": None,
+                    "skipped": True,
+                }
+            )
+            continue
         # The segment's own bindings count as provided: `for f in a b; do echo
         # "$f"; done` reads a name it binds itself, one segment, no prelude
         # needed. The shape this whole branch exists for is the other one --
@@ -5003,11 +5112,27 @@ def _probe_verify_segments(text, cwd):
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=_VERIFY_TIMEOUT,
+                timeout=limit,
             )
             status = completed.returncode
         except subprocess.TimeoutExpired:
-            status = 124  # `timeout`'s own status for a command that outlived it
+            # NOT a verdict, and no longer 124. A run that was cut off
+            # measured nothing, so it gets the third answer rather than the
+            # least-bad of two wrong ones -- see _VERIFY_TIMEOUT for what
+            # changed and why the old reasoning was right until it wasn't.
+            # `timeoutSeconds` is carried because a bare `timedOut: true`
+            # would send its reader into this file to find out what cap it
+            # missed, and the cap is the caller's to choose.
+            results.append(
+                {
+                    "segment": segment,
+                    "exit": None,
+                    "discriminates": None,
+                    "timedOut": True,
+                    "timeoutSeconds": limit,
+                }
+            )
+            continue
         except OSError as err:
             status = 127  # no bash, or no such cwd -- "command not found"
             del err
@@ -5107,6 +5232,14 @@ def op_verify_probe(argv):
     subprocess is spawned and so nothing recurses. What loops is the verb
     reaching the shell and the shell reaching the verb, so the verb is what
     refuses.
+
+    `--skip-matching <regex>` IS EXPOSED AND `timeout` IS NOT, deliberately.
+    The skip is the one of the two that a caller can decide from OUTSIDE a
+    run: it names segments already known to be expensive -- a verify ending in
+    a suite -- and the answer it buys is the same on every host. A per-segment
+    ceiling is a budget, and this verb has no way to know the caller's. The
+    parameter is there for a caller driving `probe_verify` in Python, which is
+    the same escape hatch the re-entrancy refusal points at.
     """
     if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
         die(_VERIFY_PROBE_REENTRY)
@@ -5114,11 +5247,25 @@ def op_verify_probe(argv):
     story_id = _flag(argv, "--story-id")
     cwd = _flag(argv, "--cwd")
     previous_file = _flag(argv, "--previous-file")
+    skip_matching = _flag(argv, "--skip-matching")
     if not path or story_id is None:
         die(
             "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
-            "[--cwd <dir>] [--previous-file <path>]"
+            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>]"
         )
+    # The regex is validated HERE rather than left to `re.compile` inside the
+    # probe, because this is the argument-handling half of the verb: a caller
+    # who mistyped a pattern is owed the same one-line refusal every other bad
+    # flag gets. A traceback out of a tool whose whole job is to emit warnings
+    # would read as the tool being broken.
+    if skip_matching is not None:
+        try:
+            re.compile(skip_matching)
+        except re.error as err:
+            die(
+                "Error: verify-probe: --skip-matching is not a valid regular "
+                "expression: %s" % err
+            )
     text = ""
     for doc in read_docs(path, "verify-probe"):
         for story in stories_with_id(doc, story_id):
@@ -5129,7 +5276,7 @@ def op_verify_probe(argv):
                 break
         if text:
             break
-    results = probe_verify(text, cwd or os.getcwd())
+    results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
     _emit(results)
     return 0

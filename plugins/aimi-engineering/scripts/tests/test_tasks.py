@@ -4932,7 +4932,7 @@ def test_a_missing_branchname_is_still_the_word_null():
 # branch is never run.
 
 
-def _probe(tmp_path, verify, files=(), cwd=None, previous=None):
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=()):
     """A one-story project whose story carries `verify`, probed through the CLI.
 
     `files` are created relative to the project root before the run, and `cwd`
@@ -4941,7 +4941,10 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None):
     JSON-serializable array (typically a prior call's own `probed` return
     value) written to a file inside the project and passed as
     `--previous-file`, the same way the story-executor hands the
-    pre-implementation run's output to the post-implementation one.
+    pre-implementation run's output to the post-implementation one. `flags`
+    are appended to the command line verbatim, for a flag with no fixture of
+    its own -- `--skip-matching` is a pattern rather than a path or a file, so
+    there is nothing for this helper to create on its behalf.
     """
     base = os.path.realpath(str(tmp_path))
     root = os.path.join(base, "proj")
@@ -4976,6 +4979,7 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None):
         with open(previous_file, "w", encoding="utf-8") as handle:
             json.dump(previous, handle)
         args += ["--previous-file", previous_file]
+    args += list(flags)
     proc = subprocess.run(
         args,
         cwd=os.path.join(root, cwd) if cwd else root,
@@ -5890,6 +5894,181 @@ def test_the_guard_catches_the_mutual_case_no_id_check_could_see(tmp_path):
     assert nested.returncode != 0
     assert T.VERIFY_PROBE_ACTIVE_ENV in nested.stderr
     assert nested.stdout.strip() == "", "a refusal must emit no probe array"
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: the segment that was NOT RUN, on purpose (US-004, plan #149)
+# ---------------------------------------------------------------------------
+#
+# Two halves, one statement: a segment that did not run cannot be reported as
+# though it had.
+#
+# The DELIBERATE half is cost. `.aimi/known-gaps/2026-09-03-US-004-verify-probe
+# -cost.md` records that probing a verify which ends in a suite costs that
+# suite's whole run time once per story, with no way to decline it. The
+# ACCIDENTAL half is a segment outliving the ceiling: it was reported at status
+# 124 with `discriminates: True` -- the least-bad answer available while
+# `discriminates` had two values, since `False` is the one that tells a reader
+# to stop looking. US-001 added the third value and both halves now answer
+# `None`.
+#
+# WHICH CEILING ACTUALLY BIT, measured 2026-09-07 and recorded here because the
+# tests are where the next reader checks the claim. The record says eight
+# stories blew a FIVE-minute ceiling; `_VERIFY_TIMEOUT` is 600 seconds, and no
+# 300-second constant exists anywhere in this plugin -- so the five minutes is
+# the HARNESS's wall clock around the whole verb, while this ceiling is per
+# segment. The two never meet: what blew was the SUM. Timed on this tree,
+# `pytest scripts/tests/` is 435s and `test-aimi-cli.sh` 292s -- each
+# comfortably under 600, each already most of five minutes on its own, and the
+# suite segments in `.aimi/tasks/verify-probe-US-00{1,2}.json` all carry
+# `exit: 0`, i.e. they ran to completion. That is why the default did not move:
+# a per-segment cap cannot bound a sum of segments none of which reaches it.
+# What bounds the sum is running fewer of them.
+
+
+def test_a_skipped_segment_stays_in_the_report_carrying_no_verdict(tmp_path):
+    """AC: a segment matching `skip_matching` is not run, is NOT dropped, and
+    carries `discriminates: None` plus a field saying it was skipped.
+
+    Staying in the report is the half worth asserting. Dropping it would be a
+    lie in the opposite direction from the one this story fixes: it would make
+    "the caller declined to measure this" indistinguishable from "no such
+    segment is in the verify", and a reader counting segments would never know
+    the difference."""
+    probed = T.probe_verify(
+        "grep -q x /dev/null\ntrue\n", str(tmp_path), skip_matching=r"^grep"
+    )
+    assert [entry["segment"] for entry in probed] == ["grep -q x /dev/null", "true"]
+    assert probed[0]["discriminates"] is None
+    assert probed[0]["exit"] is None, "a segment that was not run has no status"
+    assert probed[0]["skipped"] is True
+
+
+def test_a_segment_the_skip_pattern_misses_keeps_its_verdict_untouched(tmp_path):
+    """AC: a segment matching nothing and finishing in time is byte-for-byte
+    what it was. The skip is opt-in per SEGMENT, not a mode the whole run
+    enters -- one matching segment must not soften the verdict on its
+    neighbours."""
+    probed = T.probe_verify(
+        "grep -q x /dev/null\ntrue\n", str(tmp_path), skip_matching=r"^grep"
+    )
+    kept = probed[1]
+    assert kept == {"segment": "true", "exit": 0, "discriminates": False}
+
+
+def test_a_segment_that_outlives_its_cap_gets_no_verdict_rather_than_124(tmp_path):
+    """AC: a timed-out segment carries `discriminates: None` rather than a
+    verdict.
+
+    The reversal this story is named for. The old answer was `exit: 124,
+    discriminates: True` and its reasoning was sound while `None` did not
+    exist -- of two wrong answers, the one that does not stop a reader looking
+    is the safer. With three answers available, the run that was CUT OFF
+    measured nothing, and saying so is both honest and safe at once."""
+    probed = T.probe_verify("sleep 5\n", str(tmp_path), timeout=1)
+    assert len(probed) == 1, "the timed-out segment is reported, not dropped"
+    assert probed[0]["discriminates"] is None
+    assert probed[0]["exit"] is None
+    assert probed[0]["timedOut"] is True
+    assert probed[0]["timeoutSeconds"] == 1, "the cap it missed is named"
+
+
+def test_the_default_call_skips_nothing_and_keeps_the_six_hundred_second_ceiling(
+    tmp_path,
+):
+    """AC: called with neither option, `probe_verify` behaves exactly as it did,
+    ceiling included. The defaults ARE the compatibility contract.
+
+    `_VERIFY_TIMEOUT` is asserted here rather than left implicit because the
+    measurement above is the reason it did not move: it is the number a later
+    reader is most likely to lower "to fix the cost", and lowering it fixes
+    nothing -- the ceiling that bit was never this one."""
+    parameters = inspect.signature(T.probe_verify).parameters
+    assert parameters["skip_matching"].default is None
+    assert parameters["timeout"].default is None
+    assert T._VERIFY_TIMEOUT == 600
+    probed = T.probe_verify("grep -q x /dev/null\ntrue\n", str(tmp_path))
+    assert probed == [
+        {"segment": "grep -q x /dev/null", "exit": 1, "discriminates": True},
+        {"segment": "true", "exit": 0, "discriminates": False},
+    ]
+
+
+def test_the_skip_pattern_cannot_reach_the_prelude(tmp_path):
+    """The property that makes the flag safe to hand to a caller in a hurry.
+
+    A pattern matching a `cd` or an assignment must still leave it CARRIED: a
+    skip able to drop a `cd` would run every later segment in the caller's own
+    tree -- the exact defect the carried prelude exists to prevent -- at the
+    request of someone who only meant to save time. Asserted through
+    consequence rather than by inspection: the `grep` runs and PASSES, which
+    is only possible if `DIR=sub` and `cd "$DIR"` both survived the pattern
+    that matches them."""
+    os.makedirs(os.path.join(str(tmp_path), "sub"))
+    with open(os.path.join(str(tmp_path), "sub", "f.txt"), "w") as handle:
+        handle.write("marker\n")
+    probed = T.probe_verify(
+        'DIR=sub\ncd "$DIR"\ngrep -q marker f.txt\n',
+        str(tmp_path),
+        skip_matching=r"^(DIR=|cd )",
+    )
+    assert [entry["segment"] for entry in probed] == ["grep -q marker f.txt"]
+    assert probed[0]["discriminates"] is False
+    assert "skipped" not in probed[0]
+
+
+def test_a_segment_that_did_not_run_is_never_called_unsatisfiable(tmp_path):
+    """`unsatisfiable` means non-zero in BOTH runs, and neither a skip nor a
+    timeout is a non-zero run -- it is no run at all. Both carry `exit: None`
+    for exactly this reason, which is the same reason the missing-shell-state
+    verdict does, so `_match_previous` needs no case of its own for them.
+
+    Without this, a caller who skipped an expensive segment on both runs would
+    get it back labelled "check the harness, not the code" -- a confident
+    verdict manufactured out of two measurements nobody took."""
+    for withheld in ({"skipped": True}, {"timedOut": True, "timeoutSeconds": 1}):
+        current = [dict({"segment": "x", "exit": None, "discriminates": None}, **withheld)]
+        T._match_previous([{"segment": "x", "exit": 1}], current)
+        assert current[0]["unsatisfiable"] is False, withheld
+        assert current[0]["discriminates"] is None, withheld
+
+
+def test_the_cli_passes_skip_matching_through_to_the_probe(tmp_path):
+    """AC: `aimi-cli.sh` parses `--skip-matching` and passes it through. The
+    executor's step 1.5 is this verb's only caller, so a parameter the CLI
+    cannot reach is a parameter nobody can use."""
+    _, probed = _probe(
+        tmp_path,
+        "grep -q x /dev/null\ntrue\n",
+        flags=["--skip-matching", "^grep"],
+    )
+    assert [entry["segment"] for entry in probed] == ["grep -q x /dev/null", "true"]
+    assert probed[0]["discriminates"] is None
+    assert probed[0]["skipped"] is True
+    assert probed[1]["discriminates"] is False, "the neighbour keeps its verdict"
+
+
+def test_a_skip_pattern_that_is_not_a_regex_is_refused_before_the_file_is_read(capsys):
+    """A mistyped pattern gets the one-line refusal every other bad flag gets,
+    not a traceback out of a tool whose whole job is emitting warnings.
+
+    The tasks file named here does not exist, so reaching the read would die
+    with a different message -- which is what makes this an ordering assertion
+    as well as a message one."""
+    with pytest.raises(SystemExit):
+        T.op_verify_probe(
+            [
+                "--tasks-file",
+                "/nao/existe.json",
+                "--story-id",
+                "US-001",
+                "--skip-matching",
+                "(unclosed",
+            ]
+        )
+    err = capsys.readouterr().err
+    assert "--skip-matching" in err
+    assert "regular expression" in err
 
 
 # ---------------------------------------------------------------------------

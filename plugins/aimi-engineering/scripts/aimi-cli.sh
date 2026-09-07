@@ -1867,14 +1867,23 @@ cmd_get_story_context() {
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 #        --previous-file <path> (optional; a prior run's own output --
 #        discarded with a stderr warning, never fatal, if it fails confinement)
+#        --skip-matching <regex> (optional; a segment the regex matches is not
+#        run and is reported discriminates:null with skipped:true). It is NOT
+#        run through validate_path_in_project and must not be: it is a pattern,
+#        not a path, so the confinement rule has nothing to say about it. What
+#        it does need is to BE a regex, and that is checked in tasks.py where
+#        the regex engine is, rather than reimplemented here in bash.
 cmd_verify_probe() {
-  local tasks_file positional=() previous_file="" remaining=()
+  local tasks_file positional=() previous_file="" skip_matching="" remaining=()
   local args=("$@")
   local i=0 n=${#args[@]}
   while [ "$i" -lt "$n" ]; do
     if [ "${args[$i]}" = "--previous-file" ]; then
       i=$((i + 1))
       previous_file="${args[$i]:-}"
+    elif [ "${args[$i]}" = "--skip-matching" ]; then
+      i=$((i + 1))
+      skip_matching="${args[$i]:-}"
     else
       remaining+=("${args[$i]}")
     fi
@@ -1884,7 +1893,7 @@ cmd_verify_probe() {
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>]" >&2
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>] [--skip-matching <regex>]" >&2
     exit 1
   fi
 
@@ -1898,6 +1907,11 @@ cmd_verify_probe() {
   fi
   validate_story_exists "$story_id" "$tasks_file"
 
+  local skip_args=()
+  if [ -n "$skip_matching" ]; then
+    skip_args=(--skip-matching "$skip_matching")
+  fi
+
   local previous_args=()
   if [ -n "$previous_file" ]; then
     if path_within_project "$previous_file"; then
@@ -1910,7 +1924,7 @@ cmd_verify_probe() {
   check_python3
   python3 "$(_aimi_tasks_py)" verify-probe \
     --tasks-file "$tasks_file" --story-id "$story_id" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}"
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}"
 }
 
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
@@ -15334,6 +15348,7 @@ COMMANDS:
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
     verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
+                 [--skip-matching <regex>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
                               report which ones already pass. Output: a JSON array of
                               {segment, exit, discriminates, unsatisfiable}; discriminates is
@@ -15346,6 +15361,14 @@ COMMANDS:
                               run in the CALLER's directory, in order, carrying the verify's
                               own variable assignments; `set` lines, comments and assignments
                               are not reported. An absent or empty verify is [] at exit 0.
+                              --skip-matching names segments NOT to run: a match stays in the
+                              report carrying discriminates:null and skipped:true, never
+                              dropped, so a skip is never mistaken for a segment that does not
+                              exist. Reach for it when a verify ends in a suite whose cost you
+                              already know -- it AVOIDS that cost rather than removing it, and
+                              every skipped segment is one this probe can no longer warn about.
+                              A segment that outlives the per-segment ceiling answers the same
+                              null: a run that was cut off measured nothing.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
