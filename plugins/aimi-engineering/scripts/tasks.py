@@ -4522,6 +4522,78 @@ def _verify_at_word_start(buf):
     return i < 0 or buf[i] in ";&|(){}\n<>"
 
 
+def _verify_heredoc_opener(text, i):
+    """The `<<WORD` / `<<-WORD` starting at `i`, as `(delimiter, strip_tabs,
+    end)`, or None when what is there is not a heredoc redirect at all.
+
+    Only the SHAPE is decided here: `<<`, an optional `-`, optional blanks and
+    then a word, whose quotes are removed the way bash removes them -- `<<'X'`,
+    `<<"X"` and `<<\\X` all name the delimiter `X`, and the quoting decides how
+    the BODY is expanded, which is not this scanner's business. Whether the
+    position even admits a redirect -- not inside quotes, not inside `$(( ))`
+    where `<<` is a left shift -- is the caller's to know, because the caller
+    is the only thing that tracks it.
+    """
+    n = len(text)
+    j = i + 2
+    strip_tabs = False
+    if j < n and text[j] == "-":
+        strip_tabs = True
+        j += 1
+    while j < n and text[j] in " \t":
+        j += 1
+    delimiter = []
+    while j < n:
+        ch = text[j]
+        if ch in " \t\n;&|<>()":
+            break
+        if ch in ("'", '"'):
+            close = text.find(ch, j + 1)
+            if close == -1:
+                return None
+            delimiter.append(text[j + 1 : close])
+            j = close + 1
+            continue
+        if ch == "\\" and j + 1 < n:
+            delimiter.append(text[j + 1])
+            j += 2
+            continue
+        delimiter.append(ch)
+        j += 1
+    word = "".join(delimiter)
+    if not word:
+        return None
+    return word, strip_tabs, j
+
+
+def _verify_take_heredoc_bodies(text, i, heredocs, buf):
+    """Every pending heredoc body from `i`, appended to `buf` verbatim, and the
+    index just past the last terminator consumed.
+
+    IN ORDER, because `cmd <<A <<B` reads A's body first and then B's. Each one
+    ends at a line equal to its own delimiter -- with leading TABS, and never
+    spaces, stripped first for the `<<-` form, which is the one detail that
+    fails loudly rather than quietly when it is wrong: a terminator that never
+    matches swallows the rest of the script. An unterminated heredoc takes
+    everything that is left, which is what bash does with one too.
+    """
+    n = len(text)
+    while heredocs:
+        delimiter, strip_tabs = heredocs.pop(0)
+        while i < n:
+            end = text.find("\n", i)
+            stop = n if end == -1 else end + 1
+            line = text[i:stop]
+            buf.append(line)
+            i = stop
+            candidate = line[:-1] if line.endswith("\n") else line
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                break
+    return i
+
+
 def verify_segments(text):
     """A verify script cut into its top-level segments, each paired with the
     separator that INTRODUCED it -- "" for the first and for anything after a
@@ -4532,6 +4604,20 @@ def verify_segments(text):
     quotes, a `$(...)` or backtick substitution, a `{ ...; }` group, a `(...)`
     subshell or a compound command is not a separator at all. Comments are
     dropped whole, so a `#` line never becomes a segment that trivially passes.
+
+    A HEREDOC IS THE ONE SHAPE WHOSE CONTENT IS NOT SHELL AT ALL, and it is
+    tracked here beside those quoting states rather than left to them. `cmd
+    <<DELIM` -- in every form bash accepts, `<<'X'`, `<<"X"`, `<<X` and the
+    tab-stripping `<<-X` -- keeps every line up to and INCLUDING its terminator
+    inside the segment that opened it, and the terminator is never a segment of
+    its own. The body is Python, or SQL, or a patch, and each newline and `;`
+    in it would otherwise cut it into fragments handed to a shell as if they
+    were commands. That is not a cosmetic miscount: `_VERIFY_TIMEOUT`'s note
+    records where it already led -- a bare `import` line cut out of a Python
+    heredoc, which bash resolved to ImageMagick's blocking screen-capture
+    `import`. The `<<` of an arithmetic `$(( a << b ))` is a left shift and is
+    deliberately NOT one, which is the single position this scanner has to
+    tell apart, and the only reason it tracks arithmetic at all.
 
     THE SEPARATOR IS CARRIED because `||` means something the other three do
     not: what follows it is the failure branch of the segment before it, which
@@ -4550,6 +4636,11 @@ def verify_segments(text):
     parens = 0
     braces = 0
     keywords = 0
+    # Delimiters whose bodies have been announced but not yet read, in the
+    # order bash reads them, and the paren depths at which an arithmetic
+    # context opened. The second exists only to answer the `<<` question.
+    heredocs = []
+    arith = []
     i = 0
     n = len(text)
 
@@ -4599,6 +4690,19 @@ def verify_segments(text):
                 i += 1
             continue
 
+        if text.startswith("$((", i) or text.startswith("((", i):
+            # Arithmetic, remembered as the DEPTH it opened at rather than as
+            # a flag, so nesting closes in the right order. Nothing else
+            # consults it: `((` and `$((` already balanced through the two
+            # branches below, and this one exists so that the `<<` of a left
+            # shift is not read as a heredoc.
+            opener = "$((" if ch == "$" else "(("
+            arith.append(parens)
+            parens += 2
+            buf.append(opener)
+            i += len(opener)
+            continue
+
         if text.startswith("$(", i):
             parens += 1
             buf.append("$(")
@@ -4614,6 +4718,8 @@ def verify_segments(text):
         if ch == ")":
             if parens:
                 parens -= 1
+            while arith and parens <= arith[-1]:
+                arith.pop()
             buf.append(ch)
             i += 1
             continue
@@ -4631,6 +4737,29 @@ def verify_segments(text):
             i += 1
             continue
 
+        if text.startswith("<<<", i) and not arith:
+            # A here-STRING: one line, no body, no terminator. Taken WHOLE
+            # rather than left to fall through a character at a time, because
+            # the `<<` starting at its second character would then be read as
+            # a heredoc opening on the here-string's own operand -- which
+            # swallows the rest of the script as that heredoc's body.
+            buf.append("<<<")
+            i += 3
+            continue
+
+        if text.startswith("<<", i) and not arith:
+            # The redirect itself is appended here; the body waits for the
+            # newline that ends the command, because that is where bash starts
+            # reading it -- `cat <<X > out.txt` and `cat <<A <<B` both keep
+            # announcing on this line.
+            opened = _verify_heredoc_opener(text, i)
+            if opened is not None:
+                delimiter, strip_tabs, j = opened
+                heredocs.append((delimiter, strip_tabs))
+                buf.append(text[i:j])
+                i = j
+                continue
+
         if (ch.isalpha() or ch == "_") and _verify_at_word_start(buf):
             j = i
             while j < n and (text[j].isalnum() or text[j] == "_"):
@@ -4647,17 +4776,28 @@ def verify_segments(text):
         top = quote is None and not backtick and not parens and not braces and not keywords
 
         if text.startswith("&&", i) or text.startswith("||", i):
-            if top:
+            if top and not heredocs:
                 flush(text[i : i + 2])
             else:
                 buf.append(text[i : i + 2])
             i += 2
             continue
 
-        if ch == ";" or ch == "\n":
+        if ch == "\n" and heredocs:
+            # The bodies belong to the command that announced them, so they
+            # are taken BEFORE this newline is allowed to cut anything.
+            buf.append(ch)
+            i = _verify_take_heredoc_bodies(text, i + 1, heredocs, buf)
             if top:
                 flush()
+            continue
+
+        if ch == ";" or ch == "\n":
+            if top and not heredocs:
+                flush()
             else:
+                # `cat <<X; echo` -- the body is still unread, and cutting here
+                # would leave it in the NEXT segment. Neither half would run.
                 buf.append(ch)
             i += 1
             continue
