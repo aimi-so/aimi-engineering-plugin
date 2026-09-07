@@ -532,15 +532,29 @@ Derive a **feature-level** PR title — one that describes the whole change, not
 
 ```bash
 # Source 1: feature-level metadata title (guarded, like Step 4c). The
-# `metadata` subcommand emits the metadata object itself, so the title and the
-# branch are at the top level (`.title`, `.branchName`), not nested under
-# `.metadata`. One call, read twice — the two fields must describe one document.
+# `metadata` subcommand emits the metadata object itself, so the title, the
+# branch and the issue list are at the top level (`.title`, `.branchName`,
+# `.issues`), not nested under `.metadata`. One call, read three times — the
+# three fields must describe one document.
 METADATA_JSON=$($AIMI_CLI metadata 2>/dev/null)
 METADATA_TITLE=$(printf '%s' "$METADATA_JSON" | jq -r '.title // empty' 2>/dev/null)
 METADATA_BRANCH=$(printf '%s' "$METADATA_JSON" | jq -r '.branchName // empty' 2>/dev/null)
+# `.issues` is optional and omitted entirely when nothing was confirmed — never
+# `[]`, never `null` — so `.issues[]?` yields nothing at all in that case and
+# one line per number otherwise. Step 4b renders those lines; see below.
+METADATA_ISSUES=$(printf '%s' "$METADATA_JSON" | jq -r '.issues[]? // empty' 2>/dev/null)
 # Ignore story-merge's pre-patch skeleton placeholder — never a real title.
 if [ "$METADATA_TITLE" = "feat: merged tasks" ]; then
   METADATA_TITLE=""
+fi
+
+# The issue list falls under the same branchName gate the title does, but as its
+# own statement: `.issues` can be present on a document whose `.title` is absent
+# or was emptied by the placeholder case above, and the title's mismatch branch
+# below never runs for such a document.
+if [ -n "$METADATA_ISSUES" ] && [ "$METADATA_BRANCH" != "$CURRENT_BRANCH" ]; then
+  echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.issues names another feature's issues and no Closes line is rendered." >&2
+  METADATA_ISSUES=""
 fi
 
 if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
@@ -573,13 +587,16 @@ Store as `$PR_TITLE`.
 
 **The mismatch branch empties `$METADATA_TITLE` too, not only the placeholder special-case above.** `$PR_TITLE` is not this gate's only consumer — Step 5c's backend issue title reads `$METADATA_TITLE` as well (see Step 4c and Step 5c below), and it never re-checks `branchName` itself. Emptying the variable here, right beside the note that already explains why, means that check never needs writing a second time at the point of use: every downstream reader of `$METADATA_TITLE` sees the same "not this feature" verdict this gate already reached, the same way the placeholder case already made source 2 the answer for both without either consumer needing to know why.
 
+**`$METADATA_ISSUES` gets the same verdict, and it is written as a separate `if` rather than a line inside the title's mismatch branch.** That branch is reached only when `$METADATA_TITLE` was non-empty — it exists to explain a title that was rejected — so a tasks file carrying `issues` but no usable `title` (absent, or emptied by the placeholder case) would sail past it with the wrong feature's issue list intact. The issue gate therefore compares `$METADATA_BRANCH` against `$CURRENT_BRANCH` on its own, and its consequence is heavier than the title's: a wrong title is read once and corrected by hand, while a wrong `Closes` line **shuts a real issue the moment the PR merges** — someone else's work, silently marked done. Both gates ask the same question because `metadata` answers the session's active tasks file rather than this branch's, and the ordinary state after switching work is that those two are different documents.
+
 ### 4b. PR Description
 
-Build the description from git state with three core sections:
+Build the description from git state with three core sections, plus one conditional trailer:
 
 - **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. If every commit body is empty, concatenate the commit **subjects** instead — apply the **story-tag strip** below to each subject first.
 - **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
+- **Closes lines** (conditional): one `Closes #<N>` line per entry of `$METADATA_ISSUES`, the issue list Step 4a already read and already gated on `branchName`. Rendered last, after every section above, so a merged PR retires the issues the plan named. Nothing is emitted at all — no heading, no blank section — when the list is empty, which covers all three of its causes at once: a plan that named no issue, a `metadata.issues` key that is absent (it is omitted entirely rather than written as `[]` or `null`), and a list Step 4a's branchName gate discarded as another feature's.
 
 **Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets or the **Summary** subject-fallback, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
 
@@ -589,6 +606,23 @@ s_clean=$(printf '%s' "$s" | sed -E \
   -e 's/[[:space:]]*\[(Story[[:space:]]+)?US-[0-9]{3}[a-z]?\][[:space:]]*$//' \
   -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
 ```
+
+**Closes lines.** Build them into `$CLOSES_SECTION`, which Step 5b appends verbatim to the end of `$PR_BODY`. The variable is initialised to the empty string *before* the guard, so the absent-issues case needs no special handling anywhere downstream — an empty `$CLOSES_SECTION` appends nothing and the body ends exactly where it does today:
+
+```bash
+CLOSES_SECTION=""
+if [ -n "$METADATA_ISSUES" ]; then
+  while IFS= read -r issue_num; do
+    [ -n "$issue_num" ] || continue
+    CLOSES_SECTION="${CLOSES_SECTION}Closes #${issue_num}
+"
+  done <<CLOSES_ISSUES
+$METADATA_ISSUES
+CLOSES_ISSUES
+fi
+```
+
+**Feed that loop from a heredoc, not from `for issue_num in $METADATA_ISSUES`** — the same rule, for the same reason, that `/aimi:plan`'s Issue Reference Confirmation Gate states about the list it produces. These blocks run under whatever shell the host hands them, and zsh does not word-split an unquoted parameter expansion the way bash does: the `for` form iterates **once**, over the whole newline-joined list as a single token, and renders one malformed `Closes #149\n150` line instead of two good ones. A heredoc splits on newlines identically in both shells and keeps the loop in the current shell, so `$CLOSES_SECTION` survives `done` — which a `| while` pipeline would not.
 
 ### 4c. Backend Implementation Spec (conditional)
 
@@ -673,7 +707,7 @@ git push -u origin "$CURRENT_BRANCH"
 
 ### 5b. Create the PR
 
-Render the body into a captured shell variable first — `$PR_BODY` — instead of embedding a HEREDOC directly as the `--body` argument, then call `forge-pr-create` with that variable plus the title, base, and head values. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`:
+Render the body into a captured shell variable first — `$PR_BODY` — instead of embedding a HEREDOC directly as the `--body` argument, then call `forge-pr-create` with that variable plus the title, base, and head values. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`, and Step 4b's `$CLOSES_SECTION` is appended last, after both, only when it is non-empty:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -733,6 +767,10 @@ PR_BODY=$(cat <<'EOF'
 <if businessContext is a plain string (legacy), render as a single paragraph instead>
 
 </if>
+
+<$CLOSES_SECTION from Step 4b — one "Closes #<N>" line per entry, already
+branchName-gated; when it is empty append nothing at all, not even this blank
+line, so the body ends where it did before>
 EOF
 )
 
@@ -752,7 +790,7 @@ echo "PR_NUMBER=$PR_NUMBER"
 
 If `forge-pr-create` itself exits non-zero (an unsupported forge, a missing `gh` binary, or the `gh pr create` call failing), it has already printed manual create-it-yourself instructions to stderr — mandatory-print degradation, `forge-contract.md`'s Degradation Contract, since opening a PR has no other fallback — **and** now emits a `status: "degraded"` envelope on stdout carrying the same reason in its `message` field. The exit code is unchanged; the envelope is an additional in-band signal, not a replacement for it. Report those instructions to the user and STOP.
 
-**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
+**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section — or after the `Closes` lines, when Step 4b produced any. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
 
 ### 5c. Create backend issue and link to PR (conditional)
 
