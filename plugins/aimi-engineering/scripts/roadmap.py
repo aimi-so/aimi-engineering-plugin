@@ -594,6 +594,31 @@ def jq_sort_key(value):
     return (6, 0)
 
 
+class _LiteralFloat(float):
+    """A float that also remembers the exact digits it was parsed from.
+
+    2.410 and 2.41 are the same double -- no numeric comparison tells them
+    apart, and json.load's parse_float hook is the one stdlib seam that still
+    sees the raw text before it collapses into that double. This class is how
+    roadmap-init's --sync collision check gets to ask "same number, but was
+    it WRITTEN the same way" instead of only "same number".
+
+    It behaves as an ordinary float everywhere else -- equality, hashing,
+    sorting, the is_integer() collapse jq_numbers already does for an id like
+    2.0 -- because nothing here overrides those; only .literal is new, and it
+    never survives a json.dump: the encoder renders any float, this subclass
+    included, from its numeric value alone (float.__repr__ is called on it
+    directly, bypassing whatever __repr__/__str__ a subclass defines), which
+    is exactly why op_init_write's collision check reads .literal before that
+    round-trip, not after it.
+    """
+
+    def __new__(cls, literal):
+        obj = super().__new__(cls, literal)
+        obj.literal = literal
+        return obj
+
+
 # The note aimi-cli.sh prints under every identity refusal. Duplicated from
 # _roadmap_identity_note in aimi-cli.sh for exactly as long as roadmap-amend-phase
 # still prints it from bash; test_roadmap.py asserts the two are identical so the
@@ -2388,7 +2413,13 @@ def op_init_validate(argv):
 
     raw = sys.stdin.read()
     try:
-        payload = jq_numbers(json.loads(raw))
+        # parse_float is the one stdlib hook that still sees an id's raw
+        # digits before they collapse into a double -- see _LiteralFloat.
+        # jq_numbers still collapses an integer-valued float (2.0) to a plain
+        # int, same as always; only a genuinely fractional id keeps its
+        # literal, which is the only shape init-write's --sync collision
+        # check (below, in op_init_write) needs it for.
+        payload = jq_numbers(json.loads(raw, parse_float=_LiteralFloat))
     except ValueError:
         die("Error: roadmap-init: phases payload must be a JSON array")
     if not isinstance(payload, list):
@@ -2410,6 +2441,19 @@ def op_init_validate(argv):
         _die_list("Error: roadmap-init: invalid phase directory slug(s):", dir_errors)
     if branch_errors:
         _die_list("Error: roadmap-init: invalid branch name(s):", branch_errors)
+
+    # init-write is the next crossing, reached only through this array
+    # re-serialized as JSON text -- and JSON has no way to keep an id a
+    # number while still printing the digits it was written with, so
+    # json.dump below is the last moment .literal (see _LiteralFloat) is
+    # still reachable. Stashed here as a plain string companion key rather
+    # than left on `id` itself, so the id field stays a JSON number the whole
+    # way through; init-write reads this key for its --sync collision check
+    # and pops it back off before anything is written to disk.
+    for p in phases:
+        literal = getattr(p.get("id"), "literal", None)
+        if literal is not None:
+            p["_idLiteral"] = literal
 
     json.dump(phases, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -2439,6 +2483,11 @@ def op_init_write(argv):
         )
 
     new_phases = jq_numbers(json.load(sys.stdin))
+    # init-validate's own companion key (see its tail) -- read here, aligned
+    # by position with new_phases, and popped off every phase unconditionally
+    # so it never reaches `merged` below or the document on disk, whether or
+    # not this call ends up needing it for a collision check.
+    new_id_literals = [p.pop("_idLiteral", None) for p in new_phases]
 
     if os.path.exists(path):
         if not sync_mode:
@@ -2451,6 +2500,41 @@ def op_init_write(argv):
 
         existing_phases = existing.get("phases") or []
         existing_ids = [p.get("id") for p in existing_phases]
+
+        # The discriminator is the LITERAL a payload id was WRITTEN with, not
+        # its numeric value -- 2.410 and 2.41 are the same JSON number, so a
+        # plain `in existing_ids` check below can never tell them apart on
+        # its own. Judged here, before filtered_new drops the colliding entry
+        # silently: that silent drop is exactly the defect this guards
+        # against -- a phase the author wrote that the tool never reports and
+        # never creates. An identical literal (a genuine re-sync) is not a
+        # collision; --sync's anti-clobber no-op for that case is unchanged.
+        collisions = []
+        for p, literal in zip(new_phases, new_id_literals):
+            if literal is None:
+                continue
+            pid = p.get("id")
+            for existing_phase in existing_phases:
+                existing_id = existing_phase.get("id")
+                if existing_id == pid and literal != _num(existing_id):
+                    collisions.append(
+                        "phase "
+                        + literal
+                        + " normalizes onto existing phase "
+                        + _num(existing_id)
+                        + ' ("'
+                        + str(existing_phase.get("name") or "")
+                        + '") once rendered as a JSON number -- choose a value '
+                        "that fits strictly between the existing neighboring "
+                        "ids to subdivide further instead of colliding with "
+                        "one of them"
+                    )
+        if collisions:
+            _die_list(
+                "Error: roadmap-init: phase id normalizes onto an existing phase:",
+                collisions,
+            )
+
         # Anti-clobber: a phase this roadmap already holds is never revisited.
         filtered_new = [p for p in new_phases if p.get("id") not in existing_ids]
 
@@ -2642,6 +2726,27 @@ def op_amend_write(argv):
             + _num(phase_id)
             + " not found in "
             + path
+        )
+
+    # The literal arrives here as a CLI argument, already text -- unlike
+    # roadmap-init's payload it never passes through a float at all until the
+    # `jq_numbers(json.loads(...))` two lines up, so phase_raw IS the literal,
+    # with no capture step needed. Compared against the stored id rendered by
+    # _num (jq's own tostring), because that is what a bystander reading
+    # roadmap.json would call this phase. Equal value, different literal
+    # (--phase 2.410 matching a stored 2.41) used to amend the wrong phase in
+    # silence; refusing here is the same guard roadmap-init's --sync collision
+    # check applies to a payload id, applied to the id an operator typed.
+    if phase_raw != _num(stored.get("id")):
+        die(
+            "Error: roadmap-amend-phase: --phase "
+            + phase_raw
+            + " normalizes onto phase "
+            + _num(stored.get("id"))
+            + ' ("'
+            + str(stored.get("name") or "")
+            + '") once rendered as a JSON number -- pass the id exactly as it '
+            "appears in roadmap.json"
         )
 
     # Shallow merge: every key the stored phase already had keeps its position
