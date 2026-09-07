@@ -346,13 +346,32 @@ No message is printed for the "already correct" half of Case A — `$CURRENT_BRA
 ```bash
 if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$' && [ "$CANDIDATE_BRANCH" != "$CURRENT_BRANCH" ]; then
   if ! git show-ref --verify --quiet "refs/heads/$CANDIDATE_BRANCH"; then
-    echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", but no such branch exists in this repository." >&2
-    echo "The plan was generated and never executed — there is no branch to open a PR from." >&2
-    echo "Run /aimi:execute first, then re-run this command." >&2
-    exit 1
+    RUN_VERDICT=$($AIMI_CLI run-verdict 2>/dev/null | jq -r '.verdict // "undetermined"' 2>/dev/null)
+    case "$RUN_VERDICT" in
+      never-run)
+        echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", but no such branch exists in this repository." >&2
+        echo "The plan was generated and never executed — there is no branch to open a PR from." >&2
+        echo "Run /aimi:execute first, then re-run this command." >&2
+        exit 1
+        ;;
+      delivered)
+        echo "Notice: the active tasks file's plan already ran to completion — its branch (\"$CANDIDATE_BRANCH\") is gone because the run finished and was cleaned up, not because it never started." >&2
+        echo "This tasks file is spent; run \`$AIMI_CLI archive-task\` to retire it. To find how it landed, run \`gh pr list --head \"$CANDIDATE_BRANCH\" --state all\` (not --state merged: a delivered plan's branch can be gone with no merged PR to find)." >&2
+        ;;
+      interrupted)
+        echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", which no longer exists, and a story in it is still in_progress or failed — the run is stuck mid-flight, neither finished nor never started." >&2
+        echo "Resolve or re-run the interrupted execution before opening a PR." >&2
+        exit 1
+        ;;
+      *)
+        echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", which no longer exists, and its run state could not be determined from the tasks file." >&2
+        exit 1
+        ;;
+    esac
+  else
+    echo "Resolved feature branch from the active tasks file: $CANDIDATE_BRANCH (HEAD was on $CURRENT_BRANCH)" >&2
+    CURRENT_BRANCH="$CANDIDATE_BRANCH"
   fi
-  echo "Resolved feature branch from the active tasks file: $CANDIDATE_BRANCH (HEAD was on $CURRENT_BRANCH)" >&2
-  CURRENT_BRANCH="$CANDIDATE_BRANCH"
 fi
 ```
 
