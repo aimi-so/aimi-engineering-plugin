@@ -797,17 +797,47 @@ def _read_repo_text(root, name):
 
 _MAKEFILE_TARGET_RE = re.compile(r"(?m)^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)")
 _BACKTICK_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_FENCED_COMMAND_BLOCK_RE = re.compile(r"(?ms)^```(?:bash|sh)[ \t]*\n(.*?)^```[ \t]*$")
+
+
+def _fenced_block_commands(text):
+    """Commands from ```bash / ```sh fenced blocks in `text` -- the sixth
+    repo_command_vocabulary source, for a repo (like this one) whose tooling
+    is documented in prose rather than exposed through a manifest.
+
+    Conservative, line by line, inside a matched block only: cut each line's
+    comment from its first '#', strip the rest, then drop an empty line, a
+    line that already starts with '#', a line whose first token is an
+    assignment (`FOO=bar`) or is `cd`/`export`. What survives is command text.
+    A prose block that fences no command contributes nothing, and a
+    backtick-quoted identifier elsewhere in a document (an acceptance
+    criterion, say) never reaches this function at all -- it only ever reads
+    the two whole files repo_command_vocabulary hands it.
+    """
+    commands = set()
+    for block in _FENCED_COMMAND_BLOCK_RE.findall(text):
+        for line in block.splitlines():
+            candidate = line.split("#", 1)[0].strip()
+            if not candidate:
+                continue
+            if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", candidate):
+                continue
+            if candidate.split(None, 1)[0] in ("cd", "export"):
+                continue
+            commands.add(candidate)
+    return commands
 
 
 def repo_command_vocabulary(root):
     """The commands `root`'s own tooling actually exposes: package.json
-    `scripts` keys, Makefile targets, and the canonical runner a Cargo.toml,
-    pyproject.toml or go.mod implies. DERIVED from the repository, never a
-    fixed runner list -- a fixed list is wrong on the next repository, and
-    wrong in the direction that manufactures false confidence (see
-    verify_coverage_findings below).
+    `scripts` keys, Makefile targets, the canonical runner a Cargo.toml,
+    pyproject.toml or go.mod implies, and the commands CLAUDE.md/AGENTS.md
+    document in fenced ```bash/```sh blocks (see _fenced_block_commands).
+    DERIVED from the repository, never a fixed runner list -- a fixed list is
+    wrong on the next repository, and wrong in the direction that
+    manufactures false confidence (see verify_coverage_findings below).
 
-    Returns None -- never an empty set -- when none of those five files
+    Returns None -- never an empty set -- when none of those seven files
     exists at `root`. None is the CANNOT-DETERMINE-THE-VOCABULARY state; an
     empty set would claim "this repo's tooling runs nothing," which is a
     finding about the repo, not an admission this function found nothing to
@@ -849,6 +879,12 @@ def repo_command_vocabulary(root):
     if _read_repo_text(root, "go.mod") is not None:
         found_a_source = True
         vocabulary |= {"go test", "go build", "go vet"}
+
+    for name in ("CLAUDE.md", "AGENTS.md"):
+        prose = _read_repo_text(root, name)
+        if prose is not None:
+            found_a_source = True
+            vocabulary |= _fenced_block_commands(prose)
 
     return vocabulary if found_a_source else None
 
@@ -1819,9 +1855,9 @@ def main(argv):
         sys.stderr.write(
             "Warning: story-merge: Phase 4.3 verify-coverage VOCABULARY UNDETERMINED for "
             + _join(", ", verify_coverage_undetermined)
-            + " (no package.json, Makefile, Cargo.toml, pyproject.toml or go.mod found for"
-            + " that story's project; its cited command(s) were not evaluated -- do not read"
-            + " this as CHECKED-AND-CLEAN)\n"
+            + " (no package.json, Makefile, Cargo.toml, pyproject.toml, go.mod, CLAUDE.md or"
+            + " AGENTS.md found for that story's project; its cited command(s) were not"
+            + " evaluated -- do not read this as CHECKED-AND-CLEAN)\n"
         )
     if verify_coverage_clean:
         sys.stderr.write(

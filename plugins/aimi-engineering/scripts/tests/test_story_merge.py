@@ -873,6 +873,64 @@ def test_repo_command_vocabulary_reads_pyproject_toml_package_json_and_makefile(
     assert "make .PHONY" not in vocabulary, ".PHONY is not a runnable target"
 
 
+def test_repo_command_vocabulary_reads_fenced_bash_blocks_from_claude_md_and_agents_md(tmp_path):
+    """The sixth source: a repo with no manifest at all, but commands
+    documented in prose -- CLAUDE.md and AGENTS.md are read independently and
+    their fenced-block commands merge into one vocabulary."""
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Project\n\n## Testing\n\n```bash\nbash scripts/suite.sh\n```\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "AGENTS.md").write_text(
+        "## Install\n\n```sh\n./install.sh --to opencode\n```\n",
+        encoding="utf-8",
+    )
+    vocabulary = SM.repo_command_vocabulary(str(tmp_path))
+    assert vocabulary == {"bash scripts/suite.sh", "./install.sh --to opencode"}
+
+
+def test_repo_command_vocabulary_extraction_is_conservative(tmp_path):
+    """Inside a fenced block: comment-only and blank lines, assignments, and
+    cd/export are all dropped. A backtick span elsewhere in the file (not
+    inside a fence) is prose, not a command, and never reaches the
+    vocabulary."""
+    (tmp_path / "CLAUDE.md").write_text(
+        "\n".join(
+            [
+                "```bash",
+                "# a full-line comment",
+                "",
+                "FOO=bar",
+                "cd somewhere",
+                "export X=1",
+                "bash scripts/suite.sh   # trailing comment",
+                "```",
+                "",
+                "Prose citing `not_a_command` in backticks, outside any fence.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    vocabulary = SM.repo_command_vocabulary(str(tmp_path))
+    assert vocabulary == {"bash scripts/suite.sh"}
+
+
+def test_repo_command_vocabulary_still_returns_none_with_claude_md_and_agents_md_absent(tmp_path):
+    """The CANNOT-DETERMINE state survives the new source: with no manifest
+    AND no CLAUDE.md/AGENTS.md, the answer is still None, never an empty set."""
+    assert SM.repo_command_vocabulary(str(tmp_path)) is None
+
+
+def test_repo_command_vocabulary_found_a_source_even_with_no_commands_inside(tmp_path):
+    """A CLAUDE.md that exists but fences no bash/sh block is still a found
+    source -- found_a_source is set on the read succeeding, not on the
+    extraction yielding anything -- so the vocabulary is an empty set (a
+    real finding: this repo documents nothing runnable), never None."""
+    (tmp_path / "CLAUDE.md").write_text("# Project\n\nNo commands here.\n", encoding="utf-8")
+    assert SM.repo_command_vocabulary(str(tmp_path)) == set()
+
+
 def test_verify_coverage_findings_distinguishes_checked_and_clean_from_cannot_determine(tmp_path):
     """The two non-finding outcomes constraint 3 requires kept apart. Both
     stories cite the same command; only their PROJECT differs, so only one of
@@ -947,6 +1005,63 @@ def test_the_verify_coverage_smell_reaches_metadata_only_for_a_real_divergence(t
     assert warnings[0]["type"] == "verify-coverage"
     assert warnings[0]["storyId"] == "US-001"
     assert warnings[0]["commands"] == ["pytest"]
+
+
+def test_the_verify_coverage_smell_fires_from_a_claude_md_declared_command(tmp_path):
+    """End to end through the real CLI, over a project with NO manifest at
+    all -- only a CLAUDE.md documenting its own test command in prose. This
+    is the repo shape US-003 exists for: the gate now sees a vocabulary here
+    instead of answering UNDETERMINED forever."""
+    (tmp_path / "CLAUDE.md").write_text(
+        "# Project\n\n## Testing\n\n```bash\nbash scripts/suite.sh\n```\n",
+        encoding="utf-8",
+    )
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": {
+                **_staging_story("A"),
+                "acceptanceCriteria": [
+                    "The suite passes: `bash scripts/suite.sh` exits zero."
+                ],
+                "implementation": {
+                    "files": ["scripts/suite.sh"],
+                    "approach": "Implement it",
+                    "verify": "echo nothing",
+                },
+            },
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 4.3 verify-coverage VOCABULARY UNDETERMINED" not in proc.stderr
+    assert "Phase 4.3 verify-coverage smell detected" in proc.stderr
+    warnings = doc["metadata"]["smellWarnings"]
+    assert warnings[0]["type"] == "verify-coverage"
+    assert warnings[0]["storyId"] == "US-001"
+    assert warnings[0]["commands"] == ["bash scripts/suite.sh"]
+
+
+def test_the_undetermined_message_names_claude_md_and_agents_md(tmp_path):
+    """The UNDETERMINED message names every source actually searched -- it
+    would otherwise lie by omission about the two new ones."""
+    proc, _doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": {
+                **_staging_story("A"),
+                "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+                "implementation": {
+                    "files": ["src/x.py"],
+                    "approach": "Implement it",
+                    "verify": "pytest",
+                },
+            },
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "VOCABULARY UNDETERMINED" in proc.stderr
+    assert "CLAUDE.md" in proc.stderr
+    assert "AGENTS.md" in proc.stderr
 
 
 def test_the_verify_coverage_smell_never_blocks_in_either_mode(tmp_path):
