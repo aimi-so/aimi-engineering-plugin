@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.128.0] - 2026-09-07
+
+### Added
+
+- A plan records which issues it closes. `/aimi:plan` gains an Issue Reference
+  Confirmation Gate between Phase 0.5 and Phase 1: it scans the feature
+  description for issue references, resolves each one through
+  `forge-issue-view --number`, keeps only those the forge reports as `found`
+  AND `open`, and confirms the survivors by title in exactly one question
+  before writing them to `metadata.issues`. Existence alone cannot
+  discriminate -- an open issue and a merged pull request both resolve
+  `found` -- so state and title are what carry the decision. The key is
+  omitted entirely when it would be empty, matching the convention `baseRef`
+  and `pluginVersion` already use. Documented in `task-format-v3.md`'s
+  metadata table as `number[]`, optional. The candidate loop is fed from a
+  heredoc rather than `for n in $CANDIDATES`: zsh does not word-split an
+  unquoted expansion, so the `for` form iterates once over the whole
+  newline-joined list and reports no issues for a description that named
+  several.
+- `/aimi:open-pr` renders one `Closes #<N>` line per `metadata.issues` entry,
+  read from the `metadata` call Step 4a already makes rather than a new one,
+  and gated on `branchName` matching the PR's branch. The gate is its own
+  check rather than a line inside the title's mismatch branch, which runs only
+  when a title was present: a tasks file carrying issues but no usable title
+  would otherwise have passed through with another feature's issue list
+  intact. A wrong title is read once and corrected by hand; a wrong `Closes`
+  line shuts someone else's issue the moment the PR merges.
+
+### Fixed
+
+- `/aimi:open-pr` strips the bracketed `[US-NNN]` story tag from both the PR
+  title and the rendered commit list. Both strip sites carried end-anchored
+  expressions for the un-bracketed forms only, so every PR body built from
+  tagged commits leaked the internal story tags -- three earlier PRs read
+  clean only because the operator removed them by hand.
+
 ## [1.127.0] - 2026-09-07
 
 ### Added
