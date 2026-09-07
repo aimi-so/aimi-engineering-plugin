@@ -139,6 +139,7 @@ normalize rules reproduce all three.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -5015,35 +5016,134 @@ def verify_changes_directory(segment):
     return bool(words) and words[0] in _VERIFY_CHDIR
 
 
+# THE FOUR MECHANISMS THAT CARRY ONE SHELL INTO THE NEXT, in the order a
+# `source` of the file has to replay them: `declare -f` for the function
+# definitions, `declare -p` for the variables, `set +o` for the options and
+# `printf %q` for the working directory, all written to ONE sourceable file.
+# There is no fifth: `shopt` options, traps and the dirstack are not carried,
+# and the four were round-tripped through a fresh `bash -c` before this shape
+# was written rather than after.
+#
+# THE ORDER IS LOAD-BEARING AND IT IS NOT COSMETIC. `set +o` comes after both
+# `declare`s because a snapshot taken from a shell that ran `set -e` carries
+# `set -o errexit`, and a snapshot that enabled it FIRST would abort its own
+# replay on the first line bash refuses. Those refusals are ordinary rather
+# than a defect: `BASHOPTS`, `BASH_VERSINFO`, `EUID`, `PPID`, `SHELLOPTS` and
+# `UID` are readonly and `declare -p` dumps them like everything else, so
+# every replay prints six "readonly variable" complaints to a stderr the probe
+# already discards. Putting the options last is what keeps them harmless. `cd`
+# is last of all, so the directory is the last thing established before the
+# segment runs.
+#
+# `|| :` ON EACH `declare` IS THE SAME SENTENCE READ BACKWARDS: this dump runs
+# inside the EXIT trap of a shell that may have errexit ON, and `declare -f`
+# in a shell that defined no function exits 1 -- which is the commonest verify
+# there is. Without it the snapshot would truncate at its own first line.
+_VERIFY_SNAPSHOT_VAR = "__aimi_probe_snapshot"
+
+_VERIFY_SNAPSHOT_TRAP = (
+    "trap '__aimi_probe_rc=$?; "
+    "{ declare -f || :; declare -p || :; set +o; "
+    'printf "cd %q\\n" "$PWD"; } >"$' + _VERIFY_SNAPSHOT_VAR + '" 2>/dev/null; '
+    "exit $__aimi_probe_rc' EXIT"
+)
+
+# WHY A TRAP RATHER THAN THREE LINES APPENDED AFTER THE SEGMENT. The segment is
+# arbitrary shell and it has to be the LAST thing in the script: US-001 made a
+# heredoc travel with the command that opened it, so a segment can end inside
+# `PY` with no terminator after it, and anything appended below would land in
+# the heredoc body instead of in the shell. An EXIT trap is set BEFORE the
+# segment and still runs after it -- including when errexit or the segment's
+# own `exit` ends the shell early, which is exactly when the state that
+# preceded the failure is still worth carrying.
+#
+# THE EXPLICIT `exit $__aimi_probe_rc` IS REDUNDANCY, AND IT IS KEPT KNOWING
+# THAT. Measured on this bash: a trap that runs commands and does not exit
+# leaves the shell's status alone (`trap "true; false" EXIT; exit 7` still
+# exits 7), so the dump could not have clobbered the verdict on its own. What
+# the line buys is that the guarantee is stated in the code rather than known
+# about bash -- the status the trap captured on its first line is the one that
+# leaves this shell, and it is the only number every verdict below is computed
+# from.
+
+# WHAT A FAILED `cd` COSTS EVERY SEGMENT AFTER IT. Before the snapshot existed
+# the prelude carried `cd X || exit 1`, so every later assertion aborted at the
+# shell's own failure status. That guarantee is worth keeping byte for byte: a
+# `cd` that failed and then let everything after it run in the CALLER's tree is
+# this verb manufacturing the defect it exists to find, and quietly. So a
+# failed directory change is remembered and every script built afterwards opens
+# with this line, which exits before the segment is reached -- the same answer
+# the old prelude gave, reported at the same status.
+_VERIFY_SNAPSHOT_ABORT = "exit 1"
+
+
+def _probe_segment_script(segment, snapshot, restore, aborted):
+    """The script one segment runs: restore, arm the dump, then the segment.
+
+    `restore` is False for the very first segment of a verify -- there is no
+    state yet -- and `aborted` is True once a `cd` has failed, which wins over
+    it: nothing is restored and nothing is run. The restore carries
+    `2>/dev/null` of its own so the readonly-variable complaints the replay
+    always prints cannot be mistaken for the segment's own stderr by a caller
+    that stops discarding it.
+
+    ONE FILE, READ THEN OVERWRITTEN, and the order is what makes that safe:
+    the `.` finishes long before the EXIT trap fires, so the dump lands on a
+    file nothing is still reading. A second file swapped in by `os.replace`
+    would buy protection against a dump that dies half-written, and would cost
+    this module a second path of its own -- see `_probe_verify_segments` for
+    why the one it already has is written down as a widening.
+    """
+    lines = []
+    if aborted:
+        lines.append(_VERIFY_SNAPSHOT_ABORT)
+    elif restore:
+        lines.append(". %s 2>/dev/null" % shlex.quote(snapshot))
+    lines.append("%s=%s" % (_VERIFY_SNAPSHOT_VAR, shlex.quote(snapshot)))
+    lines.append(_VERIFY_SNAPSHOT_TRAP)
+    lines.append(segment)
+    return "\n".join(lines)
+
+
 def probe_verify(text, cwd, skip_matching=None, timeout=None):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
-    THE ASSIGNMENTS ARE CARRIED, THE ASSERTIONS ARE NOT. A verify names its own
-    paths -- `S=path/to/SKILL.md`, then `grep -q x "$S"` -- so an assertion run
-    with no context would see an empty `$S`, fail for that reason alone, and be
-    reported as discriminating when it is the very thing this verb exists to
-    expose. Each assertion is therefore prefixed with the assignments that
-    preceded it, and with nothing else: no earlier assertion's exit status and
-    no `set -e`, which is exactly what stops the run at the first failure in
-    the real script and hides everything after it.
+    EVERY SEGMENT RUNS ONCE, IN ORDER, AND THE SHELL IT LEAVES BEHIND IS
+    CARRIED INTO THE NEXT ONE. A verify names its own paths -- `S=path/to/
+    SKILL.md`, then `grep -q x "$S"` -- so an assertion run with no context
+    would see an empty `$S`, fail for that reason alone, and be reported as
+    discriminating when it is the very thing this verb exists to expose. What
+    stops that is a SNAPSHOT: after each segment the shell writes its
+    functions, variables, options and working directory to one sourceable
+    file, and the next segment sources it before running. Four mechanisms,
+    listed at `_VERIFY_SNAPSHOT_TRAP`, and no fifth.
 
-    The cost of that choice is that an assignment whose value comes from a
-    command substitution runs once per assertion after it. Verify scripts
-    assign paths and captured output, so this is cheap in practice, and the
-    alternative -- one shell for the whole script with each assertion in a
-    subshell -- buys that back by making every exit status depend on parsing a
-    marker out of a stream the assertions themselves write to.
+    THE COUNT OF RUNS DOES NOT RISE -- IT FALLS. Each segment is executed
+    exactly once, where the carried-prelude shape this replaces re-ran every
+    assignment once per assertion after it. `W=$(mktemp -d)` used to hand each
+    assertion a DIFFERENT directory; now it makes one, and `cd "$W"` moves
+    into the one that exists.
 
-    THE WORKING DIRECTORY IS CARRIED FOR THE SAME REASON, WITH MORE AT STAKE.
-    An assignment is carried so an assertion is not measured against an empty
-    variable; a `cd` is carried so an assertion is not measured against -- and
-    not WRITTEN INTO -- the wrong tree. Without it, `cd "$W"` ran as a segment
-    of its own and changed nothing that outlived it, so a `mkdir -p out` two
-    segments later landed in `cwd`: the story executor's own worktree, which is
-    where step 1.5 probes from. The probe was manufacturing the class of defect
-    it exists to find. Like an assignment it is carried and not reported -- a
-    segment that only establishes context is noise in a list whose subject is
-    assertions that already pass.
+    WHAT IS NOT CARRIED IS THE THING THE REAL SCRIPT USES TO STOP: no earlier
+    assertion's exit status reaches the next segment as `$?`, and each segment
+    is measured on its own status alone. `set -e` is a shell OPTION and IS
+    carried -- it is state a real run would have -- but it can only ever end
+    the one segment that fails, never the run: the next segment starts in its
+    own process from the snapshot. That is the whole point of taking the verify
+    apart, and it is why an assertion hidden behind an earlier failure still
+    gets a verdict here.
+
+    THE WORKING DIRECTORY IS THE STATE WITH THE MOST AT STAKE. An assignment is
+    carried so an assertion is not measured against an empty variable; a `cd`
+    is carried so an assertion is not measured against -- and not WRITTEN INTO
+    -- the wrong tree. Without it, `cd "$W"` ran as a segment of its own and
+    changed nothing that outlived it, so a `mkdir -p out` two segments later
+    landed in `cwd`: the story executor's own worktree, which is where step 1.5
+    probes from. The probe was manufacturing the class of defect it exists to
+    find. A `cd` that FAILS aborts everything after it instead, at the shell's
+    own failure status, which reads as discriminating -- the safe direction,
+    the one the timeout used to take, since a probe must never invent dead
+    weight. See `_VERIFY_SNAPSHOT_ABORT` for how.
 
     REFUSING A VERIFY THAT CONTAINS A `cd` WOULD CLOSE THAT TOO, AND IS WORSE.
     The verifies that cd are the elaborate ones: the verify that builds a
@@ -5055,6 +5155,12 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     the executor would print a clean all-clear for the verifies least likely to
     deserve one. Carrying the `cd` keeps the answer; refusing would trade a
     wrong directory for a wrong answer.
+
+    A SEGMENT THAT ESTABLISHES CONTEXT IS RUN AND NOT REPORTED. An assignment,
+    a `cd` and a bare `set` claim nothing about the tree -- and the assignments
+    are worse than noise in a list of assertions that already pass, because
+    they always pass. They still run, because running them is what puts their
+    state in the snapshot.
 
     Output is discarded. What the caller gets is the status, because that is
     what `discriminates` is computed from and a probe that echoed a whole test
@@ -5069,25 +5175,28 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     opposite case and IS run: it is a further assertion, reached only because
     the one before it passed.
 
-    WHAT A SEGMENT LOSES IS SHELL STATE, AND ONLY SHELL STATE. Every segment
-    runs as a REAL SUBPROCESS in the same directory, so everything it writes to
-    the DISK outlives it and the segments after it read it back: `mkdir -p fx`,
-    then `printf x > fx/a.txt`, then `grep -q x fx/a.txt` passes here, measured
+    THE DISK WAS NEVER THE PROBLEM AND STILL IS NOT. Every segment runs as a
+    REAL SUBPROCESS in the same directory, so everything it writes to the DISK
+    outlives it and the segments after it read it back: `mkdir -p fx`, then
+    `printf x > fx/a.txt`, then `grep -q x fx/a.txt` passes here, measured
     rather than reasoned about. The record in
     `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
     says a `mkdir`/`printf >` fixture leaves every downstream assertion running
     against an EMPTY TREE, and that half of it is wrong; the correction is
     written down here because this docstring is where the next reader of this
-    function looks, and a known-gap file is not. What does NOT survive is the
-    shell itself -- a variable set by anything other than the plain assignments
-    carried above dies with the subprocess that set it.
+    function looks, and a known-gap file is not.
 
-    A SEGMENT WHOSE SHELL STATE THE PRELUDE NEVER REPRODUCED GETS NO VERDICT.
-    Its entry carries `discriminates: None` and an `unresolvedState` naming the
-    variables that were missing, and the segment is NOT RUN: an exit status
-    measured in a world that never existed is not evidence, and reporting a
-    verdict computed from it is worse than reporting none. Both directions the
-    missing state produces are wrong, and they are not equally wrong:
+    DISK EFFECTS ARE ALSO THE STATE NOTHING HERE CAN UNDO, and that is by
+    design rather than by omission. A segment that deletes a file has deleted
+    it for every segment after it, exactly as in a real run; no snapshot
+    reverses that, and none should.
+
+    A SEGMENT WHOSE READS THE PROBE CANNOT ACCOUNT FOR GETS NO VERDICT. Its
+    entry carries `discriminates: None` and an `unresolvedState` naming the
+    variables, and the segment is NOT RUN: an exit status measured in a world
+    that never existed is not evidence, and reporting a verdict computed from
+    it is worse than reporting none. Both directions the missing state produces
+    are wrong, and they are not equally wrong:
 
       - the assertion that FAILS without it reads as spuriously DISCRIMINATING,
         an exemplary check that is nothing of the sort; and
@@ -5100,11 +5209,30 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     "cannot tell", which is the only true thing available about a run that did
     not happen.
 
-    THE SCOPE OF THAT THIRD ANSWER IS SHELL VARIABLES. A function definition,
-    a `set -o` option and a subshell mutate shell state too, and a segment
-    downstream of one of those still gets an ordinary verdict here. They are
-    deliberately deferred rather than overlooked -- see this plan's
-    `metadata.decisions`, anchor `scope:snapshot-deferred`.
+    THAT CHECK IS STATIC AND DELIBERATELY CONSERVATIVE, AND IT IS NOW WIDER
+    THAN WHAT THE SNAPSHOT ACTUALLY MISSES. A name counts as available when the
+    inherited environment holds it, when a carried assignment segment binds it,
+    or when the segment binds it itself; a name an `eval`, a subshell or a
+    function set is not counted even though the snapshot taken after that
+    segment very often carries the value. Reading the answer back out of the
+    snapshot instead would make the verdict depend on which segments happened
+    to run -- a name set inside a segment that was skipped, timed out or was
+    itself withheld is genuinely absent -- so the gate answers the question it
+    can answer everywhere: can the probe PROVE this segment's reads were
+    reproduced. A `None` given where a real verdict was available costs a
+    reader one look; a real verdict given where the state was missing is the
+    defect this whole third answer exists to prevent.
+
+    WHAT THE SNAPSHOT CLOSED, NAMED SO THE NEXT READER DOES NOT RE-DERIVE IT.
+    A function an earlier segment defined is present, so a call to it reports
+    the function's own status instead of 127 -- the same non-zero for a
+    different reason, which is why the fix is asserted on the exit code and not
+    on `discriminates`. A shell option an earlier segment set is present too,
+    and that one flips the verdict outright: `false | true` under a carried
+    `set -o pipefail` exits 1 and discriminates, where without the option it
+    exits 0 and reads as dead weight. That direction -- a real check reported
+    as already passing -- is the dangerous one, and it is the reason this was
+    worth doing.
 
     TWO WAYS TO NOT RUN A SEGMENT ON PURPOSE, AND BOTH ANSWER `None`.
     `skip_matching` is a regular expression: a segment it matches is NOT run,
@@ -5123,15 +5251,17 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     makes the report honest. Dropping a skipped segment instead would be its
     own lie in the other direction: it would make "the caller declined to
     measure this" indistinguishable from "no such segment is in the verify".
+    Neither advances the snapshot, for the reason that answers them both:
+    a segment that did not run set nothing for the ones after it.
 
-    WHAT `skip_matching` CANNOT REACH IS THE PRELUDE, and that is load-bearing
-    rather than incidental. The pattern is tested only against segments that
-    have already survived the `||`, the `cd` and the assignment branches, so a
-    regex broad enough to match a `cd` or an assignment still leaves it
-    CARRIED. A skip that could drop a `cd` would move every later segment into
-    the caller's own tree -- precisely the defect the carried prelude exists to
-    prevent -- and would do it at the request of someone who only meant to
-    save time.
+    WHAT `skip_matching` CANNOT REACH IS THE CONTEXT SEGMENTS, and that is
+    load-bearing rather than incidental. The pattern is tested only against
+    segments that have already survived the `||`, the `cd` and the assignment
+    branches, so a regex broad enough to match a `cd` or an assignment still
+    leaves it RUN and its state carried. A skip that could drop a `cd` would
+    move every later segment into the caller's own tree -- precisely the defect
+    the snapshot exists to prevent -- and would do it at the request of someone
+    who only meant to save time.
 
     THIS IS A MITIGATION AND NOT A CURE, and saying so is part of the fix.
     `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` records that
@@ -5150,7 +5280,7 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     # own `os.environ` because that is the environment `subprocess.run` hands
     # every segment below -- one channel, so a nested `verify-probe` inside a
     # segment sees it and refuses. Seeding `assigned` from `os.environ` after
-    # the write is what makes the marker a name the prelude PROVIDES: set it
+    # the write is what makes the marker a name the probe PROVIDES: set it
     # afterwards and a segment reading `$AIMI_VERIFY_PROBE_ACTIVE` would be
     # judged missing its shell state, reported `discriminates: None` and never
     # run at all -- the guard would be invisible to the only assertion that can
@@ -5173,7 +5303,6 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     rather than wrapping a hundred lines of body. See that function's docstring
     for every rule this implements; nothing is decided here."""
     results = []
-    prelude = []
     # Compiled once for the whole run rather than once per segment. A pattern
     # that does not compile raises HERE -- inside `probe_verify`'s
     # try/finally, so the re-entrancy marker is still restored on the way out.
@@ -5184,101 +5313,135 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     # caller naming zero -- so the default is resolved by an `is None` test
     # and never by truthiness.
     limit = _VERIFY_TIMEOUT if timeout is None else timeout
-    # The state a segment can count on: what the prelude has assigned so far,
-    # seeded with the environment this process already holds -- `subprocess.run`
-    # hands that same environment to every segment, so `$HOME` and an exported
-    # `$TASKS_FILE_PATH` are resolved, not missing.
+    # The state a segment can be PROVEN to have: what a carried assignment
+    # binds, seeded with the environment this process already holds --
+    # `subprocess.run` hands that same environment to every segment, so `$HOME`
+    # and an exported `$TASKS_FILE_PATH` are resolved, not missing. It is not
+    # read back out of the snapshot; probe_verify's docstring says why.
     assigned = set(os.environ)
-    for separator, segment in verify_segments(text):
-        if separator == "||":
-            continue
-        if verify_changes_directory(segment):
-            # `|| exit 1` rather than the bare segment. A `cd` that FAILS in
-            # the prelude would leave everything after it running in the
-            # caller's directory -- this same defect, only quieter, because
-            # nothing in the answer would say the probe had never moved.
-            # Aborting instead reports every assertion after it at the shell's
-            # own failure status, which reads as discriminating: the safe
-            # direction, the one the timeout takes, since a probe must never
-            # invent dead weight.
-            prelude.append(segment + " || exit 1")
-            continue
-        if verify_asserts_nothing(segment):
-            words = verify_words(segment)
-            if words and words[0] != "set":
-                prelude.append(segment)
-                assigned |= verify_assigns(segment)
-            continue
-        # THE SKIP IS TESTED HERE AND NOWHERE EARLIER -- after `||`, after the
-        # `cd` and after the assignments -- so the pattern can only ever reach
-        # a segment that would otherwise have been RUN and REPORTED. See
-        # probe_verify's docstring for why a skip able to reach the prelude
-        # would be a defect rather than a feature.
-        #
-        # It is also tested BEFORE the missing-state check below. Both answer
-        # `None`, but for different reasons, and only one of them is true
-        # here: the caller said do not run this. Naming an `unresolvedState`
-        # on a segment nobody was going to run would report the wrong cause.
-        if skip_pattern is not None and skip_pattern.search(segment):
-            results.append(
-                {
-                    "segment": segment,
-                    "exit": None,
-                    "discriminates": None,
-                    "skipped": True,
-                }
-            )
-            continue
-        # The segment's own bindings count as provided: `for f in a b; do echo
-        # "$f"; done` reads a name it binds itself, one segment, no prelude
-        # needed. The shape this whole branch exists for is the other one --
-        # an `eval "$CMD"`, a subshell or a function call setting a variable
-        # the NEXT segment reads, none of which the prelude carries.
-        missing = sorted(verify_reads(segment) - assigned - verify_assigns(segment))
-        if missing:
-            results.append(
-                {
-                    "segment": segment,
-                    "exit": None,
-                    "discriminates": None,
-                    "unresolvedState": missing,
-                }
-            )
-            continue
+    # THE ONE PATH THIS MODULE NAMES RATHER THAN RECEIVES, and it is written
+    # down as the widening it is. Everything else here is rooted in an argument
+    # bash resolved; this is a scratch file in $TMPDIR, created by this
+    # function and unlinked by it, never under PROJECT_ROOT and never shown to
+    # a caller.
+    #
+    # `mkstemp` RATHER THAN A NAME BUILT FROM A PID OR A STORY ID, for two
+    # reasons that both bite. This function runs nested against itself -- the
+    # verify of the story that wrote it calls `probe_verify()` from inside a
+    # `python3` heredoc, which is a segment of an outer probe -- so two live
+    # invocations share a machine and a $TMPDIR, and a fixed name would have
+    # them writing each other's shell state. And the file holds `declare -p` of
+    # a whole environment: mkstemp's 0600 is what keeps a token that arrived in
+    # $GH_TOKEN out of a world-readable temp file.
+    snapshot_handle, snapshot = tempfile.mkstemp(prefix="aimi-verify-probe-")
+    os.close(snapshot_handle)
+    # Set once a `cd` has failed and never cleared -- see _VERIFY_SNAPSHOT_ABORT.
+    # `carry` only READS it, so the loop below can rebind it without `nonlocal`.
+    aborted = False
+
+    def carry(segment):
+        """Run `segment` against the accumulated state, and accumulate its own.
+
+        Returns `(status, timed_out)`. An empty snapshot means nothing has been
+        carried yet; a snapshot the segment did not overwrite -- because it
+        replaced the EXIT trap, or because the restore itself aborted -- leaves
+        the previous state in place rather than clearing it, since state that
+        was already proven is better than none.
+        """
+        script = _probe_segment_script(
+            segment, snapshot, os.path.getsize(snapshot) > 0, aborted
+        )
         try:
             completed = subprocess.run(
-                ["bash", "-c", "\n".join(prelude + [segment])],
+                ["bash", "-c", script],
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=limit,
             )
-            status = completed.returncode
+            return completed.returncode, False
         except subprocess.TimeoutExpired:
-            # NOT a verdict, and no longer 124. A run that was cut off
-            # measured nothing, so it gets the third answer rather than the
-            # least-bad of two wrong ones -- see _VERIFY_TIMEOUT for what
-            # changed and why the old reasoning was right until it wasn't.
-            # `timeoutSeconds` is carried because a bare `timedOut: true`
-            # would send its reader into this file to find out what cap it
-            # missed, and the cap is the caller's to choose.
+            return None, True
+        except OSError:
+            return 127, False  # no bash, or no such cwd
+
+    try:
+        for separator, segment in verify_segments(text):
+            if separator == "||":
+                continue
+            if verify_changes_directory(segment):
+                status, timed_out = carry(segment)
+                if timed_out or status != 0:
+                    aborted = True
+                continue
+            if verify_asserts_nothing(segment):
+                carry(segment)
+                words = verify_words(segment)
+                if words and words[0] != "set":
+                    assigned |= verify_assigns(segment)
+                continue
+            # THE SKIP IS TESTED HERE AND NOWHERE EARLIER -- after `||`, after
+            # the `cd` and after the assignments -- so the pattern can only
+            # ever reach a segment that would otherwise have been RUN and
+            # REPORTED. See probe_verify's docstring for why a skip able to
+            # reach a context segment would be a defect rather than a feature.
+            #
+            # It is also tested BEFORE the missing-state check below. Both
+            # answer `None`, but for different reasons, and only one of them is
+            # true here: the caller said do not run this. Naming an
+            # `unresolvedState` on a segment nobody was going to run would
+            # report the wrong cause.
+            if skip_pattern is not None and skip_pattern.search(segment):
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "skipped": True,
+                    }
+                )
+                continue
+            # The segment's own bindings count as provided: `for f in a b; do
+            # echo "$f"; done` reads a name it binds itself, one segment, no
+            # carried assignment needed. The shape this whole branch exists for
+            # is the other one -- an `eval "$CMD"`, a subshell or a function
+            # call setting a variable the NEXT segment reads.
+            missing = sorted(verify_reads(segment) - assigned - verify_assigns(segment))
+            if missing:
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "unresolvedState": missing,
+                    }
+                )
+                continue
+            status, timed_out = carry(segment)
+            if timed_out:
+                # NOT a verdict, and no longer 124. A run that was cut off
+                # measured nothing, so it gets the third answer rather than the
+                # least-bad of two wrong ones -- see _VERIFY_TIMEOUT for what
+                # changed and why the old reasoning was right until it wasn't.
+                # `timeoutSeconds` is carried because a bare `timedOut: true`
+                # would send its reader into this file to find out what cap it
+                # missed, and the cap is the caller's to choose.
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "timedOut": True,
+                        "timeoutSeconds": limit,
+                    }
+                )
+                continue
             results.append(
-                {
-                    "segment": segment,
-                    "exit": None,
-                    "discriminates": None,
-                    "timedOut": True,
-                    "timeoutSeconds": limit,
-                }
+                {"segment": segment, "exit": status, "discriminates": status != 0}
             )
-            continue
-        except OSError as err:
-            status = 127  # no bash, or no such cwd -- "command not found"
-            del err
-        results.append(
-            {"segment": segment, "exit": status, "discriminates": status != 0}
-        )
+    finally:
+        os.unlink(snapshot)
     return results
 
 

@@ -3411,8 +3411,24 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     archive-task added the only writes here that put no bytes anywhere: one
     move and one delete. Both are counted rather than merely allowed, because
     this is the one verb that can destroy a user's files -- a second
-    shutil.move, a third os.unlink or a second os.makedirs is a new capability
+    shutil.move, a fourth os.unlink or a second os.makedirs is a new capability
     in it and has to change this test to arrive.
+
+    THE THIRD os.unlink IS THE PROBE'S SNAPSHOT, and it is the first path this
+    module NAMES rather than receives -- which is the widening, and it is
+    argued for here rather than absorbed into the count. probe_verify carries
+    a segment's shell state into the next one through a file that `bash`
+    writes and sources, so the file has to exist somewhere: tempfile.mkstemp
+    puts it in $TMPDIR at 0600 (it holds `declare -p` of a whole environment,
+    so a world-readable one would leak whatever arrived in $GH_TOKEN), the
+    same function unlinks it in a finally, and nothing outside probe_verify
+    ever learns its name. It is not under PROJECT_ROOT and it is not a
+    document, which is why it needs no confinement rule of its own: the two
+    that exist -- validate_path_in_project in bash, require_in_project here --
+    both answer about paths a CALLER supplied, and no caller supplies this
+    one. What stays true is the ban above it: this file still owns no
+    recursive delete, so the scratch space is ONE file that one os.unlink
+    removes rather than a directory something would have to walk.
     """
     code = _code()
     assert code.count("open(") == 7
@@ -3425,7 +3441,9 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
-    assert code.count("os.unlink(") == 2, "the temp file, and _rm_f's single delete"
+    assert code.count("os.unlink(") == 3, (
+        "the temp file, _rm_f's single delete, and probe_verify's snapshot"
+    )
     assert set(re.findall(r"([\w.]+)\.write\(", code)) == {
         "sys.stdout",
         "sys.stderr",
@@ -3439,6 +3457,7 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert [line.strip() for line in code.splitlines() if "os.unlink(" in line] == [
         "os.unlink(handle.name)",
         "os.unlink(path)",
+        "os.unlink(snapshot)",
     ]
     # Thirty-seven os.path calls, and the module still names no path of its own
     # -- not .aimi/state/, not a lock, not a sibling file. Two live in
@@ -3484,7 +3503,11 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # against the features that exist instead of being believed on sight. No
     # new root, no new leaf, one more directory predicate over a directory
     # --aimi-dir already reaches.
-    assert code.count("os.path.") == 39
+    # The fortieth is probe_verify's getsize() over the snapshot file it made
+    # itself -- "has anything been carried yet", asked of a path no caller
+    # named. The docstring above argues that one; the rule the other
+    # thirty-nine keep is unchanged.
+    assert code.count("os.path.") == 40
     assert code.count("os.path.isfile(") == 7
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -5431,11 +5454,16 @@ def test_nothing_in_the_decomposition_reaches_eval():
 #   helper() { return 1; } ; helper
 #     the call reported `exit=127, discriminates=True`. A false positive.
 #
-# Only the shell-VARIABLE half is closed here; functions and `set -o` are
-# deferred by name in the plan's `metadata.decisions`, anchor
-# `scope:snapshot-deferred`. What was NOT wrong is the filesystem: each segment
-# is a real subprocess in the same cwd, so a `mkdir`/`printf >` fixture DOES
-# persist -- asserted below, because the known-gap record says otherwise.
+# Only the shell-VARIABLE half was closed here, with functions and `set -o`
+# deferred by name in that plan's `metadata.decisions`, anchor
+# `scope:snapshot-deferred`. THAT DEFERRAL IS OVER: the snapshot section below
+# (US-002) carries all three plus the working directory, and the two cases
+# quoted above are asserted there against the fix. What these tests still own
+# is the VERDICT -- when it is withheld, what names the missing state, and the
+# controls that stop it being withheld everywhere. What was NOT wrong in
+# either story is the filesystem: each segment is a real subprocess in the same
+# cwd, so a `mkdir`/`printf >` fixture DOES persist -- asserted below, because
+# the known-gap record says otherwise.
 
 
 def test_a_segment_reading_state_no_prelude_assignment_provides_gets_no_verdict(tmp_path):
@@ -6247,6 +6275,269 @@ def test_a_skip_pattern_that_is_not_a_regex_is_refused_before_the_file_is_read(c
     err = capsys.readouterr().err
     assert "--skip-matching" in err
     assert "regular expression" in err
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: the shell state a snapshot carries between segments (US-002)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: the previous plan carried plain assignments and `cd`
+# and NOTHING else, and said so -- functions and `set -o` options were deferred
+# by name under the anchor `scope:snapshot-deferred`. Both directions of that
+# blindness were measured on the tree before this change:
+#
+#   helper() { return 1; } ; helper
+#     the call reported `exit: 127` -- command not found. Non-zero for the
+#     wrong reason. `discriminates` was True and stayed True, which is why
+#     every assertion below is on the EXIT CODE: 127 and 1 are both non-zero,
+#     so the verdict cannot tell the two apart and the number is the only
+#     thing that can.
+#   set -o pipefail ; false | true
+#     the pipeline reported `exit: 0, discriminates: False`. This one FLIPS
+#     the verdict, and in the dangerous direction: "already passes before the
+#     work" is the sentence that tells a reader to stop looking, so a real
+#     check was being crossed off the list by the tool meant to find it.
+#
+# What replaces the carried prelude is a SNAPSHOT written after every segment
+# and sourced by the next -- four mechanisms, `declare -f`, `declare -p`,
+# `set +o` and `pwd`, in one sourceable file. Every segment still runs exactly
+# once, and one fewer time than before for an assignment, which used to be
+# re-run once per assertion following it.
+#
+# THE THREE CONTROLS ARE HALF THIS SECTION, deliberately. A story that carried
+# state by turning every verdict into null or true would satisfy the two cases
+# above and destroy the verb, so the unresolved-variable verdict, an ordinary
+# covered read and the disk are each asserted to be exactly what they were.
+
+
+def test_a_function_an_earlier_segment_defined_is_present_when_it_is_called(tmp_path):
+    """AC: the call exits with the FUNCTION's own status, never 127.
+
+    Asserted on the exit code rather than on `discriminates` because the
+    verdict cannot see this defect at all: `return 1` and "command not found"
+    are 1 and 127, both non-zero, both True. The verdict was right for the
+    wrong reason, and only the number says which.
+    """
+    probed = T.probe_verify("helper() { return 1; }\nhelper\n", str(tmp_path))
+    call = [entry for entry in probed if entry["segment"].strip() == "helper"]
+    assert call, probed
+    assert call[0]["exit"] == 1, "127 means the definition was not carried"
+    assert call[0]["discriminates"] is True, "still a verdict, not a withheld one"
+
+
+def test_a_shell_option_an_earlier_segment_set_flips_the_verdict(tmp_path):
+    """AC: `false | true` under a carried `set -o pipefail` discriminates.
+
+    The CONTROL travels with it in the same test, because the assertion is
+    about the OPTION and not about the pipeline: the identical segment with no
+    `set -o pipefail` in front of it exits 0 and reads as dead weight. Split
+    across two tests the pair would drift; here a change that carried nothing
+    turns the first assertion red while the second still passes, which is what
+    names the cause.
+    """
+    with_option = [
+        entry
+        for entry in T.probe_verify("set -o pipefail\nfalse | true\n", str(tmp_path))
+        if "false" in entry["segment"]
+    ]
+    assert with_option, "the pipeline segment vanished"
+    assert with_option[0]["exit"] == 1
+    assert with_option[0]["discriminates"] is True
+
+    alone = T.probe_verify("false | true\n", str(tmp_path))
+    assert alone[0]["exit"] == 0
+    assert alone[0]["discriminates"] is False, (
+        "without the option the same pipeline reads as dead weight -- which is "
+        "what the carried option is measured against"
+    )
+
+
+def test_the_set_segment_itself_is_run_and_still_not_reported(tmp_path):
+    """`set -o pipefail` claims nothing about the tree, so it stays out of a
+    list whose subject is assertions that already pass -- and it has to RUN,
+    because running it is what puts the option in the snapshot. Before this
+    story it was neither reported nor run, and the second half was the bug."""
+    probed = T.probe_verify("set -o pipefail\nfalse | true\n", str(tmp_path))
+    assert [entry["segment"] for entry in probed] == ["false | true"]
+
+
+def test_the_working_directory_an_earlier_segment_established_is_reproduced(tmp_path):
+    """AC: the `cd` still works, as it did before the snapshot replaced the
+    prelude that carried it. The grep PASSES, which is only possible from
+    inside `sub` -- and the two context segments stay out of the report."""
+    os.makedirs(os.path.join(str(tmp_path), "sub"))
+    with open(os.path.join(str(tmp_path), "sub", "f.txt"), "w") as handle:
+        handle.write("marker\n")
+    probed = T.probe_verify(
+        'DIR=sub\ncd "$DIR"\ngrep -q marker f.txt\n', str(tmp_path)
+    )
+    assert [entry["segment"] for entry in probed] == ["grep -q marker f.txt"]
+    assert probed[0]["discriminates"] is False
+
+
+def test_a_cd_that_fails_still_aborts_every_segment_after_it(tmp_path):
+    """The guarantee the old `cd X || exit 1` prelude gave, kept byte for byte.
+
+    A `cd` that failed and then let the segments after it run in the CALLER's
+    tree is this verb manufacturing the defect it exists to find, quietly:
+    nothing in the answer would say the probe never moved. The abort is
+    planted in the snapshot itself, so every later segment sources it, exits 1
+    and is reported at 1 -- discriminating, the safe direction, since a probe
+    must never invent dead weight.
+    """
+    probed = T.probe_verify("cd nao-existe\ntrue\n", str(tmp_path))
+    assert [entry["segment"] for entry in probed] == ["true"]
+    assert probed[0]["exit"] == 1
+    assert probed[0]["discriminates"] is True
+
+
+def test_an_assignment_is_executed_once_rather_than_once_per_assertion(tmp_path):
+    """AC: the count of runs does not rise -- and for an assignment it falls.
+
+    The carried prelude re-ran every assignment once per assertion after it,
+    so `W=$(mktemp -d)` handed each assertion a DIFFERENT directory. Measured
+    through the only thing a re-run leaves behind: a command substitution that
+    appends a line to a file. Three assertions follow it; one line means it ran
+    once, three would mean the prelude shape survived.
+    """
+    probed = T.probe_verify(
+        "TAG=$(printf 'ran\\n' >> runs.txt)\n"
+        "test -f a.txt\ntest -f b.txt\ntest -f c.txt\n",
+        str(tmp_path),
+    )
+    assert len(probed) == 3, "the three assertions are still reported"
+    with open(os.path.join(str(tmp_path), "runs.txt"), encoding="utf-8") as handle:
+        assert handle.read() == "ran\n"
+
+
+def test_the_unresolved_variable_verdict_still_fires(tmp_path):
+    """CONTROL 1, and the one that says what the check now IS.
+
+    The gate is STATIC and deliberately conservative: a name an `eval` set is
+    not counted even though the snapshot taken after that very segment carries
+    the value. Reading the answer back out of the snapshot would make the
+    verdict depend on which segments happened to run -- a name set inside a
+    segment that was skipped, timed out or was itself withheld is genuinely
+    absent -- so the gate answers the question it can answer everywhere. A
+    `None` where a real verdict was available costs a reader one look; a real
+    verdict where the state was missing is the defect the third answer exists
+    to prevent.
+    """
+    probed = T.probe_verify(
+        "CMD='s=x'\neval \"$CMD\"\ncase \"$s\" in x) exit 1 ;; esac\n", str(tmp_path)
+    )
+    case = [entry for entry in probed if entry["segment"].startswith("case")]
+    assert case, probed
+    assert case[0]["discriminates"] is None
+    assert case[0]["exit"] is None, "a segment that was not run has no status"
+    assert case[0]["unresolvedState"] == ["s"]
+
+
+def test_a_covered_read_keeps_its_ordinary_verdict(tmp_path):
+    """CONTROL 2, load-bearing: this story could be "passed" by turning every
+    verdict into null or true, which would destroy the verb rather than carry
+    anything. A carried assignment resolves the reads after it, and both a
+    passing and a failing assertion keep the answer they always had."""
+    with open(os.path.join(str(tmp_path), "doc.md"), "w") as handle:
+        handle.write("marker\n")
+    probed = T.probe_verify(
+        'S=doc.md\ngrep -q marker "$S"\ngrep -q ausente "$S"\n', str(tmp_path)
+    )
+    assert [entry["exit"] for entry in probed] == [0, 1]
+    assert [entry["discriminates"] for entry in probed] == [False, True]
+    assert all("unresolvedState" not in entry for entry in probed)
+
+
+def test_filesystem_effects_persist_and_a_deletion_is_not_undone(tmp_path):
+    """CONTROL 3, plus the half that is irreducible on purpose.
+
+    The disk was never the blind spot -- each segment is a real subprocess in
+    the same directory, so a `mkdir`/`printf >` fixture is there for the ones
+    after it. What no snapshot reverses is a segment that DELETES: the
+    assertion after it runs against a tree with the file gone, exactly as in a
+    real run, and the docstring says so rather than implying the probe undoes
+    it.
+    """
+    probed = T.probe_verify(
+        "mkdir -p fx\nprintf 'alvo\\n' > fx/a.txt\ngrep -q alvo fx/a.txt\n"
+        "rm -f fx/a.txt\ngrep -q alvo fx/a.txt\n",
+        str(tmp_path),
+    )
+    assert [entry["exit"] for entry in probed] == [0, 0, 0, 0, 2]
+    assert probed[2]["discriminates"] is False, "the fixture is there"
+    assert probed[4]["discriminates"] is True, "and the deletion is not undone"
+    assert not os.path.exists(os.path.join(str(tmp_path), "fx", "a.txt"))
+
+
+def test_the_snapshot_is_unique_per_invocation_and_removed_afterwards(tmp_path):
+    """The nested case, asserted through consequence rather than by inspection.
+
+    This function runs against ITSELF: the verify of the story that wrote it
+    calls `probe_verify()` from inside a `python3` heredoc, which is a segment
+    of an outer probe, so two live invocations share a machine and a $TMPDIR.
+    A fixed filename would have them writing each other's shell state, and
+    `mkstemp` is what rules that out where a name built from a pid or a story
+    id would not. The path is read out of the segment's own environment, so
+    this pins two more things at once: that the variable reaches the
+    subprocess, and that the file is gone when the call returns.
+    """
+    text = "declare -p %s > snap.txt\n" % T._VERIFY_SNAPSHOT_VAR
+
+    def snapshot_of(where):
+        os.makedirs(where, exist_ok=True)
+        probed = T.probe_verify(text, where)
+        assert probed[0]["exit"] == 0, probed
+        with open(os.path.join(where, "snap.txt"), encoding="utf-8") as handle:
+            recorded = handle.read()
+        match = re.search(r'="([^"]+)"', recorded)
+        assert match, recorded
+        return match.group(1)
+
+    first = snapshot_of(os.path.join(str(tmp_path), "um"))
+    second = snapshot_of(os.path.join(str(tmp_path), "dois"))
+    assert first != second, "two invocations must not share one snapshot file"
+    for path in (first, second):
+        assert not os.path.exists(path), "the probe cleans up after itself"
+        assert not path.startswith(str(tmp_path)), "scratch space, not the tree"
+
+
+def test_the_snapshot_carries_four_mechanisms_in_the_order_that_replays(tmp_path):
+    """The four, and no fifth -- and `set +o` after both `declare`s.
+
+    The order is not cosmetic: a snapshot from a shell that ran `set -e`
+    carries `set -o errexit`, and enabling it before the declares would abort
+    the replay on the first readonly variable bash refuses (`BASHOPTS`,
+    `EUID`, `PPID`, `SHELLOPTS`, `UID` -- dumped like everything else). This
+    asserts the shape a later edit is most likely to tidy into alphabetical
+    order.
+    """
+    trap = T._VERIFY_SNAPSHOT_TRAP
+    for mechanism in ("declare -f", "declare -p", "set +o", 'printf "cd %q'):
+        assert mechanism in trap, mechanism
+    assert "shopt" not in trap, "there is no fifth mechanism"
+    assert trap.index("set +o") > trap.index("declare -p") > trap.index("declare -f")
+    assert "|| :" in trap, (
+        "`declare -f` in a shell with no functions exits 1, and this dump runs "
+        "inside the exit trap of a shell that may have errexit on"
+    )
+
+
+def test_the_docstring_says_which_state_is_reproduced_and_which_is_not():
+    """The docstring is the only place a reader of a `null` verdict looks, and
+    two of its claims are load-bearing enough to pin: that the four mechanisms
+    are carried, and that a disk effect is NOT undone. The second is the one a
+    later reader would otherwise assume away."""
+    doc = T.probe_verify.__doc__
+    for claim in (
+        "EVERY SEGMENT RUNS ONCE, IN ORDER",
+        "functions, variables, options and working directory",
+        "_VERIFY_SNAPSHOT_TRAP",
+        "DISK EFFECTS ARE ALSO THE STATE NOTHING HERE CAN UNDO",
+    ):
+        assert claim in doc, claim
+    assert "scope:snapshot-deferred" not in doc, (
+        "the deferral this story closes must not still be promised here"
+    )
 
 
 # ---------------------------------------------------------------------------
