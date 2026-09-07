@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.125.0] - 2026-09-07
+
+### Fixed
+
+- `verify-probe`'s `--previous-file` no longer aborts the probe. The flag names a
+  prior run's own output — the before-state a story's second probe compares
+  against — and `tasks.py` has always documented it as tolerated rather than
+  required: "a bad `--previous-file` must never be why the probe itself fails".
+  The bash wrapper was stricter than the contract it wrapped, in two independent
+  ways. It pre-resolved the path with a bare `realpath`, which aborts on a path
+  that does not exist yet — defeating `validate_path_in_project`'s own
+  parent-plus-basename handling for exactly that case. And it then refused an
+  out-of-project path fatally, killing a diagnostic run over a diagnostic input.
+  Both are gone: the path is consulted through a silent predicate, and a refusal
+  now prints one warning naming the flag and drops it, so the probe still answers
+  with every `unsatisfiable` false — the same degrade an unreadable or malformed
+  file already produced. `--tasks-file` is untouched and still fatal: it is a
+  required input, not a diagnostic one.
+
+- `validate_path_in_project` keeps its exact refusal message and exit status for
+  every caller. Its decision moved into a predicate that the existing function now
+  wraps, so path confinement remains one rule with one implementation — no second
+  check was introduced.
+
+- `skills/story-executor/SKILL.md` stopped telling the executor to save the
+  `verify-probe` baseline to `/tmp` and hand that path back through
+  `--previous-file`, which the CLI refuses. The baseline now goes to the tasks
+  file's own directory. It is deliberately not a `.aimi/` directory inside the
+  worktree: `find_aimi_root` stops at the first `.aimi/` above the working
+  directory, so creating one there relocates `PROJECT_ROOT` to the worktree and
+  every later CLI call naming an absolute path outside it is refused — including
+  `get-story-context`, the executor's own first action. The instruction now
+  carries that reason inline, so the shorter-looking path is not restored later.
+
+Closes #141.
+
 ## [1.124.0] - 2026-09-05
 
 One release consolidating the verification work that reached this branch across

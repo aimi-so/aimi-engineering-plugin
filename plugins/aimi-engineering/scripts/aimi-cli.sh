@@ -97,6 +97,45 @@ find_aimi_root() {
   done
 }
 
+# Resolve $1 to the exact form the project-confinement check compares against
+# PROJECT_ROOT: realpath when the path already exists, realpath(parent)/
+# basename when only the parent does, and the raw path when neither does --
+# there is nothing left on disk to anchor a resolution to. Shared by
+# path_within_project (the decision) and validate_path_in_project (which also
+# prints this value on refusal), so the two can never compute it differently.
+# Usage: _resolve_for_confinement_check "/some/path"
+_resolve_for_confinement_check() {
+  local target_path="$1"
+  if [ -e "$target_path" ]; then
+    resolve_path "$target_path"
+    return
+  fi
+  local parent_dir
+  parent_dir=$(dirname "$target_path")
+  if [ -e "$parent_dir" ]; then
+    echo "$(resolve_path "$parent_dir")/$(basename "$target_path")"
+  else
+    echo "$target_path"
+  fi
+}
+
+# Silent predicate: the decision half of validate_path_in_project's rule,
+# factored out for a caller that must not die on refusal. Prints nothing and
+# never exits -- 0 when $1 resolves within PROJECT_ROOT (or is exactly it),
+# 1 otherwise. This is NOT a second confinement rule: validate_path_in_project
+# stays the sole authority and every other caller still goes through it,
+# unchanged, below -- this only gives the ONE caller that must degrade
+# instead of dying (verify-probe's --previous-file) the same rule without the
+# fatal wrapper.
+# Usage: if path_within_project "/some/path"; then ... fi
+path_within_project() {
+  case "$(_resolve_for_confinement_check "$1")" in
+    "$PROJECT_ROOT"/*) return 0 ;;  # Under project root (includes .worktrees/)
+    "$PROJECT_ROOT")   return 0 ;;  # Exactly the project root
+    *)                 return 1 ;;
+  esac
+}
+
 # Validate that a given path resolves to a location within PROJECT_ROOT.
 # Worktree paths (under .worktrees/ inside PROJECT_ROOT) are explicitly allowed.
 # Usage: validate_path_in_project "/some/path"
@@ -114,32 +153,14 @@ validate_path_in_project() {
     exit 1
   fi
 
-  # Resolve the target path to its absolute form
-  local resolved_target
-  if [ -e "$target_path" ]; then
-    resolved_target=$(resolve_path "$target_path")
-  else
-    # For paths that don't exist yet, resolve the parent directory
-    local parent_dir
-    parent_dir=$(dirname "$target_path")
-    if [ -e "$parent_dir" ]; then
-      resolved_target="$(resolve_path "$parent_dir")/$(basename "$target_path")"
-    else
-      resolved_target="$target_path"
-    fi
+  if path_within_project "$target_path"; then
+    return 0
   fi
 
-  # Check if the resolved path is under PROJECT_ROOT
-  case "$resolved_target" in
-    "$PROJECT_ROOT"/*) return 0 ;;  # Under project root (includes .worktrees/)
-    "$PROJECT_ROOT")   return 0 ;;  # Exactly the project root
-    *)
-      echo "Error: Path escapes project root — access denied" >&2
-      echo "  Path:         $resolved_target" >&2
-      echo "  Project root: $PROJECT_ROOT" >&2
-      exit 1
-      ;;
-  esac
+  echo "Error: Path escapes project root — access denied" >&2
+  echo "  Path:         $(_resolve_for_confinement_check "$target_path")" >&2
+  echo "  Project root: $PROJECT_ROOT" >&2
+  exit 1
 }
 
 # Portable exclusive lock (Linux: flock, macOS: mkdir spinlock)
@@ -1817,10 +1838,21 @@ cmd_get_story_context() {
 # --previous-file names a PRIOR run's own JSON array -- the executor's
 # pre-implementation call to this same verb, on this same story -- so a
 # segment non-zero in both runs can be told apart from one that merely has
-# not passed yet. It goes through resolve_path/validate_path_in_project like
-# --tasks-file, because it too arrives as a CLI argument. Omitted, or naming a
-# segment this run's script does not carry, every entry's `unsatisfiable` is
-# false: see tasks.py's _match_previous for what the comparison actually does.
+# not passed yet. It is confined by the same rule as --tasks-file, but through
+# path_within_project -- the silent predicate validate_path_in_project shares
+# -- rather than the fatal wrapper itself, and it is never pre-resolved with
+# resolve_path either: that call aborts on a path that does not exist yet,
+# which is exactly the shape a --previous-file often has (a sibling story's
+# not-yet-written probe output), and would nullify path_within_project's own
+# parent-plus-basename resolution for it. A refused --previous-file is
+# DISCARDED -- a stderr line naming the flag and the path, and the run
+# proceeds with no comparison -- rather than aborting the probe, because it is
+# optional, read-only and purely diagnostic: a bad one must never be why the
+# probe itself fails, the same contract tasks.py's _read_previous_probe
+# docstring already declares for a file that is merely unreadable or
+# malformed. Omitted, refused, or naming a segment this run's script does not
+# carry, every entry's `unsatisfiable` is false: see tasks.py's _match_previous
+# for what the comparison actually does.
 #
 # The same five gates every other tasks verb runs, and the same one crossing --
 # the decomposition, the per-segment run and the shape are tasks.py's. The only
@@ -1833,7 +1865,8 @@ cmd_get_story_context() {
 #
 # No lock: this reads the document and writes nothing to it.
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
-#        --previous-file <path> (optional; a prior run's own output)
+#        --previous-file <path> (optional; a prior run's own output --
+#        discarded with a stderr warning, never fatal, if it fails confinement)
 cmd_verify_probe() {
   local tasks_file positional=() previous_file="" remaining=()
   local args=("$@")
@@ -1867,9 +1900,11 @@ cmd_verify_probe() {
 
   local previous_args=()
   if [ -n "$previous_file" ]; then
-    previous_file=$(resolve_path "$previous_file")
-    validate_path_in_project "$previous_file"
-    previous_args=(--previous-file "$previous_file")
+    if path_within_project "$previous_file"; then
+      previous_args=(--previous-file "$previous_file")
+    else
+      echo "Warning: --previous-file ignored -- escapes project root: $previous_file" >&2
+    fi
   fi
 
   check_python3
