@@ -154,7 +154,7 @@ import tempfile
 # If a third module ever needs these, they follow rm_sanitize into a module of
 # their own -- that is what sanitize.py is, and why it was extracted in its own
 # commit rather than being imported out of whichever file happened to hold it.
-from roadmap import TERMINAL_STORY_STATUSES, _json_type, jq_numbers, jq_sort_key
+from roadmap import TERMINAL_STORY_STATUSES, _json_type, ground_truth, jq_numbers, jq_sort_key
 
 # compute_waves is the WRITER's own rule -- roots at 1, everyone else at
 # max(dependency waves) + 1. normalize_waves (below) recomputes a stale
@@ -738,6 +738,51 @@ def status_view(doc, counts_only):
     if not counts_only:
         view["userStories"] = [story_row(story) for story in stories]
     return view
+
+
+# ground_truth's six phase-classification answers, remapped onto the four
+# run-verdict values a caller outside roadmap.py's own phase-claim machinery
+# actually needs. "" and "unknown" both mean the document told ground_truth
+# nothing usable (unreadable as a tasks file, or userStories absent/empty);
+# verification_failed and in_progress both mean the run is stuck rather than
+# finished, including ground_truth's residual in_progress bucket -- a mix of
+# pending and completed/skipped with no story ever explicitly claimed, i.e. a
+# session killed at a wave boundary before the next story was claimed. That
+# case is not a fifth verdict: it falls out of importing ground_truth whole
+# rather than restating its four bullets, exactly as the mapping intends.
+_RUN_VERDICT_FROM_GROUND_TRUTH = {
+    "": "undetermined",
+    "unknown": "undetermined",
+    "verification_failed": "interrupted",
+    "in_progress": "interrupted",
+    "planned": "never-run",
+    "completed": "delivered",
+}
+
+
+def run_verdict(doc):
+    """Classify a tasks file's execution state: never-run, delivered,
+    interrupted, or undetermined.
+
+    Answers by calling roadmap.ground_truth(doc) and remapping its six-way
+    phase classification through _RUN_VERDICT_FROM_GROUND_TRUTH, rather than
+    re-implementing ground_truth's branching rule here. ground_truth's own
+    docstring names why: "the one rule reconcile and the has-work map both
+    read, so they cannot drift" -- a third copy in tasks.py would be exactly
+    the drift risk that warning is about, and would also have to reproduce a
+    precedence that is easy to get wrong by hand: failed is checked BEFORE
+    either terminal-set branch, and completed-or-skipped is ONE terminal set.
+
+    The mapping also picks up ground_truth's own residual case for free: a
+    tasks file with one story completed and the rest still pending, with no
+    story ever marked in_progress or failed, is not "every story pending"
+    (not never-run) and not "every story terminal" (not delivered) -- it is
+    the in_progress bucket ground_truth falls through to by elimination, and
+    that reads interrupted here too. A hand-written four-bullet restatement
+    of "interrupted = any story is in_progress or failed" would miss exactly
+    this case; importing ground_truth's actual rule does not.
+    """
+    return {"verdict": _RUN_VERDICT_FROM_GROUND_TRUTH[ground_truth(doc)]}
 
 
 def metadata_view(doc):
@@ -3137,6 +3182,15 @@ def op_count_pending(argv):
     return 0
 
 
+def op_run_verdict(argv):
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py run-verdict --tasks-file <path>")
+    for doc in read_docs(path, "run-verdict"):
+        _emit(run_verdict(doc))
+    return 0
+
+
 def op_get_story(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started, and neither is
@@ -5219,6 +5273,7 @@ _OPS = {
     "current-story": op_current_story,
     "get-state": op_get_state,
     "count-pending": op_count_pending,
+    "run-verdict": op_run_verdict,
     "list-ready": op_list_ready,
     "next-story": op_next_story,
     "validate-deps": op_validate_deps,

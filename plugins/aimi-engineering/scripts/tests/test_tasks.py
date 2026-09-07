@@ -62,6 +62,7 @@ the port drifted or a rule genuinely changed; in the second case the golden file
 changes in the same commit as the rule, with the reason in the message.
 """
 
+import inspect
 import json
 import os
 import re
@@ -4256,6 +4257,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "current-story",
         "get-state",
         "count-pending",
+        "run-verdict",
         "list-ready",
         "next-story",
         "validate-deps",
@@ -4396,6 +4398,70 @@ def test_counts_only_omits_exactly_one_key_and_changes_nothing_else():
     counts = T.status_view(doc, True)
     assert set(full) - set(counts) == {"userStories"}
     assert {k: v for k, v in full.items() if k != "userStories"} == counts
+
+
+# ---------------------------------------------------------------------------
+# run_verdict -- imports roadmap.ground_truth rather than restating its rule
+# ---------------------------------------------------------------------------
+
+
+def _doc(*statuses):
+    return {"userStories": [{"id": "US-%03d" % (i + 1), "status": s} for i, s in enumerate(statuses)]}
+
+
+def test_run_verdict_never_run_when_every_story_is_pending():
+    assert T.run_verdict(_doc("pending", "pending")) == {"verdict": "never-run"}
+
+
+def test_run_verdict_delivered_when_every_story_reached_a_terminal_status():
+    """completed and skipped are ONE terminal set -- a mix of the two, with
+    none in_progress/failed, still reads delivered."""
+    assert T.run_verdict(_doc("completed", "skipped")) == {"verdict": "delivered"}
+    assert T.run_verdict(_doc("completed", "completed")) == {"verdict": "delivered"}
+    assert T.run_verdict(_doc("skipped", "skipped")) == {"verdict": "delivered"}
+
+
+def test_run_verdict_interrupted_when_a_story_is_in_progress():
+    assert T.run_verdict(_doc("pending", "in_progress")) == {"verdict": "interrupted"}
+
+
+def test_run_verdict_interrupted_when_a_story_is_failed():
+    """failed is checked BEFORE either terminal-set branch: a failed story
+    outranks a completed sibling, per ground_truth's own load-bearing order."""
+    assert T.run_verdict(_doc("completed", "failed")) == {"verdict": "interrupted"}
+
+
+def test_run_verdict_interrupted_on_a_wave_boundary_crash_with_no_explicit_marker():
+    """One story completed, the rest still pending, and nothing ever marked
+    in_progress or failed -- a session killed between waves before the next
+    story was claimed. Not never-run (something happened) and not delivered
+    (something remains); ground_truth's residual in_progress bucket, which
+    this mapping reads as interrupted."""
+    assert T.run_verdict(_doc("completed", "pending")) == {"verdict": "interrupted"}
+    assert T.run_verdict(_doc("skipped", "pending", "pending")) == {"verdict": "interrupted"}
+
+
+def test_run_verdict_undetermined_when_user_stories_is_an_empty_array():
+    assert T.run_verdict({"userStories": []}) == {"verdict": "undetermined"}
+
+
+def test_run_verdict_undetermined_when_user_stories_is_absent():
+    assert T.run_verdict({}) == {"verdict": "undetermined"}
+
+
+def test_run_verdict_undetermined_when_the_document_is_not_readable_as_a_tasks_file():
+    """Not a dict at all -- the same shape ground_truth's own '' branch covers."""
+    assert T.run_verdict("not a tasks file") == {"verdict": "undetermined"}
+    assert T.run_verdict(None) == {"verdict": "undetermined"}
+
+
+def test_run_verdict_calls_ground_truth_rather_than_restating_its_rule():
+    """The story's own notes: a third copy of the branching rule is exactly
+    the drift ground_truth's docstring warns against. Assert the delegation
+    structurally, not just its four output values."""
+    assert T.run_verdict is not None
+    source = inspect.getsource(T.run_verdict)
+    assert "ground_truth(" in source
 
 
 def test_a_duplicated_story_id_still_returns_both_objects():

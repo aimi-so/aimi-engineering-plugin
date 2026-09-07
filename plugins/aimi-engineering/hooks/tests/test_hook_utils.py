@@ -260,6 +260,13 @@ def test_deny_custom_event_name():
     assert parsed["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
 
 
+def test_deny_includes_top_level_system_message():
+    """Carries the message in a top-level systemMessage, the field Claude Code reads."""
+    msg = "You shall not pass."
+    parsed = json.loads(hook_utils.deny(msg))
+    assert parsed["systemMessage"] == msg
+
+
 # ---------------------------------------------------------------------------
 # extract_skill_name tests
 # ---------------------------------------------------------------------------

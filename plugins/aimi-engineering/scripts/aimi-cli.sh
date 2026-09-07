@@ -2218,6 +2218,36 @@ cmd_count_pending() {
   python3 "$(_aimi_tasks_py)" count-pending --tasks-file "$tasks_file"
 }
 
+# Classify a tasks file's execution state: never-run, delivered, interrupted,
+# or undetermined. Read-only, no lock -- same shape as count-pending above.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+cmd_run_verdict() {
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh run-verdict [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  check_python3
+  python3 "$(_aimi_tasks_py)" run-verdict --tasks-file "$tasks_file"
+}
+
 # Validate dependencies in a tasks file
 # Checks for: circular dependencies, missing IDs, self-references
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
@@ -15255,6 +15285,9 @@ COMMANDS:
                               phase-scoped tasks file (metadata.phase present).
     count-pending [--tasks-file <path>]
                               Count pending stories
+    run-verdict [--tasks-file <path>]
+                              Classify a tasks file's run state: never-run, delivered,
+                              interrupted, or undetermined (returns {verdict} JSON)
     validate-deps [--tasks-file <path>]
                               Validate dependency graph (no cycles, no missing refs)
     validate-stories [--tasks-file <path>]
@@ -16334,6 +16367,7 @@ main() {
     mark-skipped)      shift; cmd_mark_skipped "$@" ;;
     set-execution-mode) shift; cmd_set_execution_mode "$@" ;;
     count-pending)     shift; cmd_count_pending "$@" ;;
+    run-verdict)       shift; cmd_run_verdict "$@" ;;
     validate-deps)            shift; cmd_validate_deps "$@" ;;
     validate-stories)         shift; cmd_validate_stories "$@" ;;
     normalize-verification)   cmd_normalize_verification "${2:-}" ;;

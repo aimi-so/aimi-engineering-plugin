@@ -233,7 +233,7 @@ if echo "$COMMAND" | grep -qE '^\$AIMI_CLI\b|^\$\{AIMI_CLI\}'; then
   case "$SUBCMD" in
     init-session|find-tasks|find-tasks-all|status|metadata|next-story|current-story|\
     list-ready|mark-in-progress|mark-complete|mark-failed|mark-skipped|\
-    count-pending|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
+    count-pending|run-verdict|validate-deps|validate-stories|cascade-skip|reset-orphaned|\
     get-branch|get-state|detect-default-branch|clear-state|help|\
     check-version|cleanup-versions|\
     list-archivable|archive-task|setup-branch)
