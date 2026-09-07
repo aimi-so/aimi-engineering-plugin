@@ -5225,6 +5225,181 @@ def test_nothing_in_the_decomposition_reaches_eval():
 
 
 # ---------------------------------------------------------------------------
+# verify-probe: the THIRD verdict -- `discriminates: null` (US-001, plan #149)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: the prelude carries `cd` and plain assignments and
+# NOTHING ELSE, so a segment whose variable was set by an `eval`, a subshell or
+# a function ran against a world that never existed -- and the exit status of
+# that run was reported as a verdict. Measured on the tree before this change,
+# both directions:
+#
+#   CMD='s_clean="tagged [US-003]"' ; eval "$CMD" ; case "$s_clean" in ...
+#     the whole script exits 1 -- it DISCRIMINATES -- while the probe reported
+#     the `case` segment `exit=0, discriminates=False`. A false negative, and
+#     the dangerous one: "already passes" is what tells a reader to stop.
+#   helper() { return 1; } ; helper
+#     the call reported `exit=127, discriminates=True`. A false positive.
+#
+# Only the shell-VARIABLE half is closed here; functions and `set -o` are
+# deferred by name in the plan's `metadata.decisions`, anchor
+# `scope:snapshot-deferred`. What was NOT wrong is the filesystem: each segment
+# is a real subprocess in the same cwd, so a `mkdir`/`printf >` fixture DOES
+# persist -- asserted below, because the known-gap record says otherwise.
+
+
+def test_a_segment_reading_state_no_prelude_assignment_provides_gets_no_verdict(tmp_path):
+    """AC: `discriminates: null` plus `unresolvedState`, and the segment is not
+    run at all.
+
+    The exact shape the #149 run hit. `CMD=...` is carried -- it is a plain
+    assignment -- so `eval "$CMD"` keeps an ordinary verdict; what the eval
+    SETS does not survive its own subprocess, so the `case` after it would have
+    read an empty `$s_clean`, exited 0, and been reported as dead weight when
+    the real script exits 1 on that very line.
+    """
+    _, probed = _probe(
+        tmp_path,
+        'CMD=\'s_clean="tagged [US-003]"\'\n'
+        'eval "$CMD"\n'
+        'case "$s_clean" in *"[US-003]"*) exit 1 ;; esac\n',
+    )
+    assert [entry["segment"] for entry in probed] == [
+        'eval "$CMD"',
+        'case "$s_clean" in *"[US-003]"*) exit 1 ;; esac',
+    ]
+    assert probed[0]["discriminates"] is False, "a carried assignment still resolves"
+    assert probed[1]["discriminates"] is None
+    assert probed[1]["exit"] is None, "a segment that was not run has no status"
+    assert probed[1]["unresolvedState"] == ["s_clean"]
+
+
+def test_the_null_verdict_names_every_missing_variable_and_only_those(tmp_path):
+    """AC: `unresolvedState` tells the reader WHICH state was missing.
+
+    Sorted, deduplicated, and holding neither the name the prelude did assign
+    nor the special parameters the shell provides itself -- a list that named
+    `$?` on every segment reading an exit status would be noise where the
+    answer belongs.
+    """
+    _, probed = _probe(
+        tmp_path,
+        'HAVE=x\n'
+        'test -n "$ZETA$ALPHA$HAVE$ZETA${BETA}$?$1$@$#"\n',
+    )
+    assert probed[0]["unresolvedState"] == ["ALPHA", "BETA", "ZETA"]
+    assert probed[0]["discriminates"] is None
+
+
+def test_a_segment_whose_every_read_is_carried_keeps_its_real_verdict(tmp_path):
+    """CONTROL, and the reason it is load-bearing: this story could be "passed"
+    by turning EVERY verdict into null, which would destroy the verb rather
+    than fix it. A prelude assignment resolves the read that follows it, both
+    when the assertion passes and when it fails."""
+    _, probed = _probe(
+        tmp_path,
+        'S=doc.md\ngrep -q marker "$S"\ngrep -q ausente "$S"\n',
+        files=("doc.md",),
+    )
+    assert [entry["exit"] for entry in probed] == [0, 1]
+    assert [entry["discriminates"] for entry in probed] == [False, True]
+    assert all("unresolvedState" not in entry for entry in probed)
+
+
+def test_a_segment_reading_no_variable_at_all_keeps_its_verdict(tmp_path):
+    """CONTROL 2, the other half of the same guard: nothing to resolve means
+    nothing to withhold, so the entry is byte-for-byte what it always was --
+    same keys in the same order, no `unresolvedState` key at all."""
+    _, probed = _probe(tmp_path, "true\ntest -f ausente.txt\n")
+    assert probed == [
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {
+            "segment": "test -f ausente.txt",
+            "exit": 1,
+            "discriminates": True,
+            "unsatisfiable": False,
+        },
+    ]
+
+
+def test_a_variable_the_segment_binds_itself_is_not_unresolved(tmp_path):
+    """A `for` loop reads a name it bound one word earlier, inside the SAME
+    segment, so no prelude could ever carry it. Treating that as missing would
+    put a null on every loop in every verify -- the over-nulling the two
+    controls above exist to rule out, arriving through a side door."""
+    _, probed = _probe(tmp_path, 'for f in existe.txt; do test -f "$f"; done\n',
+                       files=("existe.txt",))
+    assert probed[0]["discriminates"] is False
+    assert "unresolvedState" not in probed[0]
+
+
+def test_a_variable_from_the_inherited_environment_is_not_unresolved(tmp_path):
+    """`subprocess.run` hands the probe's own environment to every segment, so
+    `$HOME` is genuinely there. Reporting it missing would be false in the
+    plainest way available: the segment would have resolved it had it run."""
+    _, probed = _probe(tmp_path, 'test -d "$HOME"\n')
+    assert probed[0]["discriminates"] is False
+    assert "unresolvedState" not in probed[0]
+
+
+def test_a_dollar_inside_single_quotes_is_not_a_read(tmp_path):
+    """Single quotes suppress expansion, so `$NOPE` here is three characters of
+    text. A regex over the raw segment would call this a read and null the
+    entry; only the character-by-character quote tracking gets it right."""
+    _, probed = _probe(tmp_path, "grep -q 'literal $NOPE' doc.md\n", files=("doc.md",))
+    assert probed[0]["discriminates"] is True
+    assert "unresolvedState" not in probed[0]
+
+
+def test_a_null_verdict_is_never_named_unsatisfiable(tmp_path):
+    """`unsatisfiable` means non-zero in BOTH runs, and a segment that was not
+    run has no status to be non-zero. Without the guard, `exit: None` compares
+    unequal to 0 and a story would get told to "check the harness" about a
+    check nothing ever executed."""
+    text = 'CMD=\'v=1\'\neval "$CMD"\ntest -n "$v"\n'
+    _, before = _probe(tmp_path, text)
+    _, after = _probe(tmp_path, text, previous=before)
+    unresolved = [entry for entry in after if entry["discriminates"] is None]
+    assert len(unresolved) == 1, after
+    assert unresolved[0]["unsatisfiable"] is False
+    assert "note" not in unresolved[0]
+
+
+def test_a_fixture_built_on_disk_persists_across_segments(tmp_path):
+    """The claim this story's docstring change CORRECTS, asserted rather than
+    argued. The known-gap record says a `mkdir`/`printf >` fixture leaves every
+    downstream assertion running against an empty tree; each segment is a real
+    subprocess in the same directory, so it does not. What is lost is shell
+    state alone -- which is what the null verdict above is for."""
+    root, probed = _probe(
+        tmp_path,
+        "mkdir -p fx\nprintf 'alvo\\n' > fx/a.txt\ngrep -q alvo fx/a.txt\n",
+    )
+    assert [entry["exit"] for entry in probed] == [0, 0, 0]
+    assert [entry["discriminates"] for entry in probed] == [False, False, False]
+    assert os.path.isfile(os.path.join(root, "fx", "a.txt"))
+
+
+def test_verify_reads_and_verify_assigns_are_the_two_halves_of_the_question():
+    """The helpers on their own, because probe_verify can only show their
+    AGREEMENT and a disagreement is what a bug here looks like. The assignment
+    word binds `CMD` and reads nothing -- its right-hand side is single-quoted
+    text, not an expansion -- which is precisely why the `case` after it has
+    nothing to resolve `$s_clean` with."""
+    assert T.verify_reads('CMD=\'s_clean="x"\'') == set()
+    assert T.verify_assigns('CMD=\'s_clean="x"\'') == {"CMD"}
+    assert T.verify_reads('case "$s_clean" in *x*) exit 1 ;; esac') == {"s_clean"}
+    assert T.verify_assigns('case "$s_clean" in *x*) exit 1 ;; esac') == set()
+    assert T.verify_reads('echo "$1 $@ $# $_ $$ $! $?"') == set()
+    assert T.verify_reads('echo "${VAR#p}" "${#LEN}" "${!IND}"') == {"VAR", "LEN", "IND"}
+    assert T.verify_reads('echo "$(printf %s "$INNER")"') == {"INNER"}
+    assert T.verify_assigns("export G=y") == {"G"}
+    assert T.verify_assigns("arr[0]=y") == {"arr"}
+    assert T.verify_assigns("x+=1") == {"x"}
+    assert T.verify_assigns("while read -r line; do echo x; done") == {"line"}
+
+
+# ---------------------------------------------------------------------------
 # verify-probe --previous-file: the second measurement point (US-005)
 # ---------------------------------------------------------------------------
 #

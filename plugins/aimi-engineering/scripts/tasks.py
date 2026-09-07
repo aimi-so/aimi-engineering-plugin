@@ -2797,17 +2797,28 @@ def verification_report(doc):
     Those two numbers are what make this the first pipeline metric that MOVES
     when verification actually improves.
 
-    AND THE NUMBER READS HIGH -- a ceiling on what was verified, never a
+    AND THE NUMBER STILL READS HIGH -- a ceiling on what was verified, never a
     measurement of it. The count originates in `verify-probe`'s
     `discriminates`, and `probe_verify` carries only assignments and `cd` into
-    each assertion's isolated shell: a verify that builds its fixture with
-    `mkdir`, `printf > file` or a subshell has every downstream assertion
-    failing because the fixture is MISSING, and a failing segment is scored
-    `discriminates: true`. So `checked` over-counts and `fraction` reads high.
-    Three phase-2 executors hit exactly this; the gap is written up in
-    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
-    and is deliberately open -- read the number with that caveat rather than
-    fixing the probe from here.
+    each assertion's isolated shell, so a verify whose fixture is built by
+    anything that mutates the SHELL -- a subshell, a function definition, a
+    `set -o` -- has the segments after it measured against state that was never
+    reproduced, and a segment failing for that reason alone is scored
+    `discriminates: true`. Three phase-2 executors hit this; the gap is written
+    up in
+    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`.
+
+    TWO CORRECTIONS TO THAT RECORD, BOTH MEASURED. It names `mkdir` and
+    `printf > file` among the causes and they are NOT: every segment runs as a
+    real subprocess in the same directory, so a fixture built on DISK persists
+    and the assertions after it read it back -- see `probe_verify`'s own
+    docstring, which carries the measurement. And the shell-VARIABLE half of
+    the gap is closed: a segment reading a variable no carried assignment
+    provides is now scored `discriminates: None`, which is neither the `true`
+    the executor counts into this number nor the `false` it reports as an
+    assertion that already passes. What remains open is the rest of shell
+    state, so read the number with that narrower caveat rather than fixing the
+    probe from here.
     """
     visual = []
     pending = []
@@ -4397,6 +4408,15 @@ _VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 # The words that may precede an assignment and still leave it an assignment.
 _VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
 
+# A NAME as `$NAME` and `${NAME}` spell it, matched from a position rather than
+# anchored, so it can be run against the character after a `$`.
+_VERIFY_NAME_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# The same NAME as a whole word, tolerating the `;` a word carries when the
+# scanner cut on blanks alone -- `for f in a; do` yields the word `f`, but
+# `while read -r line; do` yields `line;`.
+_VERIFY_BOUND_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*);?$")
+
 # The builtins whose whole job is to MOVE the shell. Only `cd` appears in the
 # corpus this parser was cut against -- 11 of the 258 verifies under this
 # plugin's own .aimi/ carry one and none carries a pushd, measured 2026-09-04 --
@@ -4636,6 +4656,117 @@ def verify_words(segment):
     return words
 
 
+def verify_reads(segment):
+    """The variable names a segment EXPANDS: every `$NAME` and `${NAME}` in it.
+
+    Same scanner discipline as verify_segments and verify_words, and here it is
+    the whole point: a `$` inside single quotes is not an expansion at all, so
+    `CMD='s_clean=x'` READS nothing and assigns `CMD`, while the `case "$s_clean"`
+    after it reads `s_clean`. Getting that backwards in either direction is the
+    defect this function exists to make visible, so quoting is tracked character
+    by character rather than guessed at with a regex over the raw text.
+
+    POSITIONAL AND SPECIAL PARAMETERS ARE NOT NAMES and never appear here.
+    `$?`, `$$`, `$!`, `$#`, `$@`, `$*`, `$-`, `$_` and `$1`..`$9` are given by
+    the shell itself; reporting them as state the prelude failed to reproduce
+    would put a null verdict on every segment that reads an exit status, which
+    is noise where an answer belongs.
+
+    IT SEES `$NAME` AND `${NAME}` AND DELIBERATELY NOTHING ELSE. A bare name
+    inside `$(( ))` arithmetic is a read this misses, and a name bound by a
+    function definition or a shell option set with `set -o` is out of scope by
+    the same decision. Widening it is a separate change with its own corpus
+    measurement behind it; what is here is what the corpus of real verifies
+    actually carries.
+    """
+    names = set()
+    quote = None
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'" and quote is None:
+            quote = "'"
+            i += 1
+            continue
+        if ch == '"':
+            quote = None if quote == '"' else '"'
+            i += 1
+            continue
+        if ch != "$":
+            i += 1
+            continue
+        j = i + 1
+        if j < n and segment[j] == "(":
+            # A command substitution or arithmetic. Step over the `$` only --
+            # what is inside is scanned by this same loop, so a `$VAR` nested
+            # in it is still counted.
+            i = j
+            continue
+        if j < n and segment[j] == "{":
+            j += 1
+            # `${#VAR}` is VAR's length and `${!VAR}` is an indirect read of
+            # it; both READ VAR, so the sigil is stepped over rather than
+            # ending the parse.
+            while j < n and segment[j] in "#!":
+                j += 1
+        match = _VERIFY_NAME_AT.match(segment, j)
+        if match and match.group(0) != "_":
+            names.add(match.group(0))
+            i = match.end()
+            continue
+        i = j + 1
+    return names
+
+
+def verify_assigns(segment):
+    """The variable names a segment BINDS, the other half of what verify_reads
+    asks about.
+
+    Every word that is an assignment binds its own name -- `S=x`, `arr[0]=x`,
+    `x+=1`, and the same behind any of the declarators. `for NAME in ...` and
+    `read NAME` bind too, and they are here for a reason worth stating: those
+    two bind INSIDE the segment that then reads them, so a `for f in a b; do
+    echo "$f"; done` provides its own `$f` and must keep its ordinary verdict.
+    Leaving them out would turn every loop in every verify into a null.
+
+    Kept apart from verify_asserts_nothing for the same reason
+    verify_changes_directory is: that one asks whether a segment could be an
+    assertion at all, this one asks what state it leaves behind for the
+    segments after it.
+    """
+    words = verify_words(segment)
+    names = set()
+    for index, word in enumerate(words):
+        if _VERIFY_ASSIGN.match(word):
+            names.add(re.split(r"[\[+=]", word, 1)[0])
+            continue
+        if word == "for" and index + 1 < len(words):
+            bound = _VERIFY_BOUND_NAME.match(words[index + 1])
+            if bound:
+                names.add(bound.group(1))
+            continue
+        if word == "read":
+            for follower in words[index + 1:]:
+                if follower.startswith("-"):
+                    continue
+                bound = _VERIFY_BOUND_NAME.match(follower)
+                if not bound:
+                    break
+                names.add(bound.group(1))
+                if follower.endswith(";"):
+                    break
+    return names
+
+
 def verify_asserts_nothing(segment):
     """True for a segment that cannot be an assertion: a `set` builtin, or a
     plain variable assignment.
@@ -4720,9 +4851,51 @@ def probe_verify(text, cwd):
     a directory the real script never would. The operand after `&&` is the
     opposite case and IS run: it is a further assertion, reached only because
     the one before it passed.
+
+    WHAT A SEGMENT LOSES IS SHELL STATE, AND ONLY SHELL STATE. Every segment
+    runs as a REAL SUBPROCESS in the same directory, so everything it writes to
+    the DISK outlives it and the segments after it read it back: `mkdir -p fx`,
+    then `printf x > fx/a.txt`, then `grep -q x fx/a.txt` passes here, measured
+    rather than reasoned about. The record in
+    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
+    says a `mkdir`/`printf >` fixture leaves every downstream assertion running
+    against an EMPTY TREE, and that half of it is wrong; the correction is
+    written down here because this docstring is where the next reader of this
+    function looks, and a known-gap file is not. What does NOT survive is the
+    shell itself -- a variable set by anything other than the plain assignments
+    carried above dies with the subprocess that set it.
+
+    A SEGMENT WHOSE SHELL STATE THE PRELUDE NEVER REPRODUCED GETS NO VERDICT.
+    Its entry carries `discriminates: None` and an `unresolvedState` naming the
+    variables that were missing, and the segment is NOT RUN: an exit status
+    measured in a world that never existed is not evidence, and reporting a
+    verdict computed from it is worse than reporting none. Both directions the
+    missing state produces are wrong, and they are not equally wrong:
+
+      - the assertion that FAILS without it reads as spuriously DISCRIMINATING,
+        an exemplary check that is nothing of the sort; and
+      - the assertion that PASSES without it reads as spurious DEAD WEIGHT.
+
+    The second is the dangerous one, because "already passes before the work"
+    is what tells a reader to STOP LOOKING -- so a check that in truth guards
+    the story gets crossed off the list by the tool that was supposed to find
+    it. `None` is the third answer that keeps both out of the list: it says
+    "cannot tell", which is the only true thing available about a run that did
+    not happen.
+
+    THE SCOPE OF THAT THIRD ANSWER IS SHELL VARIABLES. A function definition,
+    a `set -o` option and a subshell mutate shell state too, and a segment
+    downstream of one of those still gets an ordinary verdict here. They are
+    deliberately deferred rather than overlooked -- see this plan's
+    `metadata.decisions`, anchor `scope:snapshot-deferred`.
     """
     results = []
     prelude = []
+    # The state a segment can count on: what the prelude has assigned so far,
+    # seeded with the environment this process already holds -- `subprocess.run`
+    # hands that same environment to every segment, so `$HOME` and an exported
+    # `$TASKS_FILE_PATH` are resolved, not missing.
+    assigned = set(os.environ)
     for separator, segment in verify_segments(text):
         if separator == "||":
             continue
@@ -4741,6 +4914,23 @@ def probe_verify(text, cwd):
             words = verify_words(segment)
             if words and words[0] != "set":
                 prelude.append(segment)
+                assigned |= verify_assigns(segment)
+            continue
+        # The segment's own bindings count as provided: `for f in a b; do echo
+        # "$f"; done` reads a name it binds itself, one segment, no prelude
+        # needed. The shape this whole branch exists for is the other one --
+        # an `eval "$CMD"`, a subshell or a function call setting a variable
+        # the NEXT segment reads, none of which the prelude carries.
+        missing = sorted(verify_reads(segment) - assigned - verify_assigns(segment))
+        if missing:
+            results.append(
+                {
+                    "segment": segment,
+                    "exit": None,
+                    "discriminates": None,
+                    "unresolvedState": missing,
+                }
+            )
             continue
         try:
             completed = subprocess.run(
@@ -4819,7 +5009,11 @@ def _match_previous(previous, current):
     for entry in current:
         queue = pending.get(entry["segment"])
         previous_exit = queue.pop(0) if queue else None
-        failed_both = entry["exit"] != 0 and previous_exit not in (None, 0)
+        # `None` on either side is "not measured", never "failed": a segment
+        # this run declined to run for want of its shell state has no status
+        # to compare, and calling it unsatisfiable would put back the
+        # confident verdict the null was introduced to withhold.
+        failed_both = entry["exit"] not in (None, 0) and previous_exit not in (None, 0)
         entry["unsatisfiable"] = failed_both
         if failed_both:
             entry["note"] = _UNSATISFIABLE_NOTE
