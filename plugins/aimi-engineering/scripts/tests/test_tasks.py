@@ -4541,9 +4541,17 @@ def _isolated_env(base):
     AIMI_CONFIG_DIR would rewrite the developer's own ~/.config/aimi/cli-path
     while the suite ran. HOME is the fixture too, because find_aimi_root stops
     walking up there.
+
+    VERIFY_PROBE_ACTIVE_ENV is dropped for a reason the other two do not have:
+    this suite is itself a segment of several stories' `implementation.verify`,
+    so the story executor's step 1.5 runs it INSIDE a verify-probe and hands it
+    that marker. Inherited, it would make every `_probe` case here read as a
+    nested call and refuse -- the fixtures would fail for a reason that has
+    nothing to do with what they assert. A case that WANTS the marker sets it
+    on top of this, which is what `_run_probe_cli` does.
     """
     env = dict(os.environ)
-    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE"):
+    for name in ("AIMI_PLUGIN_DIR", "CLAUDECODE", T.VERIFY_PROBE_ACTIVE_ENV):
         env.pop(name, None)
     env["HOME"] = base
     env["AIMI_CONFIG_DIR"] = os.path.join(base, "cfg")
@@ -5577,6 +5585,311 @@ def test_read_previous_probe_tolerates_absence_and_bad_shape(tmp_path):
     with open(obj_path, "w", encoding="utf-8") as handle:
         json.dump({"not": "a list"}, handle)
     assert T._read_previous_probe(obj_path) is None
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: the re-entrancy guard (US-003, plan #149)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: `verify-probe <id>` RUNS that story's verify
+# segments, so a verify naming the verb re-enters it. Measured on a throwaway
+# fixture before the fix: 127 re-entries in 25 seconds, the outer call dying at
+# its own ceiling (124) rather than answering. Nothing in `--help`, the SKILL.md
+# or plan.md warned, and the class of story that walks into it is precisely the
+# one editing verify-probe.
+#
+# WHY A MARKER AND NOT AN ID COMPARISON, since that is the fix a reader reaches
+# for first: comparing the requested story id against the running one closes
+# self-reference and nothing else. The recorded gap
+# (.aimi/known-gaps/2026-09-07-plan-141-verify-probe-nao-pode-apontar-para-si.md)
+# names the MUTUAL case in the same paragraph -- A's verify probes B, whose
+# verify probes A -- where the two ids differ at every level and the loop is
+# identical. `test_the_guard_catches_the_mutual_case_no_id_check_could_see` is
+# the one that would go green against an id comparison and does not.
+
+
+def _probe_project(tmp_path, verifies):
+    """A project whose stories are `verifies` (id -> verify text), unprobed.
+
+    Returns `(root, tasks_file)`. Unlike `_probe` above this runs nothing: the
+    tests here drive the CLI themselves because they need the exit status and
+    the stderr of the call, which `_probe` asserts away.
+    """
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    stories = []
+    for story_id, verify in verifies.items():
+        stories.append(
+            {
+                "id": story_id,
+                "title": "s",
+                "description": "d",
+                "acceptanceCriteria": ["x"],
+                "priority": 1,
+                "status": "pending",
+                "dependsOn": [],
+                "implementation": {"verify": verify},
+            }
+        )
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": {"title": "t", "branchName": "b"},
+        "userStories": stories,
+    }
+    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    return root, tasks_file
+
+
+def _run_probe_cli(root, tasks_file, story_id, marker=None, timeout=120):
+    """`verify-probe <story_id>` through the CLI, with the re-entrancy marker
+    set to `marker` when that is not None. Returns the CompletedProcess."""
+    env = _isolated_env(os.path.dirname(root))
+    if marker is not None:
+        env[T.VERIFY_PROBE_ACTIVE_ENV] = marker
+    return subprocess.run(
+        ["bash", CLI, "verify-probe", story_id, "--tasks-file", tasks_file],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def test_the_marker_name_is_one_constant_and_not_a_literal_at_each_site():
+    """AC: the environment variable's NAME lives in a module-level constant.
+
+    A literal repeated at the guard, at the export and inside the refusal
+    message is three places to change and two to forget -- and the failure of
+    forgetting one is a guard that never fires, which looks exactly like a
+    guard that is working. Comment lines are stripped before counting, the
+    same way `test_nothing_in_the_decomposition_reaches_eval` does it: prose
+    is free to spell the name out.
+    """
+    assert T.VERIFY_PROBE_ACTIVE_ENV
+    code = "\n".join(
+        line
+        for line in _code().split("\n")
+        if not line.lstrip().startswith("#")
+    )
+    assert code.count('"' + T.VERIFY_PROBE_ACTIVE_ENV + '"') == 1
+
+
+def test_entering_the_verb_with_the_marker_already_set_refuses(capsys):
+    """AC: a nested entry refuses non-zero instead of running the segments.
+
+    Driven in-process rather than through the CLI so the refusal is the ONLY
+    thing that could have produced the exit status -- no bash gate, no missing
+    file, nothing else that also exits 1.
+    """
+    previous = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        with pytest.raises(SystemExit) as raised:
+            T.op_verify_probe(["--tasks-file", "/nao/existe.json",
+                               "--story-id", "US-001"])
+    finally:
+        if previous is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = previous
+    assert raised.value.code not in (0, None)
+    assert T._VERIFY_PROBE_REENTRY in capsys.readouterr().err
+
+
+def test_the_refusal_runs_before_the_flags_are_read(capsys):
+    """AC: the guard is at entry, ahead of argument parsing and the file read.
+
+    `op_verify_probe([])` with no flags at all would normally die with the
+    usage line. Under the marker it must die with the RE-ENTRANCY line
+    instead -- which is only possible if the guard is the first statement.
+    Ordering is otherwise invisible: both refusals exit 1, so nothing but the
+    message tells a guard-at-entry from a guard-after-the-read.
+    """
+    previous = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        with pytest.raises(SystemExit):
+            T.op_verify_probe([])
+    finally:
+        if previous is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = previous
+    err = capsys.readouterr().err
+    assert T._VERIFY_PROBE_REENTRY in err
+    assert "Usage:" not in err
+
+
+def test_the_refusal_names_the_recursion_and_both_ways_out():
+    """AC: the message tells the reader what happened and what to do.
+
+    A generic failure would send them hunting for a broken assertion, which
+    is the wrong tree entirely: nothing is broken, the verify names the verb.
+    """
+    message = T._VERIFY_PROBE_REENTRY
+    assert T.VERIFY_PROBE_ACTIVE_ENV in message
+    assert "recurse" in message
+    for way_out in ("does not itself call verify-probe", "probe_verify()"):
+        assert way_out in message, way_out
+
+
+def test_the_refusal_is_immediate_rather_than_merely_bounded():
+    """AC: the refusal is reachable in well under a second, against a defect
+    that reached 127 re-entries in 25 seconds before its ceiling.
+
+    Timed against the in-process entry, which is where the guard lives: it
+    parses nothing, opens nothing and runs nothing, so the honest measurement
+    is microseconds and the second below is slack for a loaded host, not a
+    budget anything is expected to use.
+    """
+    previous = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "1"
+    started = time.time()
+    try:
+        with pytest.raises(SystemExit):
+            T.op_verify_probe(["--tasks-file", "/nao/existe.json",
+                               "--story-id", "US-001"])
+    finally:
+        if previous is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = previous
+    assert time.time() - started < 1.0
+
+
+def test_an_ordinary_non_nested_call_is_unchanged(tmp_path):
+    """AC: same output, same exit, same shape when nothing is nested.
+
+    The marker is absent on a first call, which is every call the story
+    executor's step 1.5 makes. An empty value counts as absent too, the shell's
+    own `test -n` convention -- `probe_verify` only ever writes "1", so an
+    exported empty string can only have come from a person, and refusing on it
+    would turn `export AIMI_VERIFY_PROBE_ACTIVE=` into an unexplained outage.
+    """
+    root, tasks_file = _probe_project(tmp_path, {"US-001": "true\nfalse\n"})
+    expected = [
+        {"segment": "true", "exit": 0, "discriminates": False,
+         "unsatisfiable": False},
+        {"segment": "false", "exit": 1, "discriminates": True,
+         "unsatisfiable": False},
+    ]
+    for marker in (None, ""):
+        proc = _run_probe_cli(root, tasks_file, "US-001", marker=marker)
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout) == expected, repr(marker)
+
+
+def test_the_marker_reaches_the_segment_subprocess_and_the_segment_is_run(tmp_path):
+    """AC: the marker is actually exported into every segment subprocess --
+    without that the guard protects nothing at runtime, because the nested call
+    lives in a segment.
+
+    THE SECOND ASSERTION IS THE ONE THAT INTERACTS WITH US-001. That story
+    withholds a verdict (`discriminates: None`) from any segment reading a
+    shell variable no carried prelude segment assigns, seeding the assigned set
+    from `os.environ`. So the marker has to be in THIS process's environment,
+    not only in a dict handed to `subprocess.run`: put it only in the child's
+    and this segment is judged to be missing its state, reported `None` and
+    never run -- the guard would be real and invisible to the only assertion
+    able to see it. `discriminates is False` is what tells the two apart.
+    """
+    probed = T.probe_verify(
+        'test -n "$%s"\n' % T.VERIFY_PROBE_ACTIVE_ENV, str(tmp_path)
+    )
+    assert [entry["exit"] for entry in probed] == [0]
+    assert probed[0]["discriminates"] is False
+    assert "unresolvedState" not in probed[0]
+
+
+def test_the_marker_does_not_outlive_the_probe(tmp_path):
+    """`probe_verify` restores whatever it found, absent or set. Leaving the
+    marker behind would make the SECOND call in one process read as nested --
+    which is every test below this one, and every caller driving the function
+    directly.
+
+    Both directions are asserted from the AMBIENT value rather than from an
+    assumed-clean environment, because this suite is itself a verify segment
+    for several stories: run under the executor's step 1.5, the marker really
+    is inherited here, and a test that assumed its absence would fail for that
+    reason alone -- reporting the guard broken at exactly the moment it works.
+    """
+    ambient = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    T.probe_verify("true\n", str(tmp_path))
+    assert os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV) == ambient
+
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "herdado"
+    try:
+        T.probe_verify("true\n", str(tmp_path))
+        assert os.environ[T.VERIFY_PROBE_ACTIVE_ENV] == "herdado"
+    finally:
+        if ambient is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = ambient
+
+
+def test_a_verify_that_probes_itself_terminates_instead_of_recursing(tmp_path):
+    """The recorded defect, end to end: a story whose verify calls the verb on
+    its own id. The nested call refuses, the segment reports that refusal as
+    its exit status, and the outer call ANSWERS -- where it used to spin until
+    its own timeout killed it at 124."""
+    root, tasks_file = _probe_project(tmp_path, {"US-001": "placeholder\n"})
+    nested = "bash %s verify-probe US-001 --tasks-file %s\n" % (
+        json.dumps(CLI), json.dumps(tasks_file)
+    )
+    with open(tasks_file, "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    document["userStories"][0]["implementation"]["verify"] = nested
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+
+    proc = _run_probe_cli(root, tasks_file, "US-001", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    probed = json.loads(proc.stdout)
+    assert len(probed) == 1
+    # 124 is the timeout status the runaway produced. Anything else non-zero is
+    # the nested refusal being reported as an ordinary failing segment.
+    assert probed[0]["exit"] not in (0, 124, None), probed
+
+
+def test_the_guard_catches_the_mutual_case_no_id_check_could_see(tmp_path):
+    """AC: INDIRECT recursion -- A's verify probes B, whose verify probes A.
+
+    This is the assertion that discriminates the fix that was built from the
+    one a reader reaches for first. An id comparison sees `US-002` requested
+    while `US-001` runs, finds them different, and lets the call through --
+    then `US-002`'s own verify asks for `US-001` and the loop closes with
+    every single comparison passing. The marker says only "some probe is
+    running", which is the fact that is actually true at both levels.
+    """
+    root, tasks_file = _probe_project(
+        tmp_path, {"US-001": "placeholder\n", "US-002": "placeholder\n"}
+    )
+    with open(tasks_file, "r", encoding="utf-8") as handle:
+        document = json.load(handle)
+    for story, other in zip(document["userStories"], ("US-002", "US-001")):
+        story["implementation"]["verify"] = "bash %s verify-probe %s --tasks-file %s\n" % (
+            json.dumps(CLI), other, json.dumps(tasks_file)
+        )
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+
+    proc = _run_probe_cli(root, tasks_file, "US-001", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    probed = json.loads(proc.stdout)
+    assert len(probed) == 1
+    assert probed[0]["exit"] not in (0, 124, None), probed
+
+    # And the refusal itself is not id-scoped: asking for a DIFFERENT story
+    # than any that could be running still refuses, with the same message.
+    nested = _run_probe_cli(root, tasks_file, "US-002", marker="1", timeout=60)
+    assert nested.returncode != 0
+    assert T.VERIFY_PROBE_ACTIVE_ENV in nested.stderr
+    assert nested.stdout.strip() == "", "a refusal must emit no probe array"
 
 
 # ---------------------------------------------------------------------------
