@@ -127,6 +127,20 @@ and never as `AIMI_CLI=$(cat ~/.config/aimi/cli-path)`. Three mechanical reasons
 
 Recorded from the failing side in `.aimi/known-gaps/2026-09-03-US-002.md`: two stories in that phase had their verify repaired mid-flight for exactly this, and the gap closes by noting the rule did not yet exist here — which is why it does now.
 
+## Verify fixtures live inside the project
+
+A `verify` that needs a throwaway tasks file cannot build it with `mktemp -d`. Every path arriving as a CLI **argument** is checked against `PROJECT_ROOT` before `python3` starts, so a `--tasks-file` under `/tmp` is refused outright:
+
+```
+Error: Path escapes project root — access denied
+```
+
+That is the confinement working rather than a defect, and it belongs to no particular verb: `count-pending`, which predates all of this, refuses the same path and accepts the same fixture the moment it is moved inside the repository. So build the fixture under the project — `.aimi/` is the obvious home — or point `TMPDIR` at a directory inside it before the fixture is created.
+
+`PROJECT_ROOT` is wider than the worktree the executor stands in, which is why the fixture has anywhere to go at all. `find_aimi_root` walks up from the working directory to the **first** `.aimi/` and takes that directory's git toplevel. `.aimi/` is gitignored, so it exists in no worktree; the walk from a story worktree nested under `.worktrees/` therefore climbs past every one of them to the main checkout. Everything under that checkout — the nested worktrees included — is inside `PROJECT_ROOT`. `/tmp` is not.
+
+Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fixture-em-tmp-recusado.md`: an executor wrote its verify fixture with `mktemp -d`, spent its diagnosis establishing that the refusal was structural rather than its own story's, and worked around it by repointing `TMPDIR`. The rule did not exist here — which is why it does now.
+
 ## Verify coverage
 
 `implementation.verify` must execute every check the story's `acceptanceCriteria` assert. When a criterion asserts something `verify` does not run, there are exactly two ways to resolve it: extend `verify` to cover it, or drop the assertion from `acceptanceCriteria` — never leave a criterion that nothing executes. State this rule without naming any runner, because it has to hold for a criterion written in plain prose that names no command at all ("the lint passes") — that is the class no parser can ever reach, and the reason this rule has to be applied by you, the author, rather than caught downstream.

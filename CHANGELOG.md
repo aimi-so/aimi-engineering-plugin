@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one story completed with the rest still pending and nothing marked, which is
   a session killed at a wave boundary, not a run that never started.
 
+### Changed
+
+- The story expander states where a verify's fixture may live. A `verify` that
+  builds a throwaway tasks file with `mktemp -d` has it refused: every path
+  arriving as a CLI argument is checked against `PROJECT_ROOT` before `python3`
+  starts, and `/tmp` is outside it. That is the confinement working, and it
+  belongs to no particular verb -- `count-pending` refuses the same path and
+  accepts the same fixture moved inside the repository. What was missing was
+  anyone saying so: three authoring documents had no mention of it, while
+  `mktemp -d` is the reflex of anyone writing a disposable fixture.
+
 ### Fixed
 
 - A guard's denial reaches the model with the explanation the guard wrote.
