@@ -107,9 +107,28 @@ source "$SCRIPT_DIR/lib/extract-command-blocks.sh"
 DEFAULT_CEILING=16384
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+# Colour only when stdout is a terminal, and held as a real ESC byte. The
+# three-line form this replaces carried two separate defects. First,
+# '\033[0;32m' is four ordinary characters, not an escape, so a plain `echo`
+# (no -e) printed them verbatim -- several suites here use plain echo, and
+# their result line read "\033[0;32m87 passed\033[0m" on a terminal that was
+# perfectly capable of colour. $'...' stores the byte itself, so `echo` and
+# `echo -e` finally agree. Second, nothing asked where stdout was going, so a
+# captured or piped run carried ANSI into whatever read it next: an assertion
+# grepping for "41 passed, 0 failed" could then never match, against any tree,
+# and one story's verify failed for exactly that reason while its work was
+# sound. Empty on a pipe is what keeps this output greppable.
+# AIMI_TEST_COLOR forces colour back on for a caller that captures a stream it
+# will replay to a terminal itself -- test-aimi-cli.sh sets it for its parts.
+if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${AIMI_TEST_COLOR:-}" ]; }; then
+  RED=$'\033[0;31m'
+  GREEN=$'\033[0;32m'
+  NC=$'\033[0m'
+else
+  RED=''
+  GREEN=''
+  NC=''
+fi
 
 TESTS_PASSED=0
 TESTS_FAILED=0

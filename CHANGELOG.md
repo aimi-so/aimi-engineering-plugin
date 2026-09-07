@@ -37,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Test suites emit colour only to a terminal, and their colour variables now
+  hold a real escape byte. Two defects sat in the same three lines, repeated
+  across six definition sites covering all ten suites. `'\033[0;32m'` is four
+  ordinary characters rather than an escape, so every suite printing its
+  result line with a plain `echo` -- `test-aimi-cli.sh`, the four parts,
+  `test-worktree-manager.sh`, `test-resolve-pr-parallel.sh` -- emitted the
+  characters verbatim and had never actually shown colour. The suites using
+  `echo -e` emitted real ANSI unconditionally instead, so a captured run
+  carried escapes into whatever read it next and an assertion grepping for
+  `41 passed, 0 failed` could not match against any tree. `NO_COLOR` is
+  honoured, and `AIMI_TEST_COLOR` forces colour back on for a caller that
+  captures a stream it will replay to a terminal itself -- `test-aimi-cli.sh`
+  sets it for its parts, so concurrent mode keeps the colour it had.
 - `/aimi:open-pr` strips the bracketed `[US-NNN]` story tag from both the PR
   title and the rendered commit list. Both strip sites carried end-anchored
   expressions for the un-bracketed forms only, so every PR body built from
