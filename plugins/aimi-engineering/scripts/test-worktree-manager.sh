@@ -250,6 +250,83 @@ test_create_remove_default_removes_branch() {
 }
 
 # ============================================================================
+# Environment Files Tests
+# ============================================================================
+#
+# Issue #142: copy_env_files used to glob exactly ".env*", so a project whose
+# runtime reads .dev.vars (wrangler/Cloudflare Workers' own convention) got a
+# worktree that could not run its own gate. These three prove the fix's
+# discriminating claims: .dev.vars now copies, AIMI_WORKTREE_ENV_GLOBS
+# replaces the default rather than adding to it, and *.example stays
+# excluded once .dev.vars* is globbed too.
+
+test_create_copies_dev_vars_glob() {
+  echo ""
+  echo "=== Testing create copies .dev.vars alongside .env ==="
+
+  setup_wtm_fixture
+
+  printf 'SECRET=1\n' > .dev.vars
+  printf 'SECRET=1\n' > .env
+
+  local branch="dev-vars-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  bash "$WTM" create "$branch" >/dev/null 2>&1
+
+  assert_eq "true" "$([[ -f "$worktree_path/.dev.vars" ]] && echo true || echo false)"     "env files: .dev.vars is copied to the worktree"
+  assert_eq "true" "$([[ -f "$worktree_path/.env" ]] && echo true || echo false)"     "env files: .env is still copied to the worktree"
+
+  local mode
+  mode=$(stat -c '%a' "$worktree_path/.dev.vars" 2>/dev/null || stat -f '%Lp' "$worktree_path/.dev.vars")
+  assert_eq "600" "$mode" "env files: .dev.vars is chmod 600"
+
+  teardown_wtm_fixture
+}
+
+test_create_env_globs_env_var_replaces_default() {
+  echo ""
+  echo "=== Testing AIMI_WORKTREE_ENV_GLOBS replaces (not adds to) the default ==="
+
+  setup_wtm_fixture
+
+  printf 'SECRET=1\n' > .segredos
+  printf 'SECRET=1\n' > .env
+
+  local branch="env-globs-override-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  AIMI_WORKTREE_ENV_GLOBS='.segredos*' bash "$WTM" create "$branch" >/dev/null 2>&1
+
+  assert_eq "true" "$([[ -f "$worktree_path/.segredos" ]] && echo true || echo false)"     "env files: AIMI_WORKTREE_ENV_GLOBS glob (.segredos) is honored"
+  assert_eq "false" "$([[ -f "$worktree_path/.env" ]] && echo true || echo false)"     "env files: AIMI_WORKTREE_ENV_GLOBS replaces the default — .env is NOT copied"
+
+  teardown_wtm_fixture
+}
+
+test_create_excludes_example_files_generalized() {
+  echo ""
+  echo "=== Testing *.example exclusion generalizes beyond .env.example ==="
+
+  setup_wtm_fixture
+
+  printf 'SECRET=1\n' > .env
+  printf 'SECRET=1\n' > .env.example
+  printf 'SECRET=1\n' > .dev.vars.example
+
+  local branch="example-exclusion-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  bash "$WTM" create "$branch" >/dev/null 2>&1
+
+  assert_eq "true" "$([[ -f "$worktree_path/.env" ]] && echo true || echo false)"     "env files: .env is still copied"
+  assert_eq "false" "$([[ -f "$worktree_path/.env.example" ]] && echo true || echo false)"     "env files: .env.example is excluded"
+  assert_eq "false" "$([[ -f "$worktree_path/.dev.vars.example" ]] && echo true || echo false)"     "env files: .dev.vars.example is excluded — the exclusion generalized beyond .env.example"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Serve Status Tests
 # ============================================================================
 #
@@ -968,6 +1045,12 @@ main() {
   test_create_emits_sentinels_on_both_branches
   test_create_defaults_from_current_branch
   test_create_does_not_create_aimi_in_worktree
+
+  echo ""
+  echo "--- Environment Files Tests ---"
+  test_create_copies_dev_vars_glob
+  test_create_env_globs_env_var_replaces_default
+  test_create_excludes_example_files_generalized
 
   echo ""
   echo "--- Serve Status Tests ---"
