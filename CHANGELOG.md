@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.126.0] - 2026-09-07
+
+### Fixed
+
+- `worktree create` carries the env file the project actually reads, not only
+  `.env`. `copy_env_files` globbed exactly one pattern, so a project whose
+  runtime names its env file differently — `.dev.vars`, wrangler's own
+  convention, named directly by the affected project's test script — got a
+  worktree that could not run its own gate. The pattern is now a set,
+  defaulting to `.env* .dev.vars*`, so the reported case needs no
+  configuration at all; `AIMI_WORKTREE_ENV_GLOBS` replaces that default for
+  the next ecosystem with its own name. The `.env.example` skip generalizes to
+  any `*.example` — a regression the fix would otherwise introduce, since
+  `.dev.vars.example` is excluded today only because `.dev.vars*` is not
+  globbed at all. `chmod 600` and the backup-on-existing branch are untouched.
+  Closes #142.
+
+- A phase id that normalizes onto an existing one is refused instead of
+  vanishing. `roadmap-init --sync` compared ids by JSON value alone, so the
+  tenth intermediate under a subdivided phase — written the obvious way as
+  `2.410` against an existing `2.41` — was dropped with `added: 0` and exit 0.
+  Not an overwrite: a silent no-op, where an author writes a phase, the tool
+  says nothing, and the phase never existed. `roadmap-amend-phase` had the
+  mirror defect, amending the wrong phase without a word.
+
+  The discriminator has to be the literal, since the two are the same JSON
+  number: `json.load`'s `parse_float` hook is the only stdlib mechanism that
+  preserves it. The captured literal never reaches the document — ids stay
+  plain JSON numbers. Both sites now refuse, naming the literal written, the
+  existing phase it lands on, and the way out (subdivide further). A re-sync
+  writing the same literal is still the documented silent no-op.
+
+  Phase identity is deliberately NOT redesigned: ids stay numbers, the
+  two-level limit stays, and `jq_sort_key` keeps reproducing jq's total order.
+  Moving a dotted id into the numeric bucket would mean diverging from jq on
+  purpose and migrating roadmaps in flight. Closes #137.
+
+- `story-merge`'s verify-coverage gate can see a project that declares its
+  commands in prose. `repo_command_vocabulary` derived its vocabulary from
+  five package manifests, none of which exists in this repository — it is bash
+  and python by construction — so the gate this project ships was permanently
+  blind inside it, answering VOCABULARY UNDETERMINED for every story forever.
+  A sixth source reads fenced `bash`/`sh` blocks from the root `CLAUDE.md` and
+  `AGENTS.md`, honoring the rule the function's own docstring states: derived
+  from the repository, never a fixed runner list. The CANNOT-DETERMINE state
+  survives — a project with none of the seven sources still gets `None`, never
+  an empty set, because an empty set asserts "this repo's tooling runs
+  nothing" while `None` admits nothing was found to read. The UNDETERMINED
+  message now names all seven files searched.
+
 ## [1.125.0] - 2026-09-07
 
 ### Fixed
