@@ -56,7 +56,7 @@ Example: `.aimi/tasks/2026-02-27-dep-graph-tasks.json`
 | `brainstormPath` | string | No | — | Path to brainstorm document if one was used as context. |
 | `researchDepth` | string | No | `null` | Research depth hint for the planner. One of: `skip`, `quick`, `standard`, `deep`. When `null`, the planner decides automatically. |
 | `researchPaths` | string[] | No | — | Paths to research files generated during planning. Collected from Phase 1 and Phase 1.5b research agents. Omitted when `researchDepth` is `skip` or no research files were written. |
-| `maxConcurrency` | number | No | `5` | Maximum number of stories that can execute in parallel. Applies only to stories whose dependencies are all satisfied. |
+| `maxConcurrency` | number | No | `20` | Maximum number of stories that can execute in parallel. Applies only to stories whose dependencies are all satisfied. |
 | `frontendOnly` | boolean | No | — | Signals that this plan is a frontend-only prototype where all backend interactions are mocked. When `true`, stories should use stubbed/mocked data instead of real API calls. |
 | `backendSpec` | object | No | — | Backend specification metadata for PR generation. Contains sub-fields describing the eventual backend contract. See [backendSpec Object](#backendspec-object). |
 
@@ -339,8 +339,8 @@ Controls how many stories execute in parallel when their dependencies are satisf
 | Value | Behavior |
 |-------|----------|
 | `1` | Sequential execution (one story at a time) |
-| `4` (default) | Up to 4 stories run in parallel |
-| `0` or omitted | Uses default (`4`) |
+| `20` (default) | Up to 20 stories run in parallel |
+| `0` or omitted | Uses default (`20`) |
 
 The executor picks up to `maxConcurrency` ready stories, ordered by `priority`, and runs them simultaneously.
 

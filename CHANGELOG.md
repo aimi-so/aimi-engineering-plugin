@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.126.1] - 2026-09-07
+
+### Fixed
+
+- `task-format-v3.md` stated three different defaults for `maxConcurrency` in
+  one file: `5` in the field table, `4` twice in the section devoted to the
+  field, and `20` in the JSON skeleton. The resolver has one default and it is
+  `20` — `DEFAULT_MAX_CONCURRENCY` in `tasks.py`, applied when the key is
+  absent and again when the value is `0` or lower. Every producer already
+  carried the right number in its own text (`plan.md`, `task-planner/SKILL.md`),
+  which is why nothing generated a wrong document; what the drift broke was
+  diagnosis. `maxConcurrency` is also the ceiling the worktree-budget guard
+  denies `git worktree add` against, so someone reading this reference to
+  understand a refusal at `20/20 active` was told the ceiling was `4` and would
+  conclude the guard was wrong. The three stale numbers now say `20`; the
+  `0`-or-omitted rule they described was already correct and is unchanged.
+
 ## [1.126.0] - 2026-09-07
 
 ### Fixed
