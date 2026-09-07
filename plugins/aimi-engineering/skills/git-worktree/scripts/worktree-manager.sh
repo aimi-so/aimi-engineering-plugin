@@ -88,26 +88,51 @@ ensure_gitignore() {
   fi
 }
 
-# Copy .env files from main repo to worktree
+# Copy environment files from main repo to worktree. The glob set is
+# AIMI_WORKTREE_ENV_GLOBS (space-separated) when set -- REPLACING the default
+# entirely, not adding to it -- else ".env* .dev.vars*" (the second pattern
+# covers wrangler/Cloudflare Workers' own convention, issue #142).
 copy_env_files() {
   local worktree_path="$1"
 
   echo -e "${BLUE}Copying environment files...${NC}"
 
-  # Find all .env* files in root (excluding .env.example which should be in git)
+  local -a env_globs
+  if [[ -n "${AIMI_WORKTREE_ENV_GLOBS:-}" ]]; then
+    read -r -a env_globs <<< "$AIMI_WORKTREE_ENV_GLOBS"
+  else
+    env_globs=(".env*" ".dev.vars*")
+  fi
+
+  # Find all files matching any glob in root (excluding *.example, which is
+  # typically committed to git), deduplicated by basename since two globs
+  # can match the same file.
   local env_files=()
-  for f in "$GIT_ROOT"/.env*; do
-    if [[ -f "$f" ]]; then
-      local basename=$(basename "$f")
-      # Skip .env.example (that's typically committed to git)
-      if [[ "$basename" != ".env.example" ]]; then
-        env_files+=("$basename")
+  local glob f basename already
+  for glob in "${env_globs[@]}"; do
+    for f in "$GIT_ROOT"/$glob; do
+      if [[ -f "$f" ]]; then
+        basename=$(basename "$f")
+        # Skip *.example (that's typically committed to git)
+        if [[ "$basename" == *.example ]]; then
+          continue
+        fi
+        already=0
+        for existing in "${env_files[@]}"; do
+          if [[ "$existing" == "$basename" ]]; then
+            already=1
+            break
+          fi
+        done
+        if [[ "$already" -eq 0 ]]; then
+          env_files+=("$basename")
+        fi
       fi
-    fi
+    done
   done
 
   if [[ ${#env_files[@]} -eq 0 ]]; then
-    echo -e "  ${YELLOW}ℹ️  No .env files found in main repository${NC}"
+    echo -e "  ${YELLOW}ℹ️  No env files found in main repository${NC}"
     return
   fi
 
@@ -1780,7 +1805,8 @@ Git Worktree Manager
 Usage: worktree-manager.sh <command> [options]
 
 Commands:
-  create <branch-name> [--from <branch>]  Create new worktree (copies .env files automatically)
+  create <branch-name> [--from <branch>]  Create new worktree (copies env files automatically --
+                                          see AIMI_WORKTREE_ENV_GLOBS below)
                                           (from-branch defaults to main)
   remove | rm <name> [--keep-branch]  Remove a specific worktree and its branch
                                       (--keep-branch skips branch deletion, default off)
@@ -1809,8 +1835,10 @@ Commands:
   help                                Show this help message
 
 Environment Files:
-  - Automatically copies .env, .env.local, .env.test, etc. on create
-  - Skips .env.example (should be in git)
+  - Automatically copies .env, .env.local, .env.test, .dev.vars, etc. on create
+  - AIMI_WORKTREE_ENV_GLOBS overrides the glob set (space-separated, REPLACES
+    the default rather than adding to it), e.g. AIMI_WORKTREE_ENV_GLOBS='.env* .secrets*'
+  - Skips *.example (should be in git)
   - Creates .backup files if destination already exists
   - Use 'copy-env' to refresh env files after main repo changes
 
