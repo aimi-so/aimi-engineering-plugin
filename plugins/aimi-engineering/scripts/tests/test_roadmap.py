@@ -2218,6 +2218,155 @@ def test_roadmap_init_refuses_an_invalid_integration_branch_before_any_write(tmp
     )
 
 
+# ---------------------------------------------------------------------------
+# A phase id that normalizes onto an existing one -- issue #137. 2.410 and
+# 2.41 are the same JSON number, so filtered_new's plain `not in existing_ids`
+# used to drop the new phase with no diagnostic at all: exit 0, added: 0, and
+# the phase the author wrote never existed. Through the real aimi-cli.sh CLI
+# rather than roadmap.py's ops directly, because the defect lived in the
+# crossing itself -- init-validate's stdout is where an id's original digits
+# would otherwise be lost, canonicalized back to 2.41 by the time init-write
+# reads it, so only the full two-process pipe proves the fix survives it.
+# ---------------------------------------------------------------------------
+
+_TENTH_ROOT_PHASES = [
+    {"id": 2.4, "name": "A", "goal": "g", "slug": "a", "dependsOn": []},
+    {"id": 2.41, "name": "B", "goal": "g", "slug": "b", "dependsOn": []},
+]
+
+
+def _rm_run(root, base, *args, stdin=None, raw_stdin=None):
+    """raw_stdin is for a payload whose trailing digits matter: `2.410` as a
+    Python float literal IS `2.41` (the source parses it before json.dumps
+    ever sees it), so the one case this story is about -- a literal different
+    from its own value -- has to be spelled as JSON text directly, never
+    built through a Python number."""
+    if raw_stdin is not None:
+        payload = raw_stdin
+    elif stdin is not None:
+        payload = json.dumps(stdin)
+    else:
+        payload = None
+    return subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh")] + list(args),
+        input=payload,
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
+    )
+
+
+def _tenth_fixture(tmp_path):
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi"), exist_ok=True)
+    feature = "tenth"
+    proc = _rm_run(root, base, "roadmap-init", "--feature", feature, stdin=_TENTH_ROOT_PHASES)
+    assert proc.returncode == 0, proc.stderr
+    roadmap_file = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    return root, base, feature, roadmap_file
+
+
+def test_a_sync_id_that_normalizes_onto_an_existing_one_is_refused_not_dropped(tmp_path):
+    """AC1/AC2/AC3. Today: exit 0, added: 0, and the phase silently never
+    exists. The refusal must name BOTH sides -- the literal the author wrote
+    and the existing id it falls on, with that phase's name -- and leave the
+    document byte-for-byte unchanged."""
+    root, base, feature, roadmap_file = _tenth_fixture(tmp_path)
+    with open(roadmap_file, encoding="utf-8") as handle:
+        before = handle.read()
+
+    proc = _rm_run(
+        root, base, "roadmap-init", "--feature", feature, "--sync",
+        raw_stdin='[{"id": 2.410, "name": "O DECIMO", "goal": "g", "slug": "decimo", "dependsOn": []}]',
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "2.410" in proc.stderr, proc.stderr
+    assert re.search(r"2\.41\b", proc.stderr), proc.stderr
+    assert '"B"' in proc.stderr, proc.stderr
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        after = handle.read()
+    assert after == before, "a refused --sync must not touch the document"
+
+
+def test_a_resync_of_the_same_literal_is_still_a_silent_no_op(tmp_path):
+    """GUARD-CORPO. --sync's documented contract is that a phase already on
+    disk is untouched, exit 0, added: 0 -- and the new collision check must
+    not swallow that: a re-sync writing 2.41 again writes the same literal,
+    which is not a collision."""
+    root, base, feature, roadmap_file = _tenth_fixture(tmp_path)
+
+    proc = _rm_run(
+        root, base, "roadmap-init", "--feature", feature, "--sync",
+        stdin=[{"id": 2.41, "name": "B", "goal": "g", "slug": "b", "dependsOn": []}],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["added"] == 0
+
+
+def test_a_genuinely_new_id_between_the_two_still_lands(tmp_path):
+    """GUARD-CORPO. 2.405 collides with neither 2.4 nor 2.41 -- it is the
+    subdivision the refusal above points authors toward -- and must still be
+    accepted, added: 1, and stored as a plain JSON number."""
+    root, base, feature, roadmap_file = _tenth_fixture(tmp_path)
+
+    proc = _rm_run(
+        root, base, "roadmap-init", "--feature", feature, "--sync",
+        stdin=[{"id": 2.405, "name": "NOVA", "goal": "g", "slug": "nova", "dependsOn": []}],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["added"] == 1
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    assert [p["id"] for p in doc["phases"]] == [2.4, 2.405, 2.41]
+    assert all(isinstance(p["id"], (int, float)) for p in doc["phases"]), (
+        "no Decimal or literal-carrying wrapper may reach the written document"
+    )
+    # And no scratch key leaked out either -- init-write's own companion key,
+    # popped before merge, must never appear on a stored phase.
+    assert not any("_idLiteral" in p for p in doc["phases"])
+
+
+def test_roadmap_amend_phase_refuses_a_normalizing_phase_id(tmp_path):
+    """AC4. Today, `--phase 2.410` matches phase 2.41 by value and amends it
+    in silence -- wrong target, no warning. The literal arrives as a CLI
+    argument, so the guard compares it directly against the stored id
+    rendered by _num, and a refusal must leave the targeted phase untouched."""
+    root, base, feature, roadmap_file = _tenth_fixture(tmp_path)
+
+    proc = _rm_run(
+        root, base, "roadmap-amend-phase", "--feature", feature, "--phase", "2.410",
+        "--goal", "MUDADO",
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "2.410" in proc.stderr, proc.stderr
+    assert re.search(r"2\.41\b", proc.stderr), proc.stderr
+    assert '"B"' in proc.stderr, proc.stderr
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    goal = next(p["goal"] for p in doc["phases"] if p["id"] == 2.41)
+    assert goal == "g", "a refused amend must not have reached phase 2.41"
+
+
+def test_roadmap_amend_phase_still_accepts_the_id_exactly_as_stored(tmp_path):
+    """GUARD-CORPO. The literal comparison must not turn into a rewrite of
+    every legitimate amend -- --phase 2.41, written the same way the document
+    already renders it, still succeeds."""
+    root, base, feature, roadmap_file = _tenth_fixture(tmp_path)
+
+    proc = _rm_run(
+        root, base, "roadmap-amend-phase", "--feature", feature, "--phase", "2.41",
+        "--goal", "corrected",
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    with open(roadmap_file, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    goal = next(p["goal"] for p in doc["phases"] if p["id"] == 2.41)
+    assert goal == "corrected"
+
+
 def test_the_empty_ground_truth_is_the_jq_capture_and_not_an_invention():
     """A tasks file that parses but whose userStories is absent made jq abort and
     the bash carry on with an empty capture. Reconcile then wrote status: "".
