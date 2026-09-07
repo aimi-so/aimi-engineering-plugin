@@ -206,6 +206,13 @@ def extract_skill_name(tool_input: dict) -> str | None:
 def deny(user_message: str, event_name: str = "PreToolUse") -> str:
     """Return the canonical JSON deny output for a PreToolUse (or other) hook event.
 
+    Carries the message in two places: ``hookSpecificOutput.userMessage``
+    (unchanged, kept for existing consumers) and a top-level ``systemMessage``
+    sibling of ``hookSpecificOutput`` -- the field Claude Code's PreToolUse
+    handling actually reads, per the "Output for PreToolUse" shape documented
+    in the hook-development SKILL.md. Without it, a guard's explanation never
+    reaches the model.
+
     Usage::
 
         print(deny("your message"))
@@ -217,6 +224,7 @@ def deny(user_message: str, event_name: str = "PreToolUse") -> str:
                 "hookEventName": event_name,
                 "permissionDecision": "deny",
                 "userMessage": user_message,
-            }
+            },
+            "systemMessage": user_message,
         }
     )
