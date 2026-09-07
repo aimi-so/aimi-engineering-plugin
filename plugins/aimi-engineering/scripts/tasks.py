@@ -4431,6 +4431,43 @@ _VERIFY_CHDIR = ("cd", "pushd", "popd")
 # as discriminating, the safe direction: a probe must never invent dead weight.
 _VERIFY_TIMEOUT = 600
 
+# The name of the environment variable that says "a verify-probe is already
+# running underneath you". `probe_verify` sets it before it runs a single
+# segment; `op_verify_probe` refuses when it is already there.
+#
+# THE ENVIRONMENT IS THE CHANNEL BECAUSE THE SUBPROCESS BOUNDARY IS THE PROBLEM.
+# `verify-probe <id>` RUNS that story's verify segments, so a verify that names
+# the verb re-enters it -- measured on a throwaway fixture at 127 re-entries in
+# 25 seconds before the outer call hit its own ceiling at 124. Every re-entry
+# crosses a `subprocess.run`, and the environment is the only state that
+# crosses with it: an in-process flag would be reset by the fresh interpreter
+# each segment starts.
+#
+# A NAME, NOT AN ID, AND THAT IS THE WHOLE DESIGN. Comparing the requested
+# story id against the running one closes self-reference and nothing else, and
+# the record this fix answers --
+# `.aimi/known-gaps/2026-09-07-plan-141-verify-probe-nao-pode-apontar-para-si.md`
+# -- names the MUTUAL case in the same breath: story A's verify probes B, whose
+# verify probes A. Two ids, neither equal to the other, and the loop is
+# identical. A marker that says only "some probe is running" catches both,
+# because both are the same fact.
+VERIFY_PROBE_ACTIVE_ENV = "AIMI_VERIFY_PROBE_ACTIVE"
+
+# What the refusal says. A message that reported only "failed" would send the
+# reader looking for a broken assertion, when what happened is that the verify
+# being probed names the probe -- so it names the recursion, and it names the
+# two ways out rather than leaving the reader to find them.
+_VERIFY_PROBE_REENTRY = (
+    "Error: verify-probe: refusing to run inside another verify-probe.\n"
+    "  " + VERIFY_PROBE_ACTIVE_ENV + " is already set, which means the verify "
+    "being probed calls this verb back -- directly, or through a second story "
+    "whose own verify probes the first. Running the segments again would "
+    "recurse instead of answering.\n"
+    "  Two ways out: probe from a verify that does not itself call "
+    "verify-probe (a sibling story's, or a throwaway fixture's), or call "
+    "probe_verify() in tasks.py directly, which is not guarded."
+)
+
 
 def _verify_at_word_start(buf):
     """True when the next character begins a WORD rather than continuing one.
@@ -4889,6 +4926,33 @@ def probe_verify(text, cwd):
     deliberately deferred rather than overlooked -- see this plan's
     `metadata.decisions`, anchor `scope:snapshot-deferred`.
     """
+    # THE RE-ENTRANCY MARKER GOES IN FIRST, before `assigned` is seeded, and
+    # the order is load-bearing rather than tidy. It is put into THIS process's
+    # own `os.environ` because that is the environment `subprocess.run` hands
+    # every segment below -- one channel, so a nested `verify-probe` inside a
+    # segment sees it and refuses. Seeding `assigned` from `os.environ` after
+    # the write is what makes the marker a name the prelude PROVIDES: set it
+    # afterwards and a segment reading `$AIMI_VERIFY_PROBE_ACTIVE` would be
+    # judged missing its shell state, reported `discriminates: None` and never
+    # run at all -- the guard would be invisible to the only assertion that can
+    # see it. Restored on the way out so a second call in the same process (the
+    # tests, and any caller driving this function directly) is not itself read
+    # as a nested one.
+    previous_marker = os.environ.get(VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        return _probe_verify_segments(text, cwd)
+    finally:
+        if previous_marker is None:
+            os.environ.pop(VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[VERIFY_PROBE_ACTIVE_ENV] = previous_marker
+
+
+def _probe_verify_segments(text, cwd):
+    """`probe_verify`'s loop, split out so the marker above owns one try/finally
+    rather than wrapping a hundred lines of body. See that function's docstring
+    for every rule this implements; nothing is decided here."""
     results = []
     prelude = []
     # The state a segment can count on: what the prelude has assigned so far,
@@ -5029,7 +5093,23 @@ def op_verify_probe(argv):
     no verify at all. That is the same treatment the executor's step 1.5 gives
     the absent case, and a caller that has to tell "no verify" from "the verb
     broke" would just reimplement the check it delegated.
+
+    THE RE-ENTRANCY GUARD IS THE FIRST STATEMENT, before the flags are read and
+    long before the tasks file is opened. A refusal that had already parsed
+    arguments and read a document would cost the same work as the recursion it
+    prevents, one level at a time; refusing at entry costs one interpreter
+    start and cannot half-run.
+
+    THE GUARD IS ON THE VERB, NOT ON `probe_verify`, and the asymmetry is
+    deliberate rather than an omission. `probe_verify` is the escape hatch the
+    refusal message points at -- a caller that genuinely wants to decompose a
+    verify from inside another probe can still do it in Python, where no
+    subprocess is spawned and so nothing recurses. What loops is the verb
+    reaching the shell and the shell reaching the verb, so the verb is what
+    refuses.
     """
+    if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
+        die(_VERIFY_PROBE_REENTRY)
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
     cwd = _flag(argv, "--cwd")
