@@ -4509,6 +4509,55 @@ _VERIFY_PROBE_REENTRY = (
     "probe_verify() in tasks.py directly, which is not guarded."
 )
 
+# What the refusal says when `implementation.verify` is PRESENT and is not a
+# string. Same shape as the constant above and for the same reason: the
+# message is the only place that states the whole problem, so it names the
+# type it found, says why there is no honest reading of it, and names the two
+# ways out.
+#
+# WHY THIS REFUSES RATHER THAN JOINING THE LINES. The 2026-09-07 census over
+# every tasks document in `.aimi/` found 292 non-empty verifies and exactly
+# two written as a list -- and the two are not the same kind of list. One is a
+# list of COMMANDS; the other is a list of checks in PROSE ("Hand-trace three
+# scenarios through the rewritten condition..."). Joining with newlines would
+# hand those sentences to bash, bash would reject them, and the probe would
+# report `discriminates: true` -- a confident verdict about something that was
+# never a script. Nothing in the document tells the two lists apart, so the
+# probe cannot choose between them, and of the three answers available --
+# silence, a guess, a refusal -- only the refusal is honest.
+_VERIFY_PROBE_NOT_A_STRING = (
+    "Error: verify-probe: implementation.verify is %s, not a string.\n"
+    "  A verify is the script this verb takes apart, and only a string is a "
+    "script. Reading this value as one would mean guessing: joining a list of "
+    "lines hands prose to bash as though it were commands, and the empty "
+    "array reports silence as a clean bill of health.\n"
+    "  Two ways out: make implementation.verify a single string -- joining "
+    "the lines yourself when they really are a script -- or remove the field "
+    "when there is no command to run, which still probes to the empty array, "
+    "on purpose."
+)
+
+
+def _verify_probe_type_name(value):
+    """What the refusal above calls the value it found.
+
+    Four names, because four shapes reach it: a string is the shape the field
+    is for, and a `verify` that is JSON null is indistinguishable from an
+    absent one once `jq_index` has run, so null is never refused either.
+
+    Neither `jq_type` nor roadmap.py's `_json_type` is used here, and they
+    spell the first of the four `array` and `an array`. Nothing compares this
+    string -- it is prose inside a refusal, not a value inside a rule -- and
+    `a list` is the word the sentence beside it already uses.
+    """
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object"
+
 
 def _verify_at_word_start(buf):
     """True when the next character begins a WORD rather than continuing one.
@@ -5579,6 +5628,47 @@ def _match_previous(previous, current):
     return current
 
 
+def verify_text_for_story(path, story_id):
+    """The verify SCRIPT `story_id` carries, or `""` when it carries none.
+
+    Split out of `op_verify_probe` because the two lines that did this inline
+    gave a non-string `verify` and an ABSENT one the same empty string, and
+    the empty string probes to the empty array at exit 0 -- so a `verify`
+    written as a JSON list arrived at the executor's step 1.5 as "no segment
+    fails to discriminate". That is silence reaching a reader as a clean bill
+    of health, which is the one answer a probe must never give.
+
+    THE WALK IS UNCHANGED, deliberately: every document in the stream, every
+    story matching the id inside it, the first match carrying a non-empty
+    string wins, and a match whose verify is an empty string keeps the search
+    going. A tasks file may hold the same id twice -- `stories_with_id`
+    returns a list for exactly that reason -- so which of them answers is a
+    rule, not an accident, and it is preserved here byte for byte.
+
+    WHAT IS NEW is the refusal in the middle of that walk. The first matched
+    story whose `verify` is present and is not a string stops it, before any
+    segment runs and before a caller can read an empty array as a verdict.
+    `jq_index` cannot tell `verify: null` from a missing `verify` key, so JSON
+    null stays on the absent side of that line and still resolves to `""` --
+    unchanged, and the one shape of "present" this cannot see.
+
+    Callable directly, and that matters: `verify-probe` refuses to re-enter
+    itself, so a verify that wants to exercise this decision has to reach it
+    from Python rather than by naming the verb.
+    """
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if verify is None:
+                continue
+            if not isinstance(verify, str):
+                die(_VERIFY_PROBE_NOT_A_STRING % _verify_probe_type_name(verify))
+            if verify.strip():
+                return verify
+    return ""
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -5588,6 +5678,15 @@ def op_verify_probe(argv):
     no verify at all. That is the same treatment the executor's step 1.5 gives
     the absent case, and a caller that has to tell "no verify" from "the verb
     broke" would just reimplement the check it delegated.
+
+    A verify that is PRESENT and not a string gets the opposite answer, and
+    the asymmetry is the point rather than an inconsistency:
+    `verify_text_for_story` refuses by name at exit 1, naming the type it
+    found. The empty array means "this story has nothing to check"; a story
+    carrying a `verify` has something to check, and answering it with the
+    shape reserved for the absent case would report silence as a clean bill of
+    health. JSON null stays on the absent side, since nothing downstream of
+    `jq_index` can tell it from a missing key.
 
     THE RE-ENTRANCY GUARD IS THE FIRST STATEMENT, before the flags are read and
     long before the tasks file is opened. A refusal that had already parsed
@@ -5636,16 +5735,7 @@ def op_verify_probe(argv):
                 "Error: verify-probe: --skip-matching is not a valid regular "
                 "expression: %s" % err
             )
-    text = ""
-    for doc in read_docs(path, "verify-probe"):
-        for story in stories_with_id(doc, story_id):
-            implementation = jq_index(story, "implementation", STORY)
-            verify = jq_index(implementation, "verify", STORY + ".implementation")
-            if isinstance(verify, str) and verify.strip():
-                text = verify
-                break
-        if text:
-            break
+    text = verify_text_for_story(path, story_id)
     results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
     _emit(results)
