@@ -32193,7 +32193,7 @@
         "env": {}
       },
       "exit": 0,
-      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {},\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"primeira\\nsegunda\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
+      "stdout": "{\n  \"story\": {\n    \"id\": \"US-001\",\n    \"title\": \"Story US-001\",\n    \"description\": \"As a user, I want US-001.\",\n    \"acceptanceCriteria\": [\n      \"Typecheck passes\"\n    ],\n    \"status\": \"pending\",\n    \"priority\": 1,\n    \"dependsOn\": [],\n    \"wave\": 0\n  },\n  \"metadata\": {},\n  \"skills\": [],\n  \"designContext\": {\n    \"decisions\": \"## Design Decisions\\nprimeira\\n\\n## Design Decisions\\nsegunda\",\n    \"bundleGuidance\": \"\"\n  }\n}\n",
       "stderr": "",
       "state_after": {}
     },

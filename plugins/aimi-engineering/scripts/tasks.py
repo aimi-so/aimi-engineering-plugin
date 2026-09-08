@@ -2374,11 +2374,24 @@ def _named_lines(values):
 
 SKILLS_CAP = 102400
 
-# `head -c 65536` on the decisions pipeline. Bytes, like the cap above, and for
-# a stronger reason: head counts bytes and never had a locale to depend on.
+# `head -c 65536` on the decisions pipeline, before this cap became a whole-
+# section eviction budget (see design_decisions() below) rather than a byte
+# slice point. Bytes, like the skills cap above, and for the same reason: the
+# old `head -c` counted them and never had a locale to depend on, and every
+# size compared against this cap today is still `len()` on a bytes object.
 DECISIONS_CAP = 65536
 
-DECISIONS_HEADING = b"## Design Decisions"
+# The shape rule a `## ` heading's own text is tested against, from US-001's
+# corpus measurement (`.aimi/research/design-decisions-section-shapes.md`):
+# case-insensitive, matches a word starting `Decis` continuing `ion` (covers
+# "Decision"/"Decisions"), `ão` (covers "Decisão") or `õe` (covers "Decisões").
+# Confirmed against the corpus to accept "## Design Decisions", "## Design
+# Decisions e mais" and "## Key Decisions", and to reject "## Overview" and
+# "## Next Steps" (the second of which is a real heading in both corpus files,
+# correcting an earlier assumption that it did not exist). The `\b` before
+# `Decis` blocks a false hit inside an unrelated word (e.g. "indecisão") for
+# free; no such heading is in the corpus, but the guard costs nothing.
+DECISIONS_HEADING_RE = re.compile(r"(?i)^##\s+.*\bDecis(ion|ão|õe)")
 
 # The two tag-breakout escapes, in the order the per-skill `sed` applied them.
 # Order matters and is not alphabetical: the closing form has to go first, or
@@ -2515,46 +2528,133 @@ def skills_payload(names, base_dir, warn):
     return [entry for entry, _ in kept], dropped
 
 
+def _is_decisions_heading(heading_line):
+    """The shape predicate: does this `## ` heading's own text match
+    DECISIONS_HEADING_RE? Decoded to text for the regex the same way every
+    other text this module hands back to the agent is decoded -- malformed
+    UTF-8 is replaced rather than refused, matching read_skill()'s rule."""
+    return bool(DECISIONS_HEADING_RE.match(heading_line.decode("utf-8", "replace")))
+
+
+def _split_top_sections(lines):
+    """Every top-level `## ` heading and its body (to the next `## ` or EOF),
+    in document order. A deeper `### ` heading is not a boundary -- its line
+    starts with three hashes and a space, not two hashes and a space, so it
+    stays inside whichever section is open, unchanged from the pre-port
+    scanner. Content before the first `## ` heading belongs to no section and
+    is dropped, matching the pre-port scanner, which only ever started
+    collecting once a heading had already been seen."""
+    sections = []
+    heading = None
+    body = []
+    for line in lines:
+        if line.startswith(b"## "):
+            if heading is not None:
+                sections.append((heading, body))
+            heading = line
+            body = []
+        elif heading is not None:
+            body.append(line)
+    if heading is not None:
+        sections.append((heading, body))
+    return sections
+
+
+def _section_body(body_lines):
+    """`sed 's/^[[:space:]]*//;s/[[:space:]]*$//'` over every body line, then
+    the blank-line drop that used to be a squeeze-then-delete pair (see the
+    docstring this rule carried before the shape rewrite: `awk 'NF ||
+    prev_nf'` collapsed blank runs to one and the `sed '/^$/d'` right after it
+    deleted the survivor too, so the composition drops every blank line and
+    writing the squeeze out would be dead code). Bytes throughout, for the
+    same reason DECISIONS_CAP counts them."""
+    collected = [stripped for stripped in (line.strip(b" \t\v\f\r") for line in body_lines) if stripped]
+    return b"\n".join(collected)
+
+
+def _decisions_dropped_marker(dropped):
+    """One bracketed marker naming every dropped heading and the byte size of
+    the block it cost, in the order design_decisions() dropped them (oversized
+    entries first in document order, then aggregate evictions in reverse
+    document order -- see design_decisions()'s own docstring)."""
+    parts = [
+        entry_heading.strip(b" \t\v\f\r").decode("utf-8", "replace") + " (" + str(entry_size) + " bytes)"
+        for entry_heading, entry_size in dropped
+    ]
+    return ("[design decisions dropped — cap exceeded: " + "; ".join(parts) + "]").encode("utf-8")
+
+
 def design_decisions(brainstorm_bytes):
-    """The awk/sed/awk/sed/head pipeline, in one pass over the file's bytes.
+    """The awk/sed/awk/sed/head pipeline, rewritten from a single-heading
+    prefix match into a shape rule over every top-level `## ` heading (see
+    DECISIONS_HEADING_RE), because a real brainstorm can carry its decisions
+    under `## Key Decisions` with no `## Design Decisions` heading anywhere,
+    and the old prefix match silently returned "" for one.
 
-    From `## Design Decisions` (a PREFIX match, so a heading with a suffix opens
-    the section too -- brainstorm-heading-sufixado) to the next `## ` heading or
-    end of file. A deeper `### ` heading stays inside. A SECOND
-    `## Design Decisions` does not close the section: awk tested that rule
-    first and `next`ed past the closing rule, so the two sections merge, which
-    brainstorm-secao-duplicada records.
+    Every `## ` section whose heading matches DECISIONS_HEADING_RE is a
+    matched section, in document order. A SECOND matching heading does not
+    close the first -- two `## Design Decisions` sections still both survive
+    (brainstorm-secao-duplicada), the same merge-not-close rule the old
+    prefix-match scanner had, now over the wider match set. Exactly one
+    matched section returns its bare body unchanged, same as before a shape
+    rule existed at all. Two or more matched sections concatenate in document
+    order, each carrying its own `## <Heading>` line as provenance -- the
+    reader can no longer tell two concatenated sections apart by content
+    alone, so the heading is what tells them apart.
 
-    Bytes throughout, like validate-tasks' subsection scanner and for the same
-    reason: awk, sed and `head -c` all counted them.
-
-    The blank-line SQUEEZE is not implemented and its absence is the port being
-    honest. `awk 'NF || prev_nf'` collapsed runs of blank lines to one, and the
-    `sed '/^$/d'` immediately after it then deleted the survivor too -- the
-    composition drops every blank line, and writing the squeeze out would be
-    dead code pretending to be a rule.
+    DECISIONS_CAP is no longer a byte-slice point (`head -c` truncated a
+    single stream mid-sentence); it is a whole-section eviction budget, in the
+    same two-pass shape skills_payload() already uses a few functions up:
+    drop any section whose own block alone exceeds the cap before aggregating,
+    then evict whole sections from the end -- lowest priority, meaning
+    last-matched in document order -- while the remaining concatenation is
+    still over the cap. No section's body is ever byte-sliced; a section
+    either survives whole or is dropped whole, and a marker names every
+    dropped heading and the byte size of the block it cost.
     """
     lines = brainstorm_bytes.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
 
-    collected = []
-    in_section = False
-    for line in lines:
-        if line.startswith(DECISIONS_HEADING):
-            in_section = True
-            continue
-        if in_section and line.startswith(b"## "):
-            break
-        if in_section:
-            # `sed 's/^[[:space:]]*//;s/[[:space:]]*$//'`, over a record that can
-            # hold no newline.
-            stripped = line.strip(b" \t\v\f\r")
-            if stripped:
-                collected.append(stripped)
+    matched = [
+        (heading, _section_body(body))
+        for heading, body in _split_top_sections(lines)
+        if _is_decisions_heading(heading)
+    ]
+    if not matched:
+        return ""
 
-    stream = b"".join(line + b"\n" for line in collected)
-    return stream[:DECISIONS_CAP].rstrip(b"\n").decode("utf-8", "replace")
+    multi = len(matched) > 1
+    blocks = []
+    for heading, body in matched:
+        if not multi:
+            block = body
+        else:
+            heading_text = heading.strip(b" \t\v\f\r")
+            block = heading_text if not body else heading_text + b"\n" + body
+        blocks.append((heading, block, len(block)))
+
+    kept = []
+    dropped = []
+    for heading, block, size in blocks:
+        if size > DECISIONS_CAP:
+            dropped.append((heading, size))
+            continue
+        kept.append((heading, block, size))
+
+    aggregate = sum(size for _, _, size in kept)
+    while aggregate > DECISIONS_CAP and kept:
+        heading, block, size = kept.pop()
+        dropped.append((heading, size))
+        aggregate -= size
+
+    survivors = b"\n\n".join(block for _, block, _ in kept)
+    if not dropped:
+        return survivors.decode("utf-8", "replace")
+
+    marker = _decisions_dropped_marker(dropped)
+    result = marker if not survivors else survivors + b"\n\n" + marker
+    return result.decode("utf-8", "replace")
 
 
 BUNDLE_GUIDANCE = (

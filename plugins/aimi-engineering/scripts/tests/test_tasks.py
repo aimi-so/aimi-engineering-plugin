@@ -28,11 +28,17 @@ it recorded jq PROGRAMS; get-story-context's logic was bash arrays and a shell
 loop, so the recording pins the payload's SHAPE -- which keys, in which order,
 holding what when a skill is missing or empty or oversized -- and the
 hand-written tests beside it carry the fidelity argument. It is also the one
-block whose port changed rules on purpose: three of them, named in
+block whose port changed rules on purpose: four of them, named in
 CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
 engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
+The fourth, brainstorm-secao-duplicada, differs from the first three in one
+way: its recorded value WAS updated to the new output (US-002's shape rule and
+provenance line), rather than kept as pre-port evidence the way
+cap-gigante-primeiro's is -- it is still named here rather than left to the
+plain comparison, so a reader scanning this table for "what changed on
+purpose" finds it without also reading the diff.
 
 A FOURTH rule then changed and it is the only one that MOVED this block rather
 than being absorbed by a table or a strip: `metadata` is now projected onto the
@@ -2649,6 +2655,7 @@ CONTEXT_DECISIONS = {
     "cap-multibyte-c": "the cap counts bytes; under LC_ALL=C it already did",
     "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
     "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
+    "brainstorm-secao-duplicada": "two matched sections now carry provenance instead of merging bare",
 }
 
 
@@ -2670,7 +2677,7 @@ def test_the_story_context_tables_name_only_cases_that_exist():
     assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
     assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
     assert len(CONTEXT) == 57
-    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 9, "48 of 57 match; keep this in step"
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 10, "47 of 57 match; keep this in step"
 
 
 def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
@@ -2719,7 +2726,13 @@ def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, 
     assert actual["exit"] == 0, label + ": the shell that killed this is gone"
     payload = json.loads(actual["stdout"])
     if label == "brainstorm-truncagem-64k":
-        assert payload["designContext"]["decisions"] == "<<d*65536>>", "truncated, not fatal"
+        # US-002: the 200000-byte single matched section is now dropped WHOLE
+        # with a marker, not byte-sliced to 65536 -- so the run of "d"s is gone
+        # entirely and the old `_rle`-compressed "<<d*65536>>" expectation is
+        # exactly the wrong shape to assert any more.
+        assert payload["designContext"]["decisions"] == (
+            "[design decisions dropped — cap exceeded: ## Design Decisions (200000 bytes)]"
+        ), "dropped whole, not truncated"
     else:
         assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
         assert payload["skillsDropped"] == []
@@ -3060,21 +3073,111 @@ def test_the_skills_array_is_serialized_once_rather_than_once_per_skill():
     assert op.count("_emit(") == 1
 
 
-def test_the_decisions_scanner_is_the_awk_pipeline_and_truncates_at_65536():
-    """The unit, over the shapes the corpus records: a `### ` heading stays
-    inside the section, a `## ` heading closes it, a second `## Design Decisions`
-    does NOT (awk tested that rule first and skipped the closing one), the match
-    is a PREFIX so a suffixed heading opens the section, blank lines go, and the
-    truncation counts bytes because `head -c` did."""
+def test_the_decisions_scanner_matches_heading_shape_and_evicts_whole_sections():
+    """The single-section shapes the corpus records, unchanged by the shape
+    rewrite: a `### ` heading stays inside the section, a `## ` heading closes
+    it, blank lines go. A suffixed heading (`## Design Decisions e mais`) still
+    opens a section -- not because of a prefix match any more, but because the
+    shape regex matches "Decisions" wherever it sits in the heading text."""
     assert T.design_decisions(b"## Design Decisions\num\n### Sub\ndois\n## Fim\ntres\n") == (
         "um\n### Sub\ndois"
     )
     assert T.design_decisions(b"## Design Decisions e mais\num\n") == "um"
-    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == "um\ndois"
     assert T.design_decisions(b"## Outra\num\n") == ""
     assert T.design_decisions(b"## Design Decisions\n\n  recuada  \n\n\nfim\n") == "recuada\nfim"
-    assert T.design_decisions(b"## Design Decisions\n" + b"d" * 70000) == "d" * 65536
     assert T.DECISIONS_CAP == 65536
+
+
+def test_a_second_matching_heading_still_does_not_close_the_first_but_now_carries_provenance():
+    """The merge-not-close rule survives the shape rewrite (AC #4): a second
+    `## Design Decisions` does not close the first section -- both are matched
+    individually and both survive, each now carrying its own `## <Heading>`
+    line as provenance rather than merging into one bare body the way the
+    prefix-match scanner used to (the old value here was "um\\ndois")."""
+    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == (
+        "## Design Decisions\num\n\n## Design Decisions\ndois"
+    )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## Design Decisions", "## Design Decisions e mais", "## Key Decisions"],
+)
+def test_the_shape_rule_accepts_every_positive_control(heading):
+    """AC #2's three positives, each as the SOLE heading in its own brainstorm
+    -- a bare-body return, since exactly one section ever matches here."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == "um"
+
+
+@pytest.mark.parametrize("heading", ["## Overview", "## Next Steps"])
+def test_the_shape_rule_rejects_both_negative_controls(heading):
+    """AC #2's two negative controls, each as the sole heading present --
+    neither carries a "Decision"/"Decisions" word, so neither matches, and
+    with no matched section at all the return is "", same as a brainstorm with
+    no decisions heading whatsoever."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == ""
+
+
+def test_two_differently_named_matched_sections_concatenate_in_document_order():
+    """AC #3: `## Design Decisions` and `## Key Decisions` elsewhere in the
+    same file are two matched sections, not one -- both heading lines and both
+    bodies appear in the result, in source order."""
+    brainstorm = (
+        b"## Design Decisions\nprimeira\n"
+        b"## Overview\nnao conta\n"
+        b"## Key Decisions\nsegunda\n"
+    )
+    result = T.design_decisions(brainstorm)
+    assert result == "## Design Decisions\nprimeira\n\n## Key Decisions\nsegunda"
+    assert result.index("## Design Decisions") < result.index("## Key Decisions")
+    assert result.index("primeira") < result.index("segunda")
+
+
+def test_two_matched_sections_over_the_combined_cap_evict_the_lower_priority_one(monkeypatch):
+    """AC #5: neither section alone exceeds the cap, but their concatenation
+    does. The lowest-priority section -- last-matched in document order,
+    mirroring skills_payload()'s declaration-order eviction -- is dropped
+    whole; the higher-priority section's body survives intact and the lower
+    one's text is entirely absent, not partially present."""
+    monkeypatch.setattr(T, "DECISIONS_CAP", 100)
+    brainstorm = b"## Design Decisions\n" + b"a" * 60 + b"\n## Key Decisions\n" + b"b" * 60 + b"\n"
+    result = T.design_decisions(brainstorm)
+    assert result.startswith("## Design Decisions\n" + "a" * 60)
+    assert "b" * 60 not in result
+    assert "## Key Decisions (77 bytes)" in result
+    assert "cap exceeded" in result
+
+
+def test_a_single_oversized_matched_section_is_dropped_whole_not_sliced():
+    """AC #6, replacing the old 70000-byte truncation assertion this story's
+    rule change makes wrong: a lone matched section whose own body alone
+    exceeds DECISIONS_CAP is dropped in full -- never truncated into a partial
+    65536-byte blob -- and the return is a non-empty marker naming the dropped
+    heading and its byte size, containing none of the section's original body
+    text."""
+    result = T.design_decisions(b"## Design Decisions\n" + b"d" * 70000)
+    assert "d" * 10 not in result
+    assert len(result) < 100
+    assert "## Design Decisions (70000 bytes)" in result
+    assert "cap exceeded" in result
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_brainstorm_secao_duplicada_now_carries_provenance_end_to_end(tmp_path):
+    """AC #4, run through the CLI rather than the bare function: the golden
+    recording for this case WAS updated (unlike cap-gigante-primeiro's, kept as
+    pre-port evidence) to the new provenance-preserving value, so the ordinary
+    corpus replay would already pass it -- it is named in CONTEXT_DECISIONS
+    anyway, and this is the dedicated assertion that names why, per heading."""
+    _, payload = _context_stdout("brainstorm-secao-duplicada", tmp_path)
+    decisions = payload["designContext"]["decisions"]
+    assert decisions == "## Design Decisions\nprimeira\n\n## Design Decisions\nsegunda"
+    assert decisions.count("## Design Decisions") == 2
+    assert decisions.index("## Design Decisions") == 0
+    assert decisions.rindex("## Design Decisions") == decisions.index("segunda") - len(
+        "## Design Decisions\n"
+    )
+    assert decisions.index("primeira") < decisions.index("segunda")
 
 
 def test_the_tag_breakout_escape_is_the_seds_two_rules_in_the_seds_order(tmp_path):
