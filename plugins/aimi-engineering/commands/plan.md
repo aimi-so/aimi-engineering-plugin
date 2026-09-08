@@ -894,16 +894,21 @@ existence alone discriminates nothing. State and title are what carry the
 decision, and only a human answers the last question. Do not collapse the three
 steps into two.
 
-**SCAN.** Every `#<digits>` and every bare `<digits>` token in
-`FEATURE_DESCRIPTION` is a candidate. Deduplicate, drop leading zeros, and keep
-only positive integers — issue numbers start at 1:
+**SCAN and RESOLVE — one CLI call.** Both steps are decidable with no person
+in the loop, so both live in `aimi-cli.sh` and this file calls them rather than
+describing them. The verb reads the description, treats every `#<digits>` and
+every bare `<digits>` token as a candidate — deduplicated, leading zeros
+dropped, positive integers only, because issue numbers start at 1 — resolves
+each candidate through the forge, and prints only the survivors whose envelope
+`.status` is `found` **and** whose `.data.state` is `open`, as a compact JSON
+array of `{number, title}` ascending by number:
 
 ```bash
-ISSUE_CANDIDATES=$(printf '%s\n' "$FEATURE_DESCRIPTION" \
-  | grep -oE '[0-9]+' \
-  | sed 's/^0*//' \
-  | grep -E '^[1-9][0-9]*$' \
-  | sort -un)
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+
+ISSUE_SURVIVORS=$($AIMI_CLI forge-issue-scan --description "$FEATURE_DESCRIPTION")
+printf '%s' "$ISSUE_SURVIVORS"
 ```
 
 Bare digits are in scope deliberately, and the noise that brings — `v1.2.3`
@@ -911,76 +916,26 @@ contributes `1`, `2` and `3` — is the CONFIRM step's problem, not the scan's. 
 description that names its issue without a `#` is far more common than one that
 names no issue at all, and a candidate nobody confirms costs one forge lookup.
 
-**RESOLVE.** For each candidate, capture the CLI's stdout into a shell variable
-first, then parse that variable with `jq`:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-
-ISSUE_SURVIVORS=""
-while IFS= read -r issue_num; do
-  [ -n "$issue_num" ] || continue
-  ISSUE_JSON=$($AIMI_CLI forge-issue-view --number "$issue_num")
-  issue_row=$(printf '%s' "$ISSUE_JSON" \
-    | jq -r 'select(.status == "found" and .data.state == "open")
-             | "\(.data.number)\t\(.data.title)"')
-  if [ -n "$issue_row" ]; then
-    ISSUE_SURVIVORS="${ISSUE_SURVIVORS}${issue_row}
-"
-  fi
-done <<CANDIDATES
-$ISSUE_CANDIDATES
-CANDIDATES
-printf '%s' "$ISSUE_SURVIVORS"
-```
-
-**Feed the loop from a heredoc, not from `for issue_num in $ISSUE_CANDIDATES`.**
-These blocks run under whatever shell the host hands them, and zsh does not
-word-split an unquoted parameter expansion the way bash does — the `for` form
-iterates **once**, over the entire newline-joined list as a single token, asks
-the forge about a number that does not exist, and comes back with an empty
-survivor list and exit 0. That is the worst available failure: the gate reports
-"no issues named" for a description that named several, and nothing anywhere
-says so. A heredoc splits on newlines identically in both shells and keeps the
-loop in the current shell, so `ISSUE_SURVIVORS` survives `done` — which a
-`| while` pipeline would not.
-
-**Never pipe `$AIMI_CLI forge-issue-view` straight into `grep -qF`, or into any
-other predicate whose exit status you then read.** This exact pipeline already
-has the defect recorded against it, and the reason it is a defect is the
-Degradation Contract in `commands/references/forge-contract.md`: this verb
-soft-fails, so a missing `gh`, an unauthenticated one, or a rate-limited host
-all return exit 0 carrying a `status: "error"` envelope. Chain it into a
-predicate and the pipeline's status is the only signal left — the one signal the
-degradation contract deliberately renders meaningless — so "the issue is open"
-and "the forge never answered" become indistinguishable. Capturing the document
-and branching on `.status` and `.data.state` is the contract's own stated read
-path, and it is the only one that tells those two apart.
-
-Keep a candidate only when its envelope `.status` is `found` **and** its
-`.data.state` is `open`. Everything else leaves quietly:
-
-- `.status` is `not_found` — the number was a version fragment, a line number,
-  or an issue on another repository. Not an error; there was never anything
-  there.
-- `.status` is `error` — offline, no forge configured, no `gh`/`glab`/`tea`,
-  unauthenticated, or rate-limited. The gate **drops that candidate silently**
-  and the plan continues to completion. It never aborts the run and never
-  surfaces a raw CLI error to the user: a plan that cannot reach a forge is
-  still a plan, and the only thing lost is an optional key.
-- `.data.state` is anything but `open` (`closed`, and on a number that names a
-  pull request, `merged`) — a plan does not close what is already closed.
+**The verb degrades, so this gate never aborts.** It answers `[]` at exit 0 in
+three cases: the description named no candidate (and then no forge was
+consulted at all), the working directory is not a git repository, and every
+candidate was dropped. Individual candidates leave quietly too — `not_found`
+was a version fragment, a line number, or an issue on another repository;
+`status: "error"` is offline, no forge configured, no `gh`/`glab`/`tea`,
+unauthenticated, or rate-limited; anything but `open` (`closed`, and on a
+number that names a pull request, `merged`) is work a plan does not close.
+Never surface a raw CLI error from this call to the user: a plan that cannot
+reach a forge is still a plan, and the only thing lost is an optional key.
 
 A run in which every candidate is dropped is indistinguishable, from here on,
 from a run whose description named no numbers at all: no picker is presented,
 nothing is logged, and `metadata.issues` is omitted entirely from the written
 tasks.json — never `[]`, never `null`.
 
-**CONFIRM.** When `ISSUE_SURVIVORS` is non-empty, present the whole list in
-**exactly one** AskUserQuestion call — never one call per candidate — as a
-multi-select whose options are the surviving issues, each labelled with its own
-`.data.number` and `.data.title`:
+**CONFIRM.** When `ISSUE_SURVIVORS` holds anything other than `[]`, present the
+whole list in **exactly one** AskUserQuestion call — never one call per
+candidate — as a multi-select whose options are the surviving issues, each
+labelled with its own element's `number` and `title`:
 
 ```
 Which issues does this plan close?
