@@ -948,12 +948,13 @@ def test_verify_coverage_findings_distinguishes_checked_and_clean_from_cannot_de
         "acceptanceCriteria": ["Running `pytest` must be green before merge."],
         "implementation": {"verify": "echo nothing"},
     }
-    findings, undetermined, clean = SM.verify_coverage_findings(
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
         [clean_story, undetermined_story], str(tmp_path)
     )
     assert findings == []
     assert clean == ["US-001"]
     assert undetermined == ["US-002"]
+    assert not_evaluated == [], "both stories cited something; neither is unevaluated"
 
 
 def test_verify_coverage_findings_reports_a_command_verify_never_runs(tmp_path):
@@ -963,22 +964,222 @@ def test_verify_coverage_findings_reports_a_command_verify_never_runs(tmp_path):
         "acceptanceCriteria": ["Running `pytest` must be green before merge."],
         "implementation": {"verify": "flake8 ."},
     }
-    findings, undetermined, clean = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
     assert findings == [{"id": "US-001", "commands": ["pytest"]}]
-    assert undetermined == clean == []
+    assert undetermined == clean == not_evaluated == []
 
 
-def test_verify_coverage_findings_is_silent_when_no_criterion_cites_a_command(tmp_path):
-    """No backtick citation anywhere -- neither non-finding state applies. This
-    is what keeps test_an_ordinary_merge_says_nothing_about_the_sidecars_
-    beside_it's default staging stories (acceptanceCriteria: ["Typecheck
-    passes"]) silent on stderr."""
+def test_verify_coverage_findings_records_a_story_that_cites_no_command(tmp_path):
+    """This test used to assert `== ([], [], [])` -- that a story citing nothing
+    landed in NO list. That silence at the FUNCTION level is exactly the defect:
+    the story entered the merge and left with no verdict from anybody. It now
+    lands in `not_evaluated` with reason (a), and the silence this test used to
+    protect is asserted where it actually belongs -- on stderr, by
+    test_um_merge_ordinario_continua_mudo_na_fase_4_3 below, which keeps
+    test_an_ordinary_merge_says_nothing_about_the_sidecars_beside_it's default
+    staging stories (acceptanceCriteria: ["Typecheck passes"]) quiet."""
     story = {
         "id": "US-001",
         "acceptanceCriteria": ["Typecheck passes"],
         "implementation": {"verify": "tsc --noEmit"},
     }
-    assert SM.verify_coverage_findings([story], str(tmp_path)) == ([], [], [])
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert findings == undetermined == clean == []
+    assert [entry["id"] for entry in not_evaluated] == ["US-001"]
+    assert not_evaluated[0]["reason"] == (
+        "no acceptance criterion cites a command in backticks"
+    )
+
+
+def test_verify_coverage_records_a_story_whose_citations_are_not_in_the_vocabulary(tmp_path):
+    """Reason (b), the dangerous half: the story NAMED something and the gate
+    walked past it. The reason must name the unrecognised citations -- 'not
+    evaluated' with no subject is what makes this state invisible."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    story = {
+        "id": "US-001",
+        "project": ".",
+        "acceptanceCriteria": ["The section lands in `commands/execute.md`."],
+        "implementation": {"verify": "grep -q section commands/execute.md"},
+    }
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert findings == undetermined == clean == []
+    assert [entry["id"] for entry in not_evaluated] == ["US-001"]
+    assert not_evaluated[0]["reason"] == (
+        "cites nothing in its project's derived vocabulary: commands/execute.md"
+    )
+
+
+def test_verify_coverage_da_veredicto_a_toda_story_que_entrou(tmp_path):
+    """The invariant this story delivers: the four lists PARTITION the input.
+
+    One story per outcome, all four in one call, so the assertion is over a
+    real mixture rather than four separate single-outcome runs. `US-004` and
+    `US-005` are the two not-evaluated reasons; both used to leave by a bare
+    `continue` and appear in no list at all, which is how a story could enter a
+    merge and receive no verdict from any line of the report."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    (tmp_path / "sem-manifesto").mkdir()
+    cites = "Running `pytest` must be green before merge."
+    stories = [
+        {
+            "id": "US-001",
+            "project": ".",
+            "acceptanceCriteria": [cites],
+            "implementation": {"verify": "pytest -q"},
+        },
+        {
+            "id": "US-002",
+            "project": ".",
+            "acceptanceCriteria": [cites],
+            "implementation": {"verify": "echo nothing"},
+        },
+        {
+            "id": "US-003",
+            "project": "sem-manifesto",
+            "acceptanceCriteria": [cites],
+            "implementation": {"verify": "pytest -q"},
+        },
+        {
+            "id": "US-004",
+            "project": ".",
+            "acceptanceCriteria": ["The Finalization section exists in execute.md"],
+            "implementation": {"verify": "grep -q Finalization execute.md"},
+        },
+        {
+            "id": "US-005",
+            "project": ".",
+            "acceptanceCriteria": ["The file `commands/execute.md` gains the section."],
+            "implementation": {"verify": "grep -q section commands/execute.md"},
+        },
+    ]
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        stories, str(tmp_path)
+    )
+
+    # The three existing outcomes still discriminate -- this story is not
+    # allowed to pass by moving everyone into one bucket.
+    assert [f["id"] for f in findings] == ["US-002"]
+    assert undetermined == ["US-003"]
+    assert clean == ["US-001"]
+    assert [entry["id"] for entry in not_evaluated] == ["US-004", "US-005"]
+    assert not_evaluated[0]["reason"] != not_evaluated[1]["reason"], "two distinct reasons"
+
+    judged = len(findings) + len(undetermined) + len(clean) + len(not_evaluated)
+    assert judged == len(stories), "every story that entered received a verdict"
+    seen = (
+        {f["id"] for f in findings}
+        | set(undetermined)
+        | set(clean)
+        | {entry["id"] for entry in not_evaluated}
+    )
+    assert seen == {s["id"] for s in stories}, "the union is the input's own id set"
+    assert len(seen) == judged, "no id appears in two lists"
+
+
+def test_a_quarta_linha_nomeia_a_story_pulada_e_o_motivo(tmp_path):
+    """End to end through the real CLI, in the shape that produced the defect:
+    one story judged CHECKED-AND-CLEAN beside one the phase skipped. The
+    CHECKED-AND-CLEAN line naming only the first is precisely how the second
+    used to disappear -- a reader counts the named ids and finds one fewer than
+    the merge took in."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": {
+                **_staging_story("A"),
+                "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+                "implementation": {
+                    "files": ["src/x.py"],
+                    "approach": "Implement it",
+                    "verify": "pytest -q",
+                },
+            },
+            "02-b.json": {
+                **_staging_story("B"),
+                "acceptanceCriteria": ["The Finalization section exists in execute.md"],
+                "implementation": {
+                    "files": ["src/y.py"],
+                    "approach": "Implement it",
+                    "verify": "grep -q Finalization execute.md",
+                },
+            },
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 4.3 verify-coverage CHECKED-AND-CLEAN for US-001" in proc.stderr
+    assert "Phase 4.3 verify-coverage NOT EVALUATED for US-002" in proc.stderr
+    assert "no acceptance criterion cites a command in backticks" in proc.stderr
+    assert len(doc["userStories"]) == 2
+    # Together the printed lines name every story the merge took in.
+    named = {story["id"] for story in doc["userStories"] if story["id"] in proc.stderr}
+    assert named == {"US-001", "US-002"}
+
+
+def test_um_merge_ordinario_continua_mudo_na_fase_4_3(tmp_path):
+    """The guardrail the rewritten function-level test handed over to stderr.
+
+    Every story here is not-evaluated (the default staging story cites nothing),
+    so the fourth line has plenty to say -- and says none of it, because no
+    other Phase 4.3 line was emitted. The phase asserted nothing about anyone,
+    so there is no CHECKED-AND-CLEAN line for a missing id to hide behind. This
+    is what keeps
+    test_an_ordinary_merge_says_nothing_about_the_sidecars_beside_it green and
+    what keeps all 92 golden recordings from gaining a stderr line."""
+    proc, doc = _merge(
+        tmp_path,
+        {"01-a.json": _staging_story("A"), "02-b.json": _staging_story("B")},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 4.3" not in proc.stderr
+    assert proc.stderr == "", "an ordinary merge stays silent on stderr"
+    assert len(doc["userStories"]) == 2
+
+
+def test_uma_story_nao_avaliada_nao_entra_em_smell_warnings(tmp_path):
+    """Not evaluating is the ABSENCE of a finding, never one. metadata keeps
+    exactly the two types it already had; the skipped story is reported on
+    stderr and nowhere else."""
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    proc, doc = _merge(
+        tmp_path,
+        {
+            "01-a.json": {
+                **_staging_story("A"),
+                "acceptanceCriteria": ["Running `pytest` must be green before merge."],
+                "implementation": {
+                    "files": ["src/x.py"],
+                    "approach": "Implement it",
+                    "verify": "flake8 src/x.py",
+                },
+            },
+            "02-b.json": {
+                **_staging_story("B"),
+                "acceptanceCriteria": ["The file `commands/execute.md` gains the section."],
+                "implementation": {
+                    "files": ["src/y.py"],
+                    "approach": "Implement it",
+                    "verify": "grep -q section commands/execute.md",
+                },
+            },
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "Phase 4.3 verify-coverage NOT EVALUATED for US-002" in proc.stderr
+    assert "cites nothing in its project's derived vocabulary: commands/execute.md" in (
+        proc.stderr
+    )
+    warnings = doc["metadata"]["smellWarnings"]
+    assert {w["type"] for w in warnings} <= {"orphan-symbol", "verify-coverage"}
+    assert [w["storyId"] for w in warnings if w["type"] == "verify-coverage"] == ["US-001"]
+    assert all(w["storyId"] != "US-002" for w in warnings), "not evaluated is not a finding"
 
 
 def test_the_verify_coverage_smell_reaches_metadata_only_for_a_real_divergence(tmp_path):
