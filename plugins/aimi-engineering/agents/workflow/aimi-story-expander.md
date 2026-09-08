@@ -141,6 +141,12 @@ That is the confinement working rather than a defect, and it belongs to no parti
 
 Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fixture-em-tmp-recusado.md`: an executor wrote its verify fixture with `mktemp -d`, spent its diagnosis establishing that the refusal was structural rather than its own story's, and worked around it by repointing `TMPDIR`. The rule did not exist here — which is why it does now.
 
+## Verify never names `verify-probe`
+
+**A story's own `implementation.verify` must NEVER name the `verify-probe` verb.** The executor probes a story by RUNNING that story's own verify segments (`skills/story-executor/SKILL.md` step 1.5), so a verify that calls the verb back re-enters the probe: the CLI refuses instead of answering, and the story then fails for a reason that has nothing to do with its own code. The same loop closes between two stories — A's verify probing B while B's probes A, two ids and neither equal to the other — so write neither shape.
+
+A story that must exercise the verb has two ways out: probe from a verify that does not itself call it (a sibling story's, or a throwaway fixture's), or call `probe_verify()` in `tasks.py` directly, which is not guarded. Point at the refusal rather than restating it — `_VERIFY_PROBE_REENTRY` in `plugins/aimi-engineering/scripts/tasks.py` is the one place that states the problem in full and names both exits, and it is the text whoever trips this actually reads.
+
 ## Verify coverage
 
 `implementation.verify` must execute every check the story's `acceptanceCriteria` assert. When a criterion asserts something `verify` does not run, there are exactly two ways to resolve it: extend `verify` to cover it, or drop the assertion from `acceptanceCriteria` — never leave a criterion that nothing executes. State this rule without naming any runner, because it has to hold for a criterion written in plain prose that names no command at all ("the lint passes") — that is the class no parser can ever reach, and the reason this rule has to be applied by you, the author, rather than caught downstream.
