@@ -585,8 +585,13 @@ setup_forge_cli_sandbox() {
   # filename than production and than any test that seeded the store from the
   # real PATH -- so a routed write would silently find no recorded answer and
   # the assertion would pass for the wrong reason.
+  # sort joined the list for forge-issue-scan, whose SCAN pipeline ends in
+  # `sort -un` to deduplicate candidate numbers. Without it the verb reaches
+  # its `|| candidates=""` fallback and answers [] for EVERY description --
+  # which is the correct answer for two of that verb's three cases, so its
+  # absence would have been invisible in two tests out of three.
   local tool resolved candidate
-  for tool in bash jq git mktemp cat rm grep sed tr tail dirname basename sha256sum shasum awk; do
+  for tool in bash jq git mktemp cat rm grep sed sort tr tail dirname basename sha256sum shasum awk; do
     resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
     if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
       for candidate in "/usr/bin/$tool" "/bin/$tool"; do

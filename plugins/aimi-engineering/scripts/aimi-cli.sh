@@ -8813,6 +8813,142 @@ cmd_forge_issue_view() {
   _forge_issue_view "$number"
 }
 
+# Public verb behind the Issue Reference Confirmation Gate's decidable half
+# (commands/plan.md): free text in, the issues this plan could close out.
+# SCAN (number-shaped tokens -> candidate integers) and RESOLVE (each
+# candidate through the forge, keeping only what is found AND open) live
+# here; CONFIRM -- the one AskUserQuestion, its four-option cap, and the
+# write of metadata.issues -- stays in plan.md, because only a human can
+# answer it. Extracting the two decidable steps is what puts them under a
+# suite: while they lived as prose, every test passed no matter what the
+# pipeline did.
+#
+# Prints a compact JSON array of {number, title}, ascending by number.
+#
+# DEGRADES, NEVER ABORTS -- unlike cmd_forge_issue_view, which calls
+# _require_git_repo and exits 1 outside a repository. This verb's caller is
+# a gate whose documented contract is that it never aborts the run: a plan
+# that cannot reach a forge is still a plan, and the only thing lost is an
+# optional key. So a cwd that is not a git repository, a description naming
+# no candidate, and a candidate whose envelope is an `error` (offline, no
+# gh/glab/tea, unauthenticated, rate-limited) all leave quietly -- `[]` or a
+# dropped row, at exit 0. Only a caller-side usage error exits non-zero.
+#
+# check_jq is called here rather than relied upon from the dispatcher: this
+# verb dispatches in the pre-find_aimi_root forge block, and the dispatcher's
+# own check_jq runs after it (see the comment beside that block).
+cmd_forge_issue_scan() {
+  check_jq
+
+  local description="" project_dir="" have_description=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --description) shift; description="${1:-}"; have_description=1 ;;
+      --project)     shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-scan: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$have_description" -eq 0 ]; then
+    echo "Error: forge-issue-scan: --description <text> is required" >&2
+    exit 1
+  fi
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # SCAN. Every #<digits> and every bare <digits> token is a candidate:
+  # deduplicate, drop leading zeros, keep positive integers only (issue
+  # numbers start at 1). Bare digits are in scope deliberately, and the noise
+  # that brings -- `v1.2.3` contributes 1, 2 and 3 -- is CONFIRM's problem,
+  # not the scan's: a description naming its issue without a `#` is far more
+  # common than one naming no issue at all, and a candidate nobody confirms
+  # costs one forge lookup. The `|| candidates=""` is not decoration: under
+  # this script's `set -o pipefail`, a grep that matches nothing fails the
+  # whole pipeline, and a description with no digits in it is the ordinary
+  # case this verb answers `[]` for.
+  local candidates=""
+  candidates=$(printf '%s\n' "$description" \
+    | grep -oE '[0-9]+' \
+    | sed 's/^0*//' \
+    | grep -E '^[1-9][0-9]*$' \
+    | sort -un) || candidates=""
+
+  if [ -z "$candidates" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # The forge is consulted only past this line, so a description that named
+  # no number never reaches one -- and only past this line does a repository
+  # matter, which is why the check sits here and not at the top.
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # Feed the loop from a heredoc, never `for n in $candidates`. These four
+  # lines are ported verbatim from the block that used to live in plan.md,
+  # where a command block runs under whatever shell the host hands it and
+  # zsh does not word-split an unquoted expansion the way bash does: the
+  # `for` form iterates ONCE over the whole newline-joined list, asks the
+  # forge about a number that does not exist, and comes back empty at exit
+  # 0 -- the gate reporting "no issues named" for a description that named
+  # several, with nothing anywhere saying so. A heredoc splits on newlines
+  # identically in both shells and keeps the loop in the current shell.
+  local rows="" issue_num issue_json row
+  while IFS= read -r issue_num; do
+    [ -n "$issue_num" ] || continue
+
+    # _forge_issue_view IN PROCESS, never a nested `aimi-cli.sh
+    # forge-issue-view` subprocess -- the precedent forge-pr-create already
+    # set for reusing a read verb. The number interpolated toward the forge
+    # has already passed ^[1-9][0-9]*$ above, which is cmd_forge_issue_view's
+    # own numeric guard by another route.
+    issue_json=$(_forge_issue_view "$issue_num") || issue_json=""
+
+    # Keep found AND open, and nothing else. Measured on this repository,
+    # #149 (an open issue) and #3 (a merged pull request) both resolve status
+    # "found", so existence alone discriminates nothing between them: state
+    # and title are what carry the decision. Branch on a CAPTURED document's .status
+    # and .data.state -- never pipe the read verb into a predicate whose exit
+    # status you then read, because forge-contract.md's Degradation Contract
+    # makes that status meaningless: a missing gh, an unauthenticated one and
+    # a rate-limited host all return exit 0 carrying a status "error"
+    # envelope, so "the issue is open" and "the forge never answered" would
+    # become indistinguishable. An `error` candidate leaves silently, exactly
+    # as the prose this replaced specified; a `not_found` one was a version
+    # fragment or a line number and there was never anything there; anything
+    # but `open` -- `closed`, or on a number naming a pull request, `merged`
+    # -- is work a plan does not close.
+    row=$(printf '%s' "$issue_json" \
+      | jq -c 'select(.status == "found" and .data.state == "open")
+               | {number: .data.number, title: .data.title}') || row=""
+
+    if [ -n "$row" ]; then
+      rows="${rows}${row}
+"
+    fi
+  done <<CANDIDATES
+$candidates
+CANDIDATES
+
+  # jq -s over zero rows is `[]`, which is the same answer a run where every
+  # candidate was dropped must give -- indistinguishable, deliberately, from
+  # a description that named no numbers at all.
+  printf '%s' "$rows" | jq -s -c 'sort_by(.number)'
+}
+
 # Prints the MANDATORY manual-fallback instruction (forge-contract.md's
 # Degradation Contract, mandatory mode) for every forge-issue-create
 # failure path -- missing gh, unauthenticated session, or the create call
@@ -15683,6 +15819,26 @@ COMMANDS:
                               unauthenticated forge CLI yields status "error"
                               with no stderr output. github, gitlab and gitea
                               each have an adapter.
+    forge-issue-scan --description <text> [--project <path>]
+                              Reads free text, prints the issues it names that
+                              are found AND open, as a compact JSON array of
+                              {number, title} ascending by number. Backs the
+                              decidable half of plan.md's Issue Reference
+                              Confirmation Gate (SCAN + RESOLVE); CONFIRM stays
+                              there, because only a human answers it. Every
+                              #<digits> and every bare <digits> token is a
+                              candidate, deduplicated with leading zeros
+                              dropped, so `v1.2.3` contributes 1, 2 and 3 and
+                              the filter is what removes them. DEGRADES rather
+                              than aborts, since its caller is a gate that
+                              never aborts a run: `[]` at exit 0 when the
+                              description names no candidate (the forge is not
+                              consulted at all), when the cwd is not a git
+                              repository, and when every candidate is dropped.
+                              A candidate whose envelope is status "error"
+                              leaves silently. Resolution goes through
+                              forge-issue-view's own adapter, so github, gitlab
+                              and gitea all work.
     forge-issue-create --title <t> --body <b> [--project <path>]
                               Write verb -- shells gh issue create (no --json
                               flag exists on it; the URL/number are captured
@@ -16470,6 +16626,7 @@ main() {
     forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
     forge-pr-merge) shift; cmd_forge_pr_merge "$@"; return ;;
     forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
+    forge-issue-scan) shift; cmd_forge_issue_scan "$@"; return ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
     forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
