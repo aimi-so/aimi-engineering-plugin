@@ -1976,6 +1976,53 @@ cmd_list_known_gaps() {
   python3 "$(_aimi_tasks_py)" "${args[@]}"
 }
 
+# Extract a brainstorm's Design Decisions section, for /aimi:plan's Phase 1.7c
+# to thread into the Phase 3d story-expander prompt.
+#
+# --brainstorm-path arrives as a CLI ARGUMENT, so it is confined by
+# validate_path_in_project here, before python3 ever starts -- the
+# CLI-argument half of the split the top-level CLAUDE.md's "Path confinement
+# is split on a real boundary" section names. This is deliberately distinct
+# from design_context()'s own document-sourced read of metadata.brainstormPath
+# inside get-story-context (the story EXECUTOR's read, reached at execute
+# time), which stays unconfined by that function's own docstring and is
+# unchanged by this verb -- the two paths enter at different points and one
+# crossing a document does not blur into the other.
+#
+# Prints {"decisions": "..."} -- empty string when the file is missing or
+# unreadable, mirroring design_context()'s own degrade. Read-only, no lock:
+# nothing here touches tasks.json.
+#
+# Flags: --brainstorm-path <path> (required)
+cmd_design_decisions() {
+  local brainstorm_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --brainstorm-path)
+        shift
+        brainstorm_path="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh design-decisions --brainstorm-path <path>" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$brainstorm_path" ]; then
+    echo "Usage: aimi-cli.sh design-decisions --brainstorm-path <path>" >&2
+    exit 1
+  fi
+
+  brainstorm_path=$(resolve_path "$brainstorm_path")
+  validate_path_in_project "$brainstorm_path"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" design-decisions --brainstorm-path "$brainstorm_path"
+}
+
 # Mark a story as in-progress
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
@@ -15630,6 +15677,14 @@ COMMANDS:
                               tasks file planned on the same date, else null -- never
                               dropped. Both filters are exact; --since drops a dated-less
                               entry.
+    design-decisions --brainstorm-path <path>
+                              Extract a brainstorm's Design Decisions section as
+                              {"decisions": "..."}, empty when the file is missing or
+                              carries no matching section. --brainstorm-path is confined
+                              to the project root by validate_path_in_project before
+                              python3 starts, because it arrives as a CLI argument --
+                              distinct from get-story-context's own unconfined,
+                              document-sourced read of metadata.brainstormPath.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -16681,6 +16736,7 @@ main() {
     get-story-context) shift; cmd_get_story_context "$@" ;;
     verify-probe)      shift; cmd_verify_probe "$@" ;;
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
+    design-decisions)  shift; cmd_design_decisions "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;

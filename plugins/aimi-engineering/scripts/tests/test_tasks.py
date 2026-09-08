@@ -28,11 +28,17 @@ it recorded jq PROGRAMS; get-story-context's logic was bash arrays and a shell
 loop, so the recording pins the payload's SHAPE -- which keys, in which order,
 holding what when a skill is missing or empty or oversized -- and the
 hand-written tests beside it carry the fidelity argument. It is also the one
-block whose port changed rules on purpose: three of them, named in
+block whose port changed rules on purpose: four of them, named in
 CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
 engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
+The fourth, brainstorm-secao-duplicada, differs from the first three in one
+way: its recorded value WAS updated to the new output (US-002's shape rule and
+provenance line), rather than kept as pre-port evidence the way
+cap-gigante-primeiro's is -- it is still named here rather than left to the
+plain comparison, so a reader scanning this table for "what changed on
+purpose" finds it without also reading the diff.
 
 A FOURTH rule then changed and it is the only one that MOVED this block rather
 than being absorbed by a table or a strip: `metadata` is now projected onto the
@@ -2269,6 +2275,134 @@ def test_a_null_metadata_finalize_is_read_as_absent_and_not_as_malformed(tmp_pat
     assert actual["stderr"] == ""
 
 
+def _replay_brainstorm_decision(decisions, tmp_path, brainstorm_path=_ABSENT):
+    """One story through the real CLI, carrying `metadata.decisions` and
+    `metadata.brainstormPath` as given.
+
+    R20's own replay, built here for the reason _replay_line_anchor and
+    _replay_implementation are: bash never ran this rule either, so there is
+    no jq recording to replay, and adding a case to `validate_tasks_cases`
+    would be recording the Python. schemaVersion 3.3 is load-bearing for the
+    same reason -- R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+
+    `decisions` reuses `_replay_implementation`'s `_ABSENT` sentinel for the
+    same reason it does: `None` and `[]` are both values the schema allows,
+    so "no metadata.decisions[] key at all" -- the false-positive control's
+    first shape -- needs a fixture distinguishable from either.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if decisions is not _ABSENT:
+        metadata["decisions"] = decisions
+    if brainstorm_path is not _ABSENT:
+        metadata["brainstormPath"] = brainstorm_path
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+_BRAINSTORM_SOURCED_DECISION = {
+    "anchor": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "source": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "text": "algo decidido no brainstorm",
+    "resolution": "sim",
+}
+
+
+def test_a_brainstorm_sourced_decision_with_no_brainstormpath_warns_exactly_once(tmp_path):
+    """R20's warning half. Confirms BRAINSTORM_DECISION_SOURCE matches this
+    shape before relying on the CLI to have matched it too, so a failure here
+    can never be mistaken for a regex that silently stopped matching."""
+    assert T.BRAINSTORM_DECISION_SOURCE.match(_BRAINSTORM_SOURCED_DECISION["source"])
+    actual = _replay_brainstorm_decision([_BRAINSTORM_SOURCED_DECISION], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, for the whole document"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: metadata.decisions[] cites a "
+        "brainstorm-sourced decision (.aimi/brainstorms/2026-01-01-exemplo.md:L12) but "
+        "metadata.brainstormPath is absent — every one of that brainstorm's design "
+        "decisions is silently dropped from every story's execution context\n"
+    )
+
+
+def test_no_decisions_key_at_all_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape one -- the criterion this rule exists
+    to satisfy. A plan that never went through a brainstorm at all is the
+    ordinary, legitimate shape of a tasks.json, and must produce silence on
+    both channels, exactly like every case above it that never touches
+    metadata.decisions."""
+    actual = _replay_brainstorm_decision(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_decisions_present_but_none_brainstorm_sourced_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape two -- decisions[] populated
+    entirely with the OTHER fixed source tags, including the two that also
+    end in ':L<line>' (businessSpec, designSpec), which
+    BRAINSTORM_DECISION_SOURCE's own negative lookahead exists to exclude."""
+    actual = _replay_brainstorm_decision(
+        [
+            {
+                "anchor": "outline:edit:03",
+                "source": "outline",
+                "text": "renomeado",
+                "resolution": "sim",
+            },
+            {
+                "anchor": "businessSpec:L12",
+                "source": "businessSpec:L12",
+                "text": "marcador",
+                "resolution": "confirmado",
+            },
+        ],
+        tmp_path,
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_brainstormpath_present_alongside_the_same_decision_never_warns(tmp_path):
+    """The rule fires on the ABSENCE of the link, never merely on the
+    presence of a brainstorm-shaped decision -- the same
+    _BRAINSTORM_SOURCED_DECISION that warns above must fall silent once
+    metadata.brainstormPath is filled in."""
+    actual = _replay_brainstorm_decision(
+        [_BRAINSTORM_SOURCED_DECISION],
+        tmp_path,
+        brainstorm_path=".aimi/brainstorms/2026-01-01-exemplo.md",
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
@@ -2649,6 +2783,7 @@ CONTEXT_DECISIONS = {
     "cap-multibyte-c": "the cap counts bytes; under LC_ALL=C it already did",
     "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
     "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
+    "brainstorm-secao-duplicada": "two matched sections now carry provenance instead of merging bare",
 }
 
 
@@ -2670,7 +2805,7 @@ def test_the_story_context_tables_name_only_cases_that_exist():
     assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
     assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
     assert len(CONTEXT) == 57
-    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 9, "48 of 57 match; keep this in step"
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 10, "47 of 57 match; keep this in step"
 
 
 def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
@@ -2719,7 +2854,13 @@ def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, 
     assert actual["exit"] == 0, label + ": the shell that killed this is gone"
     payload = json.loads(actual["stdout"])
     if label == "brainstorm-truncagem-64k":
-        assert payload["designContext"]["decisions"] == "<<d*65536>>", "truncated, not fatal"
+        # US-002: the 200000-byte single matched section is now dropped WHOLE
+        # with a marker, not byte-sliced to 65536 -- so the run of "d"s is gone
+        # entirely and the old `_rle`-compressed "<<d*65536>>" expectation is
+        # exactly the wrong shape to assert any more.
+        assert payload["designContext"]["decisions"] == (
+            "[design decisions dropped — cap exceeded: ## Design Decisions (200000 bytes)]"
+        ), "dropped whole, not truncated"
     else:
         assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
         assert payload["skillsDropped"] == []
@@ -3060,21 +3201,111 @@ def test_the_skills_array_is_serialized_once_rather_than_once_per_skill():
     assert op.count("_emit(") == 1
 
 
-def test_the_decisions_scanner_is_the_awk_pipeline_and_truncates_at_65536():
-    """The unit, over the shapes the corpus records: a `### ` heading stays
-    inside the section, a `## ` heading closes it, a second `## Design Decisions`
-    does NOT (awk tested that rule first and skipped the closing one), the match
-    is a PREFIX so a suffixed heading opens the section, blank lines go, and the
-    truncation counts bytes because `head -c` did."""
+def test_the_decisions_scanner_matches_heading_shape_and_evicts_whole_sections():
+    """The single-section shapes the corpus records, unchanged by the shape
+    rewrite: a `### ` heading stays inside the section, a `## ` heading closes
+    it, blank lines go. A suffixed heading (`## Design Decisions e mais`) still
+    opens a section -- not because of a prefix match any more, but because the
+    shape regex matches "Decisions" wherever it sits in the heading text."""
     assert T.design_decisions(b"## Design Decisions\num\n### Sub\ndois\n## Fim\ntres\n") == (
         "um\n### Sub\ndois"
     )
     assert T.design_decisions(b"## Design Decisions e mais\num\n") == "um"
-    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == "um\ndois"
     assert T.design_decisions(b"## Outra\num\n") == ""
     assert T.design_decisions(b"## Design Decisions\n\n  recuada  \n\n\nfim\n") == "recuada\nfim"
-    assert T.design_decisions(b"## Design Decisions\n" + b"d" * 70000) == "d" * 65536
     assert T.DECISIONS_CAP == 65536
+
+
+def test_a_second_matching_heading_still_does_not_close_the_first_but_now_carries_provenance():
+    """The merge-not-close rule survives the shape rewrite (AC #4): a second
+    `## Design Decisions` does not close the first section -- both are matched
+    individually and both survive, each now carrying its own `## <Heading>`
+    line as provenance rather than merging into one bare body the way the
+    prefix-match scanner used to (the old value here was "um\\ndois")."""
+    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == (
+        "## Design Decisions\num\n\n## Design Decisions\ndois"
+    )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## Design Decisions", "## Design Decisions e mais", "## Key Decisions"],
+)
+def test_the_shape_rule_accepts_every_positive_control(heading):
+    """AC #2's three positives, each as the SOLE heading in its own brainstorm
+    -- a bare-body return, since exactly one section ever matches here."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == "um"
+
+
+@pytest.mark.parametrize("heading", ["## Overview", "## Next Steps"])
+def test_the_shape_rule_rejects_both_negative_controls(heading):
+    """AC #2's two negative controls, each as the sole heading present --
+    neither carries a "Decision"/"Decisions" word, so neither matches, and
+    with no matched section at all the return is "", same as a brainstorm with
+    no decisions heading whatsoever."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == ""
+
+
+def test_two_differently_named_matched_sections_concatenate_in_document_order():
+    """AC #3: `## Design Decisions` and `## Key Decisions` elsewhere in the
+    same file are two matched sections, not one -- both heading lines and both
+    bodies appear in the result, in source order."""
+    brainstorm = (
+        b"## Design Decisions\nprimeira\n"
+        b"## Overview\nnao conta\n"
+        b"## Key Decisions\nsegunda\n"
+    )
+    result = T.design_decisions(brainstorm)
+    assert result == "## Design Decisions\nprimeira\n\n## Key Decisions\nsegunda"
+    assert result.index("## Design Decisions") < result.index("## Key Decisions")
+    assert result.index("primeira") < result.index("segunda")
+
+
+def test_two_matched_sections_over_the_combined_cap_evict_the_lower_priority_one(monkeypatch):
+    """AC #5: neither section alone exceeds the cap, but their concatenation
+    does. The lowest-priority section -- last-matched in document order,
+    mirroring skills_payload()'s declaration-order eviction -- is dropped
+    whole; the higher-priority section's body survives intact and the lower
+    one's text is entirely absent, not partially present."""
+    monkeypatch.setattr(T, "DECISIONS_CAP", 100)
+    brainstorm = b"## Design Decisions\n" + b"a" * 60 + b"\n## Key Decisions\n" + b"b" * 60 + b"\n"
+    result = T.design_decisions(brainstorm)
+    assert result.startswith("## Design Decisions\n" + "a" * 60)
+    assert "b" * 60 not in result
+    assert "## Key Decisions (77 bytes)" in result
+    assert "cap exceeded" in result
+
+
+def test_a_single_oversized_matched_section_is_dropped_whole_not_sliced():
+    """AC #6, replacing the old 70000-byte truncation assertion this story's
+    rule change makes wrong: a lone matched section whose own body alone
+    exceeds DECISIONS_CAP is dropped in full -- never truncated into a partial
+    65536-byte blob -- and the return is a non-empty marker naming the dropped
+    heading and its byte size, containing none of the section's original body
+    text."""
+    result = T.design_decisions(b"## Design Decisions\n" + b"d" * 70000)
+    assert "d" * 10 not in result
+    assert len(result) < 100
+    assert "## Design Decisions (70000 bytes)" in result
+    assert "cap exceeded" in result
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_brainstorm_secao_duplicada_now_carries_provenance_end_to_end(tmp_path):
+    """AC #4, run through the CLI rather than the bare function: the golden
+    recording for this case WAS updated (unlike cap-gigante-primeiro's, kept as
+    pre-port evidence) to the new provenance-preserving value, so the ordinary
+    corpus replay would already pass it -- it is named in CONTEXT_DECISIONS
+    anyway, and this is the dedicated assertion that names why, per heading."""
+    _, payload = _context_stdout("brainstorm-secao-duplicada", tmp_path)
+    decisions = payload["designContext"]["decisions"]
+    assert decisions == "## Design Decisions\nprimeira\n\n## Design Decisions\nsegunda"
+    assert decisions.count("## Design Decisions") == 2
+    assert decisions.index("## Design Decisions") == 0
+    assert decisions.rindex("## Design Decisions") == decisions.index("segunda") - len(
+        "## Design Decisions\n"
+    )
+    assert decisions.index("primeira") < decisions.index("segunda")
 
 
 def test_the_tag_breakout_escape_is_the_seds_two_rules_in_the_seds_order(tmp_path):
@@ -3717,15 +3948,30 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     every other number in this test is unchanged. A write that had brought a
     writer of its own would have moved three of these assertions at once,
     which is the shape this ratchet exists to make visible.
+
+    THE EIGHTH open() ARRIVED WITH design-decisions, and it is a second
+    caller of the same read design_context() already does for
+    get-story-context's own metadata.brainstormPath, not a new capability:
+    same read mode, same degrade-to-empty-string on a missing file. What is
+    new is the CALLER and the CONFINEMENT that precedes it -- op_design_decisions
+    is reached from aimi-cli.sh's design-decisions verb, whose --brainstorm-path
+    argument crosses bash's validate_path_in_project before python3 starts,
+    the CLI-argument half of the split the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section names, where
+    design_context()'s own read stays unconfined by that function's own
+    docstring because its path is document-sourced rather than an argument.
+    The variable is named brainstorm_path, not path, so it cannot collide
+    with the literal the fourth open's own check above matches.
     """
     code = _code()
-    assert code.count("open(") == 7
+    assert code.count("open(") == 8
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 7
+    assert 'open(brainstorm_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 8
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -3803,8 +4049,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # the other forty keep holds here too -- no new root, no leaf this module
     # chose, and no directory created anywhere. The docstring above argues why
     # the write exists at all.
-    assert code.count("os.path.") == 44
-    assert code.count("os.path.isfile(") == 7
+    #
+    # The forty-fifth is design-decisions' own isfile() over --brainstorm-path
+    # -- bash's own argument, already run through validate_path_in_project
+    # before this module ever saw it, the same CLI-argument confinement every
+    # tasks-file path here already gets. No new root, no new leaf: the rule
+    # the other forty-four keep holds for this one too.
+    assert code.count("os.path.") == 45
+    assert code.count("os.path.isfile(") == 8
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -4570,6 +4822,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "verification-report",
         "verify-probe",
         "list-known-gaps",
+        "design-decisions",
         "project-groups",
         "get-story",
         "get-story-context",

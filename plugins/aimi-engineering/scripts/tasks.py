@@ -1760,6 +1760,16 @@ BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
 URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
 SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
 SOURCE_SECTION = re.compile(r"§ [0-9]+(\.[0-9]+)?")
+# A `metadata.decisions[].source` shaped like `<brainstorm-path>:L<line>` --
+# see commands/plan.md's thirteen-value source enum. Two OTHER fixed tags
+# also end in ":L<line>" -- `businessSpec:L<line>` and `designSpec:L<line>`
+# -- and both are excluded by the negative lookahead, because they name a
+# spec file rather than a brainstorm and R20 below must never warn about
+# them. Every other fixed source tag (researchFile:..., specFlow:...,
+# scopeNegVerifier, scopePosVerifier, codebaseVerified, outline, phase,
+# auditGate, researchConflict) never ends in ":L<digits>" at all, so no
+# further exclusion is needed.
+BRAINSTORM_DECISION_SOURCE = re.compile(r"^(?!businessSpec:|designSpec:).+:L[0-9]+$")
 
 VALIDATE_METADATA_FIELDS = (
     "schema_version",
@@ -1990,15 +2000,15 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 THROUGH R19 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
+    R16 THROUGH R20 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
     the last one already present, which is the only position from which a new
     rule can add lines after everything the golden corpus recorded without
     reordering either channel; each one's own comment carries why it warns or
     errors, why it sits where it sits, and why it is defensive where every rule
-    above it is faithful. R16, R17 and R19 reach the `warn` channel only. R18
-    is the one of the four that reaches `errors`, and its own comment says why
-    a malformed `metadata.finalize` is a different kind of wrong from a stale
-    line anchor or a directory that is not there yet.
+    above it is faithful. R16, R17, R19 and R20 reach the `warn` channel only.
+    R18 is the one of the five that reaches `errors`, and its own comment says
+    why a malformed `metadata.finalize` is a different kind of wrong from a
+    stale line anchor or a directory that is not there yet.
     """
     errors = []
 
@@ -2235,6 +2245,62 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         + " — the end-of-round step writes it too"
                     )
 
+    # R20 -- metadata.decisions[] carries a brainstorm-sourced entry while
+    # metadata.brainstormPath is absent. A WARNING for R16's reason: a broken
+    # link between the two is a question to the plan's author, not a verdict
+    # on the document.
+    #
+    # THE FALSE-POSITIVE CONTROL IS THE RULE THIS EXISTS TO SATISFY. A plan
+    # with no metadata.decisions[] key at all is the ordinary, legitimate
+    # shape of a plan that never went through a brainstorm, and must never
+    # trip this rule; neither must a decisions[] populated entirely with
+    # non-brainstorm sources (outline, businessSpec:L<line>, designSpec:L
+    # <line>, researchFile:..., specFlow:..., scopeNegVerifier,
+    # scopePosVerifier, codebaseVerified, phase, auditGate, researchConflict).
+    # A rule that warned on either shape would fire on the common case and
+    # teach the reader to ignore the channel.
+    #
+    # WHY THIS SIGNAL: a metadata.decisions[] entry only carries a
+    # <brainstorm-path>:L<line> source (BRAINSTORM_DECISION_SOURCE, defined
+    # above) when /aimi:plan's Phase 0.5 actually parsed a brainstorm doc's
+    # Open Questions section, so its presence is proof a brainstorm fed this
+    # plan rather than a guess -- and it costs nothing beyond a second field
+    # read off docs[0], the same read R18/R19 already make for
+    # metadata.finalize. This story's notes carry the two other candidate
+    # signals considered and rejected (a roadmap.json brainstormPath check;
+    # a .aimi/brainstorms/ slug match).
+    #
+    # It sits BELOW R19 for R17's own stated reason: a rule appended after
+    # the last one already present can only add lines after everything the
+    # golden corpus recorded, in either channel, and can never reorder one.
+    #
+    # ONE warn call for the WHOLE document, on the FIRST matching entry, not
+    # one per matching entry -- R19's own one-line-per-story precedent
+    # (a story naming three collisions is one line), widened here to one
+    # line per document: the broken link is one fact about the document, not
+    # one fact per decision that cites it.
+    doc0_metadata = jq_index(docs[0], "metadata", "") if docs else None
+    brainstorm_path = jq_index(doc0_metadata, "brainstormPath", ".metadata")
+    if not brainstorm_path:
+        decisions = jq_index(doc0_metadata, "decisions", ".metadata")
+        if isinstance(decisions, dict):
+            decisions = list(decisions.values())
+        if isinstance(decisions, list):
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                source = decision.get("source")
+                if isinstance(source, str) and BRAINSTORM_DECISION_SOURCE.match(source):
+                    warn(
+                        tasks_file
+                        + ": metadata.decisions[] cites a brainstorm-sourced decision ("
+                        + source
+                        + ") but metadata.brainstormPath is absent — every one of that "
+                        "brainstorm's design decisions is silently dropped from every "
+                        "story's execution context"
+                    )
+                    break
+
     return errors
 
 
@@ -2374,11 +2440,24 @@ def _named_lines(values):
 
 SKILLS_CAP = 102400
 
-# `head -c 65536` on the decisions pipeline. Bytes, like the cap above, and for
-# a stronger reason: head counts bytes and never had a locale to depend on.
+# `head -c 65536` on the decisions pipeline, before this cap became a whole-
+# section eviction budget (see design_decisions() below) rather than a byte
+# slice point. Bytes, like the skills cap above, and for the same reason: the
+# old `head -c` counted them and never had a locale to depend on, and every
+# size compared against this cap today is still `len()` on a bytes object.
 DECISIONS_CAP = 65536
 
-DECISIONS_HEADING = b"## Design Decisions"
+# The shape rule a `## ` heading's own text is tested against, from US-001's
+# corpus measurement (`.aimi/research/design-decisions-section-shapes.md`):
+# case-insensitive, matches a word starting `Decis` continuing `ion` (covers
+# "Decision"/"Decisions"), `ão` (covers "Decisão") or `õe` (covers "Decisões").
+# Confirmed against the corpus to accept "## Design Decisions", "## Design
+# Decisions e mais" and "## Key Decisions", and to reject "## Overview" and
+# "## Next Steps" (the second of which is a real heading in both corpus files,
+# correcting an earlier assumption that it did not exist). The `\b` before
+# `Decis` blocks a false hit inside an unrelated word (e.g. "indecisão") for
+# free; no such heading is in the corpus, but the guard costs nothing.
+DECISIONS_HEADING_RE = re.compile(r"(?i)^##\s+.*\bDecis(ion|ão|õe)")
 
 # The two tag-breakout escapes, in the order the per-skill `sed` applied them.
 # Order matters and is not alphabetical: the closing form has to go first, or
@@ -2515,46 +2594,133 @@ def skills_payload(names, base_dir, warn):
     return [entry for entry, _ in kept], dropped
 
 
+def _is_decisions_heading(heading_line):
+    """The shape predicate: does this `## ` heading's own text match
+    DECISIONS_HEADING_RE? Decoded to text for the regex the same way every
+    other text this module hands back to the agent is decoded -- malformed
+    UTF-8 is replaced rather than refused, matching read_skill()'s rule."""
+    return bool(DECISIONS_HEADING_RE.match(heading_line.decode("utf-8", "replace")))
+
+
+def _split_top_sections(lines):
+    """Every top-level `## ` heading and its body (to the next `## ` or EOF),
+    in document order. A deeper `### ` heading is not a boundary -- its line
+    starts with three hashes and a space, not two hashes and a space, so it
+    stays inside whichever section is open, unchanged from the pre-port
+    scanner. Content before the first `## ` heading belongs to no section and
+    is dropped, matching the pre-port scanner, which only ever started
+    collecting once a heading had already been seen."""
+    sections = []
+    heading = None
+    body = []
+    for line in lines:
+        if line.startswith(b"## "):
+            if heading is not None:
+                sections.append((heading, body))
+            heading = line
+            body = []
+        elif heading is not None:
+            body.append(line)
+    if heading is not None:
+        sections.append((heading, body))
+    return sections
+
+
+def _section_body(body_lines):
+    """`sed 's/^[[:space:]]*//;s/[[:space:]]*$//'` over every body line, then
+    the blank-line drop that used to be a squeeze-then-delete pair (see the
+    docstring this rule carried before the shape rewrite: `awk 'NF ||
+    prev_nf'` collapsed blank runs to one and the `sed '/^$/d'` right after it
+    deleted the survivor too, so the composition drops every blank line and
+    writing the squeeze out would be dead code). Bytes throughout, for the
+    same reason DECISIONS_CAP counts them."""
+    collected = [stripped for stripped in (line.strip(b" \t\v\f\r") for line in body_lines) if stripped]
+    return b"\n".join(collected)
+
+
+def _decisions_dropped_marker(dropped):
+    """One bracketed marker naming every dropped heading and the byte size of
+    the block it cost, in the order design_decisions() dropped them (oversized
+    entries first in document order, then aggregate evictions in reverse
+    document order -- see design_decisions()'s own docstring)."""
+    parts = [
+        entry_heading.strip(b" \t\v\f\r").decode("utf-8", "replace") + " (" + str(entry_size) + " bytes)"
+        for entry_heading, entry_size in dropped
+    ]
+    return ("[design decisions dropped — cap exceeded: " + "; ".join(parts) + "]").encode("utf-8")
+
+
 def design_decisions(brainstorm_bytes):
-    """The awk/sed/awk/sed/head pipeline, in one pass over the file's bytes.
+    """The awk/sed/awk/sed/head pipeline, rewritten from a single-heading
+    prefix match into a shape rule over every top-level `## ` heading (see
+    DECISIONS_HEADING_RE), because a real brainstorm can carry its decisions
+    under `## Key Decisions` with no `## Design Decisions` heading anywhere,
+    and the old prefix match silently returned "" for one.
 
-    From `## Design Decisions` (a PREFIX match, so a heading with a suffix opens
-    the section too -- brainstorm-heading-sufixado) to the next `## ` heading or
-    end of file. A deeper `### ` heading stays inside. A SECOND
-    `## Design Decisions` does not close the section: awk tested that rule
-    first and `next`ed past the closing rule, so the two sections merge, which
-    brainstorm-secao-duplicada records.
+    Every `## ` section whose heading matches DECISIONS_HEADING_RE is a
+    matched section, in document order. A SECOND matching heading does not
+    close the first -- two `## Design Decisions` sections still both survive
+    (brainstorm-secao-duplicada), the same merge-not-close rule the old
+    prefix-match scanner had, now over the wider match set. Exactly one
+    matched section returns its bare body unchanged, same as before a shape
+    rule existed at all. Two or more matched sections concatenate in document
+    order, each carrying its own `## <Heading>` line as provenance -- the
+    reader can no longer tell two concatenated sections apart by content
+    alone, so the heading is what tells them apart.
 
-    Bytes throughout, like validate-tasks' subsection scanner and for the same
-    reason: awk, sed and `head -c` all counted them.
-
-    The blank-line SQUEEZE is not implemented and its absence is the port being
-    honest. `awk 'NF || prev_nf'` collapsed runs of blank lines to one, and the
-    `sed '/^$/d'` immediately after it then deleted the survivor too -- the
-    composition drops every blank line, and writing the squeeze out would be
-    dead code pretending to be a rule.
+    DECISIONS_CAP is no longer a byte-slice point (`head -c` truncated a
+    single stream mid-sentence); it is a whole-section eviction budget, in the
+    same two-pass shape skills_payload() already uses a few functions up:
+    drop any section whose own block alone exceeds the cap before aggregating,
+    then evict whole sections from the end -- lowest priority, meaning
+    last-matched in document order -- while the remaining concatenation is
+    still over the cap. No section's body is ever byte-sliced; a section
+    either survives whole or is dropped whole, and a marker names every
+    dropped heading and the byte size of the block it cost.
     """
     lines = brainstorm_bytes.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
 
-    collected = []
-    in_section = False
-    for line in lines:
-        if line.startswith(DECISIONS_HEADING):
-            in_section = True
-            continue
-        if in_section and line.startswith(b"## "):
-            break
-        if in_section:
-            # `sed 's/^[[:space:]]*//;s/[[:space:]]*$//'`, over a record that can
-            # hold no newline.
-            stripped = line.strip(b" \t\v\f\r")
-            if stripped:
-                collected.append(stripped)
+    matched = [
+        (heading, _section_body(body))
+        for heading, body in _split_top_sections(lines)
+        if _is_decisions_heading(heading)
+    ]
+    if not matched:
+        return ""
 
-    stream = b"".join(line + b"\n" for line in collected)
-    return stream[:DECISIONS_CAP].rstrip(b"\n").decode("utf-8", "replace")
+    multi = len(matched) > 1
+    blocks = []
+    for heading, body in matched:
+        if not multi:
+            block = body
+        else:
+            heading_text = heading.strip(b" \t\v\f\r")
+            block = heading_text if not body else heading_text + b"\n" + body
+        blocks.append((heading, block, len(block)))
+
+    kept = []
+    dropped = []
+    for heading, block, size in blocks:
+        if size > DECISIONS_CAP:
+            dropped.append((heading, size))
+            continue
+        kept.append((heading, block, size))
+
+    aggregate = sum(size for _, _, size in kept)
+    while aggregate > DECISIONS_CAP and kept:
+        heading, block, size = kept.pop()
+        dropped.append((heading, size))
+        aggregate -= size
+
+    survivors = b"\n\n".join(block for _, block, _ in kept)
+    if not dropped:
+        return survivors.decode("utf-8", "replace")
+
+    marker = _decisions_dropped_marker(dropped)
+    result = marker if not survivors else survivors + b"\n\n" + marker
+    return result.decode("utf-8", "replace")
 
 
 BUNDLE_GUIDANCE = (
@@ -6375,6 +6541,34 @@ def op_list_known_gaps(argv):
     return 0
 
 
+def op_design_decisions(argv):
+    """`{"decisions": "..."}` for a brainstorm file named by --brainstorm-path,
+    reusing the same design_decisions() extractor design_context() calls for
+    the story EXECUTOR's own metadata.brainstormPath read.
+
+    --brainstorm-path already crossed aimi-cli.sh's validate_path_in_project
+    by the time this runs -- confinement of a CLI-ARGUMENT path is that
+    function's job, not this op's (see the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section). Nothing here re-checks
+    it, the same way design_context() never re-checks the confinement its own
+    caller already applied to a --tasks-file.
+
+    Degrades to an empty string, never a refusal, when the file is missing or
+    unreadable -- mirroring design_context()'s own degrade for the identical
+    reason: a brainstorm with no Design Decisions section is a normal outcome,
+    not a planning failure.
+    """
+    brainstorm_path = _flag(argv, "--brainstorm-path")
+    if not brainstorm_path:
+        die("Usage: tasks.py design-decisions --brainstorm-path <path>")
+    decisions = ""
+    if os.path.isfile(brainstorm_path):
+        with open(brainstorm_path, "rb") as handle:
+            decisions = design_decisions(handle.read())
+    _emit({"decisions": decisions})
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -6412,6 +6606,7 @@ _OPS = {
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
     "list-known-gaps": op_list_known_gaps,
+    "design-decisions": op_design_decisions,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }
