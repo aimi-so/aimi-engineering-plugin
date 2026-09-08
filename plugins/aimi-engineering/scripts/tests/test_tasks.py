@@ -5617,6 +5617,59 @@ def test_verify_reads_and_verify_assigns_are_the_two_halves_of_the_question():
     assert T.verify_assigns("while read -r line; do echo x; done") == {"line"}
 
 
+def test_um_heredoc_citado_nao_e_varrido_por_verify_reads():
+    r"""AC: a quoted delimiter suppresses every expansion in the body, so the
+    body holds no reads for this function to find.
+
+    All three spellings bash accepts for "do not expand" are here because they
+    are one rule wearing three faces -- `<<'X'`, `<<"X"` and `<<\X` -- and the
+    `<<-` variant is here because its terminator arrives indented by TABS and a
+    body whose end is never found would be reported as reads to the end of the
+    segment. The last case is the boundary the skip must not cross: only the
+    BODY is quoted, and the opener's own line is ordinary shell, so a `"$ARG"`
+    argument sitting before the redirect still counts.
+    """
+    citado = "python3 - <<'FIM'\nprint(\"$VAR\")\nFIM\n"
+    escapado = "cat <<\\FIM\nlinha $X\nFIM\n"
+    aspas_duplas = 'cat <<"FIM"\nlinha $Z\nFIM\n'
+    tab = "cat <<-'FIM'\n\tlinha $Y\n\tFIM\n"
+    assert T.verify_reads(citado) == set()
+    assert T.verify_reads(escapado) == set()
+    assert T.verify_reads(aspas_duplas) == set()
+    assert T.verify_reads(tab) == set()
+    assert T.verify_reads('python3 - "$ARG" <<\'FIM\'\nprint("$VAR")\nFIM\n') == {"ARG"}
+    # Ordered, not merely filtered: A's body has to be stepped over before B's
+    # can be reached, so a skip that forgot the order would either scan A's
+    # lines as B's or lose B's altogether.
+    assert T.verify_reads("cat <<'A' <<B\nde a $NAO\nA\nde b $SIM\nB\n") == {"SIM"}
+
+
+def test_um_heredoc_nu_continua_sendo_varrido(tmp_path):
+    """AC, and the control on the one above: where bash DOES expand, the
+    withheld verdict survives.
+
+    Proved through the probe rather than through verify_reads alone, because
+    the verdict is what the reader of a probe report acts on. The same body
+    under the two delimiters is the whole argument: bare, `$NUNCA_DEFINIDO` is
+    state the prelude never provided and the segment is not run at all; quoted,
+    it is three words of text and the segment gets a measured status. Nothing
+    but the delimiter differs between the two.
+    """
+    _, nu = _probe(tmp_path, "cat <<FIM\nlinha $NUNCA_DEFINIDO\nFIM\n")
+    assert nu[0]["unresolvedState"] == ["NUNCA_DEFINIDO"]
+    assert nu[0]["exit"] is None
+    assert nu[0]["discriminates"] is None
+    _, citado = _probe(tmp_path, "cat <<'FIM'\nlinha $NUNCA_DEFINIDO\nFIM\n")
+    assert "unresolvedState" not in citado[0]
+    assert citado[0]["exit"] == 0
+    assert citado[0]["discriminates"] is False
+    # And the reason verify_reads needs no arithmetic tracker of its own, which
+    # verify_segments does need: a left shift can only name a BARE delimiter,
+    # and a bare body is scanned, so `$DEPOIS` is still found on the far side
+    # of one. The `<<` being misread costs nothing when nothing is skipped.
+    assert T.verify_reads('x=$(( 1 << 2 ))\necho "$DEPOIS"\n') == {"DEPOIS"}
+
+
 # ---------------------------------------------------------------------------
 # verify-probe --previous-file: the second measurement point (US-005)
 # ---------------------------------------------------------------------------
