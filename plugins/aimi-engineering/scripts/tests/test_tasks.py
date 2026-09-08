@@ -7717,3 +7717,68 @@ def test_the_known_gaps_wrapper_crosses_once_takes_no_lock_and_opens_no_file():
     assert "_lock" not in body, "a reader takes no lock"
     assert "check_python3" in body
     assert '--aimi-dir "$AIMI_DIR"' in body
+
+
+PLUGIN_ROOT = os.path.dirname(SCRIPTS)
+
+
+def _metadata_keys_plan_md_emits():
+    """The top-level metadata keys of plan.md's own schema template.
+
+    plan.md Phase 4 is where a tasks.json is written, and the `"metadata": {`
+    block in its schema template is the one place that enumerates the shape it
+    writes. Read structurally -- balance the braces, parse the block as JSON --
+    rather than by grepping key names out of prose, so a key added to the
+    template is picked up by its position in the document and not by anyone
+    remembering to update a second list here.
+    """
+    with open(os.path.join(PLUGIN_ROOT, "commands", "plan.md"), encoding="utf-8") as handle:
+        plan = handle.read()
+    opener = '"metadata": {'
+    assert plan.count(opener) == 1, "plan.md no longer has exactly one metadata template"
+    start = plan.index(opener) + len('"metadata": ')
+    depth = 0
+    for offset in range(start, len(plan)):
+        if plan[offset] == "{":
+            depth += 1
+        elif plan[offset] == "}":
+            depth -= 1
+            if depth == 0:
+                return list(json.loads(plan[start:offset + 1]))
+    raise AssertionError("plan.md's metadata template has unbalanced braces")
+
+
+def test_every_metadata_key_plan_md_writes_is_named_in_the_plugin_s_schema_doc():
+    """§ Tasks File Schema documents the shape; plan.md writes it. They drifted.
+
+    Nothing mechanical compared the two, so four keys /aimi:plan puts in every
+    file it writes -- createdAt, baseRef, pluginVersion, planPath -- were never
+    documented at all, and `finalize` joined them the day it entered the schema:
+    the story that added it updated plan.md's template and could not know the
+    other surface existed. Five more were absent for the same reason. That is
+    what documentation with no ratchet does; it only drifts.
+
+    The assertion is containment in the SECTION, not in its one-line key
+    enumeration, because a key may legitimately be documented by a paragraph of
+    its own -- smellWarnings and splitGroup both are -- and demanding a place in
+    the enumeration would push those paragraphs into a list that cannot hold
+    them. What it refuses is a key that appears nowhere in the section at all.
+    """
+    with open(os.path.join(PLUGIN_ROOT, "CLAUDE.md"), encoding="utf-8") as handle:
+        claude = handle.read()
+    heading = "## Tasks File Schema"
+    assert claude.count(heading) == 1
+    section = claude[claude.index(heading):]
+    section = section[:section.index("\n## ", 1)]
+
+    undocumented = [
+        key for key in _metadata_keys_plan_md_emits()
+        if not re.search(r"(?<![A-Za-z])" + re.escape(key) + r"(?![A-Za-z])", section)
+    ]
+    assert undocumented == [], (
+        "plan.md writes these metadata keys and "
+        "plugins/aimi-engineering/CLAUDE.md's Tasks File Schema section names "
+        "none of them: " + ", ".join(undocumented) + ". Document each one there "
+        "-- in the key enumeration, or in a paragraph of its own -- in the same "
+        "commit that adds it to plan.md's template."
+    )

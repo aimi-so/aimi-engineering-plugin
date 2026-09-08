@@ -118,6 +118,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- The Tasks File Schema section's metadata enumeration is checked against what
+  `plan.md` actually writes. The section documents the shape and `plan.md`
+  Phase 4 writes it; nothing compared the two, so nine keys were absent --
+  `createdAt`, `baseRef`, `pluginVersion` and `planPath`, which every generated
+  file carries, plus `roadmapPath`, `brainstormPath`, `designBundle`,
+  `designTokens` and `finalize`. Adding the nine closes today's hole and
+  nothing else, which is exactly how the earlier eight passed unnoticed, so the
+  enumeration gains a ratchet: a test reads `plan.md`'s own metadata template
+  structurally -- balancing the braces and parsing the block as JSON rather
+  than grepping key names out of prose -- and refuses a key that appears
+  nowhere in the section. Containment is asserted against the section rather
+  than its one-line enumeration, because a key may legitimately be documented
+  by a paragraph of its own, as `smellWarnings` and `splitGroup` already are.
 - The story-expander warns about self-reference too. The fourth
   verify-authoring surface is the only one where the verify is actually
   written, and it was the only one that did not warn -- the other three catch
