@@ -13,9 +13,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WTM="$SCRIPT_DIR/../skills/git-worktree/scripts/worktree-manager.sh"
 
 # Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
+# Colour only when stdout is a terminal, and held as a real ESC byte. The
+# three-line form this replaces carried two separate defects. First,
+# '\033[0;32m' is four ordinary characters, not an escape, so a plain `echo`
+# (no -e) printed them verbatim -- several suites here use plain echo, and
+# their result line read "\033[0;32m87 passed\033[0m" on a terminal that was
+# perfectly capable of colour. $'...' stores the byte itself, so `echo` and
+# `echo -e` finally agree. Second, nothing asked where stdout was going, so a
+# captured or piped run carried ANSI into whatever read it next: an assertion
+# grepping for "41 passed, 0 failed" could then never match, against any tree,
+# and one story's verify failed for exactly that reason while its work was
+# sound. Empty on a pipe is what keeps this output greppable.
+# AIMI_TEST_COLOR forces colour back on for a caller that captures a stream it
+# will replay to a terminal itself -- test-aimi-cli.sh sets it for its parts.
+if [ -z "${NO_COLOR:-}" ] && { [ -t 1 ] || [ -n "${AIMI_TEST_COLOR:-}" ]; }; then
+  RED=$'\033[0;31m'
+  GREEN=$'\033[0;32m'
+  NC=$'\033[0m'
+else
+  RED=''
+  GREEN=''
+  NC=''
+fi
 
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -245,6 +264,112 @@ test_create_remove_default_removes_branch() {
   local branch_count
   branch_count=$(git branch --list "$branch" | wc -l | tr -d ' ')
   assert_eq "0" "$branch_count" "create/remove (default): branch also gone"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
+# List / Cleanup Tests
+# ============================================================================
+#
+# Issue #149: every branch this plugin creates carries a slash — bug/…,
+# feat/…, and every story branch <base>-US-NNN nested under it — so the
+# worktree for one lands a directory deeper than `.worktrees/<name>`.
+# list_worktrees and cleanup_worktrees each walked `"$WORKTREE_DIR"/*` under
+# a byte-identical `[[ -d … && -e …/.git ]]` guard, so the glob stopped at
+# `.worktrees/bug`, which is a directory with no `.git`, and neither function
+# ever saw the worktree. The damage is asymmetric and that is why the two are
+# tested together: a blind `list` reports wrong, a blind `cleanup` does not
+# clean. The six `nested branch:` assertions below are the discriminators —
+# every one of them fails against the pre-fix tree; the two `flat branch:`
+# ones are guard-rails and pass either side of the fix.
+
+test_list_sees_worktree_on_slash_branch() {
+  echo ""
+  echo "=== Testing list sees a worktree created from a tipo/nome branch ==="
+
+  setup_wtm_fixture
+
+  bash "$WTM" create bug/issue-149-pr-body >/dev/null 2>&1
+  bash "$WTM" create flatname >/dev/null 2>&1
+
+  local out
+  out=$(bash "$WTM" list 2>&1)
+
+  local nested_entries
+  nested_entries=$(printf '%s\n' "$out" | grep -cF 'bug/issue-149-pr-body → branch:' || true)
+  assert_eq "1" "$nested_entries" \
+    "list nested branch: the slash-named worktree is listed"
+
+  # The displayed name is the path relative to .worktrees/, never the bare
+  # basename: switch_worktree reopens "$WORKTREE_DIR/$name" and the serve
+  # state key is realpath -m of that same join, so a truncated name would be
+  # one nothing else in this script can resolve.
+  assert_contains "  bug/issue-149-pr-body → branch: bug/issue-149-pr-body" "$out" \
+    "list nested branch: named by its path under .worktrees"
+
+  assert_contains "Total: 2 worktree(s)" "$out" \
+    "list nested branch: total counts nested and flat together"
+
+  # GUARD-RAIL (passes before and after): two-space indent, U+2192, no ANSI —
+  # this branch of the echo -e carries no colour. The fix changes WHICH
+  # entries the two functions see, never HOW one is printed.
+  assert_contains "  flatname → branch: flatname" "$out" \
+    "list flat branch: line format unchanged (guard-rail)"
+
+  teardown_wtm_fixture
+}
+
+test_cleanup_removes_worktree_on_slash_branch() {
+  echo ""
+  echo "=== Testing cleanup removes a worktree created from a tipo/nome branch ==="
+
+  setup_wtm_fixture
+
+  bash "$WTM" create bug/issue-149-pr-body >/dev/null 2>&1
+  bash "$WTM" create flatname >/dev/null 2>&1
+
+  local cleanup_out
+  cleanup_out=$(bash "$WTM" cleanup 2>&1)
+
+  # Three claims in one, because the pre-fix tree fails all three the same
+  # way — the entry is never enumerated, so it is never offered as a
+  # candidate, never reported as removed, and stays registered with git.
+  local nested_registered candidate_line removed_line
+  nested_registered=$(git worktree list | grep -cF '/.worktrees/bug/issue-149-pr-body' || true)
+  candidate_line=$(printf '%s\n' "$cleanup_out" | grep -cF '• bug/issue-149-pr-body' || true)
+  removed_line=$(printf '%s\n' "$cleanup_out" | grep -cF '✓ Removed: bug/issue-149-pr-body' || true)
+  assert_eq "registered=0 candidate=1 removed=1" \
+    "registered=$nested_registered candidate=$candidate_line removed=$removed_line" \
+    "cleanup nested branch: the slash-named worktree is removed"
+
+  # The consequence the basename hid: against the branch bug/issue-149-pr-body,
+  # `git branch -D issue-149-pr-body` answers "branch not found" and exits 1,
+  # and the real call swallows that with `2>/dev/null || true`. Fixing only
+  # the enumeration would remove the worktree and leave the branch behind in
+  # silence, which is why the display name is data here and not decoration.
+  local nested_branches
+  nested_branches=$(git branch --list 'bug/issue-149-pr-body' | wc -l | tr -d ' ')
+  assert_eq "0" "$nested_branches" \
+    "cleanup nested branch: its branch is deleted too"
+
+  # `git worktree remove` deletes the leaf and keeps `.worktrees/bug`; that
+  # residue is exactly what stops the rmdir cleanup_worktrees already attempts
+  # from collecting `.worktrees` itself. Both must be gone.
+  local parent_dir wt_dir
+  parent_dir=$([[ -d "$WTM_FIXTURE_REPO/.worktrees/bug" ]] && echo present || echo gone)
+  wt_dir=$([[ -d "$WTM_FIXTURE_REPO/.worktrees" ]] && echo present || echo gone)
+  assert_eq "gone gone" "$parent_dir $wt_dir" \
+    "cleanup nested branch: no empty parent dir left under .worktrees"
+
+  # GUARD-RAIL (passes before and after): the flat-named worktree was always
+  # cleaned up, branch included, and still is.
+  local flat_registered flat_branches
+  flat_registered=$(git worktree list | grep -cF '/.worktrees/flatname' || true)
+  flat_branches=$(git branch --list 'flatname' | wc -l | tr -d ' ')
+  assert_eq "registered=0 branches=0" \
+    "registered=$flat_registered branches=$flat_branches" \
+    "cleanup flat branch: still removed as before (guard-rail)"
 
   teardown_wtm_fixture
 }
@@ -1045,6 +1170,11 @@ main() {
   test_create_emits_sentinels_on_both_branches
   test_create_defaults_from_current_branch
   test_create_does_not_create_aimi_in_worktree
+
+  echo ""
+  echo "--- List/Cleanup Tests ---"
+  test_list_sees_worktree_on_slash_branch
+  test_cleanup_removes_worktree_on_slash_branch
 
   echo ""
   echo "--- Environment Files Tests ---"

@@ -7,6 +7,267 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.130.0] - 2026-09-08
+
+### Added
+
+- `forge-issue-scan` gives the Issue Reference Confirmation Gate an executable,
+  testable surface. Its SCAN and RESOLVE steps lived as two bash blocks inside
+  `commands/plan.md`, where nothing executed them under test -- a regression in
+  issue scanning or in the found/open filter would have passed every suite in
+  the tree. Both steps are decidable without a person, so both move into
+  `aimi-cli.sh` as one verb printing a compact JSON array of `{number, title}`,
+  ascending by number, holding exactly the candidates whose forge envelope is
+  status `found` AND whose `.data.state` is `open`. CONFIRM stays in `plan.md`,
+  because only a human answers it. The verb degrades rather than aborting --
+  `[]` at exit 0 -- because its caller is a gate whose contract is that it never
+  aborts a run.
+- `metadata.finalize` is an optional key declaring the once-per-run
+  finalization step, validated for shape and warned about on collision. It is
+  omitted when empty, the same convention `baseRef`, `pluginVersion` and
+  `issues` already follow, so every plan written before it existed stays valid
+  with nothing touched.
+- `/aimi:execute` runs that declared step, in a `### Finalize Step` between
+  Post-Loop Cleanup and Phase Completion -- the only window where the whole
+  run's diff exists and the branch has not yet been offered as a pull request.
+  It reuses Step 4's own mechanics rather than inventing parallel ones: the
+  same worktree create and the same two `WORKTREE_PATH`/`WORKTREE_BASE`
+  sentinels, one general-purpose executor receiving the key's intent alongside
+  `git log --oneline` over the run's commits, the same `merge-all --into`, then
+  remove. The worktree carries a `-finalize` suffix precisely so it does not
+  match the `-US-*` pattern Post-Loop Cleanup sweeps. Absence is the contract:
+  a tasks.json without the key takes zero of the new path. The step can never
+  fail the run -- `FINALIZE_STATUS` is one of `ran`, `skipped` or `failed`,
+  `failed` is reported and never reaches the command's exit status, and no
+  branch aborts. By the time it runs every story is merged; turning a finished
+  run red over a version bump would discard work that is correct. Two paths
+  report `skipped` rather than guessing: a Phase-Mode Paired Split
+  sub-orchestrator, whose parent owns the step, and a run scheduling more than
+  one project group, where one declaration cannot name N repositories' closing
+  commits.
+
+### Fixed
+
+- `verify_reads` stops scanning a quoted heredoc body. A heredoc whose
+  delimiter is quoted -- `<<'X'`, `<<"X"` or the escaped `<<\X` -- suppresses
+  every expansion in its body, so bash hands those lines to the command byte
+  for byte. The scan read them anyway, so a `$VAR` inside a `python3 - <<'PY'`
+  block was reported as state the prelude had failed to provide, and
+  `probe_verify` withheld the whole segment's verdict: `discriminates: null`
+  plus an `unresolvedState` naming string literals that were never shell in the
+  first place. The decision is taken inside `_verify_heredoc_opener`, the only
+  place that can take it -- quote removal destroys the evidence, and after it
+  `<<'X'` and `<<X` are the same three characters.
+- `resolve-base-branch` keeps the local ref when it descends from origin. A
+  container cut for an existing target branch resolved to `origin/<branch>`
+  unconditionally, so a run that had committed locally and not pushed yet was
+  born behind its own work. A local ref that strictly descends from its origin
+  ref cannot be the stale ref after a fetch that the origin preference exists
+  to avoid, because it contains everything origin has and more. Target-exists
+  now opts out too, but only for local-ahead; behind and diverged are
+  unchanged.
+- `list` and `cleanup` see worktrees on slash branches. Every branch this
+  plugin creates carries a slash -- and every story branch `<base>-US-NNN`
+  nested under it -- so its worktree lands a directory deeper than
+  `.worktrees/<name>`. Both functions walked the shallow glob under a
+  byte-identical directory guard, so enumeration stopped at `.worktrees/bug`, a
+  directory with no `.git`, and neither ever saw the worktree. The damage is
+  asymmetric, which is why the two move together: a blind list reports wrong, a
+  blind cleanup does not clean -- which is why Post-Loop Cleanup had stopped
+  removing story worktrees at all. The register of worktrees belongs to git,
+  not to the directory layout.
+- A non-string `implementation.verify` refuses instead of probing empty.
+  `op_verify_probe` resolved its script with `isinstance(verify, str) and
+  verify.strip()`, so every non-string shape fell through to the same `""` an
+  absent verify produces -- and `""` probes to `[]` at exit 0. A story whose
+  verify was written as a JSON list therefore reached the story executor's step
+  1.5 as "no segment fails to discriminate": silence arriving as a clean bill
+  of health. The first matched story whose verify is present and not a string
+  now stops the walk with a named refusal at exit 1, before any segment runs.
+  Precedence is preserved byte for byte, and JSON null stays on the absent
+  side.
+- `verify-probe` writes the artifact it already reads. The verb read a prior
+  run's array through `--previous-file` and never wrote one; the name of the
+  file it read was composed by the agent from prose, blind to which plan the
+  story came from. Story ids restart at `US-001` in every plan while
+  `.aimi/tasks/` is shared, so a new plan's `US-002` landed on top of the
+  previous plan's, and the rule that produced the name lived where no suite
+  could reach it. The path is now derived from `--tasks-file` and written
+  through the module's one atomic writer. The write is unconditional rather
+  than flag-gated: a flag would hand back to the caller the very decision this
+  removes from it.
+- `validate-stories` screens `tasks[]` for injection, not for shell syntax. Its
+  suspicious-content screen mixed two rulers: five of six alternatives are
+  instruction markers plus a code fence, and the sixth was the shell
+  command-substitution operator. None of the three fields it guards is ever
+  evaluated by a shell -- all three are interpolated into prompts, where a
+  marker does damage and a shell operator does none. Its only measured effect
+  was refusing prose, so a story about shell parsing could not name the
+  construct it was fixing. The shell ruler is re-scoped, not abolished:
+  `.project` keeps its own metacharacter test and `validate_path_in_project`
+  stays the sole authority over CLI-argument paths.
+- Phase 4.3 gives a verdict to every story that entered.
+  `verify_coverage_findings` returned three lists, and two of its three
+  `continue` branches left without recording anything, so a story could enter
+  the merge and receive no verdict from any line of the report -- it simply
+  vanished among the ids the clean line named. The function now returns four
+  lists that PARTITION the input: the four lengths sum to the story count, the
+  union of the ids is the input's own id set, and no id appears twice. The
+  count of stories judged equals the count that entered. `not_evaluated`
+  carries `{id, reason}` for the two states in which nothing was measured.
+
+### Documentation
+
+- The Tasks File Schema section's metadata enumeration is checked against what
+  `plan.md` actually writes. The section documents the shape and `plan.md`
+  Phase 4 writes it; nothing compared the two, so nine keys were absent --
+  `createdAt`, `baseRef`, `pluginVersion` and `planPath`, which every generated
+  file carries, plus `roadmapPath`, `brainstormPath`, `designBundle`,
+  `designTokens` and `finalize`. Adding the nine closes today's hole and
+  nothing else, which is exactly how the earlier eight passed unnoticed, so the
+  enumeration gains a ratchet: a test reads `plan.md`'s own metadata template
+  structurally -- balancing the braces and parsing the block as JSON rather
+  than grepping key names out of prose -- and refuses a key that appears
+  nowhere in the section. Containment is asserted against the section rather
+  than its one-line enumeration, because a key may legitimately be documented
+  by a paragraph of its own, as `smellWarnings` and `splitGroup` already are.
+- The story-expander warns about self-reference too. The fourth
+  verify-authoring surface is the only one where the verify is actually
+  written, and it was the only one that did not warn -- the other three catch
+  the error at review or execution time, none at generation. The new section
+  states the mechanism in one sentence, names both ways out, and points at
+  `_VERIFY_PROBE_REENTRY` in `tasks.py` rather than copying it: a fifth copy of
+  the prose would be a fifth chance to fix four.
+
+## [1.129.0] - 2026-09-07
+
+### Added
+
+- `verify-probe` reproduces the shell state a segment would really have
+  inherited, instead of rebuilding a synthetic prelude of assignments.
+  `probe_verify` now runs the segments in order and, after each one, has the
+  shell write `declare -f`, `declare -p`, `set +o` and its working directory
+  to a single sourceable file that the next segment sources. Options are
+  replayed after both declares: a snapshot taken from a shell that ran
+  `set -e` carries `set -o errexit`, and enabling it first aborts the replay
+  on the readonly variables `declare -p` dumps. The dump is armed as an EXIT
+  trap rather than appended below the segment, because a segment may now end
+  inside its own heredoc terminator, where nothing is appendable. Each segment
+  still runs exactly once, so the cost does not rise. Two behaviours move as a
+  result, and only the second changes a verdict: a call to a function an
+  earlier segment defined now exits with the function's own status instead of
+  127, and a pipeline under an earlier `set -o pipefail` now reports non-zero
+  and therefore discriminates, where before it exited 0 and read as dead
+  weight. The snapshot file is created per invocation at mode 0600 -- it holds
+  `declare -p` of a whole environment -- and removed in a `finally`.
+  Filesystem effects remain genuinely irreproducible, and the `null` verdict
+  with its `unresolvedState` list stays the honest answer there.
+
+### Fixed
+
+- `verify_segments` carries a heredoc with the command that opens it. The
+  scanner tracked single quotes, double quotes, command substitution in both
+  spellings, brace groups and subshells, but not heredocs, so a heredoc body
+  was cut as though it were shell: three commands became seven segments, and
+  each of the `<<'X'`, `<<X` and `<<-X` forms turned a two-command script into
+  five. The body now stays inside its own segment and the terminator is
+  consumed with it. Three positions that look like an opener are told apart --
+  `<<<` is a here-string, `$(( a << b ))` and `(( a << b ))` are left shifts,
+  and a separator reached before the body does not cut. Replaying every
+  `implementation.verify` recorded in this repository, the scripts with no
+  heredoc segment identically to before; only the ones with a heredoc change.
+
+### Documentation
+
+- Four sites warn that a story's own `implementation.verify` must never name
+  `verify-probe`: the verb's usage line and its `COMMANDS:` help entry, both
+  places `story-executor/SKILL.md` runs the probe, and the story-expander
+  prompt in `plan.md`. Probing runs a verify's segments, so a verify that
+  names the verb re-enters the probe and is refused -- and the story then
+  fails for a reason that has nothing to do with its own code. The refusal
+  message remains the single place that states the problem in full; these four
+  point at it and name the two ways out.
+
+## [1.128.0] - 2026-09-07
+
+### Added
+
+- A plan records which issues it closes. `/aimi:plan` gains an Issue Reference
+  Confirmation Gate between Phase 0.5 and Phase 1: it scans the feature
+  description for issue references, resolves each one through
+  `forge-issue-view --number`, keeps only those the forge reports as `found`
+  AND `open`, and confirms the survivors by title in exactly one question
+  before writing them to `metadata.issues`. Existence alone cannot
+  discriminate -- an open issue and a merged pull request both resolve
+  `found` -- so state and title are what carry the decision. The key is
+  omitted entirely when it would be empty, matching the convention `baseRef`
+  and `pluginVersion` already use. Documented in `task-format-v3.md`'s
+  metadata table as `number[]`, optional. The candidate loop is fed from a
+  heredoc rather than `for n in $CANDIDATES`: zsh does not word-split an
+  unquoted expansion, so the `for` form iterates once over the whole
+  newline-joined list and reports no issues for a description that named
+  several.
+- `/aimi:open-pr` renders one `Closes #<N>` line per `metadata.issues` entry,
+  read from the `metadata` call Step 4a already makes rather than a new one,
+  and gated on `branchName` matching the PR's branch. The gate is its own
+  check rather than a line inside the title's mismatch branch, which runs only
+  when a title was present: a tasks file carrying issues but no usable title
+  would otherwise have passed through with another feature's issue list
+  intact. A wrong title is read once and corrected by hand; a wrong `Closes`
+  line shuts someone else's issue the moment the PR merges.
+
+### Fixed
+
+- `verify-probe` answers "cannot tell" instead of a verdict it cannot support.
+  It runs each verify assertion on its own, carrying forward only `cd` and
+  plain assignments, so a name an earlier segment bound through an `eval`, a
+  subshell or a function call is simply absent when the next assertion reads
+  it. The verdict computed from that run described a world that never existed,
+  and it was wrong in both directions -- an assertion that fails without the
+  state read as discriminating, and one that passes without it read as dead
+  weight, which is the worse of the two because it tells the reader to stop
+  looking. Such a segment is now not run at all: it reports `discriminates:
+  null` with `unresolvedState` naming the missing variables. A segment whose
+  reads are covered keeps its ordinary verdict. The docstring's claim that a
+  `mkdir`/`printf >` fixture is lost is corrected -- filesystem effects
+  persist, because each segment is a real subprocess in the same directory;
+  shell state alone is lost.
+- `verify-probe` refuses to re-enter itself. The verb executes the named
+  story's own verify segments, so a verify that called it back looped instead
+  of answering -- measured at 127 re-entries in 25 seconds before the outer
+  call hit its ceiling. An environment marker now refuses a nested call and
+  names both ways out. The marker rather than an id comparison is what also
+  catches the mutual case, where one story's verify probes a second whose own
+  verify probes the first.
+- A segment `verify-probe` did not run is reported as unknown rather than as a
+  verdict. A segment skipped by the new `--skip-matching` pattern, and one that
+  outlives its per-segment ceiling, both carry `discriminates: null` and say
+  which happened; a timeout previously reported as discriminating, which was
+  the safe direction only while there was no honest one. The ceiling itself is
+  unchanged at 600 seconds, and deliberately: the five-minute limit that
+  stories were reported to blow is the harness's wall clock around the whole
+  verb, not this per-segment cap -- what overran was the sum, which no
+  per-segment cap can bound. `--skip-matching` lets the caller drop the
+  expensive segments from that sum; it moves the cost rather than removing it.
+- Test suites emit colour only to a terminal, and their colour variables now
+  hold a real escape byte. Two defects sat in the same three lines, repeated
+  across six definition sites covering all ten suites. `'\033[0;32m'` is four
+  ordinary characters rather than an escape, so every suite printing its
+  result line with a plain `echo` -- `test-aimi-cli.sh`, the four parts,
+  `test-worktree-manager.sh`, `test-resolve-pr-parallel.sh` -- emitted the
+  characters verbatim and had never actually shown colour. The suites using
+  `echo -e` emitted real ANSI unconditionally instead, so a captured run
+  carried escapes into whatever read it next and an assertion grepping for
+  `41 passed, 0 failed` could not match against any tree. `NO_COLOR` is
+  honoured, and `AIMI_TEST_COLOR` forces colour back on for a caller that
+  captures a stream it will replay to a terminal itself -- `test-aimi-cli.sh`
+  sets it for its parts, so concurrent mode keeps the colour it had.
+- `/aimi:open-pr` strips the bracketed `[US-NNN]` story tag from both the PR
+  title and the rendered commit list. Both strip sites carried end-anchored
+  expressions for the un-bracketed forms only, so every PR body built from
+  tagged commits leaked the internal story tags -- three earlier PRs read
+  clean only because the operator removed them by hand.
+
 ## [1.127.0] - 2026-09-07
 
 ### Added

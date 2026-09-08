@@ -10523,6 +10523,7 @@ test_resolve_base_branch() {
   echo "=== Testing resolve-base-branch command ==="
 
   local stdout stderr_file exit_code reason base current_branch prompt_needed
+  local divergence
 
   # --- Subtest: explicit --base ---
   setup_git_fixture
@@ -10562,6 +10563,10 @@ test_resolve_base_branch() {
   assert_eq "target-exists" "$reason" "resolve-base-branch: target exists locally — reason"
   assert_eq "feat/local-only" "$base" "resolve-base-branch: target exists locally — base is bare local name"
   assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists locally — promptNeeded"
+  # No origin/<branch> ref exists to compare against, so the classification
+  # has nothing to say and says so, rather than guessing at a direction.
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "none" "$divergence" "resolve-base-branch: target exists locally — baseDivergence is none"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -10583,6 +10588,122 @@ test_resolve_base_branch() {
   assert_eq "target-exists" "$reason" "resolve-base-branch: target exists on remote only — reason"
   assert_eq "origin/feat/merged-branch" "$base" "resolve-base-branch: target exists on remote only — base prefers origin"
   assert_eq "false" "$prompt_needed" "resolve-base-branch: target exists on remote only — promptNeeded"
+  # The mirror of the local-only case above: here the LOCAL ref is the missing
+  # one. Both halves of `none` are asserted because they take different exits
+  # out of _branch_divergence, and only one of them would catch a predicate
+  # that answered from whichever ref it happened to find first.
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "none" "$divergence" "resolve-base-branch: target exists on remote only — baseDivergence is none"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_git_fixture
+
+  # --- Subtest: an existing target's local ref vs. its origin ref ---
+  #
+  # Four states of one relationship, each built INLINE here rather than by
+  # adding branches to setup_git_fixture: that fixture's local branch list is
+  # what _is_merged_into_default reads, so a branch added there perturbs
+  # subtests that have nothing to do with this one.
+  #
+  # local-ahead is the state a run that has committed but not pushed is
+  # ALWAYS in, which is why it gets the base-resolves-to-a-sha assertion and
+  # the others do not: naming the right ref is worthless if that ref points at
+  # the published tip. The other three are the guard-rails -- a local ref that
+  # is behind or forked really is stale, and origin/<branch> stays right for
+  # it.
+  echo ""
+  echo "--- resolve-base-branch: local ref vs. origin ref ---"
+
+  setup_git_fixture
+  pushd "$GIT_FIXTURE_LOCAL" >/dev/null
+  git checkout main >/dev/null 2>&1
+
+  # ahead: pushed, then committed again locally.
+  git checkout -b feat/div-ahead >/dev/null 2>&1
+  echo "pushed" > div-ahead-pushed.txt
+  git add div-ahead-pushed.txt && git commit -m "div ahead: pushed" >/dev/null 2>&1
+  git push origin feat/div-ahead >/dev/null 2>&1
+  echo "unpushed" > div-ahead-unpushed.txt
+  git add div-ahead-unpushed.txt && git commit -m "div ahead: unpushed" >/dev/null 2>&1
+  local div_ahead_tip
+  div_ahead_tip=$(git rev-parse feat/div-ahead)
+  git checkout main >/dev/null 2>&1
+
+  # behind: two commits pushed, then the LOCAL ref rewound one. Rewinding the
+  # ref rather than resetting the checkout keeps origin/ at the tip.
+  git checkout -b feat/div-behind >/dev/null 2>&1
+  echo "one" > div-behind-one.txt
+  git add div-behind-one.txt && git commit -m "div behind: one" >/dev/null 2>&1
+  git push origin feat/div-behind >/dev/null 2>&1
+  echo "two" > div-behind-two.txt
+  git add div-behind-two.txt && git commit -m "div behind: two" >/dev/null 2>&1
+  git push origin feat/div-behind >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git update-ref refs/heads/feat/div-behind "$(git rev-parse feat/div-behind~1)"
+
+  # forked: origin's side and the local side share only main, so neither ref
+  # is an ancestor of the other.
+  git checkout -b feat/div-remote-side >/dev/null 2>&1
+  echo "remote" > div-forked-remote.txt
+  git add div-forked-remote.txt && git commit -m "div forked: remote side" >/dev/null 2>&1
+  git push origin feat/div-remote-side:refs/heads/feat/div-forked >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+  git branch -D feat/div-remote-side >/dev/null 2>&1
+  git checkout -b feat/div-forked >/dev/null 2>&1
+  echo "local" > div-forked-local.txt
+  git add div-forked-local.txt && git commit -m "div forked: local side" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  # in-sync: pushed and not touched since.
+  git checkout -b feat/div-insync >/dev/null 2>&1
+  echo "insync" > div-insync.txt
+  git add div-insync.txt && git commit -m "div insync" >/dev/null 2>&1
+  git push origin feat/div-insync >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  # Materialize every refs/remotes/origin/* this subtest compares against,
+  # including the one pushed under a different local name.
+  git fetch origin >/dev/null 2>&1
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/div-ahead --default-branch main 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  reason=$(echo "$stdout" | jq -r '.reason')
+  base=$(echo "$stdout" | jq -r '.base')
+  prompt_needed=$(echo "$stdout" | jq -r '.promptNeeded')
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  local div_ahead_base_sha
+  div_ahead_base_sha=$(git rev-parse "$base")
+  assert_exit_code "0" "$exit_code" "resolve-base-branch: local ahead of origin — exit code"
+  assert_eq "target-exists" "$reason" "resolve-base-branch: local ahead of origin — reason is unchanged"
+  assert_eq "feat/div-ahead" "$base" "resolve-base-branch: local ahead of origin — base is the bare local ref"
+  assert_eq "$div_ahead_tip" "$div_ahead_base_sha" "resolve-base-branch: local ahead of origin — base resolves to the local tip"
+  assert_eq "local-ahead" "$divergence" "resolve-base-branch: local ahead of origin — baseDivergence"
+  assert_eq "false" "$prompt_needed" "resolve-base-branch: local ahead of origin — promptNeeded is unchanged"
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/div-behind --default-branch main 2>"$stderr_file")
+  base=$(echo "$stdout" | jq -r '.base')
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "origin/feat/div-behind" "$base" "resolve-base-branch: local behind origin — base still prefers origin"
+  assert_eq "local-behind" "$divergence" "resolve-base-branch: local behind origin — baseDivergence"
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/div-forked --default-branch main 2>"$stderr_file")
+  base=$(echo "$stdout" | jq -r '.base')
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "origin/feat/div-forked" "$base" "resolve-base-branch: local diverged from origin — base still prefers origin"
+  assert_eq "diverged" "$divergence" "resolve-base-branch: local diverged from origin — baseDivergence"
+  rm -f "$stderr_file"
+
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" resolve-base-branch feat/div-insync --default-branch main 2>"$stderr_file")
+  base=$(echo "$stdout" | jq -r '.base')
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "origin/feat/div-insync" "$base" "resolve-base-branch: local in sync with origin — base still prefers origin"
+  assert_eq "in-sync" "$divergence" "resolve-base-branch: local in sync with origin — baseDivergence"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -10607,6 +10728,10 @@ test_resolve_base_branch() {
   assert_eq "$head_sha" "$base" "resolve-base-branch: detached HEAD — base is HEAD sha"
   assert_eq "" "$current_branch" "resolve-base-branch: detached HEAD — currentBranch is empty"
   assert_eq "false" "$prompt_needed" "resolve-base-branch: detached HEAD — promptNeeded"
+  # Detached HEAD resolves a raw sha and never sets a candidate at all, so the
+  # classification has no branch name to look up -- `none`, not an error.
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "none" "$divergence" "resolve-base-branch: detached HEAD — baseDivergence is none"
   rm -f "$stderr_file"
 
   popd >/dev/null
@@ -10672,6 +10797,14 @@ test_resolve_base_branch() {
   stacked_base_sha=$(git rev-parse "$base")
   local_tip_sha=$(git rev-parse HEAD)
   assert_eq "$local_tip_sha" "$stacked_base_sha" "resolve-base-branch: current unmerged — base resolves to the local tip commit"
+  # The fixture branch is local-ahead, so this case satisfies the target-exists
+  # opt-out's predicate as well as its own reason check. Asserting the reported
+  # divergence here is what keeps the two visibly separate: stacked-on-current
+  # must go on keeping the bare local ref because of its REASON, and a later
+  # edit that moved the exclusion onto the predicate would leave this assertion
+  # green while silently changing which rule is load-bearing.
+  divergence=$(echo "$stdout" | jq -r '.baseDivergence')
+  assert_eq "local-ahead" "$divergence" "resolve-base-branch: current unmerged — baseDivergence is local-ahead"
   rm -f "$stderr_file"
 
   popd >/dev/null

@@ -877,6 +877,110 @@ source (businessSpec before designSpec) then by line number, present the
 first 20, and emit a single warning line listing the remaining anchors so
 the user is aware they were skipped from interactive resolution.
 
+### Issue Reference Confirmation Gate
+
+Runs after Phase 0.5 and before Phase 1. `FEATURE_DESCRIPTION` and
+`INTERACTIVE_MODE` are both already resolved by Step 0 at this point, so this
+gate reads nothing the pipeline has not produced yet, and it writes exactly one
+optional key — `metadata.issues`, the forge-confirmed issue numbers this plan
+closes, which `/aimi:open-pr` later renders as `Closes` lines.
+
+The gate is SCAN → RESOLVE → CONFIRM, and every step is there because the step
+before it cannot decide alone. A scan finds number-shaped tokens but cannot tell
+an issue reference from a version fragment. A forge lookup proves a number names
+something real but not that it is work this plan closes — measured on this
+repository, `#149` (open) and `#3` (merged) both resolve `status: found`, so
+existence alone discriminates nothing. State and title are what carry the
+decision, and only a human answers the last question. Do not collapse the three
+steps into two.
+
+**SCAN and RESOLVE — one CLI call.** Both steps are decidable with no person
+in the loop, so both live in `aimi-cli.sh` and this file calls them rather than
+describing them. The verb reads the description, treats every `#<digits>` and
+every bare `<digits>` token as a candidate — deduplicated, leading zeros
+dropped, positive integers only, because issue numbers start at 1 — resolves
+each candidate through the forge, and prints only the survivors whose envelope
+`.status` is `found` **and** whose `.data.state` is `open`, as a compact JSON
+array of `{number, title}` ascending by number:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+
+ISSUE_SURVIVORS=$($AIMI_CLI forge-issue-scan --description "$FEATURE_DESCRIPTION")
+printf '%s' "$ISSUE_SURVIVORS"
+```
+
+Bare digits are in scope deliberately, and the noise that brings — `v1.2.3`
+contributes `1`, `2` and `3` — is the CONFIRM step's problem, not the scan's. A
+description that names its issue without a `#` is far more common than one that
+names no issue at all, and a candidate nobody confirms costs one forge lookup.
+
+**The verb degrades, so this gate never aborts.** It answers `[]` at exit 0 in
+three cases: the description named no candidate (and then no forge was
+consulted at all), the working directory is not a git repository, and every
+candidate was dropped. Individual candidates leave quietly too — `not_found`
+was a version fragment, a line number, or an issue on another repository;
+`status: "error"` is offline, no forge configured, no `gh`/`glab`/`tea`,
+unauthenticated, or rate-limited; anything but `open` (`closed`, and on a
+number that names a pull request, `merged`) is work a plan does not close.
+Never surface a raw CLI error from this call to the user: a plan that cannot
+reach a forge is still a plan, and the only thing lost is an optional key.
+
+A run in which every candidate is dropped is indistinguishable, from here on,
+from a run whose description named no numbers at all: no picker is presented,
+nothing is logged, and `metadata.issues` is omitted entirely from the written
+tasks.json — never `[]`, never `null`.
+
+**CONFIRM.** When `ISSUE_SURVIVORS` holds anything other than `[]`, present the
+whole list in **exactly one** AskUserQuestion call — never one call per
+candidate — as a multi-select whose options are the surviving issues, each
+labelled with its own element's `number` and `title`:
+
+```
+Which issues does this plan close?
+#<number> — <title>
+#<number> — <title>
+…
+```
+
+Selecting none is a valid answer and means the same thing as zero survivors.
+**Cap the picker at four options**, the same cap `/aimi:setup-models` applies to
+its own questions; when more than four survive, sort ascending by number,
+present the first four, and emit one warning line naming the numbers left out so
+the user knows they were not offered. Record the confirmed numbers in working
+memory as `confirmedIssues[]` — an array of positive integers, in ascending
+order, holding **only** what the user selected. A survivor the user did not pick
+is not recorded and leaves no trace.
+
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents
+AskUserQuestion — an unattended run cannot answer one. SCAN and RESOLVE still
+run: both are fully automated and need no user input, the same reason the Phase
+1.8 scope-pruning gates spawn their verifiers under agent mode and defer only
+the question at the end. Only CONFIRM is skipped. It auto-defers with the
+reason literal `agent-mode auto-defer (issue confirmation)`, distinct from every
+other gate's reason literal in this file so the deferral is greppable back to
+this gate, leaves `confirmedIssues[]` empty, and omits `metadata.issues` for that
+run. Emit exactly one log line:
+
+```
+agent-mode: issue-confirmation-gate deferred <N> candidate issue(s)
+```
+
+where `<N>` is the number of surviving open issues that would have been offered.
+
+**It never guesses, and that asymmetry is the whole design.** Confirming nothing
+costs a `Closes` line somebody adds by hand. Confirming wrongly makes
+`/aimi:open-pr` close an issue nobody approved, on a repository where an
+unattended run is exactly the case with no one watching. The two mistakes are
+not the same size, so the gate is built to make only the cheap one.
+
+**Recording.** `confirmedIssues[]` is carried in working memory to Phase 4 and
+written there as `metadata.issues` by **Derive and Patch Metadata Fields** —
+this gate writes no file itself. No validator change is needed for the key:
+nothing in `tasks.py` rejects an unknown `metadata` key, and `issues` is
+documented as optional in `skills/task-planner/references/task-format-v3.md`.
+
 ## Phase 1: Local Research (Parallel)
 
 ### Prepare Research Directory
@@ -2271,6 +2375,16 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   lint passes"). A criterion that only a human can confirm does not
   belong in 'verify' — route it to 'gate' instead.
 
+  IMPORTANT — never name 'verify-probe' inside 'verify':
+  Do NOT write 'aimi-cli.sh verify-probe' into 'implementation.verify'.
+  The executor probes a story by RUNNING that verify's segments, so a
+  verify that names the verb re-enters the probe: the CLI refuses, and
+  the story fails for a reason that has nothing to do with its own code.
+  The same loop closes when two stories probe each other. A story that
+  must exercise the verb verifies it from a sibling story's verify or a
+  throwaway fixture, or calls 'probe_verify()' in tasks.py, which is not
+  guarded — the CLI's refusal message is where both ways out are stated.
+
   IMPORTANT — dependsOn encoding:
   Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
   dependencies. Do NOT invent US-NNN IDs. story-merge will remap every
@@ -2321,8 +2435,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   - tasks[] (3-15 entries): creation/scaffolding first, integration wiring
     second, local verification last. Integration steps are mandatory when
     implementation.files lists a path shared with another story.
-    Forbidden in tasks[]: triple-backticks, \$(, 'ignore previous',
-    'system:', 'INSTRUCTIONS'.
+    Forbidden in tasks[]: triple-backticks, 'ignore previous', 'system:', 'INSTRUCTIONS'.
   - Mock-sync AC injection: scan implementation.files against
     **/schemas/**/*.{ts,js,py,rb}, **/types/**/*.{ts,js}, **/zod/**/*.{ts,js},
     *.schema.ts, *.types.ts. When matched and no mock-sync AC already present:
@@ -2821,6 +2934,8 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **createdAt**: Today's date (YYYY-MM-DD)
 - **baseRef**: The commit the plan was written against — the full 40-character SHA printed by `git rev-parse HEAD`, read at Phase 4 time in the repository this file's stories target. **Single-repo/monorepo** (`AIMI_ROOT_IS_GIT_REPO=true`): run it in `$AIMI_ROOT`. **Multi-repo** (`AIMI_ROOT_IS_GIT_REPO=false`): `$AIMI_ROOT` is not a repository at all, so the value comes from the file's own project root — the same `PROJECT_ROOT` the per-project base-branch block above already resolves. Omit the key entirely when no single repository root resolves for the file, or when `git rev-parse HEAD` exits non-zero (an unborn branch has no commit to name): an absent key reads as "this plan predates the field", which a later reader can recover from, where `""` or a placeholder reads as a SHA and cannot. Writing the field is the whole obligation here — comparing it against the branch an executor actually starts from belongs to whoever consumes it, and nothing in this command reads it back.
 - **pluginVersion**: The version of the plugin install that wrote this file — the bare string printed by `$AIMI_CLI version`, using the `$AIMI_CLI` the per-project base-branch block above already resolves (no new resolution idiom belongs here). Ask the CLI that is actually running; **never** read a version out of `.claude-plugin/plugin.json` at a guessed path. The stamp exists to record *which install* produced the artifact, and a development checkout routinely sits at a different version from the installed cache executing this command — Layer 0-dev exists precisely because those two diverge — so a file read names the wrong writer exactly when the answer matters. This is a **shared** value, patched byte-identically into every file in `SPLIT_FILES`: a version names the *writer*, and one `/aimi:plan` invocation has exactly one writer no matter how many repositories it splits across, unlike `branchName` and `baseRef`, which name a *repository* and so resolve per file. Omit the key entirely when `$AIMI_CLI version` exits non-zero or prints an empty string — never `null`, never `""`, never a placeholder such as `unknown`: an absent key reads as "this plan predates the field", which a later reader can recover from, where a placeholder reads as a real version and silently poisons every per-release slice built on it.
+- **issues**: The forge-confirmed issue numbers this plan closes — the `confirmedIssues[]` working memory the **Issue Reference Confirmation Gate** accumulated back in Phase 0, as an array of positive integers in ascending order. Omit the key entirely when that list is empty: when the description named no numbers, when every candidate was dropped by the gate's `found`/`open` filter, when the user confirmed none, and on every `INTERACTIVE_MODE=agent` run, which never confirms any. Never `[]`, never `null`, never a guessed number — the same non-placeholder rule `baseRef` and `pluginVersion` above already follow, and for the sharper reason: this key's consumer is `/aimi:open-pr`, which turns each entry into a `Closes` line that shuts a real issue when the PR merges, so an invented entry does not merely read wrong, it closes someone else's work. This is a **shared** value, patched byte-identically into every file in `SPLIT_FILES` — the issues a plan closes belong to the plan, not to one of the repositories it happens to span.
+- **finalize**: The round's single end-of-round step — the one commit no story can structurally make, because it must land after every story has. An object carrying exactly three keys: `intent` (a string saying what the step is for), `files` (a non-empty array of the paths the step writes) and `commitSubject` (the subject line the step will commit under). Emit it **at most once per round**, and name in `files` the paths **no story may declare in its own `implementation.files`** — a `chore(release)` bump touching `plugin.json`, `marketplace.json` and `CHANGELOG.md` is the case it exists for, and a story that also declares one of them is racing the final step for the same write. `validate-tasks` warns (never errors) when a story claims a declared path, because a file can legitimately belong to both and the choice is the reader's; a `finalize` that is present but missing any of the three keys, or whose `files` is not a non-empty array of strings, is an **error** and refuses the file. Omit the key entirely when the round declares no final step — never `null`, never `{}`, the same non-placeholder rule `baseRef`, `pluginVersion` and `issues` above already follow, and for the same reason: an absent key reads as "this plan predates the field" or "this round ends with its last story", both of which a later reader can act on, where an empty object reads as a step that was declared and then forgotten. This value resolves **per file** on a split rather than being shared — see the patch rule below for which file carries it on each axis.
 - **planPath**: Always `null`
 - **roadmapPath** (when `ROADMAP_MODE=true`): `.aimi/tasks/${featureSlug}/roadmap.json`, relative to `AIMI_ROOT`. Omit the key entirely when `ROADMAP_MODE=false`.
 - **phase** (when `ROADMAP_MODE=true`): `{ id: SELECTED_PHASE_ID, dir: PHASE_DIR }` — `id` is the selected phase's numeric id, `dir` is its `phase-<id>[-<slug>]` directory segment. Omit the key entirely when `ROADMAP_MODE=false`.
@@ -2851,10 +2966,11 @@ SPLIT_AXIS=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then "proje
 SPLIT_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
 ```
 
-Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `type`, `createdAt`, `pluginVersion`, `planPath`, `researchPaths`, `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, `phase`, `decisions`, `maxConcurrency`, and `execution` values the single-file case writes. Two keys resolve per file instead of being shared — `branchName` and `baseRef`:
+Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `type`, `createdAt`, `pluginVersion`, `planPath`, `issues`, `researchPaths`, `prototypePaths`, `designBundle`, `designTokens`, `roadmapPath`, `phase`, `decisions`, `maxConcurrency`, and `execution` values the single-file case writes. Three keys resolve per file instead of being shared — `branchName`, `baseRef` and `finalize`:
 
 - **SIDE axis** (`MERGE_RETURN` is the `{frontend, backend, frontend_stories, backend_stories}` object — fewer than 2 distinct `.project` values, i.e. single-repo/monorepo): exactly two files, read from its own `.frontend` and `.backend` keys. Assign `type/[feature]-frontend` and `type/[feature]-backend`, or their `ROADMAP_MODE=true` phase-suffixed equivalents (`type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-frontend`/`-backend`) — per the branchName rule above, including its dot-slugified id. When `ROADMAP_MODE=true` these are the two `--phase-aware`-derived files under `.aimi/tasks/${featureSlug}/${PHASE_DIR}/` carrying a single `tasks` segment (see Phase 3e). Behavior here is unchanged from before; only the source of the two paths is. `baseRef` is one value across both files: this axis is by definition a single repository, so `git rev-parse HEAD` in `$AIMI_ROOT` answers for each.
 - **PROJECT axis** (`MERGE_RETURN` is the `[{path, project, branchName, storyCount}, ...]` array — 2 or more distinct `.project` values, i.e. multi-repo): iterate every entry. Patch the file at `.path`, assigning the per-project `branchName` derived by the rule above from that entry's own `.project` / slug, validated against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before the write. Each entry also carries its **own** `baseRef` — `git rev-parse HEAD` run in that entry's own `PROJECT_ROOT`, the value the per-project base-branch block above already resolves for its `detect-default-branch` call — because on this axis every file names a different repository and one global SHA would be wrong for N−1 of them. Omit the key on any entry whose `git rev-parse HEAD` fails rather than borrowing a sibling's. An entry whose `.storyCount` is `0` is still a real written file — patch it like any other.
+- **`finalize`: one repository, one end-of-round step — never one per file.** The key names a commit that lands after every story in a repository has, so its unit is the *repository*, not the tasks file. **PROJECT axis:** every entry is a different repository, so each file carries its **own** `finalize`, with that repository's own paths in `files` — a shared value would point every repo's release commit at one repo's `CHANGELOG.md`. Omit the key on any entry whose repository has no final step, exactly as `baseRef` is omitted rather than borrowed from a sibling. **SIDE axis:** the two files are one repository by definition, so exactly **one** of them carries the key and the other omits it entirely — write it into the **backend** file, always. The rule names a fixed file rather than leaving it to judgment because "exactly one" is only checkable if a reader can say which one without re-deriving it, and a `finalize` duplicated across the pair would run the release commit twice while a `finalize` dropped from both would lose it silently.
 - **Preserve `metadata.splitGroup` verbatim.** story-merge already wrote the self-describing sibling marker into each PROJECT-axis file: `metadata.splitGroup` = `{project, index, total, siblings[]}` — the file's own project routing key, its 1-based `index`, the `total` file count, and `siblings[]`, the paths of the other N−1 files. Merge the patch fields **into** the existing `metadata` object; do not replace the object wholesale and do not re-derive, rename, or drop `splitGroup`. `/aimi:execute` Step 0.9 reads `metadata.splitGroup.project` to root each split's worktree/container at that project's own repo — losing it reintroduces the `fatal: not a git repository` failure in multi-repo layouts. SIDE-axis and legacy files have no `splitGroup` key and none should be invented for them.
 
 ### Derive `metadata.backendSpec` (frontend-only mode only)
@@ -2901,6 +3017,8 @@ Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `typ
     "createdAt": "YYYY-MM-DD (required)",
     "baseRef": "string (optional, 40-char commit SHA this file's stories were planned against — git rev-parse HEAD in the repository they target; on a PROJECT-axis split each file carries its own repo's SHA; omitted entirely when no repository root resolves or the command fails)",
     "pluginVersion": "string (optional, the plugin version that wrote this file — what aimi-cli.sh version printed for the install that ran /aimi:plan; one shared value patched identically into every file of a split, never resolved per file; omitted entirely when that verb fails or prints nothing)",
+    "issues": "number[] (optional, the forge-confirmed issue numbers this plan closes — positive integers in ascending order, written from the Issue Reference Confirmation Gate's confirmedIssues[]; one shared value patched identically into every file of a split; omitted entirely when nothing was confirmed, never [] and never null)",
+    "finalize": "object (optional, {intent, files[], commitSubject} — the round's single end-of-round step, the one commit no story can structurally make; files[] is a non-empty array of strings naming the paths no story should declare, and validate-tasks warns when a story's implementation.files claims one of them; a present-but-incomplete object is an error; resolved per repository on a split — one per entry on the PROJECT axis, the backend file alone on the SIDE axis — never shared across repositories; omitted entirely when the round declares no final step, never null and never {})",
     "planPath": "null (always null for planner-generated)",
     "roadmapPath": "string (optional, present only when this phase was expanded via Rolling-Wave Phase Selection; relative path to the feature's roadmap.json)",
     "phase": {
@@ -3090,6 +3208,7 @@ Specific obligations:
 - [ ] `planPath` is `null`
 - [ ] `metadata.baseRef` (if set) is a 40-character lowercase hex commit SHA — and is absent entirely, never `null` and never `""`, when no repository root resolved or `git rev-parse HEAD` failed; on a PROJECT-axis split each file carries its own repository's SHA rather than a shared one
 - [ ] `metadata.pluginVersion` (if set) is the version string the running CLI reported for itself (`$AIMI_CLI version`), not one read out of a plugin manifest — and is absent entirely, never `null` and never `""`, when that verb exited non-zero or printed nothing; it is one shared value, byte-identical across every file of a split
+- [ ] `metadata.finalize` (if set) is an object carrying all three of `intent` (string), `files` (non-empty array of strings) and `commitSubject` (string) — and is absent entirely, never `null` and never `{}`, when the round declares no end-of-round step; at most one per repository, so on a PROJECT-axis split each entry carries its own and on a SIDE-axis split only the backend file does
 - [ ] Every description follows "As a [specific role], I want [feature] so that [benefit]" format — role names the actor, never just "user"
 - [ ] Field lengths: title ≤ 200, description ≤ 500, criterion ≤ 5000
 - [ ] `schemaVersion` is `"3.3"`

@@ -139,6 +139,7 @@ normalize rules reproduce all three.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -980,13 +981,44 @@ def next_story(doc):
 # title, once for a description, once per tasks[] entry. One constant here for
 # the same reason clamp_max_concurrency is one function: three copies of a
 # security rule are three chances to fix two of them.
+#
+# WHICH RULER THIS IS: the instruction-injection one, and only that one. None of
+# the three fields it guards is ever evaluated by a shell. They are interpolated
+# into PROMPTS -- get-story-context hands title, description and tasks[] to the
+# story executor, and /aimi:plan threads a description into story-expander
+# sub-agent prompts via phaseHandoffBlocks (grep that symbol; line numbers
+# drift). An instruction marker does damage there, and so does a code fence,
+# because these fields land INSIDE fenced prompt blocks and a fence in the data
+# can break out of one. A command-substitution operator does neither: nothing
+# here reaches a shell, so its only measured effect was refusing PROSE -- a
+# tasks[] entry that merely named the operator while describing the parsing it
+# was fixing. That alternative was dropped and nothing else about this changed.
+#
+# The split is roadmap.py's, applied rather than re-derived: read the comment
+# above cv_suspicious there before widening this back. cv_injection judges both
+# an identity and its description because both reach prompts, while _SHELL_CLASS
+# judges the identity ALONE -- judging the description too refused "cmd_clean"
+# described as "does x; then y", an identity that is itself clean. That is this
+# defect with the fields renamed.
+#
+# The shell ruler is re-scoped, never abolished. It still applies exactly where
+# a shell reads: validate_stories below keeps `.project`'s own `[\$`;|&]`
+# metacharacter test and skills[]'s PATH_COMPONENT check untouched, and
+# validate_path_in_project in aimi-cli.sh remains the sole authority over every
+# path arriving as a CLI argument.
+#
+# The two surfaces that TELL an author this rule move with it -- the
+# "Forbidden in tasks[]" line in commands/plan.md and the one in
+# agents/workflow/aimi-story-expander.md each enumerate exactly the alternatives
+# below. A reader that accepts what the writer still forbids is the
+# writer-mints-what-reader-refuses shape of .aimi/known-gaps/2026-08-08-US-003.md
+# running the other way, and it leaves the defect alive under its own fix.
 SUSPICIOUS = (
     "ignore previous"
     "|(^|\\s)[^a-zA-Z0-9]*system\\s*:"
     "|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b"
     "|INSTRUCTIONS\\s*:"
     "|```"
-    "|\\$\\("
 )
 
 # aimi-cli.sh's `[[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]`, verbatim. The optional
@@ -1793,6 +1825,72 @@ def validate_tasks_metadata(doc):
     )
 
 
+def finalize_shape_errors(finalize):
+    """`metadata.finalize`'s shape, for R18. Returns a list of suffixes.
+
+    ABSENT IS VALID AND IS THE WHOLE CONTRACT OF THE KEY. `metadata.finalize`
+    declares the round's single end-of-round step -- the release commit no story
+    can structurally make -- and every plan written before the key existed must
+    keep validating byte for byte, which is why the caller skips this helper
+    entirely on a `None`. It follows the omitted-when-empty convention
+    `baseRef`, `pluginVersion` and `issues` already have in commands/plan.md:
+    the key is written when there is a step to declare and left out otherwise,
+    never `null` and never `{}`.
+
+    `null` AND ABSENT ARE THE SAME VALUE HERE, and that is jq's doing rather
+    than a softening of the rule. `.metadata.finalize` answers `null` for a key
+    that is missing and for a key that is explicitly null, so nothing on this
+    side of the read can tell them apart -- exactly the position R12 is in with
+    `metadata.execution`'s `// ""`, where an absent enum and an empty one both
+    reach the rule as the empty string and both pass. An explicit `null` is
+    therefore ACCEPTED. plan.md's checklist is what tells the writer not to
+    emit one; a validator that refused it would refuse every absent key too.
+
+    Well-formed means an object carrying all three of `intent` (string),
+    `files` (non-empty array of strings) and `commitSubject` (string). `files`
+    is the half other rules read -- R19 warns when a story claims one of those
+    paths -- so an empty array is refused rather than accepted as "declares
+    nothing": a step that names no file has nothing to collide with and nothing
+    to run against, and writing the key at all is then the mistake.
+    """
+    if jq_type(finalize) != "object":
+        return [" is not an object (expected {intent, files[], commitSubject})"]
+
+    problems = []
+    intent = jq_index(finalize, "intent", ".metadata.finalize")
+    if not isinstance(intent, str):
+        problems.append(".intent is missing or not a string")
+
+    files = jq_index(finalize, "files", ".metadata.finalize")
+    if not isinstance(files, list) or not files:
+        problems.append(".files is missing or not a non-empty array")
+    elif not all(isinstance(entry, str) for entry in files):
+        problems.append(".files holds an entry that is not a string")
+
+    subject = jq_index(finalize, "commitSubject", ".metadata.finalize")
+    if not isinstance(subject, str):
+        problems.append(".commitSubject is missing or not a string")
+
+    return problems
+
+
+def finalize_claimed_files(finalize):
+    """The paths R19 compares a story's `implementation.files` against.
+
+    Read separately from the shape check above rather than out of it, so a
+    finalize that R18 has already refused still contributes whatever paths it
+    does carry: a document with two defects should report both, not hide the
+    collision behind the shape error. A `files` that is not a list of strings
+    yields nothing and R19 then warns about nothing at all.
+    """
+    if jq_type(finalize) != "object":
+        return []
+    files = jq_index(finalize, "files", ".metadata.finalize")
+    if not isinstance(files, list):
+        return []
+    return [entry for entry in files if isinstance(entry, str)]
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -1892,10 +1990,15 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 AND R17 ARE THE RULES HERE BASH NEVER RAN. Both are appended below R15
-    and reach the `warn` channel only, so nothing above them moves; each one's
-    own comment carries why it warns instead of erroring, why it sits where it
-    sits, and why it is defensive where every rule above it is faithful.
+    R16 THROUGH R19 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
+    the last one already present, which is the only position from which a new
+    rule can add lines after everything the golden corpus recorded without
+    reordering either channel; each one's own comment carries why it warns or
+    errors, why it sits where it sits, and why it is defensive where every rule
+    above it is faithful. R16, R17 and R19 reach the `warn` channel only. R18
+    is the one of the four that reaches `errors`, and its own comment says why
+    a malformed `metadata.finalize` is a different kind of wrong from a stale
+    line anchor or a directory that is not there yet.
     """
     errors = []
 
@@ -2064,6 +2167,73 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ", ".join(unopenable)
                     + " — the file may be new, the directory it lands in may not"
                 )
+
+    # R18 -- metadata.finalize's shape. An ERROR where R16 and R17 warn, and
+    # the difference is which way the document is wrong. A line anchor and a
+    # missing directory are questions to the author about a plan that is still
+    # legible; a finalize carrying an `intent` and nothing else is a key whose
+    # own consumer cannot read it, so accepting it would hand the end-of-round
+    # step a declaration it has to guess at.
+    #
+    # ABSENT DOES NOTHING AT ALL, which is the guard-rail this rule is written
+    # around rather than a convenience: every tasks.json written before the key
+    # existed must validate byte for byte, both channels, and the caller's
+    # `is None` skip is what guarantees it. finalize_shape_errors' own docstring
+    # carries why `null` and absent are one value here.
+    #
+    # It sits BELOW R17 for R17's own reason, stated in its comment: a rule
+    # appended below the last one can only add lines after everything already
+    # recorded, and can never reorder either channel. R18 reaches `errors`,
+    # which is the channel that had not been touched below R15 -- the append
+    # position is what keeps that safe too, since `errors` is rendered as one
+    # array in the order it was built.
+    finalize = None
+    if docs:
+        finalize = jq_index(jq_index(docs[0], "metadata", ""), "finalize", ".metadata")
+    if finalize is not None:
+        for problem in finalize_shape_errors(finalize):
+            errors.append(tasks_file + ": metadata.finalize" + problem)
+
+    # R19 -- a story claiming a path metadata.finalize declares. A WARNING and
+    # never an error, and that is the rule rather than a soft start: a file can
+    # legitimately appear in both places -- a story that adds a CHANGELOG entry
+    # beside a finalize step that bumps the version writes the same file for
+    # two different reasons -- so the collision is information, not a verdict.
+    # Whoever reads the line decides which of the two should own the write.
+    #
+    # Consequently `errors` does not grow here, the exit status does not move,
+    # and the stdout verdict of a colliding document is byte-identical to the
+    # same document without the collision. Only stderr gains a line.
+    #
+    # The `jq_type(implementation) != "object"` guard is R17's, reused verbatim
+    # rather than rewritten: it is the removed cd-prefix rule's regression
+    # written down, and a second spelling of it would be a second thing to keep
+    # in step. One warn call per story, listing every path that story claims,
+    # so a story naming three declared files is one line and not three.
+    claimed_by_finalize = finalize_claimed_files(finalize) if finalize is not None else []
+    if claimed_by_finalize:
+        for doc in docs:
+            for story in _stories(doc):
+                implementation = jq_index(story, "implementation", ".userStories[]")
+                if jq_type(implementation) != "object":
+                    continue
+                files = jq_index(implementation, "files", ".userStories[].implementation")
+                if not isinstance(files, list):
+                    continue
+                collisions = []
+                for entry in files:
+                    if not isinstance(entry, str):
+                        continue
+                    if entry in claimed_by_finalize and entry not in collisions:
+                        collisions.append(entry)
+                if collisions:
+                    warn(
+                        tasks_file + ": "
+                        + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                        + ": implementation.files claims a path metadata.finalize declares: "
+                        + ", ".join(collisions)
+                        + " — the end-of-round step writes it too"
+                    )
 
     return errors
 
@@ -2797,17 +2967,28 @@ def verification_report(doc):
     Those two numbers are what make this the first pipeline metric that MOVES
     when verification actually improves.
 
-    AND THE NUMBER READS HIGH -- a ceiling on what was verified, never a
+    AND THE NUMBER STILL READS HIGH -- a ceiling on what was verified, never a
     measurement of it. The count originates in `verify-probe`'s
     `discriminates`, and `probe_verify` carries only assignments and `cd` into
-    each assertion's isolated shell: a verify that builds its fixture with
-    `mkdir`, `printf > file` or a subshell has every downstream assertion
-    failing because the fixture is MISSING, and a failing segment is scored
-    `discriminates: true`. So `checked` over-counts and `fraction` reads high.
-    Three phase-2 executors hit exactly this; the gap is written up in
-    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
-    and is deliberately open -- read the number with that caveat rather than
-    fixing the probe from here.
+    each assertion's isolated shell, so a verify whose fixture is built by
+    anything that mutates the SHELL -- a subshell, a function definition, a
+    `set -o` -- has the segments after it measured against state that was never
+    reproduced, and a segment failing for that reason alone is scored
+    `discriminates: true`. Three phase-2 executors hit this; the gap is written
+    up in
+    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`.
+
+    TWO CORRECTIONS TO THAT RECORD, BOTH MEASURED. It names `mkdir` and
+    `printf > file` among the causes and they are NOT: every segment runs as a
+    real subprocess in the same directory, so a fixture built on DISK persists
+    and the assertions after it read it back -- see `probe_verify`'s own
+    docstring, which carries the measurement. And the shell-VARIABLE half of
+    the gap is closed: a segment reading a variable no carried assignment
+    provides is now scored `discriminates: None`, which is neither the `true`
+    the executor counts into this number nor the `false` it reports as an
+    assertion that already passes. What remains open is the rest of shell
+    state, so read the number with that narrower caveat rather than fixing the
+    probe from here.
     """
     visual = []
     pending = []
@@ -4397,6 +4578,15 @@ _VERIFY_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=")
 # The words that may precede an assignment and still leave it an assignment.
 _VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
 
+# A NAME as `$NAME` and `${NAME}` spell it, matched from a position rather than
+# anchored, so it can be run against the character after a `$`.
+_VERIFY_NAME_AT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# The same NAME as a whole word, tolerating the `;` a word carries when the
+# scanner cut on blanks alone -- `for f in a; do` yields the word `f`, but
+# `while read -r line; do` yields `line;`.
+_VERIFY_BOUND_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*);?$")
+
 # The builtins whose whole job is to MOVE the shell. Only `cd` appears in the
 # corpus this parser was cut against -- 11 of the 258 verifies under this
 # plugin's own .aimi/ carry one and none carries a pushd, measured 2026-09-04 --
@@ -4406,10 +4596,136 @@ _VERIFY_DECLARATORS = ("export", "local", "declare", "readonly", "typeset")
 # the caller's tree. Two strings buy the whole family.
 _VERIFY_CHDIR = ("cd", "pushd", "popd")
 
-# A verify is allowed to be a whole test suite, so this is generous. A segment
-# that outlives it is reported at 124 -- `timeout`'s own status -- which reads
-# as discriminating, the safe direction: a probe must never invent dead weight.
+# A verify is allowed to be a whole test suite, so this default is generous.
+# It is what `probe_verify` applies when its caller names no `timeout`, and it
+# is PER SEGMENT rather than over the whole probe.
+#
+# THE VERDICT A TIMEOUT GETS WAS REVERSED, AND THE OLD REASONING IS KEPT HERE
+# RATHER THAN DELETED, BECAUSE IT WAS SOUND WHEN IT WAS WRITTEN. It said: a
+# segment that outlives this is reported at 124 -- `timeout`'s own status --
+# which reads as discriminating, the safe direction, since a probe must never
+# invent dead weight. That was the best answer AVAILABLE while `discriminates`
+# had two values: between `true` and `false`, only `false` tells a reader to
+# stop looking, so `true` was the wrong answer that costs least. US-001 added
+# the third value, and a third option does not merely widen the choice here --
+# it changes which answer is best. A TIMEOUT MEASURED NOTHING, so `None` is
+# both honest and safe at once, and safe-but-wrong is no longer the best on
+# offer. A timed-out segment now carries `discriminates: None` and `exit:
+# None`, the same shape as a segment whose shell state the prelude never
+# reproduced, for the same reason: neither of them ran.
+#
+# WHICH CEILING ACTUALLY BIT -- measured 2026-09-07, because the record that
+# asked for this fix and this constant disagreed, and the two imply different
+# fixes. `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` says eight
+# stories blew a FIVE-minute ceiling; this constant is 600 seconds. The
+# five-minute one is not this constant, and it is not the plugin's either --
+# there is no 300-second ceiling anywhere under `scripts/`, `hooks/`,
+# `commands/` or `skills/`. It is the HARNESS's wall clock around the whole
+# verb, and since this ceiling is per segment the two never meet: what blew
+# was the SUM of the segments while every individual one finished. This
+# plugin's own recorded probe output says so directly -- every suite segment
+# in `.aimi/tasks/verify-probe-US-00{1,2}.json` carries `exit: 0`, so each RAN
+# TO COMPLETION under this ceiling. Timed on this tree:
+# `test-command-blocks.sh` 4s, `test-command-size.sh` 1s,
+# `pytest scripts/tests/` 435s, `test-aimi-cli.sh` 292s -- every one
+# of them under 600 and the last two each a large share of five minutes on
+# their own. The single `exit: 124` in the corpus
+# (`verify-probe-US-003.json`) is this ceiling firing on an ACCIDENT rather
+# than on a suite: a bare `import` line cut out of a Python heredoc, which
+# bash resolved to ImageMagick's blocking screen-capture `import`.
+#
+# WHAT THAT MEASUREMENT DECIDED: lowering this number would not have helped,
+# which is why it did not move. A per-segment cap cannot bound a sum of
+# segments none of which reaches it. What bounds the sum is running fewer of
+# them -- `skip_matching` -- and a cap the CALLER picks for its own budget,
+# which is why `timeout` became a parameter while this default stayed 600.
 _VERIFY_TIMEOUT = 600
+
+# The name of the environment variable that says "a verify-probe is already
+# running underneath you". `probe_verify` sets it before it runs a single
+# segment; `op_verify_probe` refuses when it is already there.
+#
+# THE ENVIRONMENT IS THE CHANNEL BECAUSE THE SUBPROCESS BOUNDARY IS THE PROBLEM.
+# `verify-probe <id>` RUNS that story's verify segments, so a verify that names
+# the verb re-enters it -- measured on a throwaway fixture at 127 re-entries in
+# 25 seconds before the outer call hit its own ceiling at 124. Every re-entry
+# crosses a `subprocess.run`, and the environment is the only state that
+# crosses with it: an in-process flag would be reset by the fresh interpreter
+# each segment starts.
+#
+# A NAME, NOT AN ID, AND THAT IS THE WHOLE DESIGN. Comparing the requested
+# story id against the running one closes self-reference and nothing else, and
+# the record this fix answers --
+# `.aimi/known-gaps/2026-09-07-plan-141-verify-probe-nao-pode-apontar-para-si.md`
+# -- names the MUTUAL case in the same breath: story A's verify probes B, whose
+# verify probes A. Two ids, neither equal to the other, and the loop is
+# identical. A marker that says only "some probe is running" catches both,
+# because both are the same fact.
+VERIFY_PROBE_ACTIVE_ENV = "AIMI_VERIFY_PROBE_ACTIVE"
+
+# What the refusal says. A message that reported only "failed" would send the
+# reader looking for a broken assertion, when what happened is that the verify
+# being probed names the probe -- so it names the recursion, and it names the
+# two ways out rather than leaving the reader to find them.
+_VERIFY_PROBE_REENTRY = (
+    "Error: verify-probe: refusing to run inside another verify-probe.\n"
+    "  " + VERIFY_PROBE_ACTIVE_ENV + " is already set, which means the verify "
+    "being probed calls this verb back -- directly, or through a second story "
+    "whose own verify probes the first. Running the segments again would "
+    "recurse instead of answering.\n"
+    "  Two ways out: probe from a verify that does not itself call "
+    "verify-probe (a sibling story's, or a throwaway fixture's), or call "
+    "probe_verify() in tasks.py directly, which is not guarded."
+)
+
+# What the refusal says when `implementation.verify` is PRESENT and is not a
+# string. Same shape as the constant above and for the same reason: the
+# message is the only place that states the whole problem, so it names the
+# type it found, says why there is no honest reading of it, and names the two
+# ways out.
+#
+# WHY THIS REFUSES RATHER THAN JOINING THE LINES. The 2026-09-07 census over
+# every tasks document in `.aimi/` found 292 non-empty verifies and exactly
+# two written as a list -- and the two are not the same kind of list. One is a
+# list of COMMANDS; the other is a list of checks in PROSE ("Hand-trace three
+# scenarios through the rewritten condition..."). Joining with newlines would
+# hand those sentences to bash, bash would reject them, and the probe would
+# report `discriminates: true` -- a confident verdict about something that was
+# never a script. Nothing in the document tells the two lists apart, so the
+# probe cannot choose between them, and of the three answers available --
+# silence, a guess, a refusal -- only the refusal is honest.
+_VERIFY_PROBE_NOT_A_STRING = (
+    "Error: verify-probe: implementation.verify is %s, not a string.\n"
+    "  A verify is the script this verb takes apart, and only a string is a "
+    "script. Reading this value as one would mean guessing: joining a list of "
+    "lines hands prose to bash as though it were commands, and the empty "
+    "array reports silence as a clean bill of health.\n"
+    "  Two ways out: make implementation.verify a single string -- joining "
+    "the lines yourself when they really are a script -- or remove the field "
+    "when there is no command to run, which still probes to the empty array, "
+    "on purpose."
+)
+
+
+def _verify_probe_type_name(value):
+    """What the refusal above calls the value it found.
+
+    Four names, because four shapes reach it: a string is the shape the field
+    is for, and a `verify` that is JSON null is indistinguishable from an
+    absent one once `jq_index` has run, so null is never refused either.
+
+    Neither `jq_type` nor roadmap.py's `_json_type` is used here, and they
+    spell the first of the four `array` and `an array`. Nothing compares this
+    string -- it is prose inside a refusal, not a value inside a rule -- and
+    `a list` is the word the sentence beside it already uses.
+    """
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object"
 
 
 def _verify_at_word_start(buf):
@@ -4425,6 +4741,92 @@ def _verify_at_word_start(buf):
     return i < 0 or buf[i] in ";&|(){}\n<>"
 
 
+def _verify_heredoc_opener(text, i):
+    """The `<<WORD` / `<<-WORD` starting at `i`, as `(delimiter, strip_tabs,
+    quoted, end)`, or None when what is there is not a heredoc redirect at all.
+
+    Only the SHAPE is decided here: `<<`, an optional `-`, optional blanks and
+    then a word, whose quotes are removed the way bash removes them -- `<<'X'`,
+    `<<"X"` and `<<\\X` all name the delimiter `X`.
+
+    `quoted` IS REPORTED because this is the only place that can report it.
+    Quote removal destroys the evidence: after it, `<<'X'` and `<<X` are the
+    same three characters, and yet the first suppresses every expansion in the
+    body and the second performs them. verify_segments does not care -- a body
+    stays inside its segment either way -- but verify_reads does, so the fact
+    is carried out of here rather than re-derived by a second parse that would
+    have to repeat this word scan to find where the quotes were.
+
+    Whether the position even admits a redirect -- not inside quotes, not
+    inside `$(( ))` where `<<` is a left shift -- is still the caller's to
+    know, because the caller is the only thing that tracks it.
+    """
+    n = len(text)
+    j = i + 2
+    strip_tabs = False
+    quoted = False
+    if j < n and text[j] == "-":
+        strip_tabs = True
+        j += 1
+    while j < n and text[j] in " \t":
+        j += 1
+    delimiter = []
+    while j < n:
+        ch = text[j]
+        if ch in " \t\n;&|<>()":
+            break
+        if ch in ("'", '"'):
+            close = text.find(ch, j + 1)
+            if close == -1:
+                return None
+            # ANY quoting anywhere in the word suppresses the body's
+            # expansions -- `<<F'I'M` as much as `<<'FIM'` -- which is why this
+            # is a flag raised by the scan rather than a look at text[i + 2].
+            quoted = True
+            delimiter.append(text[j + 1 : close])
+            j = close + 1
+            continue
+        if ch == "\\" and j + 1 < n:
+            quoted = True
+            delimiter.append(text[j + 1])
+            j += 2
+            continue
+        delimiter.append(ch)
+        j += 1
+    word = "".join(delimiter)
+    if not word:
+        return None
+    return word, strip_tabs, quoted, j
+
+
+def _verify_take_heredoc_bodies(text, i, heredocs, buf):
+    """Every pending heredoc body from `i`, appended to `buf` verbatim, and the
+    index just past the last terminator consumed.
+
+    IN ORDER, because `cmd <<A <<B` reads A's body first and then B's. Each one
+    ends at a line equal to its own delimiter -- with leading TABS, and never
+    spaces, stripped first for the `<<-` form, which is the one detail that
+    fails loudly rather than quietly when it is wrong: a terminator that never
+    matches swallows the rest of the script. An unterminated heredoc takes
+    everything that is left, which is what bash does with one too.
+    """
+    n = len(text)
+    while heredocs:
+        delimiter, strip_tabs = heredocs.pop(0)
+        while i < n:
+            end = text.find("\n", i)
+            stop = n if end == -1 else end + 1
+            line = text[i:stop]
+            buf.append(line)
+            i = stop
+            candidate = line[:-1] if line.endswith("\n") else line
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delimiter:
+                break
+    return i
+
+
 def verify_segments(text):
     """A verify script cut into its top-level segments, each paired with the
     separator that INTRODUCED it -- "" for the first and for anything after a
@@ -4435,6 +4837,20 @@ def verify_segments(text):
     quotes, a `$(...)` or backtick substitution, a `{ ...; }` group, a `(...)`
     subshell or a compound command is not a separator at all. Comments are
     dropped whole, so a `#` line never becomes a segment that trivially passes.
+
+    A HEREDOC IS THE ONE SHAPE WHOSE CONTENT IS NOT SHELL AT ALL, and it is
+    tracked here beside those quoting states rather than left to them. `cmd
+    <<DELIM` -- in every form bash accepts, `<<'X'`, `<<"X"`, `<<X` and the
+    tab-stripping `<<-X` -- keeps every line up to and INCLUDING its terminator
+    inside the segment that opened it, and the terminator is never a segment of
+    its own. The body is Python, or SQL, or a patch, and each newline and `;`
+    in it would otherwise cut it into fragments handed to a shell as if they
+    were commands. That is not a cosmetic miscount: `_VERIFY_TIMEOUT`'s note
+    records where it already led -- a bare `import` line cut out of a Python
+    heredoc, which bash resolved to ImageMagick's blocking screen-capture
+    `import`. The `<<` of an arithmetic `$(( a << b ))` is a left shift and is
+    deliberately NOT one, which is the single position this scanner has to
+    tell apart, and the only reason it tracks arithmetic at all.
 
     THE SEPARATOR IS CARRIED because `||` means something the other three do
     not: what follows it is the failure branch of the segment before it, which
@@ -4453,6 +4869,11 @@ def verify_segments(text):
     parens = 0
     braces = 0
     keywords = 0
+    # Delimiters whose bodies have been announced but not yet read, in the
+    # order bash reads them, and the paren depths at which an arithmetic
+    # context opened. The second exists only to answer the `<<` question.
+    heredocs = []
+    arith = []
     i = 0
     n = len(text)
 
@@ -4502,6 +4923,19 @@ def verify_segments(text):
                 i += 1
             continue
 
+        if text.startswith("$((", i) or text.startswith("((", i):
+            # Arithmetic, remembered as the DEPTH it opened at rather than as
+            # a flag, so nesting closes in the right order. Nothing else
+            # consults it: `((` and `$((` already balanced through the two
+            # branches below, and this one exists so that the `<<` of a left
+            # shift is not read as a heredoc.
+            opener = "$((" if ch == "$" else "(("
+            arith.append(parens)
+            parens += 2
+            buf.append(opener)
+            i += len(opener)
+            continue
+
         if text.startswith("$(", i):
             parens += 1
             buf.append("$(")
@@ -4517,6 +4951,8 @@ def verify_segments(text):
         if ch == ")":
             if parens:
                 parens -= 1
+            while arith and parens <= arith[-1]:
+                arith.pop()
             buf.append(ch)
             i += 1
             continue
@@ -4534,6 +4970,32 @@ def verify_segments(text):
             i += 1
             continue
 
+        if text.startswith("<<<", i) and not arith:
+            # A here-STRING: one line, no body, no terminator. Taken WHOLE
+            # rather than left to fall through a character at a time, because
+            # the `<<` starting at its second character would then be read as
+            # a heredoc opening on the here-string's own operand -- which
+            # swallows the rest of the script as that heredoc's body.
+            buf.append("<<<")
+            i += 3
+            continue
+
+        if text.startswith("<<", i) and not arith:
+            # The redirect itself is appended here; the body waits for the
+            # newline that ends the command, because that is where bash starts
+            # reading it -- `cat <<X > out.txt` and `cat <<A <<B` both keep
+            # announcing on this line.
+            opened = _verify_heredoc_opener(text, i)
+            if opened is not None:
+                # The quoting is unpacked and dropped: a body belongs to the
+                # segment that opened it whether or not bash expands it, and
+                # this scanner has no other question to ask of it.
+                delimiter, strip_tabs, _quoted, j = opened
+                heredocs.append((delimiter, strip_tabs))
+                buf.append(text[i:j])
+                i = j
+                continue
+
         if (ch.isalpha() or ch == "_") and _verify_at_word_start(buf):
             j = i
             while j < n and (text[j].isalnum() or text[j] == "_"):
@@ -4550,17 +5012,28 @@ def verify_segments(text):
         top = quote is None and not backtick and not parens and not braces and not keywords
 
         if text.startswith("&&", i) or text.startswith("||", i):
-            if top:
+            if top and not heredocs:
                 flush(text[i : i + 2])
             else:
                 buf.append(text[i : i + 2])
             i += 2
             continue
 
-        if ch == ";" or ch == "\n":
+        if ch == "\n" and heredocs:
+            # The bodies belong to the command that announced them, so they
+            # are taken BEFORE this newline is allowed to cut anything.
+            buf.append(ch)
+            i = _verify_take_heredoc_bodies(text, i + 1, heredocs, buf)
             if top:
                 flush()
+            continue
+
+        if ch == ";" or ch == "\n":
+            if top and not heredocs:
+                flush()
             else:
+                # `cat <<X; echo` -- the body is still unread, and cutting here
+                # would leave it in the NEXT segment. Neither half would run.
                 buf.append(ch)
             i += 1
             continue
@@ -4636,6 +5109,167 @@ def verify_words(segment):
     return words
 
 
+def verify_reads(segment):
+    """The variable names a segment EXPANDS: every `$NAME` and `${NAME}` in it.
+
+    Same scanner discipline as verify_segments and verify_words, and here it is
+    the whole point: a `$` inside single quotes is not an expansion at all, so
+    `CMD='s_clean=x'` READS nothing and assigns `CMD`, while the `case "$s_clean"`
+    after it reads `s_clean`. Getting that backwards in either direction is the
+    defect this function exists to make visible, so quoting is tracked character
+    by character rather than guessed at with a regex over the raw text.
+
+    POSITIONAL AND SPECIAL PARAMETERS ARE NOT NAMES and never appear here.
+    `$?`, `$$`, `$!`, `$#`, `$@`, `$*`, `$-`, `$_` and `$1`..`$9` are given by
+    the shell itself; reporting them as state the prelude failed to reproduce
+    would put a null verdict on every segment that reads an exit status, which
+    is noise where an answer belongs.
+
+    IT SEES `$NAME` AND `${NAME}` AND DELIBERATELY NOTHING ELSE. A bare name
+    inside `$(( ))` arithmetic is a read this misses, and a name bound by a
+    function definition or a shell option set with `set -o` is out of scope by
+    the same decision. Widening it is a separate change with its own corpus
+    measurement behind it; what is here is what the corpus of real verifies
+    actually carries.
+
+    A HEREDOC BODY IS SCANNED ONLY WHERE BASH WOULD EXPAND IT, and which half
+    that is comes from the delimiter. Of the four forms, `<<'X'` and `<<"X"`
+    -- and the escaped `<<\\X`, the same rule said a third way -- SUPPRESS
+    expansion: bash hands the body to the command byte for byte, so a `$VAR`
+    in it is not a read at all, and reporting one withholds a verdict the
+    shell would never have withheld. `<<X` and the tab-stripping `<<-X` leave
+    the delimiter BARE and do expand, so their bodies keep being scanned
+    exactly like the rest of the segment -- a name read there is genuinely
+    unresolved and stays visible. Only the BODY is skipped, never the line
+    that announces it: `python3 - "$ARG" <<'FIM'` still reads `ARG`. Bodies
+    are taken in the order bash reads them, which is what `cmd <<'A' <<B`
+    needs -- A's has to be stepped over before B's can be reached at all.
+    """
+    names = set()
+    quote = None
+    # Delimiters announced but not yet read, in the order bash reads them, each
+    # carrying whether its quoting suppresses the body's expansions.
+    heredocs = []
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "'" and quote is None:
+            quote = "'"
+            i += 1
+            continue
+        if ch == '"':
+            quote = None if quote == '"' else '"'
+            i += 1
+            continue
+        if quote is None and segment.startswith("<<<", i):
+            # A here-STRING: one line, no body, no terminator. Taken whole so
+            # the `<<` at its second character is not read as an opening whose
+            # body would then swallow the rest of the segment.
+            i += 3
+            continue
+        if quote is None and segment.startswith("<<", i):
+            # Arithmetic is NOT tracked here, unlike in verify_segments, and
+            # the asymmetry is safe rather than sloppy: the `<<` of `$(( a <<
+            # b ))` can only ever yield a BARE delimiter, a bare body is
+            # scanned rather than skipped, and so every name past a left shift
+            # is still found -- by the recursive call below instead of by this
+            # loop. Nothing is lost, which is the only reason the second
+            # arithmetic tracker is not here.
+            opened = _verify_heredoc_opener(segment, i)
+            if opened is not None:
+                delimiter, strip_tabs, quoted, j = opened
+                heredocs.append((delimiter, strip_tabs, quoted))
+                i = j
+                continue
+        if ch == "\n" and heredocs:
+            # The bodies start at the newline that ends the command, and each
+            # is consumed whole even when it is not scanned -- stepping over a
+            # quoted body is how the next delimiter's body is reached.
+            i += 1
+            while heredocs:
+                delimiter, strip_tabs, quoted = heredocs.pop(0)
+                body = []
+                i = _verify_take_heredoc_bodies(
+                    segment, i, [(delimiter, strip_tabs)], body
+                )
+                if not quoted:
+                    names |= verify_reads("".join(body))
+            continue
+        if ch != "$":
+            i += 1
+            continue
+        j = i + 1
+        if j < n and segment[j] == "(":
+            # A command substitution or arithmetic. Step over the `$` only --
+            # what is inside is scanned by this same loop, so a `$VAR` nested
+            # in it is still counted.
+            i = j
+            continue
+        if j < n and segment[j] == "{":
+            j += 1
+            # `${#VAR}` is VAR's length and `${!VAR}` is an indirect read of
+            # it; both READ VAR, so the sigil is stepped over rather than
+            # ending the parse.
+            while j < n and segment[j] in "#!":
+                j += 1
+        match = _VERIFY_NAME_AT.match(segment, j)
+        if match and match.group(0) != "_":
+            names.add(match.group(0))
+            i = match.end()
+            continue
+        i = j + 1
+    return names
+
+
+def verify_assigns(segment):
+    """The variable names a segment BINDS, the other half of what verify_reads
+    asks about.
+
+    Every word that is an assignment binds its own name -- `S=x`, `arr[0]=x`,
+    `x+=1`, and the same behind any of the declarators. `for NAME in ...` and
+    `read NAME` bind too, and they are here for a reason worth stating: those
+    two bind INSIDE the segment that then reads them, so a `for f in a b; do
+    echo "$f"; done` provides its own `$f` and must keep its ordinary verdict.
+    Leaving them out would turn every loop in every verify into a null.
+
+    Kept apart from verify_asserts_nothing for the same reason
+    verify_changes_directory is: that one asks whether a segment could be an
+    assertion at all, this one asks what state it leaves behind for the
+    segments after it.
+    """
+    words = verify_words(segment)
+    names = set()
+    for index, word in enumerate(words):
+        if _VERIFY_ASSIGN.match(word):
+            names.add(re.split(r"[\[+=]", word, 1)[0])
+            continue
+        if word == "for" and index + 1 < len(words):
+            bound = _VERIFY_BOUND_NAME.match(words[index + 1])
+            if bound:
+                names.add(bound.group(1))
+            continue
+        if word == "read":
+            for follower in words[index + 1:]:
+                if follower.startswith("-"):
+                    continue
+                bound = _VERIFY_BOUND_NAME.match(follower)
+                if not bound:
+                    break
+                names.add(bound.group(1))
+                if follower.endswith(";"):
+                    break
+    return names
+
+
 def verify_asserts_nothing(segment):
     """True for a segment that cannot be an assertion: a `set` builtin, or a
     plain variable assignment.
@@ -4667,35 +5301,134 @@ def verify_changes_directory(segment):
     return bool(words) and words[0] in _VERIFY_CHDIR
 
 
-def probe_verify(text, cwd):
+# THE FOUR MECHANISMS THAT CARRY ONE SHELL INTO THE NEXT, in the order a
+# `source` of the file has to replay them: `declare -f` for the function
+# definitions, `declare -p` for the variables, `set +o` for the options and
+# `printf %q` for the working directory, all written to ONE sourceable file.
+# There is no fifth: `shopt` options, traps and the dirstack are not carried,
+# and the four were round-tripped through a fresh `bash -c` before this shape
+# was written rather than after.
+#
+# THE ORDER IS LOAD-BEARING AND IT IS NOT COSMETIC. `set +o` comes after both
+# `declare`s because a snapshot taken from a shell that ran `set -e` carries
+# `set -o errexit`, and a snapshot that enabled it FIRST would abort its own
+# replay on the first line bash refuses. Those refusals are ordinary rather
+# than a defect: `BASHOPTS`, `BASH_VERSINFO`, `EUID`, `PPID`, `SHELLOPTS` and
+# `UID` are readonly and `declare -p` dumps them like everything else, so
+# every replay prints six "readonly variable" complaints to a stderr the probe
+# already discards. Putting the options last is what keeps them harmless. `cd`
+# is last of all, so the directory is the last thing established before the
+# segment runs.
+#
+# `|| :` ON EACH `declare` IS THE SAME SENTENCE READ BACKWARDS: this dump runs
+# inside the EXIT trap of a shell that may have errexit ON, and `declare -f`
+# in a shell that defined no function exits 1 -- which is the commonest verify
+# there is. Without it the snapshot would truncate at its own first line.
+_VERIFY_SNAPSHOT_VAR = "__aimi_probe_snapshot"
+
+_VERIFY_SNAPSHOT_TRAP = (
+    "trap '__aimi_probe_rc=$?; "
+    "{ declare -f || :; declare -p || :; set +o; "
+    'printf "cd %q\\n" "$PWD"; } >"$' + _VERIFY_SNAPSHOT_VAR + '" 2>/dev/null; '
+    "exit $__aimi_probe_rc' EXIT"
+)
+
+# WHY A TRAP RATHER THAN THREE LINES APPENDED AFTER THE SEGMENT. The segment is
+# arbitrary shell and it has to be the LAST thing in the script: US-001 made a
+# heredoc travel with the command that opened it, so a segment can end inside
+# `PY` with no terminator after it, and anything appended below would land in
+# the heredoc body instead of in the shell. An EXIT trap is set BEFORE the
+# segment and still runs after it -- including when errexit or the segment's
+# own `exit` ends the shell early, which is exactly when the state that
+# preceded the failure is still worth carrying.
+#
+# THE EXPLICIT `exit $__aimi_probe_rc` IS REDUNDANCY, AND IT IS KEPT KNOWING
+# THAT. Measured on this bash: a trap that runs commands and does not exit
+# leaves the shell's status alone (`trap "true; false" EXIT; exit 7` still
+# exits 7), so the dump could not have clobbered the verdict on its own. What
+# the line buys is that the guarantee is stated in the code rather than known
+# about bash -- the status the trap captured on its first line is the one that
+# leaves this shell, and it is the only number every verdict below is computed
+# from.
+
+# WHAT A FAILED `cd` COSTS EVERY SEGMENT AFTER IT. Before the snapshot existed
+# the prelude carried `cd X || exit 1`, so every later assertion aborted at the
+# shell's own failure status. That guarantee is worth keeping byte for byte: a
+# `cd` that failed and then let everything after it run in the CALLER's tree is
+# this verb manufacturing the defect it exists to find, and quietly. So a
+# failed directory change is remembered and every script built afterwards opens
+# with this line, which exits before the segment is reached -- the same answer
+# the old prelude gave, reported at the same status.
+_VERIFY_SNAPSHOT_ABORT = "exit 1"
+
+
+def _probe_segment_script(segment, snapshot, restore, aborted):
+    """The script one segment runs: restore, arm the dump, then the segment.
+
+    `restore` is False for the very first segment of a verify -- there is no
+    state yet -- and `aborted` is True once a `cd` has failed, which wins over
+    it: nothing is restored and nothing is run. The restore carries
+    `2>/dev/null` of its own so the readonly-variable complaints the replay
+    always prints cannot be mistaken for the segment's own stderr by a caller
+    that stops discarding it.
+
+    ONE FILE, READ THEN OVERWRITTEN, and the order is what makes that safe:
+    the `.` finishes long before the EXIT trap fires, so the dump lands on a
+    file nothing is still reading. A second file swapped in by `os.replace`
+    would buy protection against a dump that dies half-written, and would cost
+    this module a second path of its own -- see `_probe_verify_segments` for
+    why the one it already has is written down as a widening.
+    """
+    lines = []
+    if aborted:
+        lines.append(_VERIFY_SNAPSHOT_ABORT)
+    elif restore:
+        lines.append(". %s 2>/dev/null" % shlex.quote(snapshot))
+    lines.append("%s=%s" % (_VERIFY_SNAPSHOT_VAR, shlex.quote(snapshot)))
+    lines.append(_VERIFY_SNAPSHOT_TRAP)
+    lines.append(segment)
+    return "\n".join(lines)
+
+
+def probe_verify(text, cwd, skip_matching=None, timeout=None):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
-    THE ASSIGNMENTS ARE CARRIED, THE ASSERTIONS ARE NOT. A verify names its own
-    paths -- `S=path/to/SKILL.md`, then `grep -q x "$S"` -- so an assertion run
-    with no context would see an empty `$S`, fail for that reason alone, and be
-    reported as discriminating when it is the very thing this verb exists to
-    expose. Each assertion is therefore prefixed with the assignments that
-    preceded it, and with nothing else: no earlier assertion's exit status and
-    no `set -e`, which is exactly what stops the run at the first failure in
-    the real script and hides everything after it.
+    EVERY SEGMENT RUNS ONCE, IN ORDER, AND THE SHELL IT LEAVES BEHIND IS
+    CARRIED INTO THE NEXT ONE. A verify names its own paths -- `S=path/to/
+    SKILL.md`, then `grep -q x "$S"` -- so an assertion run with no context
+    would see an empty `$S`, fail for that reason alone, and be reported as
+    discriminating when it is the very thing this verb exists to expose. What
+    stops that is a SNAPSHOT: after each segment the shell writes its
+    functions, variables, options and working directory to one sourceable
+    file, and the next segment sources it before running. Four mechanisms,
+    listed at `_VERIFY_SNAPSHOT_TRAP`, and no fifth.
 
-    The cost of that choice is that an assignment whose value comes from a
-    command substitution runs once per assertion after it. Verify scripts
-    assign paths and captured output, so this is cheap in practice, and the
-    alternative -- one shell for the whole script with each assertion in a
-    subshell -- buys that back by making every exit status depend on parsing a
-    marker out of a stream the assertions themselves write to.
+    THE COUNT OF RUNS DOES NOT RISE -- IT FALLS. Each segment is executed
+    exactly once, where the carried-prelude shape this replaces re-ran every
+    assignment once per assertion after it. `W=$(mktemp -d)` used to hand each
+    assertion a DIFFERENT directory; now it makes one, and `cd "$W"` moves
+    into the one that exists.
 
-    THE WORKING DIRECTORY IS CARRIED FOR THE SAME REASON, WITH MORE AT STAKE.
-    An assignment is carried so an assertion is not measured against an empty
-    variable; a `cd` is carried so an assertion is not measured against -- and
-    not WRITTEN INTO -- the wrong tree. Without it, `cd "$W"` ran as a segment
-    of its own and changed nothing that outlived it, so a `mkdir -p out` two
-    segments later landed in `cwd`: the story executor's own worktree, which is
-    where step 1.5 probes from. The probe was manufacturing the class of defect
-    it exists to find. Like an assignment it is carried and not reported -- a
-    segment that only establishes context is noise in a list whose subject is
-    assertions that already pass.
+    WHAT IS NOT CARRIED IS THE THING THE REAL SCRIPT USES TO STOP: no earlier
+    assertion's exit status reaches the next segment as `$?`, and each segment
+    is measured on its own status alone. `set -e` is a shell OPTION and IS
+    carried -- it is state a real run would have -- but it can only ever end
+    the one segment that fails, never the run: the next segment starts in its
+    own process from the snapshot. That is the whole point of taking the verify
+    apart, and it is why an assertion hidden behind an earlier failure still
+    gets a verdict here.
+
+    THE WORKING DIRECTORY IS THE STATE WITH THE MOST AT STAKE. An assignment is
+    carried so an assertion is not measured against an empty variable; a `cd`
+    is carried so an assertion is not measured against -- and not WRITTEN INTO
+    -- the wrong tree. Without it, `cd "$W"` ran as a segment of its own and
+    changed nothing that outlived it, so a `mkdir -p out` two segments later
+    landed in `cwd`: the story executor's own worktree, which is where step 1.5
+    probes from. The probe was manufacturing the class of defect it exists to
+    find. A `cd` that FAILS aborts everything after it instead, at the shell's
+    own failure status, which reads as discriminating -- the safe direction,
+    the one the timeout used to take, since a probe must never invent dead
+    weight. See `_VERIFY_SNAPSHOT_ABORT` for how.
 
     REFUSING A VERIFY THAT CONTAINS A `cd` WOULD CLOSE THAT TOO, AND IS WORSE.
     The verifies that cd are the elaborate ones: the verify that builds a
@@ -4707,6 +5440,12 @@ def probe_verify(text, cwd):
     the executor would print a clean all-clear for the verifies least likely to
     deserve one. Carrying the `cd` keeps the answer; refusing would trade a
     wrong directory for a wrong answer.
+
+    A SEGMENT THAT ESTABLISHES CONTEXT IS RUN AND NOT REPORTED. An assignment,
+    a `cd` and a bare `set` claim nothing about the tree -- and the assignments
+    are worse than noise in a list of assertions that already pass, because
+    they always pass. They still run, because running them is what puts their
+    state in the snapshot.
 
     Output is discarded. What the caller gets is the status, because that is
     what `discriminates` is computed from and a probe that echoed a whole test
@@ -4720,46 +5459,274 @@ def probe_verify(text, cwd):
     a directory the real script never would. The operand after `&&` is the
     opposite case and IS run: it is a further assertion, reached only because
     the one before it passed.
+
+    THE DISK WAS NEVER THE PROBLEM AND STILL IS NOT. Every segment runs as a
+    REAL SUBPROCESS in the same directory, so everything it writes to the DISK
+    outlives it and the segments after it read it back: `mkdir -p fx`, then
+    `printf x > fx/a.txt`, then `grep -q x fx/a.txt` passes here, measured
+    rather than reasoned about. The record in
+    `.aimi/known-gaps/2026-09-04-p2-verify-probe-tem-uma-terceira-cegueira.md`
+    says a `mkdir`/`printf >` fixture leaves every downstream assertion running
+    against an EMPTY TREE, and that half of it is wrong; the correction is
+    written down here because this docstring is where the next reader of this
+    function looks, and a known-gap file is not.
+
+    DISK EFFECTS ARE ALSO THE STATE NOTHING HERE CAN UNDO, and that is by
+    design rather than by omission. A segment that deletes a file has deleted
+    it for every segment after it, exactly as in a real run; no snapshot
+    reverses that, and none should.
+
+    A SEGMENT WHOSE READS THE PROBE CANNOT ACCOUNT FOR GETS NO VERDICT. Its
+    entry carries `discriminates: None` and an `unresolvedState` naming the
+    variables, and the segment is NOT RUN: an exit status measured in a world
+    that never existed is not evidence, and reporting a verdict computed from
+    it is worse than reporting none. Both directions the missing state produces
+    are wrong, and they are not equally wrong:
+
+      - the assertion that FAILS without it reads as spuriously DISCRIMINATING,
+        an exemplary check that is nothing of the sort; and
+      - the assertion that PASSES without it reads as spurious DEAD WEIGHT.
+
+    The second is the dangerous one, because "already passes before the work"
+    is what tells a reader to STOP LOOKING -- so a check that in truth guards
+    the story gets crossed off the list by the tool that was supposed to find
+    it. `None` is the third answer that keeps both out of the list: it says
+    "cannot tell", which is the only true thing available about a run that did
+    not happen.
+
+    THAT CHECK IS STATIC AND DELIBERATELY CONSERVATIVE, AND IT IS NOW WIDER
+    THAN WHAT THE SNAPSHOT ACTUALLY MISSES. A name counts as available when the
+    inherited environment holds it, when a carried assignment segment binds it,
+    or when the segment binds it itself; a name an `eval`, a subshell or a
+    function set is not counted even though the snapshot taken after that
+    segment very often carries the value. Reading the answer back out of the
+    snapshot instead would make the verdict depend on which segments happened
+    to run -- a name set inside a segment that was skipped, timed out or was
+    itself withheld is genuinely absent -- so the gate answers the question it
+    can answer everywhere: can the probe PROVE this segment's reads were
+    reproduced. A `None` given where a real verdict was available costs a
+    reader one look; a real verdict given where the state was missing is the
+    defect this whole third answer exists to prevent.
+
+    WHAT THE SNAPSHOT CLOSED, NAMED SO THE NEXT READER DOES NOT RE-DERIVE IT.
+    A function an earlier segment defined is present, so a call to it reports
+    the function's own status instead of 127 -- the same non-zero for a
+    different reason, which is why the fix is asserted on the exit code and not
+    on `discriminates`. A shell option an earlier segment set is present too,
+    and that one flips the verdict outright: `false | true` under a carried
+    `set -o pipefail` exits 1 and discriminates, where without the option it
+    exits 0 and reads as dead weight. That direction -- a real check reported
+    as already passing -- is the dangerous one, and it is the reason this was
+    worth doing.
+
+    TWO WAYS TO NOT RUN A SEGMENT ON PURPOSE, AND BOTH ANSWER `None`.
+    `skip_matching` is a regular expression: a segment it matches is NOT run,
+    stays in the report, and carries `discriminates: None` with
+    `skipped: True`. `timeout` is the per-segment ceiling: a segment that
+    outlives it carries `discriminates: None` with `timedOut: True` and the
+    cap that was applied. Both default to today's behaviour -- nothing
+    skipped, and `_VERIFY_TIMEOUT` -- because a caller passing neither must
+    get exactly the answer it got before either existed.
+
+    THEY ARE THE PARAGRAPH ABOVE RESTATED: a segment that did not run cannot
+    be reported as though it had. Skipping is the deliberate case and timing
+    out the accidental one, and until now they landed on OPPOSITE answers --
+    a skipped segment did not exist at all, and a timed-out one was reported
+    at status 124, which reads as a verdict. Routing both to `None` is what
+    makes the report honest. Dropping a skipped segment instead would be its
+    own lie in the other direction: it would make "the caller declined to
+    measure this" indistinguishable from "no such segment is in the verify".
+    Neither advances the snapshot, for the reason that answers them both:
+    a segment that did not run set nothing for the ones after it.
+
+    WHAT `skip_matching` CANNOT REACH IS THE CONTEXT SEGMENTS, and that is
+    load-bearing rather than incidental. The pattern is tested only against
+    segments that have already survived the `||`, the `cd` and the assignment
+    branches, so a regex broad enough to match a `cd` or an assignment still
+    leaves it RUN and its state carried. A skip that could drop a `cd` would
+    move every later segment into the caller's own tree -- precisely the defect
+    the snapshot exists to prevent -- and would do it at the request of someone
+    who only meant to save time.
+
+    THIS IS A MITIGATION AND NOT A CURE, and saying so is part of the fix.
+    `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` records that
+    probing a verify which ends in a suite costs that suite's whole run time
+    once per story. `skip_matching` gives the caller a way to AVOID that cost;
+    it does not remove it, and nothing here makes probing a segment cheaper.
+    The record was itself written because a tool sold as a cheap warning
+    turned out to cost a second full run, so a fix that overstated itself
+    would repeat the defect. The pivot that would actually close it -- reusing
+    the single pre-run the story executor already performs, so a segment that
+    has already run is never re-run -- changes the contract between the
+    executor and this verb and is deliberately left to its own story.
     """
+    # THE RE-ENTRANCY MARKER GOES IN FIRST, before `assigned` is seeded, and
+    # the order is load-bearing rather than tidy. It is put into THIS process's
+    # own `os.environ` because that is the environment `subprocess.run` hands
+    # every segment below -- one channel, so a nested `verify-probe` inside a
+    # segment sees it and refuses. Seeding `assigned` from `os.environ` after
+    # the write is what makes the marker a name the probe PROVIDES: set it
+    # afterwards and a segment reading `$AIMI_VERIFY_PROBE_ACTIVE` would be
+    # judged missing its shell state, reported `discriminates: None` and never
+    # run at all -- the guard would be invisible to the only assertion that can
+    # see it. Restored on the way out so a second call in the same process (the
+    # tests, and any caller driving this function directly) is not itself read
+    # as a nested one.
+    previous_marker = os.environ.get(VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        return _probe_verify_segments(text, cwd, skip_matching, timeout)
+    finally:
+        if previous_marker is None:
+            os.environ.pop(VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[VERIFY_PROBE_ACTIVE_ENV] = previous_marker
+
+
+def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
+    """`probe_verify`'s loop, split out so the marker above owns one try/finally
+    rather than wrapping a hundred lines of body. See that function's docstring
+    for every rule this implements; nothing is decided here."""
     results = []
-    prelude = []
-    for separator, segment in verify_segments(text):
-        if separator == "||":
-            continue
-        if verify_changes_directory(segment):
-            # `|| exit 1` rather than the bare segment. A `cd` that FAILS in
-            # the prelude would leave everything after it running in the
-            # caller's directory -- this same defect, only quieter, because
-            # nothing in the answer would say the probe had never moved.
-            # Aborting instead reports every assertion after it at the shell's
-            # own failure status, which reads as discriminating: the safe
-            # direction, the one the timeout takes, since a probe must never
-            # invent dead weight.
-            prelude.append(segment + " || exit 1")
-            continue
-        if verify_asserts_nothing(segment):
-            words = verify_words(segment)
-            if words and words[0] != "set":
-                prelude.append(segment)
-            continue
+    # Compiled once for the whole run rather than once per segment. A pattern
+    # that does not compile raises HERE -- inside `probe_verify`'s
+    # try/finally, so the re-entrancy marker is still restored on the way out.
+    # The CLI never reaches this raise: `op_verify_probe` refuses a bad regex
+    # by hand, so a mistyped flag gets a message rather than a traceback.
+    skip_pattern = re.compile(skip_matching) if skip_matching else None
+    # `None` means "the caller named no ceiling", which is not the same as a
+    # caller naming zero -- so the default is resolved by an `is None` test
+    # and never by truthiness.
+    limit = _VERIFY_TIMEOUT if timeout is None else timeout
+    # The state a segment can be PROVEN to have: what a carried assignment
+    # binds, seeded with the environment this process already holds --
+    # `subprocess.run` hands that same environment to every segment, so `$HOME`
+    # and an exported `$TASKS_FILE_PATH` are resolved, not missing. It is not
+    # read back out of the snapshot; probe_verify's docstring says why.
+    assigned = set(os.environ)
+    # THE ONE PATH THIS MODULE NAMES RATHER THAN RECEIVES, and it is written
+    # down as the widening it is. Everything else here is rooted in an argument
+    # bash resolved; this is a scratch file in $TMPDIR, created by this
+    # function and unlinked by it, never under PROJECT_ROOT and never shown to
+    # a caller.
+    #
+    # `mkstemp` RATHER THAN A NAME BUILT FROM A PID OR A STORY ID, for two
+    # reasons that both bite. This function runs nested against itself -- the
+    # verify of the story that wrote it calls `probe_verify()` from inside a
+    # `python3` heredoc, which is a segment of an outer probe -- so two live
+    # invocations share a machine and a $TMPDIR, and a fixed name would have
+    # them writing each other's shell state. And the file holds `declare -p` of
+    # a whole environment: mkstemp's 0600 is what keeps a token that arrived in
+    # $GH_TOKEN out of a world-readable temp file.
+    snapshot_handle, snapshot = tempfile.mkstemp(prefix="aimi-verify-probe-")
+    os.close(snapshot_handle)
+    # Set once a `cd` has failed and never cleared -- see _VERIFY_SNAPSHOT_ABORT.
+    # `carry` only READS it, so the loop below can rebind it without `nonlocal`.
+    aborted = False
+
+    def carry(segment):
+        """Run `segment` against the accumulated state, and accumulate its own.
+
+        Returns `(status, timed_out)`. An empty snapshot means nothing has been
+        carried yet; a snapshot the segment did not overwrite -- because it
+        replaced the EXIT trap, or because the restore itself aborted -- leaves
+        the previous state in place rather than clearing it, since state that
+        was already proven is better than none.
+        """
+        script = _probe_segment_script(
+            segment, snapshot, os.path.getsize(snapshot) > 0, aborted
+        )
         try:
             completed = subprocess.run(
-                ["bash", "-c", "\n".join(prelude + [segment])],
+                ["bash", "-c", script],
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=_VERIFY_TIMEOUT,
+                timeout=limit,
             )
-            status = completed.returncode
+            return completed.returncode, False
         except subprocess.TimeoutExpired:
-            status = 124  # `timeout`'s own status for a command that outlived it
-        except OSError as err:
-            status = 127  # no bash, or no such cwd -- "command not found"
-            del err
-        results.append(
-            {"segment": segment, "exit": status, "discriminates": status != 0}
-        )
+            return None, True
+        except OSError:
+            return 127, False  # no bash, or no such cwd
+
+    try:
+        for separator, segment in verify_segments(text):
+            if separator == "||":
+                continue
+            if verify_changes_directory(segment):
+                status, timed_out = carry(segment)
+                if timed_out or status != 0:
+                    aborted = True
+                continue
+            if verify_asserts_nothing(segment):
+                carry(segment)
+                words = verify_words(segment)
+                if words and words[0] != "set":
+                    assigned |= verify_assigns(segment)
+                continue
+            # THE SKIP IS TESTED HERE AND NOWHERE EARLIER -- after `||`, after
+            # the `cd` and after the assignments -- so the pattern can only
+            # ever reach a segment that would otherwise have been RUN and
+            # REPORTED. See probe_verify's docstring for why a skip able to
+            # reach a context segment would be a defect rather than a feature.
+            #
+            # It is also tested BEFORE the missing-state check below. Both
+            # answer `None`, but for different reasons, and only one of them is
+            # true here: the caller said do not run this. Naming an
+            # `unresolvedState` on a segment nobody was going to run would
+            # report the wrong cause.
+            if skip_pattern is not None and skip_pattern.search(segment):
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "skipped": True,
+                    }
+                )
+                continue
+            # The segment's own bindings count as provided: `for f in a b; do
+            # echo "$f"; done` reads a name it binds itself, one segment, no
+            # carried assignment needed. The shape this whole branch exists for
+            # is the other one -- an `eval "$CMD"`, a subshell or a function
+            # call setting a variable the NEXT segment reads.
+            missing = sorted(verify_reads(segment) - assigned - verify_assigns(segment))
+            if missing:
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "unresolvedState": missing,
+                    }
+                )
+                continue
+            status, timed_out = carry(segment)
+            if timed_out:
+                # NOT a verdict, and no longer 124. A run that was cut off
+                # measured nothing, so it gets the third answer rather than the
+                # least-bad of two wrong ones -- see _VERIFY_TIMEOUT for what
+                # changed and why the old reasoning was right until it wasn't.
+                # `timeoutSeconds` is carried because a bare `timedOut: true`
+                # would send its reader into this file to find out what cap it
+                # missed, and the cap is the caller's to choose.
+                results.append(
+                    {
+                        "segment": segment,
+                        "exit": None,
+                        "discriminates": None,
+                        "timedOut": True,
+                        "timeoutSeconds": limit,
+                    }
+                )
+                continue
+            results.append(
+                {"segment": segment, "exit": status, "discriminates": status != 0}
+            )
+    finally:
+        os.unlink(snapshot)
     return results
 
 
@@ -4819,11 +5786,56 @@ def _match_previous(previous, current):
     for entry in current:
         queue = pending.get(entry["segment"])
         previous_exit = queue.pop(0) if queue else None
-        failed_both = entry["exit"] != 0 and previous_exit not in (None, 0)
+        # `None` on either side is "not measured", never "failed": a segment
+        # this run declined to run for want of its shell state has no status
+        # to compare, and calling it unsatisfiable would put back the
+        # confident verdict the null was introduced to withhold.
+        failed_both = entry["exit"] not in (None, 0) and previous_exit not in (None, 0)
         entry["unsatisfiable"] = failed_both
         if failed_both:
             entry["note"] = _UNSATISFIABLE_NOTE
     return current
+
+
+def verify_text_for_story(path, story_id):
+    """The verify SCRIPT `story_id` carries, or `""` when it carries none.
+
+    Split out of `op_verify_probe` because the two lines that did this inline
+    gave a non-string `verify` and an ABSENT one the same empty string, and
+    the empty string probes to the empty array at exit 0 -- so a `verify`
+    written as a JSON list arrived at the executor's step 1.5 as "no segment
+    fails to discriminate". That is silence reaching a reader as a clean bill
+    of health, which is the one answer a probe must never give.
+
+    THE WALK IS UNCHANGED, deliberately: every document in the stream, every
+    story matching the id inside it, the first match carrying a non-empty
+    string wins, and a match whose verify is an empty string keeps the search
+    going. A tasks file may hold the same id twice -- `stories_with_id`
+    returns a list for exactly that reason -- so which of them answers is a
+    rule, not an accident, and it is preserved here byte for byte.
+
+    WHAT IS NEW is the refusal in the middle of that walk. The first matched
+    story whose `verify` is present and is not a string stops it, before any
+    segment runs and before a caller can read an empty array as a verdict.
+    `jq_index` cannot tell `verify: null` from a missing `verify` key, so JSON
+    null stays on the absent side of that line and still resolves to `""` --
+    unchanged, and the one shape of "present" this cannot see.
+
+    Callable directly, and that matters: `verify-probe` refuses to re-enter
+    itself, so a verify that wants to exercise this decision has to reach it
+    from Python rather than by naming the verb.
+    """
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if verify is None:
+                continue
+            if not isinstance(verify, str):
+                die(_VERIFY_PROBE_NOT_A_STRING % _verify_probe_type_name(verify))
+            if verify.strip():
+                return verify
+    return ""
 
 
 def op_verify_probe(argv):
@@ -4835,28 +5847,128 @@ def op_verify_probe(argv):
     no verify at all. That is the same treatment the executor's step 1.5 gives
     the absent case, and a caller that has to tell "no verify" from "the verb
     broke" would just reimplement the check it delegated.
+
+    A verify that is PRESENT and not a string gets the opposite answer, and
+    the asymmetry is the point rather than an inconsistency:
+    `verify_text_for_story` refuses by name at exit 1, naming the type it
+    found. The empty array means "this story has nothing to check"; a story
+    carrying a `verify` has something to check, and answering it with the
+    shape reserved for the absent case would report silence as a clean bill of
+    health. JSON null stays on the absent side, since nothing downstream of
+    `jq_index` can tell it from a missing key.
+
+    THE RE-ENTRANCY GUARD IS THE FIRST STATEMENT, before the flags are read and
+    long before the tasks file is opened. A refusal that had already parsed
+    arguments and read a document would cost the same work as the recursion it
+    prevents, one level at a time; refusing at entry costs one interpreter
+    start and cannot half-run.
+
+    THE GUARD IS ON THE VERB, NOT ON `probe_verify`, and the asymmetry is
+    deliberate rather than an omission. `probe_verify` is the escape hatch the
+    refusal message points at -- a caller that genuinely wants to decompose a
+    verify from inside another probe can still do it in Python, where no
+    subprocess is spawned and so nothing recurses. What loops is the verb
+    reaching the shell and the shell reaching the verb, so the verb is what
+    refuses.
+
+    `--skip-matching <regex>` IS EXPOSED AND `timeout` IS NOT, deliberately.
+    The skip is the one of the two that a caller can decide from OUTSIDE a
+    run: it names segments already known to be expensive -- a verify ending in
+    a suite -- and the answer it buys is the same on every host. A per-segment
+    ceiling is a budget, and this verb has no way to know the caller's. The
+    parameter is there for a caller driving `probe_verify` in Python, which is
+    the same escape hatch the re-entrancy refusal points at.
+
+    THE VERB WRITES THE ARTIFACT IT ALREADY READS, and closing that asymmetry
+    is what moved the naming rule out of prose. This verb has always read a
+    prior run's array through `--previous-file` and never written one; the
+    executor's skill told an AGENT to redirect stdout to a name blind to which
+    PLAN the story came from. Story ids restart at US-001 in every plan and
+    `.aimi/tasks/` is shared, so a new plan's US-002 overwrote the previous
+    plan's -- a rule living only in prose that no test could reach. The name is
+    derived here instead, from the `--tasks-file` stem, which is dated and
+    slugged and therefore already unique per plan.
+
+    THE WRITE IS UNCONDITIONAL, not behind a flag. A flag would hand the caller
+    back exactly the decision this takes away from it -- whether the artifact
+    exists at all -- and the artifact's only consumer is this same verb on the
+    next run, where a `--previous-file` naming a file the previous run declined
+    to write degrades silently to `None` and leaves the cycle open with nobody
+    told.
+
+    `--previous-file` PRESENT MEANS `-post.json`, and it has to: writing the
+    recomparison to the same path would overwrite the artifact it just read,
+    destroying the comparison in the act of making it. It also puts under a
+    rule the ad-hoc `-post` an executor once invented by hand.
+
+    STDOUT DOES NOT CHANGE SHAPE; the path goes to stderr. stdout has readers:
+    the executor's step 1.5 counts the array's segments and
+    `_read_previous_probe` returns `None` for any JSON that is not a list, so
+    an object `{path, results}` would break the second one in silence. The
+    write goes BETWEEN `_match_previous` and `_emit` so the bytes on disk are
+    the same array stdout gets, `unsatisfiable` already attached --
+    `write_docs_atomically` applies `jq_numbers` and ends with a newline
+    exactly as `_emit` does, so there is no second format to keep in step.
+
+    IT REUSES THE MODULE'S ONE ATOMIC WRITER rather than opening a file of its
+    own: no new `open(`, no second `NamedTemporaryFile(`, no fourth
+    `os.unlink(`. What it does add is four os.path calls -- dirname, basename,
+    splitext and join -- which is why the structural ratchet's counter moved
+    and nothing else in it did.
     """
+    if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
+        die(_VERIFY_PROBE_REENTRY)
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
     cwd = _flag(argv, "--cwd")
     previous_file = _flag(argv, "--previous-file")
+    skip_matching = _flag(argv, "--skip-matching")
     if not path or story_id is None:
         die(
             "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
-            "[--cwd <dir>] [--previous-file <path>]"
+            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>]"
         )
-    text = ""
-    for doc in read_docs(path, "verify-probe"):
-        for story in stories_with_id(doc, story_id):
-            implementation = jq_index(story, "implementation", STORY)
-            verify = jq_index(implementation, "verify", STORY + ".implementation")
-            if isinstance(verify, str) and verify.strip():
-                text = verify
-                break
-        if text:
-            break
-    results = probe_verify(text, cwd or os.getcwd())
+    # The regex is validated HERE rather than left to `re.compile` inside the
+    # probe, because this is the argument-handling half of the verb: a caller
+    # who mistyped a pattern is owed the same one-line refusal every other bad
+    # flag gets. A traceback out of a tool whose whole job is to emit warnings
+    # would read as the tool being broken.
+    if skip_matching is not None:
+        try:
+            re.compile(skip_matching)
+        except re.error as err:
+            die(
+                "Error: verify-probe: --skip-matching is not a valid regular "
+                "expression: %s" % err
+            )
+    text = verify_text_for_story(path, story_id)
+    results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
+    # The artifact lands in the TASKS FILE'S OWN directory, and the argument
+    # for that used to live in the skill prose that composed the name:
+    # `find_aimi_root` stops at the first `.aimi/` it finds walking up from the
+    # cwd, so an artifact written into a fresh one inside the worktree would
+    # relocate PROJECT_ROOT there and make every later CLI call naming an
+    # absolute path outside the worktree refuse. The STEM keys the name to the
+    # plan: story ids restart at US-001 in every plan while `.aimi/tasks/` is
+    # shared, so a new plan's US-002 landed on top of the previous plan's. The
+    # stem is already dated and slugged, so keying by it invents no identifier.
+    stem = os.path.splitext(os.path.basename(path))[0]
+    artifact = os.path.join(
+        os.path.dirname(path) or ".",
+        "verify-probe-%s-%s%s"
+        % (stem, story_id, "-post.json" if previous_file else ".json"),
+    )
+    # A failed write is ONE line and exit 0, with the array still on stdout:
+    # the probe is a diagnostic and this skill's own step says its
+    # unavailability never fails a story, so a write that killed the verb
+    # would invert that.
+    try:
+        write_docs_atomically(artifact, [results])
+    except OSError as err:
+        sys.stderr.write("verify-probe: could not write %s: %s\n" % (artifact, err))
+    else:
+        sys.stderr.write("verify-probe: wrote %s\n" % artifact)
     _emit(results)
     return 0
 

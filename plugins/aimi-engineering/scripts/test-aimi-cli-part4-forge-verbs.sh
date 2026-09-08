@@ -8639,6 +8639,168 @@ test_forge_issue_verbs_registered_in_help_and_dispatcher() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# forge-issue-scan (US-004, verification-integrity) -- the decidable half of
+# plan.md's Issue Reference Confirmation Gate, moved out of prose and under
+# this suite. While SCAN and RESOLVE lived as a bash block in a markdown
+# file, every test here passed no matter what that pipeline did; these four
+# cases are the point of the extraction.
+# ---------------------------------------------------------------------------
+
+# Writes a fake `gh` into $1 that answers `issue view` for exactly two
+# numbers -- 149 open, 3 merged -- and reports every other number the way
+# the real gh does when a number resolves to nothing. The not-found stderr
+# carries the literal the github adapter matches structurally ("Could not
+# resolve to an issue or pull request"); a stub saying anything else would
+# land in the `error` branch, which happens to drop the candidate too and
+# would therefore pass this suite while testing the wrong path. Every
+# invocation is appended to $GH_LOG when that variable is set, so a test can
+# prove WHICH numbers reached the forge -- and that none did.
+write_fake_gh_for_issue_scan() {
+  cat > "$1/gh" << 'FAKE_GH'
+#!/usr/bin/env bash
+if [ -n "${GH_LOG:-}" ]; then
+  echo "$*" >> "$GH_LOG"
+fi
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  case "$3" in
+    149)
+      printf '{"number":149,"title":"Open one","body":"b","state":"OPEN","url":"https://github.com/o/r/issues/149","labels":[],"comments":[]}'
+      exit 0
+      ;;
+    3)
+      printf '{"number":3,"title":"Merged one","body":"b","state":"MERGED","url":"https://github.com/o/r/pull/3","labels":[],"comments":[]}'
+      exit 0
+      ;;
+  esac
+  echo "GraphQL: Could not resolve to an issue or pull request with the number of $3." >&2
+  exit 1
+fi
+echo "unexpected gh invocation: $*" >&2
+exit 99
+FAKE_GH
+  chmod +x "$1/gh"
+}
+
+test_forge_issue_scan_keeps_only_found_and_open() {
+  echo ""
+  echo "=== forge-issue-scan: a mixed description keeps only the found-AND-open candidate, and the filter is what drops the rest ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  write_fake_gh_for_issue_scan "$sandbox"
+
+  local log="$sandbox/gh.log"
+  : > "$log"
+
+  local out exit_code
+  out=$(GH_LOG="$log" PATH="$sandbox" "$CLI" forge-issue-scan \
+    --description 'fixes #149, supersedes 3, drops 4242, on v1.2.3') && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-scan mixed: exit code"
+  assert_eq '[{"number":149,"title":"Open one"}]' "$(printf '%s' "$out" | jq -c 'map({number, title})')" \
+    "forge-issue-scan mixed: only #149 survives -- the merged number, the unresolvable one and v1.2.3's fragments all leave"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r 'length')" "forge-issue-scan mixed: exactly one survivor"
+
+  # The version fragments ARE looked up -- SCAN is deliberately generous and
+  # the found/open filter is what removes them. Five distinct candidates
+  # (1, 2, 3, 149, 4242) reach the forge; `3` appears twice in the
+  # description and is deduplicated to one lookup.
+  assert_eq "1 2 3 149 4242" "$(awk '{print $3}' "$log" | sort -n | tr '\n' ' ' | sed 's/ $//')" \
+    "forge-issue-scan mixed: every deduplicated candidate reached the forge exactly once"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_scan_no_candidate_never_consults_the_forge() {
+  echo ""
+  echo "=== forge-issue-scan: a description naming no number answers [] at exit 0 without touching the forge ==="
+
+  setup_detect_forge_fixture origin https://github.com/o/r.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+  write_fake_gh_for_issue_scan "$sandbox"
+
+  local log="$sandbox/gh.log"
+  : > "$log"
+
+  local out exit_code
+  out=$(GH_LOG="$log" PATH="$sandbox" "$CLI" forge-issue-scan \
+    --description 'no issue reference anywhere in this text') && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-scan no candidate: exit code"
+  assert_eq "[]" "$out" "forge-issue-scan no candidate: prints []"
+  assert_eq "" "$(cat "$log")" "forge-issue-scan no candidate: the forge was never consulted"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
+test_forge_issue_scan_outside_a_git_repository_degrades() {
+  echo ""
+  echo "=== forge-issue-scan: outside a git repository it degrades to [] where forge-issue-view aborts ==="
+
+  local outside sandbox
+  outside=$(mktemp -d)
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'; rm -rf '$outside'" RETURN
+  write_fake_gh_for_issue_scan "$sandbox"
+
+  pushd "$outside" >/dev/null
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-issue-scan --description 'fixes #149') && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-issue-scan outside a repo: exit 0, never an abort"
+  assert_eq "[]" "$out" "forge-issue-scan outside a repo: prints []"
+
+  # The contrast is the whole point: the sibling read verb calls
+  # _require_git_repo and exits 1 from this same directory. Degrading is
+  # this verb's own deliberate choice, not a property of the fixture.
+  local view_code
+  PATH="$sandbox" "$CLI" forge-issue-view --number 149 >/dev/null 2>&1 && view_code=0 || view_code=$?
+  assert_exit_code "1" "$view_code" "forge-issue-scan outside a repo: forge-issue-view aborts here, so the degrade is the verb's choice"
+
+  popd >/dev/null
+}
+
+test_forge_issue_scan_registered_in_help_and_dispatched_before_find_aimi_root() {
+  echo ""
+  echo "=== forge-issue-scan: named in help and dispatched in the pre-find_aimi_root forge block ==="
+
+  assert_contains "forge-issue-scan" "$("$CLI" help 2>&1)" "help: lists forge-issue-scan"
+
+  local outside sandbox
+  outside=$(mktemp -d)
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'; rm -rf '$outside'" RETURN
+  write_fake_gh_for_issue_scan "$sandbox"
+
+  pushd "$outside" >/dev/null
+
+  local scan_err control_err
+  scan_err=$(PATH="$sandbox" "$CLI" forge-issue-scan --description 'fixes #149' 2>&1 >/dev/null)
+  # Control: a verb dispatched AFTER find_aimi_root fails right here, which
+  # is what makes the line above evidence rather than a coincidence -- it
+  # proves this throwaway directory really has no .aimi/ anywhere above it.
+  control_err=$(PATH="$sandbox" "$CLI" status 2>&1 >/dev/null) || true
+
+  popd >/dev/null
+
+  assert_eq "0" "$(printf '%s' "$scan_err" | grep -c '.aimi/ directory not found' || true)" \
+    "dispatch: forge-issue-scan runs with no .aimi/ above it -- it is in the pre-find_aimi_root block"
+  assert_contains ".aimi/ directory not found" "$control_err" \
+    "dispatch control: a post-find_aimi_root verb DOES fail in that same directory"
+}
+
 # ============================================================================
 # Forge Review-Thread Verb Tests (US-007)
 # ============================================================================
@@ -13549,6 +13711,10 @@ main() {
   test_forge_issue_create_credential_via_env_not_argv
   test_forge_issue_create_input_errors
   test_forge_issue_verbs_registered_in_help_and_dispatcher
+  test_forge_issue_scan_keeps_only_found_and_open
+  test_forge_issue_scan_no_candidate_never_consults_the_forge
+  test_forge_issue_scan_outside_a_git_repository_degrades
+  test_forge_issue_scan_registered_in_help_and_dispatched_before_find_aimi_root
 
   # Forge Review-Thread Verb Tests (US-007) -- forge-pr-review-threads /
   # forge-resolve-review-thread, porting get-pr-comments/resolve-pr-thread's

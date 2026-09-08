@@ -1867,14 +1867,23 @@ cmd_get_story_context() {
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 #        --previous-file <path> (optional; a prior run's own output --
 #        discarded with a stderr warning, never fatal, if it fails confinement)
+#        --skip-matching <regex> (optional; a segment the regex matches is not
+#        run and is reported discriminates:null with skipped:true). It is NOT
+#        run through validate_path_in_project and must not be: it is a pattern,
+#        not a path, so the confinement rule has nothing to say about it. What
+#        it does need is to BE a regex, and that is checked in tasks.py where
+#        the regex engine is, rather than reimplemented here in bash.
 cmd_verify_probe() {
-  local tasks_file positional=() previous_file="" remaining=()
+  local tasks_file positional=() previous_file="" skip_matching="" remaining=()
   local args=("$@")
   local i=0 n=${#args[@]}
   while [ "$i" -lt "$n" ]; do
     if [ "${args[$i]}" = "--previous-file" ]; then
       i=$((i + 1))
       previous_file="${args[$i]:-}"
+    elif [ "${args[$i]}" = "--skip-matching" ]; then
+      i=$((i + 1))
+      skip_matching="${args[$i]:-}"
     else
       remaining+=("${args[$i]}")
     fi
@@ -1884,7 +1893,11 @@ cmd_verify_probe() {
   local story_id="${positional[0]:-}"
 
   if [ -z "$story_id" ]; then
-    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>]" >&2
+    echo "Usage: aimi-cli.sh verify-probe <story-id> [--tasks-file <path>] [--previous-file <path>] [--skip-matching <regex>]" >&2
+    echo "  A story's own implementation.verify must NOT name this verb: probing RUNS its" >&2
+    echo "  segments, so a verify that calls it back re-enters the probe and is refused." >&2
+    echo "  Probe from a sibling story's verify or a throwaway fixture, or call" >&2
+    echo "  probe_verify() in tasks.py, which is not guarded." >&2
     exit 1
   fi
 
@@ -1898,6 +1911,11 @@ cmd_verify_probe() {
   fi
   validate_story_exists "$story_id" "$tasks_file"
 
+  local skip_args=()
+  if [ -n "$skip_matching" ]; then
+    skip_args=(--skip-matching "$skip_matching")
+  fi
+
   local previous_args=()
   if [ -n "$previous_file" ]; then
     if path_within_project "$previous_file"; then
@@ -1910,7 +1928,7 @@ cmd_verify_probe() {
   check_python3
   python3 "$(_aimi_tasks_py)" verify-probe \
     --tasks-file "$tasks_file" --story-id "$story_id" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}"
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}"
 }
 
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
@@ -8795,6 +8813,142 @@ cmd_forge_issue_view() {
   _forge_issue_view "$number"
 }
 
+# Public verb behind the Issue Reference Confirmation Gate's decidable half
+# (commands/plan.md): free text in, the issues this plan could close out.
+# SCAN (number-shaped tokens -> candidate integers) and RESOLVE (each
+# candidate through the forge, keeping only what is found AND open) live
+# here; CONFIRM -- the one AskUserQuestion, its four-option cap, and the
+# write of metadata.issues -- stays in plan.md, because only a human can
+# answer it. Extracting the two decidable steps is what puts them under a
+# suite: while they lived as prose, every test passed no matter what the
+# pipeline did.
+#
+# Prints a compact JSON array of {number, title}, ascending by number.
+#
+# DEGRADES, NEVER ABORTS -- unlike cmd_forge_issue_view, which calls
+# _require_git_repo and exits 1 outside a repository. This verb's caller is
+# a gate whose documented contract is that it never aborts the run: a plan
+# that cannot reach a forge is still a plan, and the only thing lost is an
+# optional key. So a cwd that is not a git repository, a description naming
+# no candidate, and a candidate whose envelope is an `error` (offline, no
+# gh/glab/tea, unauthenticated, rate-limited) all leave quietly -- `[]` or a
+# dropped row, at exit 0. Only a caller-side usage error exits non-zero.
+#
+# check_jq is called here rather than relied upon from the dispatcher: this
+# verb dispatches in the pre-find_aimi_root forge block, and the dispatcher's
+# own check_jq runs after it (see the comment beside that block).
+cmd_forge_issue_scan() {
+  check_jq
+
+  local description="" project_dir="" have_description=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --description) shift; description="${1:-}"; have_description=1 ;;
+      --project)     shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-issue-scan: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ "$have_description" -eq 0 ]; then
+    echo "Error: forge-issue-scan: --description <text> is required" >&2
+    exit 1
+  fi
+
+  if [ -n "$project_dir" ]; then
+    if [ ! -d "$project_dir" ]; then
+      echo "Error: Project directory does not exist: $project_dir" >&2
+      exit 1
+    fi
+    cd "$project_dir"
+  fi
+
+  # SCAN. Every #<digits> and every bare <digits> token is a candidate:
+  # deduplicate, drop leading zeros, keep positive integers only (issue
+  # numbers start at 1). Bare digits are in scope deliberately, and the noise
+  # that brings -- `v1.2.3` contributes 1, 2 and 3 -- is CONFIRM's problem,
+  # not the scan's: a description naming its issue without a `#` is far more
+  # common than one naming no issue at all, and a candidate nobody confirms
+  # costs one forge lookup. The `|| candidates=""` is not decoration: under
+  # this script's `set -o pipefail`, a grep that matches nothing fails the
+  # whole pipeline, and a description with no digits in it is the ordinary
+  # case this verb answers `[]` for.
+  local candidates=""
+  candidates=$(printf '%s\n' "$description" \
+    | grep -oE '[0-9]+' \
+    | sed 's/^0*//' \
+    | grep -E '^[1-9][0-9]*$' \
+    | sort -un) || candidates=""
+
+  if [ -z "$candidates" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # The forge is consulted only past this line, so a description that named
+  # no number never reaches one -- and only past this line does a repository
+  # matter, which is why the check sits here and not at the top.
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    printf '[]\n'
+    return 0
+  fi
+
+  # Feed the loop from a heredoc, never `for n in $candidates`. These four
+  # lines are ported verbatim from the block that used to live in plan.md,
+  # where a command block runs under whatever shell the host hands it and
+  # zsh does not word-split an unquoted expansion the way bash does: the
+  # `for` form iterates ONCE over the whole newline-joined list, asks the
+  # forge about a number that does not exist, and comes back empty at exit
+  # 0 -- the gate reporting "no issues named" for a description that named
+  # several, with nothing anywhere saying so. A heredoc splits on newlines
+  # identically in both shells and keeps the loop in the current shell.
+  local rows="" issue_num issue_json row
+  while IFS= read -r issue_num; do
+    [ -n "$issue_num" ] || continue
+
+    # _forge_issue_view IN PROCESS, never a nested `aimi-cli.sh
+    # forge-issue-view` subprocess -- the precedent forge-pr-create already
+    # set for reusing a read verb. The number interpolated toward the forge
+    # has already passed ^[1-9][0-9]*$ above, which is cmd_forge_issue_view's
+    # own numeric guard by another route.
+    issue_json=$(_forge_issue_view "$issue_num") || issue_json=""
+
+    # Keep found AND open, and nothing else. Measured on this repository,
+    # #149 (an open issue) and #3 (a merged pull request) both resolve status
+    # "found", so existence alone discriminates nothing between them: state
+    # and title are what carry the decision. Branch on a CAPTURED document's .status
+    # and .data.state -- never pipe the read verb into a predicate whose exit
+    # status you then read, because forge-contract.md's Degradation Contract
+    # makes that status meaningless: a missing gh, an unauthenticated one and
+    # a rate-limited host all return exit 0 carrying a status "error"
+    # envelope, so "the issue is open" and "the forge never answered" would
+    # become indistinguishable. An `error` candidate leaves silently, exactly
+    # as the prose this replaced specified; a `not_found` one was a version
+    # fragment or a line number and there was never anything there; anything
+    # but `open` -- `closed`, or on a number naming a pull request, `merged`
+    # -- is work a plan does not close.
+    row=$(printf '%s' "$issue_json" \
+      | jq -c 'select(.status == "found" and .data.state == "open")
+               | {number: .data.number, title: .data.title}') || row=""
+
+    if [ -n "$row" ]; then
+      rows="${rows}${row}
+"
+    fi
+  done <<CANDIDATES
+$candidates
+CANDIDATES
+
+  # jq -s over zero rows is `[]`, which is the same answer a run where every
+  # candidate was dropped must give -- indistinguishable, deliberately, from
+  # a description that named no numbers at all.
+  printf '%s' "$rows" | jq -s -c 'sort_by(.number)'
+}
+
 # Prints the MANDATORY manual-fallback instruction (forge-contract.md's
 # Degradation Contract, mandatory mode) for every forge-issue-create
 # failure path -- missing gh, unauthenticated session, or the create call
@@ -11514,13 +11668,22 @@ cmd_setup_branch() {
 # The emitted "base" prefers the origin/<name> remote-tracking ref over the
 # bare local name, so a container is never cut from a stale local ref after a
 # successful fetch -- mirroring how cmd_setup_branch already checks out
-# origin/$default_branch for created-from-default. Two reasons opt out:
+# origin/$default_branch for created-from-default. Three cases opt out:
 #
 #   stacked-on-current -- the candidate is the caller's own checkout, and
 #     inheriting its local tip is what stacking means. Preferring origin here
 #     drops every commit made since the last push.
 #   detached-head      -- base is the raw HEAD sha; there is no branch name to
 #     prefer a remote ref for.
+#   target-exists whose local ref strictly DESCENDS from origin/<name> -- the
+#     same unpublished-work state as stacking, reached through a different
+#     door. See the origin-preference block below for why this one is scoped
+#     to target-exists and not widened to explicit-base.
+#
+# Every answer also carries "baseDivergence", classifying the emitted
+# candidate's local ref against origin/<candidate> as one of none | in-sync |
+# local-ahead | local-behind | diverged (see _branch_divergence). It is
+# emitted for every reason, including the ones whose base is unchanged.
 #
 # promptNeeded is true only when reason resolves to stacked-on-current --
 # the same four-condition gate execute.md Step 1.6 computes inline today
@@ -11541,6 +11704,64 @@ _local_has_branch() {
 _origin_has_branch() {
   git ls-remote --heads origin "refs/heads/$1" 2>/dev/null \
     | grep -q "[[:space:]]refs/heads/${1}$"
+}
+
+# Classify a branch's LOCAL ref against its origin remote-tracking ref, for the
+# one question a caller about to build on that branch actually has: is what is
+# on disk ahead of, behind, level with, or forked from what origin holds?
+#
+# Prints exactly one of: none | in-sync | local-ahead | local-behind | diverged.
+#
+# `none` is the honest answer whenever the comparison cannot be made at all --
+# an empty name (detached HEAD has no candidate to classify), no local ref, no
+# origin ref, no origin remote. Degrading rather than failing is deliberate:
+# every git call here is silenced and given a fallback, so the `set -e` this
+# script runs under can never abort a verb over a classification that is
+# advisory by construction.
+#
+# $2 is an optional pre-computed _origin_has_branch answer ("true"/"false").
+# _resolve_branch_base already runs that live `git ls-remote` for its own
+# origin preference; passing the answer in is what keeps this classification
+# from costing a second round-trip per invocation. Omitted, the probe runs
+# here, so the helper still answers on its own.
+#
+# Note the deliberate asymmetry with _origin_has_branch: that predicate asks
+# the REMOTE, while this comparison reads the local refs/remotes/origin/<name>
+# mirror. The two disagree exactly when a branch exists on origin but has
+# never been fetched here -- and `none` is the safe answer for that, not a
+# failure: nothing local can be compared against a ref that is not on disk.
+_branch_divergence() {
+  local name="$1" origin_present="${2:-}"
+  local local_sha remote_sha
+
+  [ -n "$name" ] || { printf 'none\n'; return 0; }
+  _local_has_branch "$name" || { printf 'none\n'; return 0; }
+
+  if [ -z "$origin_present" ]; then
+    if _origin_has_branch "$name"; then
+      origin_present=true
+    else
+      origin_present=false
+    fi
+  fi
+  [ "$origin_present" = "true" ] || { printf 'none\n'; return 0; }
+
+  local_sha=$(git rev-parse --verify --quiet "refs/heads/$name" 2>/dev/null || echo "")
+  remote_sha=$(git rev-parse --verify --quiet "refs/remotes/origin/$name" 2>/dev/null || echo "")
+  if [ -z "$local_sha" ] || [ -z "$remote_sha" ]; then
+    printf 'none\n'
+    return 0
+  fi
+
+  if [ "$local_sha" = "$remote_sha" ]; then
+    printf 'in-sync\n'
+  elif git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    printf 'local-ahead\n'
+  elif git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
+    printf 'local-behind\n'
+  else
+    printf 'diverged\n'
+  fi
 }
 
 # Is <branch> already merged into origin/<default>?
@@ -11581,6 +11802,19 @@ _resolve_branch_base() {
     prompt_needed=true
   fi
 
+  # The candidate's origin presence and its local-vs-origin divergence, both
+  # computed ONCE here and read by everything below. _origin_has_branch is a
+  # live `git ls-remote`; this function already runs one for its own
+  # target-exists check, and handing the answer to _branch_divergence rather
+  # than letting it probe again is what keeps the classification free.
+  local candidate_on_origin=false divergence="none"
+  if [ -n "$candidate" ]; then
+    if _origin_has_branch "$candidate"; then
+      candidate_on_origin=true
+    fi
+    divergence=$(_branch_divergence "$candidate" "$candidate_on_origin")
+  fi
+
   # Origin preference, scoped by reason: prefer the origin/<name>
   # remote-tracking ref for a reference point the caller did not author, so a
   # container is never cut from a stale local ref after a successful fetch.
@@ -11591,16 +11825,42 @@ _resolve_branch_base() {
   # the last push, which is the common state of an autonomous run. That would
   # also put this path back in disagreement with cmd_setup_branch, whose
   # stacked-on-current arm checks out from local HEAD.
+  #
+  # target-exists opts out too, but only when the local ref strictly DESCENDS
+  # from origin/<name>. That is the same state the paragraph above describes,
+  # reached through a different door: a local ref containing everything origin
+  # has and more cannot be the "stale local ref after a successful fetch" the
+  # preference exists to avoid, so preferring origin there drops exactly the
+  # commits stacking was written to keep. A local-behind or diverged ref is
+  # genuinely stale or forked and keeps resolving to origin/<name>.
+  #
+  # Scoped to target-exists on purpose, and NOT widened to explicit-base:
+  # execute.md's Step 1.6 Option A states in prose that "an explicit base is a
+  # reference point the resolver prefers origin/ for", and tells the caller to
+  # leave BASE_BRANCH unset precisely so this resolver reaches
+  # stacked-on-current instead. Widening the opt-out would make that sentence
+  # false. default-branch is left alone for the same reason plus the absence
+  # of any measured failure there.
   if [ -n "$candidate" ]; then
-    if [ "$reason" != "stacked-on-current" ] && _origin_has_branch "$candidate"; then
+    if [ "$reason" = "stacked-on-current" ]; then
+      base="$candidate"
+    elif [ "$reason" = "target-exists" ] && [ "$divergence" = "local-ahead" ]; then
+      base="$candidate"
+    elif [ "$candidate_on_origin" = "true" ]; then
       base="origin/$candidate"
     else
       base="$candidate"
     fi
   fi
 
-  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s}\n' \
-    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed"
+  # baseDivergence is emitted for EVERY reason, including the ones whose base
+  # this change leaves untouched: a caller can then always see what it is
+  # about to build on. It is additive by design -- no `reason` value is added
+  # or renamed, so the verbatim five-value list in
+  # commands/references/container-execution.md stays true and every existing
+  # jq reader of .base/.reason/.promptNeeded is unaffected.
+  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s,"baseDivergence":"%s"}\n' \
+    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed" "$divergence"
 }
 
 # CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
@@ -15334,8 +15594,14 @@ COMMANDS:
                               designContext. skills[] contains {name, path, content} per
                               declared skill. designContext contains {decisions, bundleGuidance}.
     verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
+                 [--skip-matching <regex>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
-                              report which ones already pass. Output: a JSON array of
+                              report which ones already pass. Probing RUNS them, so recursion
+                              is the hazard: a story's own implementation.verify must NOT
+                              name this verb -- it re-enters the probe and is refused. Probe
+                              from a sibling story's verify or a throwaway fixture, or call
+                              probe_verify() in tasks.py, which is not guarded.
+                              Output: a JSON array of
                               {segment, exit, discriminates, unsatisfiable}; discriminates is
                               false for an assertion that passed, i.e. one that does not tell
                               the before-state from the after-state. --previous-file names a
@@ -15346,6 +15612,14 @@ COMMANDS:
                               run in the CALLER's directory, in order, carrying the verify's
                               own variable assignments; `set` lines, comments and assignments
                               are not reported. An absent or empty verify is [] at exit 0.
+                              --skip-matching names segments NOT to run: a match stays in the
+                              report carrying discriminates:null and skipped:true, never
+                              dropped, so a skip is never mistaken for a segment that does not
+                              exist. Reach for it when a verify ends in a suite whose cost you
+                              already know -- it AVOIDS that cost rather than removing it, and
+                              every skipped segment is one this probe can no longer warn about.
+                              A segment that outlives the per-segment ceiling answers the same
+                              null: a run that was cut off measured nothing.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
@@ -15545,6 +15819,26 @@ COMMANDS:
                               unauthenticated forge CLI yields status "error"
                               with no stderr output. github, gitlab and gitea
                               each have an adapter.
+    forge-issue-scan --description <text> [--project <path>]
+                              Reads free text, prints the issues it names that
+                              are found AND open, as a compact JSON array of
+                              {number, title} ascending by number. Backs the
+                              decidable half of plan.md's Issue Reference
+                              Confirmation Gate (SCAN + RESOLVE); CONFIRM stays
+                              there, because only a human answers it. Every
+                              #<digits> and every bare <digits> token is a
+                              candidate, deduplicated with leading zeros
+                              dropped, so `v1.2.3` contributes 1, 2 and 3 and
+                              the filter is what removes them. DEGRADES rather
+                              than aborts, since its caller is a gate that
+                              never aborts a run: `[]` at exit 0 when the
+                              description names no candidate (the forge is not
+                              consulted at all), when the cwd is not a git
+                              repository, and when every candidate is dropped.
+                              A candidate whose envelope is status "error"
+                              leaves silently. Resolution goes through
+                              forge-issue-view's own adapter, so github, gitlab
+                              and gitea all work.
     forge-issue-create --title <t> --body <b> [--project <path>]
                               Write verb -- shells gh issue create (no --json
                               flag exists on it; the URL/number are captured
@@ -16332,6 +16626,7 @@ main() {
     forge-pr-edit) shift; cmd_forge_pr_edit "$@"; return ;;
     forge-pr-merge) shift; cmd_forge_pr_merge "$@"; return ;;
     forge-issue-view) shift; cmd_forge_issue_view "$@"; return ;;
+    forge-issue-scan) shift; cmd_forge_issue_scan "$@"; return ;;
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
     forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
