@@ -4955,7 +4955,7 @@ def test_a_missing_branchname_is_still_the_word_null():
 # branch is never run.
 
 
-def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=()):
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=False):
     """A one-story project whose story carries `verify`, probed through the CLI.
 
     `files` are created relative to the project root before the run, and `cwd`
@@ -4968,6 +4968,11 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=()):
     are appended to the command line verbatim, for a flag with no fixture of
     its own -- `--skip-matching` is a pattern rather than a path or a file, so
     there is nothing for this helper to create on its behalf.
+
+    `raw` hands back the finished process instead of its parsed stdout, for
+    the one case that has no parsed stdout: a `verify` this verb REFUSES.
+    Every other caller wants the zero-exit assertion below, which is why it
+    stays the default rather than becoming each test's to remember.
     """
     base = os.path.realpath(str(tmp_path))
     root = os.path.join(base, "proj")
@@ -5011,6 +5016,8 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=()):
         text=True,
         timeout=120,
     )
+    if raw:
+        return root, proc
     assert proc.returncode == 0, proc.stderr
     return root, json.loads(proc.stdout)
 
@@ -5023,6 +5030,171 @@ def test_an_absent_or_empty_verify_probes_to_an_empty_array(tmp_path):
     for verify in (None, "", "   \n\n  "):
         _, probed = _probe(tmp_path, verify)
         assert probed == [], repr(verify)
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: a verify that is not a string at all (US-006, plan #149)
+# ---------------------------------------------------------------------------
+#
+# The defect: `op_verify_probe` resolved its script with `isinstance(verify,
+# str) and verify.strip()`, so EVERY non-string shape fell through to the same
+# `""` an absent verify produces -- and `""` probes to `[]` at exit 0. A story
+# whose `implementation.verify` was written as a JSON list therefore reached
+# the story executor's step 1.5 as "no segment fails to discriminate", which
+# is silence arriving as a clean bill of health.
+#
+# A LATENT class rather than an incident: the 2026-09-07 census over every
+# tasks document in `.aimi/` found 292 non-empty verifies and exactly two
+# lists, both in archived files. What makes the class worth closing is that
+# one of those two is a list of COMMANDS and the other a list of checks in
+# PROSE, so joining the lines -- the obvious repair -- would hand English
+# sentences to bash and report the resulting failures as `discriminates: true`.
+# The probe cannot tell the two lists apart, so it refuses instead.
+
+_NO_IMPLEMENTATION = object()
+
+
+def _verify_story(verify, story_id="US-001"):
+    """One schema-v3.3 story carrying `verify`, or none at all.
+
+    `_NO_IMPLEMENTATION` omits the `implementation` object entirely; every
+    other value -- `None` included, which serializes to JSON `null` -- is
+    written under it verbatim. The two are worth telling apart here because
+    `jq_index` cannot: a null `verify` and a missing one are the same value by
+    the time the decision sees them, and that is precisely why null is not
+    refused.
+    """
+    story = {
+        "id": story_id,
+        "title": "s",
+        "description": "d",
+        "acceptanceCriteria": ["x"],
+        "priority": 1,
+        "status": "pending",
+        "dependsOn": [],
+    }
+    if verify is not _NO_IMPLEMENTATION:
+        story["implementation"] = {"verify": verify}
+    return story
+
+
+def _verify_document(tmp_path, name, stories):
+    """A tasks document holding `stories`, for reading the DECISION directly.
+
+    Not `_probe`: these cases call `verify_text_for_story` in-process, which
+    is the only way to reach it at all when the verify names `verify-probe`
+    and the verb refuses to re-enter itself -- and one of them exits rather
+    than answering, which `_probe` cannot express.
+    """
+    path = os.path.join(str(tmp_path), name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "schemaVersion": "3.3",
+                "metadata": {"title": "t", "branchName": "b"},
+                "userStories": stories,
+            },
+            handle,
+        )
+    return path
+
+
+def test_a_verify_that_is_not_a_string_is_refused_by_name(tmp_path, capsys):
+    """AC: a present `verify` the probe cannot read as a script refuses at
+    exit 1, naming the type it found and the way out.
+
+    All four refusable shapes, each naming ITSELF: a message that said only
+    "not a string" would send its reader hunting for a typo inside a script
+    that is not there. The four are exhaustive -- string is the shape the
+    field is for, and null is indistinguishable from absent.
+    """
+    for name, verify, named in (
+        ("lista.json", ["true", "false"], "a list"),
+        ("objeto.json", {"cmd": "true"}, "an object"),
+        ("numero.json", 3, "a number"),
+        ("booleano.json", True, "a boolean"),
+    ):
+        path = _verify_document(tmp_path, name, [_verify_story(verify)])
+        with pytest.raises(SystemExit) as raised:
+            T.verify_text_for_story(path, "US-001")
+        assert raised.value.code == 1, name
+        err = capsys.readouterr().err
+        assert "implementation.verify is " + named in err, name
+        assert "not a string" in err, name
+        # Naming the problem without naming the exits is how a refusal becomes
+        # something to work around instead of something to fix.
+        assert "a single string" in err, name
+        assert "remove the field" in err, name
+
+
+def test_the_refusal_reaches_the_command_line_instead_of_an_empty_array(tmp_path):
+    """AC, and the whole point of the story: what step 1.5 actually SEES.
+
+    Driven through the CLI rather than in-process, because in-process is not
+    where the damage was. The verb printed `[]` and exited 0 over a document
+    it could not read, and `[]` is the same answer a story with no verify
+    gets -- so the executor logged a clean pre-run for a check that never
+    existed. A refusal that died inside Python but let bash exit 0 would
+    reproduce that exactly.
+    """
+    _, proc = _probe(tmp_path, ["true", "false"], raw=True)
+    assert proc.returncode == 1, proc.stdout
+    assert proc.stdout.strip() == "", "a refusal that also printed an answer reads as one"
+    assert "implementation.verify is a list" in proc.stderr
+
+
+def test_a_string_verify_still_resolves_byte_for_byte(tmp_path):
+    """GUARDRAIL, passing before and after: the shape 292 of 294 verifies in
+    the corpus actually have is untouched.
+
+    Byte for byte and not merely equal-after-stripping: the resolved text is
+    handed to the decomposition, where a lost trailing newline would move a
+    segment boundary.
+    """
+    text = "set -euo pipefail\ntest -f a\n\n  grep -q x b\n"
+    path = _verify_document(tmp_path, "str.json", [_verify_story(text)])
+    assert T.verify_text_for_story(path, "US-001") == text
+
+
+def test_every_shape_of_no_verify_still_resolves_to_the_empty_string(tmp_path):
+    """GUARDRAIL, passing before and after: the four ways a story says it has
+    nothing to check all keep answering `""`, which probes to `[]` at exit 0.
+
+    JSON null is in this list rather than among the refusals on purpose --
+    `jq_index` returns `None` for a missing key and for a `null` value alike,
+    so refusing it would mean refusing the absent case too.
+    """
+    for name, verify in (
+        ("sem-implementation.json", _NO_IMPLEMENTATION),
+        ("nulo.json", None),
+        ("vazio.json", ""),
+        ("branco.json", "   \n\n  "),
+    ):
+        path = _verify_document(tmp_path, name, [_verify_story(verify)])
+        assert T.verify_text_for_story(path, "US-001") == "", name
+    assert T.probe_verify("", str(tmp_path)) == []
+
+
+def test_the_first_matching_story_with_a_non_empty_string_still_wins(tmp_path):
+    """GUARDRAIL, passing before and after: a tasks file may carry the same id
+    twice, and which duplicate answers is a rule rather than an accident.
+
+    `stories_with_id` returns a LIST for that reason. The empty string in the
+    middle has to keep the search going -- it is a story saying it has nothing
+    to check, not a story claiming the answer -- while the refusal is the one
+    thing that stops the walk where it stands.
+    """
+    path = _verify_document(
+        tmp_path,
+        "duplicadas.json",
+        [
+            _verify_story(_NO_IMPLEMENTATION),
+            _verify_story(""),
+            _verify_story("echo primeira\n"),
+            _verify_story("echo segunda\n"),
+        ],
+    )
+    assert T.verify_text_for_story(path, "US-001") == "echo primeira\n"
 
 
 def test_three_segments_where_only_the_first_already_passes(tmp_path):
