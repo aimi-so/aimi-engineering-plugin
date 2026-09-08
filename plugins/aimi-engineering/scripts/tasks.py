@@ -1825,6 +1825,72 @@ def validate_tasks_metadata(doc):
     )
 
 
+def finalize_shape_errors(finalize):
+    """`metadata.finalize`'s shape, for R18. Returns a list of suffixes.
+
+    ABSENT IS VALID AND IS THE WHOLE CONTRACT OF THE KEY. `metadata.finalize`
+    declares the round's single end-of-round step -- the release commit no story
+    can structurally make -- and every plan written before the key existed must
+    keep validating byte for byte, which is why the caller skips this helper
+    entirely on a `None`. It follows the omitted-when-empty convention
+    `baseRef`, `pluginVersion` and `issues` already have in commands/plan.md:
+    the key is written when there is a step to declare and left out otherwise,
+    never `null` and never `{}`.
+
+    `null` AND ABSENT ARE THE SAME VALUE HERE, and that is jq's doing rather
+    than a softening of the rule. `.metadata.finalize` answers `null` for a key
+    that is missing and for a key that is explicitly null, so nothing on this
+    side of the read can tell them apart -- exactly the position R12 is in with
+    `metadata.execution`'s `// ""`, where an absent enum and an empty one both
+    reach the rule as the empty string and both pass. An explicit `null` is
+    therefore ACCEPTED. plan.md's checklist is what tells the writer not to
+    emit one; a validator that refused it would refuse every absent key too.
+
+    Well-formed means an object carrying all three of `intent` (string),
+    `files` (non-empty array of strings) and `commitSubject` (string). `files`
+    is the half other rules read -- R19 warns when a story claims one of those
+    paths -- so an empty array is refused rather than accepted as "declares
+    nothing": a step that names no file has nothing to collide with and nothing
+    to run against, and writing the key at all is then the mistake.
+    """
+    if jq_type(finalize) != "object":
+        return [" is not an object (expected {intent, files[], commitSubject})"]
+
+    problems = []
+    intent = jq_index(finalize, "intent", ".metadata.finalize")
+    if not isinstance(intent, str):
+        problems.append(".intent is missing or not a string")
+
+    files = jq_index(finalize, "files", ".metadata.finalize")
+    if not isinstance(files, list) or not files:
+        problems.append(".files is missing or not a non-empty array")
+    elif not all(isinstance(entry, str) for entry in files):
+        problems.append(".files holds an entry that is not a string")
+
+    subject = jq_index(finalize, "commitSubject", ".metadata.finalize")
+    if not isinstance(subject, str):
+        problems.append(".commitSubject is missing or not a string")
+
+    return problems
+
+
+def finalize_claimed_files(finalize):
+    """The paths R19 compares a story's `implementation.files` against.
+
+    Read separately from the shape check above rather than out of it, so a
+    finalize that R18 has already refused still contributes whatever paths it
+    does carry: a document with two defects should report both, not hide the
+    collision behind the shape error. A `files` that is not a list of strings
+    yields nothing and R19 then warns about nothing at all.
+    """
+    if jq_type(finalize) != "object":
+        return []
+    files = jq_index(finalize, "files", ".metadata.finalize")
+    if not isinstance(files, list):
+        return []
+    return [entry for entry in files if isinstance(entry, str)]
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -1924,10 +1990,15 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 AND R17 ARE THE RULES HERE BASH NEVER RAN. Both are appended below R15
-    and reach the `warn` channel only, so nothing above them moves; each one's
-    own comment carries why it warns instead of erroring, why it sits where it
-    sits, and why it is defensive where every rule above it is faithful.
+    R16 THROUGH R19 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
+    the last one already present, which is the only position from which a new
+    rule can add lines after everything the golden corpus recorded without
+    reordering either channel; each one's own comment carries why it warns or
+    errors, why it sits where it sits, and why it is defensive where every rule
+    above it is faithful. R16, R17 and R19 reach the `warn` channel only. R18
+    is the one of the four that reaches `errors`, and its own comment says why
+    a malformed `metadata.finalize` is a different kind of wrong from a stale
+    line anchor or a directory that is not there yet.
     """
     errors = []
 
@@ -2096,6 +2167,73 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ", ".join(unopenable)
                     + " — the file may be new, the directory it lands in may not"
                 )
+
+    # R18 -- metadata.finalize's shape. An ERROR where R16 and R17 warn, and
+    # the difference is which way the document is wrong. A line anchor and a
+    # missing directory are questions to the author about a plan that is still
+    # legible; a finalize carrying an `intent` and nothing else is a key whose
+    # own consumer cannot read it, so accepting it would hand the end-of-round
+    # step a declaration it has to guess at.
+    #
+    # ABSENT DOES NOTHING AT ALL, which is the guard-rail this rule is written
+    # around rather than a convenience: every tasks.json written before the key
+    # existed must validate byte for byte, both channels, and the caller's
+    # `is None` skip is what guarantees it. finalize_shape_errors' own docstring
+    # carries why `null` and absent are one value here.
+    #
+    # It sits BELOW R17 for R17's own reason, stated in its comment: a rule
+    # appended below the last one can only add lines after everything already
+    # recorded, and can never reorder either channel. R18 reaches `errors`,
+    # which is the channel that had not been touched below R15 -- the append
+    # position is what keeps that safe too, since `errors` is rendered as one
+    # array in the order it was built.
+    finalize = None
+    if docs:
+        finalize = jq_index(jq_index(docs[0], "metadata", ""), "finalize", ".metadata")
+    if finalize is not None:
+        for problem in finalize_shape_errors(finalize):
+            errors.append(tasks_file + ": metadata.finalize" + problem)
+
+    # R19 -- a story claiming a path metadata.finalize declares. A WARNING and
+    # never an error, and that is the rule rather than a soft start: a file can
+    # legitimately appear in both places -- a story that adds a CHANGELOG entry
+    # beside a finalize step that bumps the version writes the same file for
+    # two different reasons -- so the collision is information, not a verdict.
+    # Whoever reads the line decides which of the two should own the write.
+    #
+    # Consequently `errors` does not grow here, the exit status does not move,
+    # and the stdout verdict of a colliding document is byte-identical to the
+    # same document without the collision. Only stderr gains a line.
+    #
+    # The `jq_type(implementation) != "object"` guard is R17's, reused verbatim
+    # rather than rewritten: it is the removed cd-prefix rule's regression
+    # written down, and a second spelling of it would be a second thing to keep
+    # in step. One warn call per story, listing every path that story claims,
+    # so a story naming three declared files is one line and not three.
+    claimed_by_finalize = finalize_claimed_files(finalize) if finalize is not None else []
+    if claimed_by_finalize:
+        for doc in docs:
+            for story in _stories(doc):
+                implementation = jq_index(story, "implementation", ".userStories[]")
+                if jq_type(implementation) != "object":
+                    continue
+                files = jq_index(implementation, "files", ".userStories[].implementation")
+                if not isinstance(files, list):
+                    continue
+                collisions = []
+                for entry in files:
+                    if not isinstance(entry, str):
+                        continue
+                    if entry in claimed_by_finalize and entry not in collisions:
+                        collisions.append(entry)
+                if collisions:
+                    warn(
+                        tasks_file + ": "
+                        + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                        + ": implementation.files claims a path metadata.finalize declares: "
+                        + ", ".join(collisions)
+                        + " — the end-of-round step writes it too"
+                    )
 
     return errors
 

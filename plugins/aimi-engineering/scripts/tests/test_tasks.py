@@ -1943,7 +1943,7 @@ def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
 _ABSENT = object()
 
 
-def _replay_implementation(implementation, tmp_path, files=None):
+def _replay_implementation(implementation, tmp_path, files=None, finalize=_ABSENT):
     """One story through the real CLI, carrying `implementation` as given.
 
     R17's own replay, built here for the reason _replay_line_anchor is built
@@ -1961,6 +1961,15 @@ def _replay_implementation(implementation, tmp_path, files=None):
     from it. `files` seeds real files under PROJECT_ROOT, which is how a case
     says "this directory exists" -- the rule asks about the PARENT, so a
     fixture only ever has to create a sibling of the path under test.
+
+    `finalize` reuses the same `_ABSENT` sentinel for R18/R19, and for a sharper
+    reason than R17's: `None` is the value that the absent-key case is
+    INDISTINGUISHABLE from once jq has read it, so a helper that could not say
+    "no key at all" apart from "the key is null" could not build the guard-rail
+    fixture at all. Left absent, the metadata object is byte-identical to the
+    one every R16/R17 case above already sends, which is what makes those cases
+    evidence that the two new rules changed nothing for a document without the
+    key.
     """
     story = {
         "id": "US-001",
@@ -1974,9 +1983,12 @@ def _replay_implementation(implementation, tmp_path, files=None):
     }
     if implementation is not _ABSENT:
         story["implementation"] = implementation
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if finalize is not _ABSENT:
+        metadata["finalize"] = finalize
     document = {
         "schemaVersion": "3.3",
-        "metadata": {"branchName": "ref/corpus", "maxConcurrency": 1},
+        "metadata": metadata,
         "userStories": [story],
     }
     case = {
@@ -2062,6 +2074,199 @@ def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(t
         "nao/existe/de/jeito/nenhum/x.py"
         " — the file may be new, the directory it lands in may not\n"
     )
+
+
+# The well-formed `metadata.finalize` every R18/R19 case below starts from. One
+# object, spelled once, so a case that changes something says which thing it
+# changed by the key it overrides rather than by a reader diffing two literals.
+_FINALIZE = {
+    "intent": "one release commit per round",
+    "files": ["CHANGELOG.md"],
+    "commitSubject": "chore(release): bump",
+}
+
+# Every fixture path in this block is a CHILD OF THE PROJECT ROOT, and that is
+# a requirement rather than a convenience: R17 warns about a path whose parent
+# directory does not exist, and it runs immediately above R19 on the same
+# document. A fixture naming `dist/CHANGELOG.md` would put an R17 line on the
+# same stderr the R19 assertions read, and the one-line assertions below would
+# then be measuring R17's output as well as R19's.
+_STORY_FILES = ["CHANGELOG.md"]
+
+
+def test_a_well_formed_metadata_finalize_validates_and_warns_nothing(tmp_path):
+    """R18's accepting half: the key is declarable, and declaring it is silent.
+
+    Both channels are asserted, not just the verdict. `stdout` byte-identical to
+    the no-key answer is what says R18 added no error, and an EMPTY stderr is
+    what says R19 did not warn about a story whose own file (`src/novo.py`) is
+    not one `finalize` claims -- a rule that warned on every document carrying
+    the key would pass a verdict-only assertion and be useless.
+    """
+    actual = _replay_implementation(
+        {"files": ["src/novo.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        {"src/existente.py": "# um vizinho, so para criar src/\n"},
+        finalize=_FINALIZE,
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_a_malformed_metadata_finalize_lands_in_errors_and_exits_one(tmp_path):
+    """R18's refusing half -- the one place in R16..R19 that reaches `errors`.
+
+    `{"intent": "x"}` is the shape that motivated the rule: a key whose consumer
+    cannot read it, because the two fields the end-of-round step actually needs
+    are the two that are missing. Both are named, in the order the helper checks
+    them, so the message tells the author what to add rather than that something
+    is wrong.
+    """
+    actual = _replay_implementation(
+        {"files": _STORY_FILES, "approach": "a", "verify": "true"},
+        tmp_path,
+        finalize={"intent": "x"},
+    )
+    assert actual["exit"] == 1
+    assert actual["stdout"] == (
+        '{"valid": false, "errors": [\n'
+        '  "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: '
+        'metadata.finalize.files is missing or not a non-empty array",\n'
+        '  "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: '
+        'metadata.finalize.commitSubject is missing or not a string"\n'
+        "]}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "label,finalize,expected",
+    [
+        (
+            "nao-e-objeto",
+            "chore(release): bump",
+            " is not an object (expected {intent, files[], commitSubject})",
+        ),
+        ("objeto-vazio", {}, ".intent is missing or not a string"),
+        (
+            "files-vazio",
+            dict(_FINALIZE, files=[]),
+            ".files is missing or not a non-empty array",
+        ),
+        (
+            "files-nao-string",
+            dict(_FINALIZE, files=["CHANGELOG.md", 7]),
+            ".files holds an entry that is not a string",
+        ),
+        ("subject-nao-string", dict(_FINALIZE, commitSubject=None), ".commitSubject is missing or not a string"),
+    ],
+    ids=["nao-e-objeto", "objeto-vazio", "files-vazio", "files-nao-string", "subject-nao-string"],
+)
+def test_each_malformed_metadata_finalize_shape_is_refused_by_name(
+    label, finalize, expected, tmp_path
+):
+    """One case per branch of the shape helper, because "malformed" is five
+    different documents and a single fixture would leave four of them untested.
+
+    `files-vazio` is the one worth defending: an empty array is not a missing
+    key and a lenient rule would accept it. It is refused because `files` is the
+    half R19 reads, so a step declaring no file has nothing to collide with and
+    nothing to run against -- writing the key at all is then the mistake.
+    """
+    actual = _replay_implementation(
+        {"files": _STORY_FILES, "approach": "a", "verify": "true"},
+        tmp_path,
+        finalize=finalize,
+    )
+    assert actual["exit"] == 1, label
+    assert "metadata.finalize" + expected in actual["stdout"], label
+
+
+def test_a_story_claiming_a_finalize_file_warns_once_and_stays_valid(tmp_path):
+    """R19: the collision, and the three things that make it a warning.
+
+    The verdict is compared byte for byte against the SAME document with the
+    collision removed, which is the assertion AC2 is really about: `errors[]`
+    does not grow, the exit status does not move, and stdout does not move
+    either. Only stderr gains a line.
+
+    One line per story, not one per path: the story below claims one declared
+    file and one undeclared one, and the undeclared one must not appear.
+    """
+    colliding = _replay_implementation(
+        {"files": ["CHANGELOG.md", "src/novo.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        {"src/existente.py": "# um vizinho, so para criar src/\n"},
+        finalize=_FINALIZE,
+    )
+    clean = _replay_implementation(
+        {"files": ["src/novo.py"], "approach": "a", "verify": "true"},
+        tmp_path,
+        {"src/existente.py": "# um vizinho, so para criar src/\n"},
+        finalize=_FINALIZE,
+    )
+
+    assert colliding["exit"] == clean["exit"] == 0, "a collision is never an error"
+    assert colliding["stdout"] == clean["stdout"], "the verdict must not move"
+    assert clean["stderr"] == ""
+    assert colliding["stderr"].count("\n") == 1, "exactly one warning line, per story"
+    assert colliding["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+        "implementation.files claims a path metadata.finalize declares: CHANGELOG.md"
+        " — the end-of-round step writes it too\n"
+    )
+
+
+def test_a_document_with_no_metadata_finalize_behaves_exactly_as_before(tmp_path):
+    """GUARD-RAIL, and it is marked as one: this passes before R18 and R19 exist
+    and after, and it is here to prove nothing moved rather than to discriminate.
+
+    The key is optional. Every tasks.json written before it existed carries no
+    `finalize`, so both new rules must be unreachable for such a document on
+    both channels -- which is also why not one recording in `validate_tasks_cases`
+    had to move: none of them carries the key either.
+
+    The same document is run WITH a well-formed finalize as the control. Its
+    stdout is identical (R18 found nothing to refuse) and its stderr is
+    identical (R19 found nothing to warn about, because `src/novo.py` is not a
+    declared path) -- so the absent case is shown to be silent for the reason
+    claimed and not merely to be silent.
+    """
+    seeded = {"src/existente.py": "# um vizinho, so para criar src/\n"}
+    story = {"files": ["src/novo.py"], "approach": "a", "verify": "true"}
+
+    absent = _replay_implementation(story, tmp_path, seeded)
+    assert absent["exit"] == 0
+    assert absent["stdout"] == '{"valid": true, "errors": []}\n'
+    assert absent["stderr"] == ""
+
+    declared = _replay_implementation(story, tmp_path, seeded, finalize=_FINALIZE)
+    assert declared["exit"] == absent["exit"]
+    assert declared["stdout"] == absent["stdout"]
+    assert declared["stderr"] == absent["stderr"]
+
+
+def test_a_null_metadata_finalize_is_read_as_absent_and_not_as_malformed(tmp_path):
+    """The one case where jq's answer, and not the rule, decides the behaviour.
+
+    `.metadata.finalize` returns `null` for a key that is missing and for a key
+    written as `null`, so nothing downstream can tell the two apart -- exactly
+    R12's position with `metadata.execution`'s `// ""`. An explicit `null` is
+    therefore ACCEPTED rather than refused as "not an object", and a rule that
+    refused it would refuse every absent key with it.
+
+    Asserted here rather than left implicit because the reading looks like a
+    hole: plan.md's checklist tells the WRITER to omit the key instead of
+    nulling it, and someone reading only that would expect this to exit 1.
+    """
+    actual = _replay_implementation(
+        {"files": _STORY_FILES, "approach": "a", "verify": "true"},
+        tmp_path,
+        finalize=None,
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
 
 
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
