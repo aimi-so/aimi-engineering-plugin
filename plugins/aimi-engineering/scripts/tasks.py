@@ -6475,6 +6475,34 @@ def op_list_known_gaps(argv):
     return 0
 
 
+def op_design_decisions(argv):
+    """`{"decisions": "..."}` for a brainstorm file named by --brainstorm-path,
+    reusing the same design_decisions() extractor design_context() calls for
+    the story EXECUTOR's own metadata.brainstormPath read.
+
+    --brainstorm-path already crossed aimi-cli.sh's validate_path_in_project
+    by the time this runs -- confinement of a CLI-ARGUMENT path is that
+    function's job, not this op's (see the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section). Nothing here re-checks
+    it, the same way design_context() never re-checks the confinement its own
+    caller already applied to a --tasks-file.
+
+    Degrades to an empty string, never a refusal, when the file is missing or
+    unreadable -- mirroring design_context()'s own degrade for the identical
+    reason: a brainstorm with no Design Decisions section is a normal outcome,
+    not a planning failure.
+    """
+    brainstorm_path = _flag(argv, "--brainstorm-path")
+    if not brainstorm_path:
+        die("Usage: tasks.py design-decisions --brainstorm-path <path>")
+    decisions = ""
+    if os.path.isfile(brainstorm_path):
+        with open(brainstorm_path, "rb") as handle:
+            decisions = design_decisions(handle.read())
+    _emit({"decisions": decisions})
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -6512,6 +6540,7 @@ _OPS = {
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
     "list-known-gaps": op_list_known_gaps,
+    "design-decisions": op_design_decisions,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }

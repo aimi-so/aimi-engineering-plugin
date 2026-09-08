@@ -3820,15 +3820,30 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     every other number in this test is unchanged. A write that had brought a
     writer of its own would have moved three of these assertions at once,
     which is the shape this ratchet exists to make visible.
+
+    THE EIGHTH open() ARRIVED WITH design-decisions, and it is a second
+    caller of the same read design_context() already does for
+    get-story-context's own metadata.brainstormPath, not a new capability:
+    same read mode, same degrade-to-empty-string on a missing file. What is
+    new is the CALLER and the CONFINEMENT that precedes it -- op_design_decisions
+    is reached from aimi-cli.sh's design-decisions verb, whose --brainstorm-path
+    argument crosses bash's validate_path_in_project before python3 starts,
+    the CLI-argument half of the split the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section names, where
+    design_context()'s own read stays unconfined by that function's own
+    docstring because its path is document-sourced rather than an argument.
+    The variable is named brainstorm_path, not path, so it cannot collide
+    with the literal the fourth open's own check above matches.
     """
     code = _code()
-    assert code.count("open(") == 7
+    assert code.count("open(") == 8
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 7
+    assert 'open(brainstorm_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 8
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -3906,8 +3921,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # the other forty keep holds here too -- no new root, no leaf this module
     # chose, and no directory created anywhere. The docstring above argues why
     # the write exists at all.
-    assert code.count("os.path.") == 44
-    assert code.count("os.path.isfile(") == 7
+    #
+    # The forty-fifth is design-decisions' own isfile() over --brainstorm-path
+    # -- bash's own argument, already run through validate_path_in_project
+    # before this module ever saw it, the same CLI-argument confinement every
+    # tasks-file path here already gets. No new root, no new leaf: the rule
+    # the other forty-four keep holds for this one too.
+    assert code.count("os.path.") == 45
+    assert code.count("os.path.isfile(") == 8
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -4673,6 +4694,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "verification-report",
         "verify-probe",
         "list-known-gaps",
+        "design-decisions",
         "project-groups",
         "get-story",
         "get-story-context",
