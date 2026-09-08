@@ -1760,6 +1760,16 @@ BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
 URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
 SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
 SOURCE_SECTION = re.compile(r"§ [0-9]+(\.[0-9]+)?")
+# A `metadata.decisions[].source` shaped like `<brainstorm-path>:L<line>` --
+# see commands/plan.md's thirteen-value source enum. Two OTHER fixed tags
+# also end in ":L<line>" -- `businessSpec:L<line>` and `designSpec:L<line>`
+# -- and both are excluded by the negative lookahead, because they name a
+# spec file rather than a brainstorm and R20 below must never warn about
+# them. Every other fixed source tag (researchFile:..., specFlow:...,
+# scopeNegVerifier, scopePosVerifier, codebaseVerified, outline, phase,
+# auditGate, researchConflict) never ends in ":L<digits>" at all, so no
+# further exclusion is needed.
+BRAINSTORM_DECISION_SOURCE = re.compile(r"^(?!businessSpec:|designSpec:).+:L[0-9]+$")
 
 VALIDATE_METADATA_FIELDS = (
     "schema_version",
@@ -1990,15 +2000,15 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 THROUGH R19 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
+    R16 THROUGH R20 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
     the last one already present, which is the only position from which a new
     rule can add lines after everything the golden corpus recorded without
     reordering either channel; each one's own comment carries why it warns or
     errors, why it sits where it sits, and why it is defensive where every rule
-    above it is faithful. R16, R17 and R19 reach the `warn` channel only. R18
-    is the one of the four that reaches `errors`, and its own comment says why
-    a malformed `metadata.finalize` is a different kind of wrong from a stale
-    line anchor or a directory that is not there yet.
+    above it is faithful. R16, R17, R19 and R20 reach the `warn` channel only.
+    R18 is the one of the five that reaches `errors`, and its own comment says
+    why a malformed `metadata.finalize` is a different kind of wrong from a
+    stale line anchor or a directory that is not there yet.
     """
     errors = []
 
@@ -2234,6 +2244,62 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         + ", ".join(collisions)
                         + " — the end-of-round step writes it too"
                     )
+
+    # R20 -- metadata.decisions[] carries a brainstorm-sourced entry while
+    # metadata.brainstormPath is absent. A WARNING for R16's reason: a broken
+    # link between the two is a question to the plan's author, not a verdict
+    # on the document.
+    #
+    # THE FALSE-POSITIVE CONTROL IS THE RULE THIS EXISTS TO SATISFY. A plan
+    # with no metadata.decisions[] key at all is the ordinary, legitimate
+    # shape of a plan that never went through a brainstorm, and must never
+    # trip this rule; neither must a decisions[] populated entirely with
+    # non-brainstorm sources (outline, businessSpec:L<line>, designSpec:L
+    # <line>, researchFile:..., specFlow:..., scopeNegVerifier,
+    # scopePosVerifier, codebaseVerified, phase, auditGate, researchConflict).
+    # A rule that warned on either shape would fire on the common case and
+    # teach the reader to ignore the channel.
+    #
+    # WHY THIS SIGNAL: a metadata.decisions[] entry only carries a
+    # <brainstorm-path>:L<line> source (BRAINSTORM_DECISION_SOURCE, defined
+    # above) when /aimi:plan's Phase 0.5 actually parsed a brainstorm doc's
+    # Open Questions section, so its presence is proof a brainstorm fed this
+    # plan rather than a guess -- and it costs nothing beyond a second field
+    # read off docs[0], the same read R18/R19 already make for
+    # metadata.finalize. This story's notes carry the two other candidate
+    # signals considered and rejected (a roadmap.json brainstormPath check;
+    # a .aimi/brainstorms/ slug match).
+    #
+    # It sits BELOW R19 for R17's own stated reason: a rule appended after
+    # the last one already present can only add lines after everything the
+    # golden corpus recorded, in either channel, and can never reorder one.
+    #
+    # ONE warn call for the WHOLE document, on the FIRST matching entry, not
+    # one per matching entry -- R19's own one-line-per-story precedent
+    # (a story naming three collisions is one line), widened here to one
+    # line per document: the broken link is one fact about the document, not
+    # one fact per decision that cites it.
+    doc0_metadata = jq_index(docs[0], "metadata", "") if docs else None
+    brainstorm_path = jq_index(doc0_metadata, "brainstormPath", ".metadata")
+    if not brainstorm_path:
+        decisions = jq_index(doc0_metadata, "decisions", ".metadata")
+        if isinstance(decisions, dict):
+            decisions = list(decisions.values())
+        if isinstance(decisions, list):
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                source = decision.get("source")
+                if isinstance(source, str) and BRAINSTORM_DECISION_SOURCE.match(source):
+                    warn(
+                        tasks_file
+                        + ": metadata.decisions[] cites a brainstorm-sourced decision ("
+                        + source
+                        + ") but metadata.brainstormPath is absent — every one of that "
+                        "brainstorm's design decisions is silently dropped from every "
+                        "story's execution context"
+                    )
+                    break
 
     return errors
 

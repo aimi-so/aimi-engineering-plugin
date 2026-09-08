@@ -2275,6 +2275,134 @@ def test_a_null_metadata_finalize_is_read_as_absent_and_not_as_malformed(tmp_pat
     assert actual["stderr"] == ""
 
 
+def _replay_brainstorm_decision(decisions, tmp_path, brainstorm_path=_ABSENT):
+    """One story through the real CLI, carrying `metadata.decisions` and
+    `metadata.brainstormPath` as given.
+
+    R20's own replay, built here for the reason _replay_line_anchor and
+    _replay_implementation are: bash never ran this rule either, so there is
+    no jq recording to replay, and adding a case to `validate_tasks_cases`
+    would be recording the Python. schemaVersion 3.3 is load-bearing for the
+    same reason -- R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+
+    `decisions` reuses `_replay_implementation`'s `_ABSENT` sentinel for the
+    same reason it does: `None` and `[]` are both values the schema allows,
+    so "no metadata.decisions[] key at all" -- the false-positive control's
+    first shape -- needs a fixture distinguishable from either.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if decisions is not _ABSENT:
+        metadata["decisions"] = decisions
+    if brainstorm_path is not _ABSENT:
+        metadata["brainstormPath"] = brainstorm_path
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+_BRAINSTORM_SOURCED_DECISION = {
+    "anchor": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "source": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "text": "algo decidido no brainstorm",
+    "resolution": "sim",
+}
+
+
+def test_a_brainstorm_sourced_decision_with_no_brainstormpath_warns_exactly_once(tmp_path):
+    """R20's warning half. Confirms BRAINSTORM_DECISION_SOURCE matches this
+    shape before relying on the CLI to have matched it too, so a failure here
+    can never be mistaken for a regex that silently stopped matching."""
+    assert T.BRAINSTORM_DECISION_SOURCE.match(_BRAINSTORM_SOURCED_DECISION["source"])
+    actual = _replay_brainstorm_decision([_BRAINSTORM_SOURCED_DECISION], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, for the whole document"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: metadata.decisions[] cites a "
+        "brainstorm-sourced decision (.aimi/brainstorms/2026-01-01-exemplo.md:L12) but "
+        "metadata.brainstormPath is absent — every one of that brainstorm's design "
+        "decisions is silently dropped from every story's execution context\n"
+    )
+
+
+def test_no_decisions_key_at_all_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape one -- the criterion this rule exists
+    to satisfy. A plan that never went through a brainstorm at all is the
+    ordinary, legitimate shape of a tasks.json, and must produce silence on
+    both channels, exactly like every case above it that never touches
+    metadata.decisions."""
+    actual = _replay_brainstorm_decision(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_decisions_present_but_none_brainstorm_sourced_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape two -- decisions[] populated
+    entirely with the OTHER fixed source tags, including the two that also
+    end in ':L<line>' (businessSpec, designSpec), which
+    BRAINSTORM_DECISION_SOURCE's own negative lookahead exists to exclude."""
+    actual = _replay_brainstorm_decision(
+        [
+            {
+                "anchor": "outline:edit:03",
+                "source": "outline",
+                "text": "renomeado",
+                "resolution": "sim",
+            },
+            {
+                "anchor": "businessSpec:L12",
+                "source": "businessSpec:L12",
+                "text": "marcador",
+                "resolution": "confirmado",
+            },
+        ],
+        tmp_path,
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_brainstormpath_present_alongside_the_same_decision_never_warns(tmp_path):
+    """The rule fires on the ABSENCE of the link, never merely on the
+    presence of a brainstorm-shaped decision -- the same
+    _BRAINSTORM_SOURCED_DECISION that warns above must fall silent once
+    metadata.brainstormPath is filled in."""
+    actual = _replay_brainstorm_decision(
+        [_BRAINSTORM_SOURCED_DECISION],
+        tmp_path,
+        brainstorm_path=".aimi/brainstorms/2026-01-01-exemplo.md",
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
