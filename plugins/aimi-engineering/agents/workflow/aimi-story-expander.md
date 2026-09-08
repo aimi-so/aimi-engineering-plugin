@@ -231,7 +231,7 @@ Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no
 
 3–15 entries, each ≤ 5000 chars, plain imperative verb-object phrasing. Order: creation/scaffolding first → integration wiring → local verification last. Cross-story integration steps (e.g., `"Wire <handler> into <owning file>"`) are mandatory when `implementation.files` lists a path that another outline entry's likely implementation also touches.
 
-Forbidden in `tasks[]` (validator at `aimi-cli.sh` rejects these): triple-backticks, `$(`, backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
+Forbidden in `tasks[]` (validator at `aimi-cli.sh` rejects these): triple-backticks, the strings `ignore previous`, `system:`, `INSTRUCTIONS`.
 
 Omit `tasks` entirely (do NOT emit `"tasks": []`) only when fewer than 3 meaningful steps can be identified.
 
