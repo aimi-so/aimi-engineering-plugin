@@ -4525,19 +4525,28 @@ def _verify_at_word_start(buf):
 
 def _verify_heredoc_opener(text, i):
     """The `<<WORD` / `<<-WORD` starting at `i`, as `(delimiter, strip_tabs,
-    end)`, or None when what is there is not a heredoc redirect at all.
+    quoted, end)`, or None when what is there is not a heredoc redirect at all.
 
     Only the SHAPE is decided here: `<<`, an optional `-`, optional blanks and
     then a word, whose quotes are removed the way bash removes them -- `<<'X'`,
-    `<<"X"` and `<<\\X` all name the delimiter `X`, and the quoting decides how
-    the BODY is expanded, which is not this scanner's business. Whether the
-    position even admits a redirect -- not inside quotes, not inside `$(( ))`
-    where `<<` is a left shift -- is the caller's to know, because the caller
-    is the only thing that tracks it.
+    `<<"X"` and `<<\\X` all name the delimiter `X`.
+
+    `quoted` IS REPORTED because this is the only place that can report it.
+    Quote removal destroys the evidence: after it, `<<'X'` and `<<X` are the
+    same three characters, and yet the first suppresses every expansion in the
+    body and the second performs them. verify_segments does not care -- a body
+    stays inside its segment either way -- but verify_reads does, so the fact
+    is carried out of here rather than re-derived by a second parse that would
+    have to repeat this word scan to find where the quotes were.
+
+    Whether the position even admits a redirect -- not inside quotes, not
+    inside `$(( ))` where `<<` is a left shift -- is still the caller's to
+    know, because the caller is the only thing that tracks it.
     """
     n = len(text)
     j = i + 2
     strip_tabs = False
+    quoted = False
     if j < n and text[j] == "-":
         strip_tabs = True
         j += 1
@@ -4552,10 +4561,15 @@ def _verify_heredoc_opener(text, i):
             close = text.find(ch, j + 1)
             if close == -1:
                 return None
+            # ANY quoting anywhere in the word suppresses the body's
+            # expansions -- `<<F'I'M` as much as `<<'FIM'` -- which is why this
+            # is a flag raised by the scan rather than a look at text[i + 2].
+            quoted = True
             delimiter.append(text[j + 1 : close])
             j = close + 1
             continue
         if ch == "\\" and j + 1 < n:
+            quoted = True
             delimiter.append(text[j + 1])
             j += 2
             continue
@@ -4564,7 +4578,7 @@ def _verify_heredoc_opener(text, i):
     word = "".join(delimiter)
     if not word:
         return None
-    return word, strip_tabs, j
+    return word, strip_tabs, quoted, j
 
 
 def _verify_take_heredoc_bodies(text, i, heredocs, buf):
@@ -4755,7 +4769,10 @@ def verify_segments(text):
             # announcing on this line.
             opened = _verify_heredoc_opener(text, i)
             if opened is not None:
-                delimiter, strip_tabs, j = opened
+                # The quoting is unpacked and dropped: a body belongs to the
+                # segment that opened it whether or not bash expands it, and
+                # this scanner has no other question to ask of it.
+                delimiter, strip_tabs, _quoted, j = opened
                 heredocs.append((delimiter, strip_tabs))
                 buf.append(text[i:j])
                 i = j
@@ -4896,9 +4913,25 @@ def verify_reads(segment):
     the same decision. Widening it is a separate change with its own corpus
     measurement behind it; what is here is what the corpus of real verifies
     actually carries.
+
+    A HEREDOC BODY IS SCANNED ONLY WHERE BASH WOULD EXPAND IT, and which half
+    that is comes from the delimiter. Of the four forms, `<<'X'` and `<<"X"`
+    -- and the escaped `<<\\X`, the same rule said a third way -- SUPPRESS
+    expansion: bash hands the body to the command byte for byte, so a `$VAR`
+    in it is not a read at all, and reporting one withholds a verdict the
+    shell would never have withheld. `<<X` and the tab-stripping `<<-X` leave
+    the delimiter BARE and do expand, so their bodies keep being scanned
+    exactly like the rest of the segment -- a name read there is genuinely
+    unresolved and stays visible. Only the BODY is skipped, never the line
+    that announces it: `python3 - "$ARG" <<'FIM'` still reads `ARG`. Bodies
+    are taken in the order bash reads them, which is what `cmd <<'A' <<B`
+    needs -- A's has to be stepped over before B's can be reached at all.
     """
     names = set()
     quote = None
+    # Delimiters announced but not yet read, in the order bash reads them, each
+    # carrying whether its quoting suppresses the body's expansions.
+    heredocs = []
     i = 0
     n = len(segment)
     while i < n:
@@ -4918,6 +4951,40 @@ def verify_reads(segment):
         if ch == '"':
             quote = None if quote == '"' else '"'
             i += 1
+            continue
+        if quote is None and segment.startswith("<<<", i):
+            # A here-STRING: one line, no body, no terminator. Taken whole so
+            # the `<<` at its second character is not read as an opening whose
+            # body would then swallow the rest of the segment.
+            i += 3
+            continue
+        if quote is None and segment.startswith("<<", i):
+            # Arithmetic is NOT tracked here, unlike in verify_segments, and
+            # the asymmetry is safe rather than sloppy: the `<<` of `$(( a <<
+            # b ))` can only ever yield a BARE delimiter, a bare body is
+            # scanned rather than skipped, and so every name past a left shift
+            # is still found -- by the recursive call below instead of by this
+            # loop. Nothing is lost, which is the only reason the second
+            # arithmetic tracker is not here.
+            opened = _verify_heredoc_opener(segment, i)
+            if opened is not None:
+                delimiter, strip_tabs, quoted, j = opened
+                heredocs.append((delimiter, strip_tabs, quoted))
+                i = j
+                continue
+        if ch == "\n" and heredocs:
+            # The bodies start at the newline that ends the command, and each
+            # is consumed whole even when it is not scanned -- stepping over a
+            # quoted body is how the next delimiter's body is reached.
+            i += 1
+            while heredocs:
+                delimiter, strip_tabs, quoted = heredocs.pop(0)
+                body = []
+                i = _verify_take_heredoc_bodies(
+                    segment, i, [(delimiter, strip_tabs)], body
+                )
+                if not quoted:
+                    names |= verify_reads("".join(body))
             continue
         if ch != "$":
             i += 1
