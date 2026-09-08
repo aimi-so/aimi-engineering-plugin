@@ -5709,6 +5709,43 @@ def op_verify_probe(argv):
     ceiling is a budget, and this verb has no way to know the caller's. The
     parameter is there for a caller driving `probe_verify` in Python, which is
     the same escape hatch the re-entrancy refusal points at.
+
+    THE VERB WRITES THE ARTIFACT IT ALREADY READS, and closing that asymmetry
+    is what moved the naming rule out of prose. This verb has always read a
+    prior run's array through `--previous-file` and never written one; the
+    executor's skill told an AGENT to redirect stdout to a name blind to which
+    PLAN the story came from. Story ids restart at US-001 in every plan and
+    `.aimi/tasks/` is shared, so a new plan's US-002 overwrote the previous
+    plan's -- a rule living only in prose that no test could reach. The name is
+    derived here instead, from the `--tasks-file` stem, which is dated and
+    slugged and therefore already unique per plan.
+
+    THE WRITE IS UNCONDITIONAL, not behind a flag. A flag would hand the caller
+    back exactly the decision this takes away from it -- whether the artifact
+    exists at all -- and the artifact's only consumer is this same verb on the
+    next run, where a `--previous-file` naming a file the previous run declined
+    to write degrades silently to `None` and leaves the cycle open with nobody
+    told.
+
+    `--previous-file` PRESENT MEANS `-post.json`, and it has to: writing the
+    recomparison to the same path would overwrite the artifact it just read,
+    destroying the comparison in the act of making it. It also puts under a
+    rule the ad-hoc `-post` an executor once invented by hand.
+
+    STDOUT DOES NOT CHANGE SHAPE; the path goes to stderr. stdout has readers:
+    the executor's step 1.5 counts the array's segments and
+    `_read_previous_probe` returns `None` for any JSON that is not a list, so
+    an object `{path, results}` would break the second one in silence. The
+    write goes BETWEEN `_match_previous` and `_emit` so the bytes on disk are
+    the same array stdout gets, `unsatisfiable` already attached --
+    `write_docs_atomically` applies `jq_numbers` and ends with a newline
+    exactly as `_emit` does, so there is no second format to keep in step.
+
+    IT REUSES THE MODULE'S ONE ATOMIC WRITER rather than opening a file of its
+    own: no new `open(`, no second `NamedTemporaryFile(`, no fourth
+    `os.unlink(`. What it does add is four os.path calls -- dirname, basename,
+    splitext and join -- which is why the structural ratchet's counter moved
+    and nothing else in it did.
     """
     if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
         die(_VERIFY_PROBE_REENTRY)
@@ -5738,6 +5775,31 @@ def op_verify_probe(argv):
     text = verify_text_for_story(path, story_id)
     results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
+    # The artifact lands in the TASKS FILE'S OWN directory, and the argument
+    # for that used to live in the skill prose that composed the name:
+    # `find_aimi_root` stops at the first `.aimi/` it finds walking up from the
+    # cwd, so an artifact written into a fresh one inside the worktree would
+    # relocate PROJECT_ROOT there and make every later CLI call naming an
+    # absolute path outside the worktree refuse. The STEM keys the name to the
+    # plan: story ids restart at US-001 in every plan while `.aimi/tasks/` is
+    # shared, so a new plan's US-002 landed on top of the previous plan's. The
+    # stem is already dated and slugged, so keying by it invents no identifier.
+    stem = os.path.splitext(os.path.basename(path))[0]
+    artifact = os.path.join(
+        os.path.dirname(path) or ".",
+        "verify-probe-%s-%s%s"
+        % (stem, story_id, "-post.json" if previous_file else ".json"),
+    )
+    # A failed write is ONE line and exit 0, with the array still on stdout:
+    # the probe is a diagnostic and this skill's own step says its
+    # unavailability never fails a story, so a write that killed the verb
+    # would invert that.
+    try:
+        write_docs_atomically(artifact, [results])
+    except OSError as err:
+        sys.stderr.write("verify-probe: could not write %s: %s\n" % (artifact, err))
+    else:
+        sys.stderr.write("verify-probe: wrote %s\n" % artifact)
     _emit(results)
     return 0
 

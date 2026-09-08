@@ -3429,6 +3429,20 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     one. What stays true is the ban above it: this file still owns no
     recursive delete, so the scratch space is ONE file that one os.unlink
     removes rather than a directory something would have to walk.
+
+    THE ONE COUNTER THAT MOVED FOR verify-probe's ARTIFACT IS os.path., and
+    that it is the only one is the point. That verb now WRITES the array it
+    had only ever read back through --previous-file, so the naming rule --
+    keyed on the tasks file's stem, because story ids restart at US-001 in
+    every plan while .aimi/tasks/ is shared -- lives in code a test can reach
+    instead of in the executor skill's prose. It writes through
+    write_docs_atomically, the module's one atomic writer, which is why
+    NOTHING else here moved: no eighth open(, no second NamedTemporaryFile( or
+    os.replace(, no fourth os.unlink(. What a derived path costs is four
+    os.path calls -- dirname, basename, splitext, join -- so 40 becomes 44 and
+    every other number in this test is unchanged. A write that had brought a
+    writer of its own would have moved three of these assertions at once,
+    which is the shape this ratchet exists to make visible.
     """
     code = _code()
     assert code.count("open(") == 7
@@ -3507,7 +3521,15 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # itself -- "has anything been carried yet", asked of a path no caller
     # named. The docstring above argues that one; the rule the other
     # thirty-nine keep is unchanged.
-    assert code.count("os.path.") == 40
+    #
+    # The last FOUR are op_verify_probe composing the artifact it now writes:
+    # dirname and basename of --tasks-file, splitext to take the stem off that
+    # basename, and join to put the two back together. Every one of them is
+    # over the path bash already handed in and already confined, so the rule
+    # the other forty keep holds here too -- no new root, no leaf this module
+    # chose, and no directory created anywhere. The docstring above argues why
+    # the write exists at all.
+    assert code.count("os.path.") == 44
     assert code.count("os.path.isfile(") == 7
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -6043,12 +6065,17 @@ def test_read_previous_probe_tolerates_absence_and_bad_shape(tmp_path):
 # the one that would go green against an id comparison and does not.
 
 
-def _probe_project(tmp_path, verifies):
+def _probe_project(tmp_path, verifies, stem="p-tasks"):
     """A project whose stories are `verifies` (id -> verify text), unprobed.
 
     Returns `(root, tasks_file)`. Unlike `_probe` above this runs nothing: the
     tests here drive the CLI themselves because they need the exit status and
     the stderr of the call, which `_probe` asserts away.
+
+    `stem` names the tasks file, and it is a parameter for one reason: the
+    artifact verify-probe writes is keyed on that stem, so a case about two
+    PLANS carrying the same story id needs two of them under one root. The
+    default keeps every earlier caller's fixture byte-for-byte.
     """
     base = os.path.realpath(str(tmp_path))
     root = os.path.join(base, "proj")
@@ -6072,20 +6099,30 @@ def _probe_project(tmp_path, verifies):
         "metadata": {"title": "t", "branchName": "b"},
         "userStories": stories,
     }
-    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    tasks_file = os.path.join(root, ".aimi", "tasks", stem + ".json")
     with open(tasks_file, "w", encoding="utf-8") as handle:
         json.dump(document, handle)
     return root, tasks_file
 
 
-def _run_probe_cli(root, tasks_file, story_id, marker=None, timeout=120):
+def _run_probe_cli(root, tasks_file, story_id, marker=None, timeout=120,
+                   previous_file=None):
     """`verify-probe <story_id>` through the CLI, with the re-entrancy marker
-    set to `marker` when that is not None. Returns the CompletedProcess."""
+    set to `marker` when that is not None. Returns the CompletedProcess.
+
+    `previous_file` adds `--previous-file`, which is the flag that both feeds
+    the unsatisfiable comparison and decides where the run writes: present, the
+    verb reports a `-post.json` of its own rather than overwriting the artifact
+    it just read.
+    """
     env = _isolated_env(os.path.dirname(root))
     if marker is not None:
         env[T.VERIFY_PROBE_ACTIVE_ENV] = marker
+    argv = ["bash", CLI, "verify-probe", story_id, "--tasks-file", tasks_file]
+    if previous_file is not None:
+        argv += ["--previous-file", previous_file]
     return subprocess.run(
-        ["bash", CLI, "verify-probe", story_id, "--tasks-file", tasks_file],
+        argv,
         cwd=root,
         env=env,
         capture_output=True,
@@ -6763,6 +6800,130 @@ def test_the_docstring_says_which_state_is_reproduced_and_which_is_not():
     assert "scope:snapshot-deferred" not in doc, (
         "the deferral this story closes must not still be promised here"
     )
+
+
+# ---------------------------------------------------------------------------
+# verify-probe: the verb writes the artifact it already reads (US-007)
+# ---------------------------------------------------------------------------
+#
+# The defect this closes: the verb read a prior run's array through
+# --previous-file and never wrote one. The name of the file it read was
+# composed by an AGENT, following the story-executor skill's prose, as
+# `verify-probe-<story id>.json` -- blind to which PLAN the story came from.
+# Story ids restart at US-001 in every plan and `.aimi/tasks/` is shared, so
+# the artifacts measured on disk before this change were already colliding:
+# one plan's `verify-probe-US-002.json` sat beside another plan's
+# `verify-probe-US-001.json`, with nothing in either file naming its plan. A rule
+# that lives in prose is a rule no suite can reach, which is why these two
+# cases exist rather than a sentence somewhere saying the name is unique.
+#
+# NO GOLDEN BLOCK here either, for this verb's usual reason: it never had a jq
+# predecessor to capture.
+
+
+def _reported_artifact(proc):
+    """The path the verb SAYS it wrote, taken off stderr.
+
+    stdout is deliberately not where this goes -- the executor's step 1.5
+    counts the array's segments and `_read_previous_probe` returns `None` for
+    any JSON that is not a list, so an object carrying the path would break
+    the second reader in silence. Asserting through this helper is what makes
+    "the path it reports is the path it wrote" a claim about the verb's own
+    answer rather than about a name the test recomposed.
+    """
+    written = [
+        line.split("wrote ", 1)[1]
+        for line in proc.stderr.splitlines()
+        if line.startswith("verify-probe: wrote ")
+    ]
+    assert len(written) == 1, proc.stderr
+    return written[0]
+
+
+def test_two_plans_with_one_story_id_get_two_probe_artifacts(tmp_path):
+    """AC: two plans, each with a `US-002`, leave TWO artifacts on disk.
+
+    The two tasks files share a directory and a story id and differ only in
+    their stem -- which is what the real `.aimi/tasks/` looks like, since every
+    plan is dated and slugged into a stem of its own. Both runs are driven
+    through the CLI so the path is the one bash resolved and confined, and each
+    artifact is read back to prove it belongs to ITS plan rather than to
+    whichever ran last.
+    """
+    old_stem = "2026-01-01-plano-anterior-tasks"
+    new_stem = "2026-02-02-plano-novo-tasks"
+    root, old_file = _probe_project(
+        tmp_path, {"US-002": "true\necho anterior\n"}, stem=old_stem
+    )
+    _, new_file = _probe_project(
+        tmp_path, {"US-002": "true\necho novo\n"}, stem=new_stem
+    )
+
+    old_proc = _run_probe_cli(root, old_file, "US-002")
+    new_proc = _run_probe_cli(root, new_file, "US-002")
+    assert old_proc.returncode == 0 and new_proc.returncode == 0, (
+        old_proc.stderr + new_proc.stderr
+    )
+
+    old_path = _reported_artifact(old_proc)
+    new_path = _reported_artifact(new_proc)
+    assert old_path != new_path, "one plan's artifact landed on the other's"
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    assert os.path.dirname(old_path) == tasks_dir, "beside the tasks file"
+    assert os.path.dirname(new_path) == tasks_dir
+    assert os.path.basename(old_path) == "verify-probe-%s-US-002.json" % old_stem
+    assert os.path.basename(new_path) == "verify-probe-%s-US-002.json" % new_stem
+
+    # The path REPORTED is the path written, and what is in it is the array
+    # stdout carried -- not a second rendering of it.
+    for path, proc, marker in (
+        (old_path, old_proc, "echo anterior"),
+        (new_path, new_proc, "echo novo"),
+    ):
+        with open(path, "r", encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        assert on_disk == json.loads(proc.stdout)
+        assert marker in [entry["segment"] for entry in on_disk]
+
+
+def test_the_probe_artifact_is_read_back_by_the_next_run(tmp_path):
+    """AC: the cycle closes and does not bite itself.
+
+    Run one writes the artifact; run two reads that same file back through
+    --previous-file and reports `unsatisfiable: true` for the segment that
+    failed BOTH times -- a verdict only reachable if the file existed and
+    parsed, which is what makes this a read-back assertion rather than a second
+    write assertion. And run two writes its own `-post.json` instead of the
+    path it just read: writing the recomparison over its own input would
+    destroy the comparison in the act of making it.
+    """
+    verify = "test -f nunca-existiu\ntrue\n"
+    root, tasks_file = _probe_project(tmp_path, {"US-001": verify})
+
+    first = _run_probe_cli(root, tasks_file, "US-001")
+    assert first.returncode == 0, first.stderr
+    pre_path = _reported_artifact(first)
+    assert pre_path.endswith("-US-001.json") and not pre_path.endswith("-post.json")
+    with open(pre_path, "rb") as handle:
+        pre_bytes = handle.read()
+
+    second = _run_probe_cli(root, tasks_file, "US-001", previous_file=pre_path)
+    assert second.returncode == 0, second.stderr
+    post_path = _reported_artifact(second)
+    assert post_path != pre_path, "the recomparison overwrote what it read"
+    assert post_path.endswith("-US-001-post.json")
+
+    results = json.loads(second.stdout)
+    by_segment = {entry["segment"]: entry for entry in results}
+    assert by_segment["test -f nunca-existiu"]["unsatisfiable"] is True, (
+        "a segment failing both runs is only knowable from the file run one wrote"
+    )
+    assert by_segment["true"]["unsatisfiable"] is False
+
+    with open(pre_path, "rb") as handle:
+        assert handle.read() == pre_bytes, "run two rewrote its own input"
+    with open(post_path, "r", encoding="utf-8") as handle:
+        assert json.load(handle) == results
 
 
 # ---------------------------------------------------------------------------
