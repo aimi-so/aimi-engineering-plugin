@@ -981,13 +981,44 @@ def next_story(doc):
 # title, once for a description, once per tasks[] entry. One constant here for
 # the same reason clamp_max_concurrency is one function: three copies of a
 # security rule are three chances to fix two of them.
+#
+# WHICH RULER THIS IS: the instruction-injection one, and only that one. None of
+# the three fields it guards is ever evaluated by a shell. They are interpolated
+# into PROMPTS -- get-story-context hands title, description and tasks[] to the
+# story executor, and /aimi:plan threads a description into story-expander
+# sub-agent prompts via phaseHandoffBlocks (grep that symbol; line numbers
+# drift). An instruction marker does damage there, and so does a code fence,
+# because these fields land INSIDE fenced prompt blocks and a fence in the data
+# can break out of one. A command-substitution operator does neither: nothing
+# here reaches a shell, so its only measured effect was refusing PROSE -- a
+# tasks[] entry that merely named the operator while describing the parsing it
+# was fixing. That alternative was dropped and nothing else about this changed.
+#
+# The split is roadmap.py's, applied rather than re-derived: read the comment
+# above cv_suspicious there before widening this back. cv_injection judges both
+# an identity and its description because both reach prompts, while _SHELL_CLASS
+# judges the identity ALONE -- judging the description too refused "cmd_clean"
+# described as "does x; then y", an identity that is itself clean. That is this
+# defect with the fields renamed.
+#
+# The shell ruler is re-scoped, never abolished. It still applies exactly where
+# a shell reads: validate_stories below keeps `.project`'s own `[\$`;|&]`
+# metacharacter test and skills[]'s PATH_COMPONENT check untouched, and
+# validate_path_in_project in aimi-cli.sh remains the sole authority over every
+# path arriving as a CLI argument.
+#
+# The two surfaces that TELL an author this rule move with it -- the
+# "Forbidden in tasks[]" line in commands/plan.md and the one in
+# agents/workflow/aimi-story-expander.md each enumerate exactly the alternatives
+# below. A reader that accepts what the writer still forbids is the
+# writer-mints-what-reader-refuses shape of .aimi/known-gaps/2026-08-08-US-003.md
+# running the other way, and it leaves the defect alive under its own fix.
 SUSPICIOUS = (
     "ignore previous"
     "|(^|\\s)[^a-zA-Z0-9]*system\\s*:"
     "|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b"
     "|INSTRUCTIONS\\s*:"
     "|```"
-    "|\\$\\("
 )
 
 # aimi-cli.sh's `[[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]`, verbatim. The optional
