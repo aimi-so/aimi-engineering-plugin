@@ -340,6 +340,76 @@ create_worktree() {
   echo ""
 }
 
+# The single source of worktree enumeration for list_worktrees and
+# cleanup_worktrees. Both used to ask the DIRECTORY the same question with the
+# same duplicated pair of lines -- iterate "$WORKTREE_DIR"/*, accept a
+# directory that has a .git -- and that shallow glob is blind to every branch
+# with a slash in it: `bug/issue-149-pr-body` nests one level deeper, so the
+# glob stops at `.worktrees/bug`, which is a directory with no .git. Since
+# every branch this plugin creates has a slash, `list` reported nothing and
+# `cleanup` cleaned nothing (issue #149).
+#
+# The register of worktrees belongs to git, not to the filesystem layout:
+# `.worktrees/` is only where they were put, and the depth follows the number
+# of slashes in the branch name. So ask git. The prefix filter against the
+# resolved WORKTREE_DIR -- the same `realpath -m` idiom create_worktree's
+# containment check already uses -- drops the main checkout, which the
+# porcelain also lists, without any heuristic, and keeps the nesting rule the
+# glob had: only worktrees under THIS container's .worktrees/.
+_registered_worktree_paths() {
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+
+  local line path
+  while IFS= read -r line; do
+    [[ "$line" == "worktree "* ]] || continue
+    path="${line#worktree }"
+    [[ "$path" == "$resolved_dir"/* ]] || continue
+    printf '%s\n' "$path"
+  done < <(git worktree list --porcelain 2>/dev/null || true)
+}
+
+# The name a worktree is known by everywhere else in this script: its path
+# relative to the resolved WORKTREE_DIR. Identical to the old basename for a
+# flat name, and `bug/issue-149-pr-body` for a nested one. This is data, not
+# decoration -- switch_worktree reopens "$WORKTREE_DIR/$name", _dev_server_key
+# is realpath -m of that same join, and cleanup_worktrees hands it to
+# `git branch -D`, so a truncated name is one nothing here can resolve.
+_worktree_display_name() {
+  local worktree_path="$1"
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+
+  local name="${worktree_path#"$resolved_dir"/}"
+  if [[ "$name" == "$worktree_path" ]]; then
+    # Not under WORKTREE_DIR after all: callers only ever pass
+    # _registered_worktree_paths output, which cannot reach here, but a bare
+    # basename beats printing an absolute path.
+    name=$(basename "$worktree_path")
+  fi
+  printf '%s\n' "$name"
+}
+
+# Remove the empty intermediate directories a nested worktree leaves behind,
+# walking up from its own parent and stopping AT $WORKTREE_DIR -- never above
+# it. `git worktree remove .worktrees/bug/issue-149-pr-body` deletes the leaf
+# and keeps `.worktrees/bug`, and that one empty directory is enough to stop
+# the `rmdir "$WORKTREE_DIR"` cleanup_worktrees already attempts from ever
+# firing. A sibling worktree still in place needs no check here: rmdir refuses
+# a non-empty directory, and the break ends the walk on the first refusal.
+_prune_empty_worktree_parents() {
+  local worktree_path="$1"
+  local resolved_dir
+  resolved_dir=$(realpath -m "$WORKTREE_DIR")
+
+  local dir
+  dir=$(dirname "$worktree_path")
+  while [[ "$dir" == "$resolved_dir"/* ]]; do
+    rmdir "$dir" 2>/dev/null || break
+    dir=$(dirname "$dir")
+  done
+}
+
 # List all worktrees
 list_worktrees() {
   echo -e "${BLUE}Available worktrees:${NC}"
@@ -350,20 +420,25 @@ list_worktrees() {
     return
   fi
 
-  local count=0
-  for worktree_path in "$WORKTREE_DIR"/*; do
-    if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
-      count=$((count + 1))
-      local worktree_name=$(basename "$worktree_path")
-      local branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  # git prints the real path; $PWD can arrive with a symlink in it.
+  local current_path
+  current_path=$(realpath -m "$PWD")
 
-      if [[ "$PWD" == "$worktree_path" ]]; then
-        echo -e "${GREEN}✓ $worktree_name${NC} (current) → branch: $branch"
-      else
-        echo -e "  $worktree_name → branch: $branch"
-      fi
+  local count=0
+  # Process substitution, never a pipe: a pipe runs this loop in a subshell,
+  # `count` increments there and dies with it, and the footer reports zero --
+  # a second way to reproduce the exact bug this function is being fixed for.
+  while IFS= read -r worktree_path; do
+    count=$((count + 1))
+    local worktree_name=$(_worktree_display_name "$worktree_path")
+    local branch=$(git -C "$worktree_path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+    if [[ "$current_path" == "$worktree_path" ]]; then
+      echo -e "${GREEN}✓ $worktree_name${NC} (current) → branch: $branch"
+    else
+      echo -e "  $worktree_name → branch: $branch"
     fi
-  done
+  done < <(_registered_worktree_paths)
 
   if [[ $count -eq 0 ]]; then
     echo -e "${YELLOW}No worktrees found${NC}"
@@ -445,24 +520,29 @@ cleanup_worktrees() {
   echo -e "${BLUE}Checking for completed worktrees...${NC}"
   echo ""
 
+  # git prints the real path; $PWD can arrive with a symlink in it.
+  local current_path
+  current_path=$(realpath -m "$PWD")
+
   local found=0
   local to_remove=()
 
-  for worktree_path in "$WORKTREE_DIR"/*; do
-    if [[ -d "$worktree_path" && -e "$worktree_path/.git" ]]; then
-      local worktree_name=$(basename "$worktree_path")
+  # Same single source as list_worktrees, and process substitution for the
+  # same reason: under a pipe `found` and `to_remove` would be built in a
+  # subshell and this function would report -- and remove -- nothing.
+  while IFS= read -r worktree_path; do
+    local worktree_name=$(_worktree_display_name "$worktree_path")
 
-      # Skip if current worktree
-      if [[ "$PWD" == "$worktree_path" ]]; then
-        echo -e "${YELLOW}(skip) $worktree_name - currently active${NC}"
-        continue
-      fi
-
-      found=$((found + 1))
-      to_remove+=("$worktree_path")
-      echo -e "${YELLOW}• $worktree_name${NC}"
+    # Skip if current worktree
+    if [[ "$current_path" == "$worktree_path" ]]; then
+      echo -e "${YELLOW}(skip) $worktree_name - currently active${NC}"
+      continue
     fi
-  done
+
+    found=$((found + 1))
+    to_remove+=("$worktree_path")
+    echo -e "${YELLOW}• $worktree_name${NC}"
+  done < <(_registered_worktree_paths)
 
   if [[ $found -eq 0 ]]; then
     echo -e "${GREEN}No inactive worktrees to clean up${NC}"
@@ -472,7 +552,13 @@ cleanup_worktrees() {
   echo ""
   echo -e "${BLUE}Cleaning up $found worktree(s)...${NC}"
   for worktree_path in "${to_remove[@]}"; do
-    local worktree_name=$(basename "$worktree_path")
+    # The display name again, not a recomputed basename: this name is not
+    # printed text here, it is the argument to serve_stop (the dev-server.json
+    # key) and to `git branch -D`. Against the branch bug/issue-149-pr-body,
+    # `git branch -D issue-149-pr-body` answers "branch not found" and exits
+    # 1 -- swallowed whole by the `2>/dev/null || true` below -- so a
+    # basename here would remove the worktree and silently leave its branch.
+    local worktree_name=$(_worktree_display_name "$worktree_path")
     # Best-effort stop before removal — see remove_worktree's own comment for
     # why: an unconditional cleanup that skips this would orphan any dev
     # server still running against one of these worktrees.
@@ -480,6 +566,7 @@ cleanup_worktrees() {
     git worktree remove "$worktree_path" --force 2>/dev/null || true
     git branch -D "$worktree_name" 2>/dev/null || true
     echo -e "${GREEN}✓ Removed: $worktree_name${NC}"
+    _prune_empty_worktree_parents "$worktree_path"
   done
 
   # Clean up empty directory if nothing left
