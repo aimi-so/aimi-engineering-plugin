@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.131.0] - 2026-09-08
+
+### Added
+
+- Brainstorm Design Decisions reach the story expander. `design_decisions()`
+  matches the `## Design Decisions` heading by shape rather than by exact
+  string, concatenates the sections it finds carrying the provenance of each,
+  and evicts whole sections once the aggregate passes `DECISIONS_CAP` instead
+  of slicing the stream at a byte -- a cut that could land mid-sentence and
+  hand the expander half a decision. `commands/plan.md` threads the block into
+  the Phase 3d prompts and `agents/workflow/aimi-story-expander.md` gains the
+  section that consumes it, so the block arrives somewhere that reads it rather
+  than being assembled and dropped.
+- `validate-tasks` warns when brainstorm-sourced decisions carry no
+  `brainstormPath`. A decision with no path back to the brainstorm that
+  produced it cannot be attributed later, and nothing said so before.
+
+### Fixed
+
+- `effective_cwd` honours a leading `cd <path>` in all three of bash's chaining
+  forms -- `&&`, `;` and a newline -- where it matched only `&&` before. The
+  other two fell through to `tool_input["cwd"]`, which names where the session
+  sits rather than where the command said it would run. The false denial that
+  surfaced this (a legitimate commit on a story branch, refused) was the benign
+  half. The other half is that when the two directories belong to different
+  repositories the protected-branch guard read the wrong one: `cd <checkout on
+  the default branch>` followed by a newline and a commit was ALLOWED, while
+  the identical command joined with `&&` was blocked. Reproduced through the
+  dispatcher against two real repositories, before and after.
+
 ## [1.130.0] - 2026-09-08
 
 ### Added
