@@ -912,26 +912,58 @@ def verify_coverage_findings(stories, project_root):
     PROJECT writer already group by -- so a multi-repo plan checks each story
     against its own repository's tooling, never a sibling's.
 
-    Returns (findings, undetermined_story_ids, clean_story_ids). A story that
-    cites nothing lands in none of the three -- there is nothing to evaluate.
-    A story that cites something lands in exactly one: `findings` when a cited
-    command is missing from verify, `undetermined_story_ids` when its group's
-    vocabulary could not be derived at all, `clean_story_ids` when every cited
-    command was found. The second list is the CANNOT-DETERMINE state
-    constraint 3 requires kept distinct from CHECKED-AND-CLEAN (the third
-    list): folding an undetermined story into "nothing to report" would be
-    exactly the false confidence this split exists to prevent.
+    Returns (findings, undetermined_story_ids, clean_story_ids,
+    not_evaluated) -- FOUR results, and the four lists PARTITION `stories`:
+    every story lands in exactly one, so the four lengths sum to len(stories)
+    and the union of their ids is the input's own id set. That partition is
+    the contract this function exists to hold: the count of stories judged
+    equals the count of stories that entered.
+
+    A story that cites something lands in one of the first three: `findings`
+    when a cited command is missing from verify, `undetermined_story_ids` when
+    its group's vocabulary could not be derived at all, `clean_story_ids` when
+    every cited command was found. The second list is the CANNOT-DETERMINE
+    state constraint 3 requires kept distinct from CHECKED-AND-CLEAN (the
+    third list): folding an undetermined story into "nothing to report" would
+    be exactly the false confidence this split exists to prevent.
+
+    `not_evaluated` is a FOURTH result and never a collapse of one of the
+    three. It holds `{id, reason}` for the two states in which this function
+    took no measurement at all: (a) the story cites no command in backticks
+    anywhere in its acceptanceCriteria, so there was nothing to evaluate; and
+    (b) the story DOES cite, but no citation is in its own project's derived
+    vocabulary, so nothing it named could be checked. Both used to leave by a
+    bare `continue`, which is how a story could enter the merge and receive no
+    verdict from any of the three lists -- the defect this fourth list closes.
+
+    Why (a) and (b) are not folded into `undetermined_story_ids`, which is the
+    tempting one-line version: that list's printed message asserts a concrete
+    cause -- no package.json, Makefile, Cargo.toml, pyproject.toml, go.mod,
+    CLAUDE.md or AGENTS.md exists for that story's project. For a story whose
+    group vocabulary was derived without trouble that sentence is FALSE, so
+    folding either state in would trade a silence for a lie, which is a
+    regression of the same family as the one this list fixes.
     """
     vocabulary_cache = {}
     findings = []
     undetermined_story_ids = []
     clean_story_ids = []
+    not_evaluated = []
 
     for story in stories:
         criteria_text = _join(" ", _list(story.get("acceptanceCriteria")))
         cited = _cited_commands(criteria_text)
         if not cited:
-            continue  # nothing this story cites -- neither state applies
+            # Reason (a): nothing was named, so nothing could be measured.
+            # Recorded rather than dropped -- a story that leaves here still
+            # entered the merge and still owes the report a verdict.
+            not_evaluated.append(
+                {
+                    "id": story["id"],
+                    "reason": "no acceptance criterion cites a command in backticks",
+                }
+            )
+            continue
 
         group = group_key(story.get("project"))
         if group not in vocabulary_cache:
@@ -946,6 +978,19 @@ def verify_coverage_findings(stories, project_root):
         lowered_vocabulary = {v.lower() for v in vocabulary}
         asserted = sorted(cmd for cmd in cited if cmd.lower() in lowered_vocabulary)
         if not asserted:
+            # Reason (b), the more dangerous of the two: the story NAMED
+            # something and the gate walked past it. `asserted` is empty
+            # exactly when no citation is in the vocabulary, so every span in
+            # `cited` is unrecognised -- name them, or the reader cannot tell
+            # a story citing a file path from one citing a real command this
+            # repository's tooling simply does not expose.
+            not_evaluated.append(
+                {
+                    "id": story["id"],
+                    "reason": "cites nothing in its project's derived vocabulary: "
+                    + _join(", ", sorted(cited)),
+                }
+            )
             continue
 
         verify_text = _cat(_implementation_verify(story)).lower()
@@ -955,7 +1000,7 @@ def verify_coverage_findings(stories, project_root):
         else:
             clean_story_ids.append(story["id"])
 
-    return findings, undetermined_story_ids, clean_story_ids
+    return findings, undetermined_story_ids, clean_story_ids, not_evaluated
 
 
 # ---------------------------------------------------------------------------
@@ -1827,15 +1872,32 @@ def main(argv):
     # Phase 4.3 is a warning in BOTH modes too, same character as 4.2. Its own
     # CANNOT-DETERMINE-THE-VOCABULARY state is reported separately from a
     # divergence AND from CHECKED-AND-CLEAN -- three distinct outcomes, never
-    # collapsed into one another. project_root mirrors PROJECT_ROOT, which
-    # find_aimi_root() has already cd'd aimi-cli.sh into by the time it invokes
-    # this script; the env var is read directly (rather than added as a flag)
+    # collapsed into one another. NOT-EVALUATED is a FOURTH outcome beside
+    # them, not a fourth name for one of the three: it is the state in which
+    # this phase measured nothing about a story, either because the story
+    # cited no command at all or because nothing it cited is in its project's
+    # own vocabulary. It is kept out of UNDETERMINED specifically -- that
+    # message asserts no manifest and no CLAUDE.md/AGENTS.md was found for the
+    # story's project, which is FALSE for a story whose group vocabulary was
+    # derived fine, so folding the two would trade this silence for a lie.
+    # Reporting it is what makes the phase account for every story that
+    # entered: before it existed a story leaving by one of those two paths got
+    # no verdict from any line, and vanished among the ones CHECKED-AND-CLEAN
+    # names.
+    #
+    # project_root mirrors PROJECT_ROOT, which find_aimi_root() has already
+    # cd'd aimi-cli.sh into by the time it invokes this script; the env var is
+    # read directly (rather than added as a flag)
     # because nothing here needs it confined -- it only ever opens a handful of
     # well-known top-level filenames, never a document-sourced path.
     project_root = os.environ.get("PROJECT_ROOT") or os.getcwd()
-    verify_coverage, verify_coverage_undetermined, verify_coverage_clean = (
-        verify_coverage_findings(stories, project_root)
-    )
+    (
+        verify_coverage,
+        verify_coverage_undetermined,
+        verify_coverage_clean,
+        verify_coverage_not_evaluated,
+    ) = verify_coverage_findings(stories, project_root)
+    phase_43_reported = False
     if verify_coverage:
         warn_list(
             "Warning: story-merge: Phase 4.3 verify-coverage smell detected (--agent-mode:"
@@ -1851,6 +1913,7 @@ def main(argv):
                 for finding in verify_coverage
             ],
         )
+        phase_43_reported = True
     if verify_coverage_undetermined:
         sys.stderr.write(
             "Warning: story-merge: Phase 4.3 verify-coverage VOCABULARY UNDETERMINED for "
@@ -1859,11 +1922,35 @@ def main(argv):
             + " AGENTS.md found for that story's project; its cited command(s) were not"
             + " evaluated -- do not read this as CHECKED-AND-CLEAN)\n"
         )
+        phase_43_reported = True
     if verify_coverage_clean:
         sys.stderr.write(
             "story-merge: Phase 4.3 verify-coverage CHECKED-AND-CLEAN for "
             + _join(", ", verify_coverage_clean)
             + "\n"
+        )
+        phase_43_reported = True
+    # Conditional on the phase having already spoken, and that condition is a
+    # measured trade rather than caution: printing it unconditionally would add
+    # a stderr line to 50 of the 92 recorded story_merge cases (109 stories, not
+    # one of them citing a command) and turn
+    # test_an_ordinary_merge_says_nothing_about_the_sidecars_beside_it red. The
+    # accepted consequence is that a merge in which EVERY story is not-evaluated
+    # stays silent -- but there the phase has asserted nothing about anyone, so
+    # there is no CHECKED-AND-CLEAN line for a missing id to hide behind. The
+    # partition itself is checked at the function level, not by this line.
+    if verify_coverage_not_evaluated and phase_43_reported:
+        sys.stderr.write(
+            "Warning: story-merge: Phase 4.3 verify-coverage NOT EVALUATED for "
+            + _join(
+                "; ",
+                [
+                    entry["id"] + " (" + entry["reason"] + ")"
+                    for entry in verify_coverage_not_evaluated
+                ],
+            )
+            + " -- this phase measured nothing about these stories; do not read"
+            + " them as CHECKED-AND-CLEAN\n"
         )
 
     # Surfaced to the orchestrator's Step 5 report through metadata.smellWarnings;
