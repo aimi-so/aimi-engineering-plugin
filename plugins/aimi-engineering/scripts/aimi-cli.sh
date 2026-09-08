@@ -11532,13 +11532,22 @@ cmd_setup_branch() {
 # The emitted "base" prefers the origin/<name> remote-tracking ref over the
 # bare local name, so a container is never cut from a stale local ref after a
 # successful fetch -- mirroring how cmd_setup_branch already checks out
-# origin/$default_branch for created-from-default. Two reasons opt out:
+# origin/$default_branch for created-from-default. Three cases opt out:
 #
 #   stacked-on-current -- the candidate is the caller's own checkout, and
 #     inheriting its local tip is what stacking means. Preferring origin here
 #     drops every commit made since the last push.
 #   detached-head      -- base is the raw HEAD sha; there is no branch name to
 #     prefer a remote ref for.
+#   target-exists whose local ref strictly DESCENDS from origin/<name> -- the
+#     same unpublished-work state as stacking, reached through a different
+#     door. See the origin-preference block below for why this one is scoped
+#     to target-exists and not widened to explicit-base.
+#
+# Every answer also carries "baseDivergence", classifying the emitted
+# candidate's local ref against origin/<candidate> as one of none | in-sync |
+# local-ahead | local-behind | diverged (see _branch_divergence). It is
+# emitted for every reason, including the ones whose base is unchanged.
 #
 # promptNeeded is true only when reason resolves to stacked-on-current --
 # the same four-condition gate execute.md Step 1.6 computes inline today
@@ -11559,6 +11568,64 @@ _local_has_branch() {
 _origin_has_branch() {
   git ls-remote --heads origin "refs/heads/$1" 2>/dev/null \
     | grep -q "[[:space:]]refs/heads/${1}$"
+}
+
+# Classify a branch's LOCAL ref against its origin remote-tracking ref, for the
+# one question a caller about to build on that branch actually has: is what is
+# on disk ahead of, behind, level with, or forked from what origin holds?
+#
+# Prints exactly one of: none | in-sync | local-ahead | local-behind | diverged.
+#
+# `none` is the honest answer whenever the comparison cannot be made at all --
+# an empty name (detached HEAD has no candidate to classify), no local ref, no
+# origin ref, no origin remote. Degrading rather than failing is deliberate:
+# every git call here is silenced and given a fallback, so the `set -e` this
+# script runs under can never abort a verb over a classification that is
+# advisory by construction.
+#
+# $2 is an optional pre-computed _origin_has_branch answer ("true"/"false").
+# _resolve_branch_base already runs that live `git ls-remote` for its own
+# origin preference; passing the answer in is what keeps this classification
+# from costing a second round-trip per invocation. Omitted, the probe runs
+# here, so the helper still answers on its own.
+#
+# Note the deliberate asymmetry with _origin_has_branch: that predicate asks
+# the REMOTE, while this comparison reads the local refs/remotes/origin/<name>
+# mirror. The two disagree exactly when a branch exists on origin but has
+# never been fetched here -- and `none` is the safe answer for that, not a
+# failure: nothing local can be compared against a ref that is not on disk.
+_branch_divergence() {
+  local name="$1" origin_present="${2:-}"
+  local local_sha remote_sha
+
+  [ -n "$name" ] || { printf 'none\n'; return 0; }
+  _local_has_branch "$name" || { printf 'none\n'; return 0; }
+
+  if [ -z "$origin_present" ]; then
+    if _origin_has_branch "$name"; then
+      origin_present=true
+    else
+      origin_present=false
+    fi
+  fi
+  [ "$origin_present" = "true" ] || { printf 'none\n'; return 0; }
+
+  local_sha=$(git rev-parse --verify --quiet "refs/heads/$name" 2>/dev/null || echo "")
+  remote_sha=$(git rev-parse --verify --quiet "refs/remotes/origin/$name" 2>/dev/null || echo "")
+  if [ -z "$local_sha" ] || [ -z "$remote_sha" ]; then
+    printf 'none\n'
+    return 0
+  fi
+
+  if [ "$local_sha" = "$remote_sha" ]; then
+    printf 'in-sync\n'
+  elif git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    printf 'local-ahead\n'
+  elif git merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
+    printf 'local-behind\n'
+  else
+    printf 'diverged\n'
+  fi
 }
 
 # Is <branch> already merged into origin/<default>?
@@ -11599,6 +11666,19 @@ _resolve_branch_base() {
     prompt_needed=true
   fi
 
+  # The candidate's origin presence and its local-vs-origin divergence, both
+  # computed ONCE here and read by everything below. _origin_has_branch is a
+  # live `git ls-remote`; this function already runs one for its own
+  # target-exists check, and handing the answer to _branch_divergence rather
+  # than letting it probe again is what keeps the classification free.
+  local candidate_on_origin=false divergence="none"
+  if [ -n "$candidate" ]; then
+    if _origin_has_branch "$candidate"; then
+      candidate_on_origin=true
+    fi
+    divergence=$(_branch_divergence "$candidate" "$candidate_on_origin")
+  fi
+
   # Origin preference, scoped by reason: prefer the origin/<name>
   # remote-tracking ref for a reference point the caller did not author, so a
   # container is never cut from a stale local ref after a successful fetch.
@@ -11609,16 +11689,42 @@ _resolve_branch_base() {
   # the last push, which is the common state of an autonomous run. That would
   # also put this path back in disagreement with cmd_setup_branch, whose
   # stacked-on-current arm checks out from local HEAD.
+  #
+  # target-exists opts out too, but only when the local ref strictly DESCENDS
+  # from origin/<name>. That is the same state the paragraph above describes,
+  # reached through a different door: a local ref containing everything origin
+  # has and more cannot be the "stale local ref after a successful fetch" the
+  # preference exists to avoid, so preferring origin there drops exactly the
+  # commits stacking was written to keep. A local-behind or diverged ref is
+  # genuinely stale or forked and keeps resolving to origin/<name>.
+  #
+  # Scoped to target-exists on purpose, and NOT widened to explicit-base:
+  # execute.md's Step 1.6 Option A states in prose that "an explicit base is a
+  # reference point the resolver prefers origin/ for", and tells the caller to
+  # leave BASE_BRANCH unset precisely so this resolver reaches
+  # stacked-on-current instead. Widening the opt-out would make that sentence
+  # false. default-branch is left alone for the same reason plus the absence
+  # of any measured failure there.
   if [ -n "$candidate" ]; then
-    if [ "$reason" != "stacked-on-current" ] && _origin_has_branch "$candidate"; then
+    if [ "$reason" = "stacked-on-current" ]; then
+      base="$candidate"
+    elif [ "$reason" = "target-exists" ] && [ "$divergence" = "local-ahead" ]; then
+      base="$candidate"
+    elif [ "$candidate_on_origin" = "true" ]; then
       base="origin/$candidate"
     else
       base="$candidate"
     fi
   fi
 
-  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s}\n' \
-    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed"
+  # baseDivergence is emitted for EVERY reason, including the ones whose base
+  # this change leaves untouched: a caller can then always see what it is
+  # about to build on. It is additive by design -- no `reason` value is added
+  # or renamed, so the verbatim five-value list in
+  # commands/references/container-execution.md stays true and every existing
+  # jq reader of .base/.reason/.promptNeeded is unaffected.
+  printf '{"base":"%s","reason":"%s","currentBranch":"%s","defaultBranch":"%s","promptNeeded":%s,"baseDivergence":"%s"}\n' \
+    "$base" "$reason" "$current_branch" "$default_branch" "$prompt_needed" "$divergence"
 }
 
 # CLI wrapper for _resolve_branch_base(): arg-parsing, --project cd and the
