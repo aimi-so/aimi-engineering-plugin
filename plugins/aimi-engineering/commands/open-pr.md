@@ -531,6 +531,35 @@ Derive a **feature-level** PR title — one that describes the whole change, not
 3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
+# How many plans declare this branch? `metadata` answers the session's ACTIVE
+# tasks file, so it can say "this document is not this branch's" but never "how
+# many others said they were". `find-tasks-all` enumerates every live plan and
+# `metadata --tasks-file` reads each one's own branchName, so the number below
+# is measured from the documents themselves. Never counted from merge-commit
+# subjects: the plugin emits no such string, so counting by one would be
+# counting whichever wording a person happened to type.
+BRANCH_PLAN_COUNT=0
+ALL_PLAN_FILES=$($AIMI_CLI find-tasks-all 2>/dev/null)
+if [ -n "$ALL_PLAN_FILES" ]; then
+  while IFS= read -r plan_file; do
+    [ -n "$plan_file" ] || continue
+    plan_branch=$($AIMI_CLI metadata --tasks-file "$plan_file" 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+    if [ "$plan_branch" = "$CURRENT_BRANCH" ]; then
+      BRANCH_PLAN_COUNT=$((BRANCH_PLAN_COUNT + 1))
+    fi
+  done <<PLAN_BRANCH_SCAN
+$ALL_PLAN_FILES
+PLAN_BRANCH_SCAN
+fi
+# One clause, appended to whichever `PR title from …` line wins below — the same
+# announcing machine, not a second one. Three cases, not two: 0 is as ordinary
+# as 2, and far more common.
+case "$BRANCH_PLAN_COUNT" in
+  0) PLAN_COUNT_NOTE="0 plans declare $CURRENT_BRANCH as their branchName, so no metadata could pass the branchName gate: this title comes from the branch's own commits, and metadata.issues fell to the same gate — no Closes line is rendered either." ;;
+  1) PLAN_COUNT_NOTE="1 plan declares $CURRENT_BRANCH as its branchName." ;;
+  *) PLAN_COUNT_NOTE="$BRANCH_PLAN_COUNT plans declare $CURRENT_BRANCH as their branchName, so this title names at most one of them and the rest of the branch goes unnamed." ;;
+esac
+
 # Source 1: feature-level metadata title (guarded, like Step 4c). The
 # `metadata` subcommand emits the metadata object itself, so the title, the
 # branch and the issue list are at the top level (`.title`, `.branchName`,
@@ -559,7 +588,7 @@ fi
 
 if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
   PR_TITLE="$METADATA_TITLE"
-  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH)." >&2
+  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH). $PLAN_COUNT_NOTE" >&2
 else
   if [ -n "$METADATA_TITLE" ]; then
     echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
@@ -574,9 +603,9 @@ else
   # Source 3: branch name when there are no commits ahead of base.
   if [ -z "$PR_TITLE" ]; then
     PR_TITLE="$CURRENT_BRANCH"
-    echo "PR title from the branch name — no commits ahead of $BASE_BRANCH to read a subject from." >&2
+    echo "PR title from the branch name — no commits ahead of $BASE_BRANCH to read a subject from. $PLAN_COUNT_NOTE" >&2
   else
-    echo "PR title from the first commit on $CURRENT_BRANCH." >&2
+    echo "PR title from the first commit on $CURRENT_BRANCH. $PLAN_COUNT_NOTE" >&2
   fi
 fi
 ```
@@ -584,6 +613,18 @@ fi
 Store as `$PR_TITLE`.
 
 **Each of the three sources announces itself.** Whichever one wins, one `PR title from …` line goes to stderr, so the transcript records which of the three produced the title that was opened. Only source 1 can be silently wrong — sources 2 and 3 read this branch — so the mismatch that rejects it prints a second line naming the branch it found, which is what makes "why is this titled after another feature" answerable without re-reading the tasks file. The placeholder special-case above is deliberately upstream of all of this: it empties `$METADATA_TITLE` before the branch comparison, so a skeleton title falls to source 2 as it always has and the mismatch note stays quiet about a title that was never a title.
+
+**How many plans declare this branch is part of that same announcement, and the answer has THREE cases, not two.** The `PR title from …` line says which source won; `$PLAN_COUNT_NOTE`, appended to whichever one fires, says how many plans claimed this branch, which is what turns "the guard rejected source 1" into a reason. No second announcing machine is introduced for it — the count is computed once at the top of the block above and the existing three lines carry it.
+
+- **`N == 0` — no plan declares this branch.** This is the common case, not the exotic one, and it is what phase mode produces: each phase's tasks file declares its own phase branch (`fix/<feature>-phase-3-…`), so the long-lived integration branch those phases merge into is the `branchName` of no plan at all. Both gates above then reject: the title falls to source 2 — the subject of the branch's *first* commit, one story out of however many the branch carries — and `metadata.issues` is suppressed by the same comparison, so **no `Closes` line is rendered either**. Those two consequences already have notes of their own above; the count is what explains why nothing matched, and it is the reason the `N == 0` clause names the lost `Closes` line rather than leaving it to be discovered from a second note.
+- **`N == 1` — the case the `==` guard was written for.** One plan owns the branch. Note the count still answers a question the guard does not: a `1` beside a *rejected* source 1 means the plan that declares this branch is not the session's active tasks file.
+- **`N >= 2` — several plans on one long-lived branch, every one of them satisfying `==`.** Whichever is active wins, and its `metadata.title` names its own feature while the other N−1 go unnamed in a title nobody re-reads against the diff.
+
+**A warning conditioned only on `>= 2` would never fire in the case that actually happens.** That is measured rather than assumed: on the integration branch these phases merge into, `grep -rl '"branchName": *"<that branch>"' .aimi/tasks .aimi/archive` returns **0** — every live plan names a phase branch instead. Treating `0` as a fourth, silent state is exactly the gap this count closes.
+
+**The count is not built on merge-commit subjects, and that exclusion is measured too.** grepping `plugins/` for the merge-commit subject these integration branches carry — the one naming a phase number — returns **0**: the plugin emits no such string anywhere, and every one of those subjects was typed by hand. A count derived from them would be counting one person's habit; `find-tasks-all` plus each file's own `metadata.branchName` counts what the documents declare.
+
+**Say the number; never auto-title from the union.** The decision recorded here is that the machine ANNOUNCES how many plans it found, not that it composes a title out of several of them. A title synthesized from two features is less readable than a partial title that says it is partial, and a reader who is told "3 plans declare this branch" can pick the right title by hand — which is more than a merged one would let them do.
 
 **The mismatch branch empties `$METADATA_TITLE` too, not only the placeholder special-case above.** `$PR_TITLE` is not this gate's only consumer — Step 5c's backend issue title reads `$METADATA_TITLE` as well (see Step 4c and Step 5c below), and it never re-checks `branchName` itself. Emptying the variable here, right beside the note that already explains why, means that check never needs writing a second time at the point of use: every downstream reader of `$METADATA_TITLE` sees the same "not this feature" verdict this gate already reached, the same way the placeholder case already made source 2 the answer for both without either consumer needing to know why.
 
