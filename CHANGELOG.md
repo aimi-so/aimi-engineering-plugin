@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.134.0] - 2026-09-09
+
+### Added
+
+- `worktree-manager.sh` gains `_assert_worktree_removed`, which answers the
+  POST-state of a removal instead of the PRE-state. Given the resolved path
+  plus the captured exit status and stderr of the `git worktree remove` call,
+  it re-asks the git register and re-tests the disk, and succeeds only when
+  both are clear. It prints nothing on the success path, so each caller keeps
+  its own wording (`✓ Removed worktree: ` and `✓ Removed: ` stay distinct),
+  and it returns rather than exits, which is what lets `cleanup`'s loop carry
+  on to the next worktree under `set -e`. Four tests in
+  `test-worktree-manager.sh` cover a refused removal, the byte-identity of the
+  success line (previously pinned by nothing, since both round-trip tests
+  discard stdout), the slash-named prune and the nested-container refusal:
+  108 passed, 0 failed.
+- `commands/execute.md` gains `### Plan Discriminator` under Multi-Repo
+  Handling. `PLAN_DISC` is the tasks file's own stem -- already dated and
+  slugged per plan, the same key `probe_verify()` in `scripts/tasks.py`
+  chooses for the same reason -- sanitized to `[A-Za-z0-9_-]`, with a `case`
+  guard prepending `p` when the result would not start alphanumerically. The
+  sanitization is load-bearing rather than defensive: `validate_branch_name`
+  accepts only `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` and `create` runs it on the
+  composed name, decimal-phase tasks files exist in the archive, and a single
+  dot makes `create` refuse the whole name while `execute.md` misreports the
+  cause as a too-old `worktree-manager.sh`.
+
+### Changed
+
+- Story worktree and branch names carry that discriminator as a PREFIX:
+  `[PLAN_DISC]-[branchName]-[story.id]` in flat and container mode,
+  `[PLAN_DISC]-[PHASE_BRANCH]-[story.id]` in phase mode. Two `/aimi:execute`
+  runs over different tasks files that share one `branchName` composed the
+  same name for their own `US-001` and were handed the same tree. The base-sha
+  check cannot catch that: it deliberately accepts a reused tree ahead of its
+  base so a story that committed and then failed can be re-run, and the other
+  plan's leftover tree on an unmoved base branch is a descendant of
+  `base_sha` -- the guard passes and the only output is `Worktree already
+  exists at:`, indistinguishable from a same-plan resume. When the base branch
+  has moved instead, that same stale tree fails the check and the story is
+  mark-failed and cascade-skipped. One cause, opposite symptoms, both closed
+  by giving the name a plan identity rather than by teaching the guard about
+  plans. The story id stays LAST because `skills/story-executor/SKILL.md`
+  requires in two places that the branch an executor finds checked out end in
+  `-<STORY_ID>` and refuses to stage or commit otherwise; `worktree_base` is
+  left alone, since it is read a second time as `--from` and must keep naming
+  a branch that really exists, so the discriminator lands in a separate
+  `worktree_prefix`.
+- Every cleanup sweep moves to the prefixed pattern, because no placement of a
+  discriminator preserves the old glob -- measured in both directions,
+  `feat/a-STEM-US-001` and `STEM-feat/a-US-001` each fail `feat/a-US-*`. The
+  Per-Project Cleanup Rule, the phase/container pass, both flat/inline passes,
+  the derivation rule, the flat-mode naming paragraph, the `-finalize`
+  non-overlap invariant and `references/container-execution.md` -- the source
+  of truth the other two defer to -- move together. The un-prefixed shape
+  keeps exactly one home per family: the one-time migration safeguard,
+  re-justified onto the legacy shape it strictly contains, and one new legacy
+  pass beside the phase/container sweep. That safeguard's removal marker named
+  **1.110.0**, twenty-three minor releases behind the release now reading it,
+  and is retargeted to **1.150.0** rather than stacked beside a dead one.
+- `remove_worktree` resolves its target from the git register
+  (`_registered_worktree_paths` + `_worktree_display_name`) instead of
+  composing `$WORKTREE_DIR/$name` -- the shape `list` and `cleanup` were given
+  and `remove` was left out of. In container mode a story worktree lives one
+  level deeper, so the composed path does not exist and the benign "may
+  already be removed" line was printed over a worktree that was registered AND
+  on disk. A name registered only inside another container's own `.worktrees/`
+  is now refused loudly at exit 1, naming the registered path; a name matching
+  nothing anywhere keeps its benign message and exit 0, because the fifteen
+  `$WORKTREE_MGR remove` invocations in `commands/` rely on idempotent
+  teardown, several of them as the last line of a bash block.
+  `remove_worktree` also calls `_prune_empty_worktree_parents`, which until
+  now only its sibling called: every story branch here carries a slash, so
+  `.worktrees/feat` was residue `remove` always left -- and that one directory
+  is what kept the `rmdir "$WORKTREE_DIR"` at its tail from ever firing.
+- Step 1.5 of `skills/story-executor/SKILL.md` chooses its instrument before
+  probing with it, and says which one it chose. `PROBE_TREE_CLI` is the
+  `aimi-cli.sh` of the working directory step 0c established, preferred when
+  `[ -x ]` holds -- `-x`, never `-f` or `-e`, since a file that is present but
+  not executable probes nothing -- and falling back to the resolved
+  `$AIMI_CLI` when it does not. All four `verify-probe` call sites across both
+  `<execution_flow>` blocks move to `"$PROBE_CLI"`, the post-failure
+  `--previous-file` re-run included, so the pre/post comparison of
+  `unsatisfiable` is made by one instrument rather than two. On a feature
+  branch the installed CLI is older than the branch's own and an old parser
+  accepts an unknown flag in silence, so with no instrument named two
+  contradictory findings about one flag are indistinguishable from each other.
+  BOTH branches announce, on one stderr line prefixed `probe-cli: ` -- a
+  deliberate divergence from the `commands/execute.md` precedent, which
+  announces only on its fallback: there the silent branch is the rare one,
+  here the tree under test is the common case, so a silent preferred branch
+  would hide exactly what this exists to show. The prefix is not
+  `verify-probe: ` because the verb already writes `verify-probe: wrote
+  <path>` to that same stream and the executor has to read that path back out
+  of it. The preference is per-call and is never persisted:
+  `write_global_cli_cache` and `_dev_dir_path` both refuse a path under
+  `.worktrees/` on purpose, after a symlink bug that exited 127, so the stderr
+  line is the substitute for persisting rather than a complement to it.
+- The root `CLAUDE.md` sentence explaining why `test-worktree-manager.sh`
+  stays serial is corrected. Both halves of the old reason were wrong when
+  measured -- the port is scanned rather than fixed, and the count was never
+  five. The conclusion survives on the real reason, which replaces them: a
+  machine-global bounded window of 20 ports from `DEV_SERVER_BASE_PORT=4100`,
+  plus a TOCTOU in `_pick_free_port` whose `_port_free` probe closes its
+  connection before the caller binds.
+- `command-size-baseline.txt` is reconciled by the same commits that moved the
+  files, as its two-way ratchet requires: `skills/story-executor/SKILL.md` to
+  57862, `execute.md` to 404568 and `references/container-execution.md` to
+  34388.
+
+### Fixed
+
+- `remove_worktree` and `cleanup_worktrees` stop reporting a removal they did
+  not make. Both gated their success line on `[[ -d "$worktree_path" ]]` -- a
+  question about the state BEFORE the attempt -- and swallowed both git calls
+  with `2>/dev/null || true`; those four swallowed calls are now zero. A
+  removal git refused (a locked working tree exits 128 with `fatal: cannot
+  remove a locked working tree`) still printed a checkmark and exited 0 while
+  the directory, the registration and the branch all survived, and the
+  surviving ref is then what the next `create` silently binds to, handing an
+  executor a tree standing on the previous plan's commit. Both calls are now
+  captured, so git's own wording -- the only text that says WHY -- reaches the
+  transcript verbatim, and the branch check asks whether the ref SURVIVED
+  rather than trusting git's exit status, since `git branch -D` exits 1 both
+  for a branch that was never there (the benign case the already-removed path
+  reaches every time) and for one it could not delete. `cleanup_worktrees`
+  records each failure and returns non-zero at the END of its loop, so one
+  worktree it could not remove no longer costs its siblings their sweep.
+
 ## [1.133.0] - 2026-09-09
 
 ### Added

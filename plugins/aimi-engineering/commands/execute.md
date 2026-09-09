@@ -112,6 +112,27 @@ Stories are grouped by their `project` field:
 
 Each project group operates independently: its own default-branch detection, `git fetch origin`, branch setup, worktree creation, merge, and cleanup all run against that project's git root.
 
+### Plan Discriminator
+
+`PLAN_DISC` is this run's own plan identity, and it is what makes a story worktree name unique across PLANS rather than only across stories. Story ids restart at `US-001` in every plan, `branchName` is chosen by the plan author and is routinely reused, and `.aimi/tasks/` is shared — so two runs over two different tasks files that happen to share one `branchName` compose the same worktree name for their own `US-001` and are handed the same tree. Step 4's base-sha check does not catch that: it deliberately ACCEPTS a reused tree that is AHEAD of its base, so a story which committed and then failed can be re-run, and the other plan's leftover tree sitting on a base branch that has not moved IS a descendant of `base_sha` — the guard passes, the story runs on the other plan's commits, and the only thing printed is `Worktree already exists at:`, which is indistinguishable from a legitimate same-plan resume. Prefixing the name with the plan's own identity makes that collision impossible instead of merely detectable; widening the guard would require it to know which plan a tree belongs to, which is precisely the identity added here. The same root cause has a louder second symptom this closes at the same time: when the base branch HAS moved, the same stale tree fails the descendancy check and the story is mark-failed and cascade-skipped with `Worktree base ... does not descend from ...`.
+
+The identity is the **tasks file's own stem** — the basename of the file Step 4 resolves as `WAVE_TASKS_FILE`, minus `.json`. Nothing is invented: that stem is already dated and slugged per plan, which is exactly why `probe_verify()` in `scripts/tasks.py` keys its artifact names to the same stem and says so in its docstring. Derive it inside the Bash call that needs it — every Bash call is an isolated shell, so the `echo` on the last line is functional and not decorative: a value that is not printed does not reach the orchestrator.
+
+The stem is **sanitized**, and the sanitization is load-bearing rather than defensive. `worktree-manager.sh`'s `validate_branch_name` accepts only `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` and `create` runs it on the composed worktree name, so a single DOT refuses the whole create — and decimal-phase tasks files exist in this repository today (`.aimi/archive/forge-abstraction-phase-1.1-tasks.json` and its `-phase-1.2-` sibling), whose raw stems carry that dot. Unsanitized, every story of every decimal phase would fail, and fail MISATTRIBUTED: Step 4's missing-sentinel branch would report `Worktree create emitted no WORKTREE_PATH/WORKTREE_BASE sentinel (worktree-manager.sh too old?)`, blaming the tool instead of the name it was handed. `probe_verify()`'s precedent needs no such step because it names a FILE, where a dot is legal; a git ref under this validator is the narrower namespace, and that is the one place the precedent does not transfer intact.
+
+```bash
+WAVE_TASKS_FILE="[the tasks file this run resolved — see Step 4]"
+PLAN_DISC=$(basename "$WAVE_TASKS_FILE" .json | sed 's/[^A-Za-z0-9_-]/-/g')
+case "$PLAN_DISC" in [A-Za-z0-9]*) ;; *) PLAN_DISC="p$PLAN_DISC" ;; esac
+echo "PLAN_DISC=$PLAN_DISC"
+```
+
+The `case` guard prepends `p` when the sanitized stem would not start alphanumerically — the validator refuses a leading `-` or `_` as firmly as it refuses a dot. `basename`, `sed` and `case` are POSIX, so the block behaves identically whether the session's shell is bash or zsh, and both variables it reads are assigned inside it.
+
+`PLAN_DISC` is a **PREFIX** and the story id stays LAST: the composed name is `[PLAN_DISC]-[branchName]-[story.id]` in flat and container mode, `[PLAN_DISC]-[PHASE_BRANCH]-[story.id]` in phase mode. The suffix position of the id is a hard external constraint rather than a preference — `${CLAUDE_PLUGIN_ROOT}/skills/story-executor/SKILL.md` requires in two places that the branch a story executor finds checked out END in `-<STORY_ID>`, and classifies a mismatch as a refusal to stage or commit. Appending the discriminator after the id would break both at once, silently, at the moment an executor refuses to commit finished work.
+
+Every cleanup sweep in this document scans the prefixed pattern, because no placement of a discriminator preserves the old glob — measured in both directions, `feat/a-STEM-US-001` and `STEM-feat/a-US-001` both fail `feat/a-US-*`. The un-prefixed shape is legacy and keeps exactly one home per sweep family: Post-Loop Cleanup's **One-time migration safeguard** for the flat/container shape, and the legacy pass beside the phase/container sweep for the `EXEC_BRANCH` one.
+
 ### Per-Project Cleanup Rule
 
 After each wave (and in Post-Loop safety cleanup), for each unique `project_root` (including CWD for the DEFAULT group):
@@ -121,11 +142,11 @@ WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/w
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 cd [project_root]
 $WORKTREE_MGR list
-# For each worktree matching "[branchName]-US-*":
+# For each worktree matching "[PLAN_DISC]-[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]
 ```
 
-This rule is unchanged, but does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with that claimed phase's own container and branch for the duration of its execution — one phase container and one phase branch per participating repository, never a single pair for the whole phase regardless of how many repositories it spans — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
+This rule is unchanged apart from the plan discriminator now leading the pattern, and does not apply in phase mode — see `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD, which supersedes `project_root` with that claimed phase's own container and branch for the duration of its execution — one phase container and one phase branch per participating repository, never a single pair for the whole phase regardless of how many repositories it spans — nor does it apply, in the same way, to container mode (`PHASE_MODE=false`, `CONTAINER_MODE=true`; see Execution Mode Detection in Step 1), which supersedes `project_root` with `CONTAINER_PATHS[group_key]` for the duration of that project group's container-mode execution. See that same reference's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection for the contract that replaces this per-consumer branching.
 
 ### Container Paths Per Project Group (Container Mode)
 
@@ -660,7 +681,7 @@ fi
 
 This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.
 
-**When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[branchName]-[story.id]` exactly as now. Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
+**When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[PLAN_DISC]-[branchName]-[story.id]` — the plan discriminator is the one clause of this paragraph that is no longer unchanged, and it applies identically in every mode (see `### Plan Discriminator` under Multi-Repo Handling). Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
 
 **When `PHASE_MODE=true`:** read `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` now — it is the single source of truth for the worktree naming/CWD, container creation, and dev-server bootstrap mechanisms every phase-mode step from Step 1.7 onward delegates to by name.
 
@@ -2643,6 +2664,12 @@ CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populate
 # orchestrators silently read and mutate each other's file.
 WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else (AIMI_ROOT + "/" + TASKS_PATH)
 
+# PLAN_DISC — this run's own plan identity, the sanitized stem of the file
+# above. Derived by the block in Multi-Repo Handling's `### Plan Discriminator`;
+# run that block in the Bash call that needs the value and read it back from
+# the PLAN_DISC= line it echoes, since every Bash call is an isolated shell.
+PLAN_DISC = sanitized stem of WAVE_TASKS_FILE
+
 while true:
     # ========================================
     # RE-POINT THE CLI — TOP OF THE WAVE, NEVER MID-WAVE
@@ -2808,8 +2835,18 @@ while true:
         worktree_cwd = EXEC_ROOT[group_key]
         worktree_base = EXEC_BRANCH[group_key]
 
+        # PLAN_DISC comes from Multi-Repo Handling's `### Plan Discriminator`,
+        # derived once from WAVE_TASKS_FILE above. worktree_base is deliberately
+        # NOT redefined: it is read a second time below as `--from [worktree_base]`
+        # and must keep naming a branch that really exists, so the discriminator
+        # goes into a separate prefix rather than being folded into the base.
+        worktree_prefix = PLAN_DISC + "-" + worktree_base
+
         for full_story in stories:
-            worktree_name = worktree_base + "-" + full_story.id
+            # The story id stays LAST. skills/story-executor/SKILL.md requires in
+            # two places that the branch an executor finds checked out END in
+            # "-<STORY_ID>", and treats a mismatch as a refusal to stage or commit.
+            worktree_name = worktree_prefix + "-" + full_story.id
 
             # cd to this group's execution root (see Execution Context above)
             cd [worktree_cwd]
@@ -3493,17 +3530,23 @@ Output your full structured review under the heading '## Design Implementation R
 
 After the wave loop ends (all stories processed or deadlock):
 
-**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection (`PHASE_CONTAINER_PATHS[group_key]`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to its own `PHASE_CONTAINER_PATHS[group_key]` — the same `PHASE_BRANCH` name, but each group's own repository's own container — so in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on a genuinely multi-repo phase that grouped stories under more than one `group_key`, the loop below runs once per group_key against that group's own container, sweeping each participating repository in turn rather than repeating a pass against the one the first iteration already covered. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
+**Phase and container mode (`EXEC_OWNS_ROOT=true`):** cleanup runs per project group with CWD = `EXEC_ROOT[group_key]`, matching worktrees named `"[PLAN_DISC]-[EXEC_BRANCH[group_key]]-US-*"` — the same derivation rule as `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md`'s Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH subsection (`PHASE_CONTAINER_PATHS[group_key]`/`PHASE_BRANCH` in phase mode, `CONTAINER_PATHS[group_key]`/`branchName` in container mode). Step 4's own wave loop rebuilds `EXEC_ROOT`/`EXEC_BRANCH` fresh each wave, scoped to that wave's own stories; Post-Loop Cleanup runs after the loop ends, so it re-derives them here across every unique `group_key` with at least one story scheduled this run, rather than reading a stale, single-wave-scoped copy. In phase mode every `group_key` resolves to its own `PHASE_CONTAINER_PATHS[group_key]` — the same `PHASE_BRANCH` name, but each group's own repository's own container — so in the common case of a single group_key this degenerates to exactly the single iteration today's phase-only cleanup already runs; on a genuinely multi-repo phase that grouped stories under more than one `group_key`, the loop below runs once per group_key against that group's own container, sweeping each participating repository in turn rather than repeating a pass against the one the first iteration already covered. The main working tree (`AIMI_ROOT`) is never `cd`'d into by this step.
 
 ```
 for each unique group_key with at least one story scheduled this run:
     cd [EXEC_ROOT[group_key]]
     $WORKTREE_MGR list
+    # For each worktree matching "[PLAN_DISC]-[EXEC_BRANCH[group_key]]-US-*":
+    $WORKTREE_MGR remove [worktree_name]
+
+    # Legacy pass — the un-prefixed shape a run predating the plan discriminator
+    # left inside this same container. Same list, same CWD; only the pattern
+    # differs, and no run can create another one.
     # For each worktree matching "[EXEC_BRANCH[group_key]]-US-*":
     $WORKTREE_MGR remove [worktree_name]
 ```
 
-**One-time migration safeguard (flat/container mode only):** additionally run one sweep pass per project group with CWD = `[project_root]` itself — the pre-upgrade, un-containerized location — scanning the same `"[branchName]-US-*"` pattern:
+**One-time migration safeguard (flat/container mode only):** additionally run one sweep pass per project group with CWD = `[project_root]` itself — the pre-upgrade, un-containerized location — scanning the un-prefixed legacy `"[branchName]-US-*"` pattern:
 
 ```
 for each unique project_root (including CWD for the DEFAULT group):
@@ -3513,9 +3556,9 @@ for each unique project_root (including CWD for the DEFAULT group):
     $WORKTREE_MGR remove [worktree_name]
 ```
 
-Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, a story worktree stranded directly under `project_root/.worktrees/` by an execution from before container mode shipped would otherwise never be swept by either cleanup pass again. This extra pass closes that gap; it is a no-op once no such pre-upgrade worktrees remain.
+Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, a story worktree stranded directly under `project_root/.worktrees/` by an execution from before container mode shipped would otherwise never be swept by either cleanup pass again. This extra pass closes that gap; it is a no-op once no such pre-upgrade worktrees remain. It closes the wider gap too: the un-prefixed shape is what EVERY run composed before the plan discriminator, pre-container runs included, so the set this pass sweeps strictly CONTAINS the one it was originally written for. That containment is why the safeguard is re-justified here rather than joined by a second subsection saying almost the same thing.
 
-**Removal marker:** this safeguard exists only to catch worktrees stranded by runs that predate container mode (introduced in 1.105.0). Delete this subsection outright once the plugin reaches **1.110.0** — five minor releases is enough runway for any pre-existing stray worktrees to have been swept, and an unbounded extra list-and-parse pass per project group on every future run stops paying for itself after that.
+**Removal marker:** this pass now exists for the plan discriminator (see `### Plan Discriminator` under Multi-Repo Handling), not for container mode: what it sweeps is the un-prefixed legacy shape no run can compose any more, and the pre-container strays it was written for are a subset of that. Delete this subsection outright once the plugin reaches **1.150.0**, which is seventeen minor releases of runway from the 1.133.0 this was written against. The marker it replaced named a version that had already gone by — it told the reader to delete this subsection at a release twenty-three minor versions BEHIND that same 1.133.0 — which is the argument for retargeting the paragraph onto the reason it now exists for rather than stacking a second marker beside a dead one. An unbounded extra list-and-parse pass per project group on every future run stops paying for itself once no un-prefixed worktree can plausibly still exist.
 
 **Flat/inline mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`):** unchanged.
 
@@ -3525,12 +3568,12 @@ Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, 
 for each unique project_root (including CWD for DEFAULT group):
     cd [project_root]
     $WORKTREE_MGR list
-    # For each worktree matching "[branchName]-US-*":
+    # For each worktree matching "[PLAN_DISC]-[branchName]-US-*":
     $WORKTREE_MGR remove [worktree_name]
 
 # When no stories have project fields, use current directory (backwards compatible):
 $WORKTREE_MGR list
-# For each worktree matching "[branchName]-US-*":
+# For each worktree matching "[PLAN_DISC]-[branchName]-US-*":
 $WORKTREE_MGR remove [worktree_name]
 ```
 
@@ -3594,7 +3637,7 @@ if WORKTREE_PATH is absent or WORKTREE_BASE is absent:
 FINALIZE_COMMITS = git -C [EXEC_ROOT[group_key]] log --oneline [CONTAINER_BASE]..[EXEC_BRANCH[group_key]]
 ```
 
-The `-finalize` suffix is chosen so the name does **not** match the `"[EXEC_BRANCH[group_key]]-US-*"` pattern Post-Loop Cleanup sweeps. Post-Loop Cleanup has already run by the time this section starts, but the two must not overlap even on a re-entry: this section removes its own worktree below, and a sweep that also claimed it would be racing for the same tree.
+The `-finalize` suffix is chosen so the name does **not** match the `"[PLAN_DISC]-[EXEC_BRANCH[group_key]]-US-*"` pattern Post-Loop Cleanup sweeps — nor the un-prefixed legacy pattern in the pass beside it, since `[EXEC_BRANCH[group_key]]-finalize` fails the `-US-*` tail of both globs alike, which is what carries this invariant across the rename unchanged in substance. Post-Loop Cleanup has already run by the time this section starts, but the two must not overlap even on a re-entry: this section removes its own worktree below, and a sweep that also claimed it would be racing for the same tree.
 
 **One executor, not a fixed command.** The step needs judgment — deciding the increment, writing a CHANGELOG entry that says what *this* set of commits did — which is why it gets the merged-commit list alongside the key's own intent rather than a hardcoded recipe:
 

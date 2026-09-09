@@ -410,6 +410,61 @@ _prune_empty_worktree_parents() {
   done
 }
 
+# Answer the POST-state: after an attempted removal, is this worktree really
+# gone? Both callers used to gate their success line on `[[ -d $path ]]`, which
+# asks whether the directory existed BEFORE the attempt -- so a `git worktree
+# remove` that exited 128 ("cannot remove a locked working tree", a container
+# still holding the tree, a permission refusal) still printed a checkmark and
+# exited 0, and the branch ref it could not delete either was then silently
+# reused by the next `create`. Ask git instead, and ask the disk second: a
+# removal is done only when the register has forgotten the path AND nothing is
+# left at it.
+#
+# Takes the captured status and stderr of the git call rather than re-running
+# it, so git's own wording -- the only text that says WHY -- reaches the
+# transcript verbatim. Prints nothing on the success path: the caller owns its
+# own `✓` line, and the two callers word theirs differently on purpose.
+#
+# Returns 1 rather than exiting: under `set -e` the callers must invoke this
+# inside an `if`, which is also what lets cleanup_worktrees carry on to the
+# next worktree instead of aborting its loop.
+_assert_worktree_removed() {
+  local worktree_path="$1"
+  local display_name="$2"
+  local git_status="$3"
+  local git_message="$4"
+
+  local resolved_path
+  resolved_path=$(realpath -m "$worktree_path")
+
+  local still_registered=false
+  local registered_path
+  while IFS= read -r registered_path; do
+    if [[ "$registered_path" == "$worktree_path" ]] || [[ "$(realpath -m "$registered_path")" == "$resolved_path" ]]; then
+      still_registered=true
+      break
+    fi
+  done < <(_registered_worktree_paths)
+
+  local still_on_disk=false
+  if [[ -e "$worktree_path" ]]; then
+    still_on_disk=true
+  fi
+
+  if [[ "$still_registered" == false ]] && [[ "$still_on_disk" == false ]]; then
+    return 0
+  fi
+
+  echo -e "${RED}✗ Failed to remove worktree: $display_name${NC}" >&2
+  echo -e "${RED}  path: $worktree_path (registered=$still_registered on_disk=$still_on_disk)${NC}" >&2
+  if [[ -n "$git_message" ]]; then
+    echo -e "${RED}  git (exit $git_status): $git_message${NC}" >&2
+  else
+    echo -e "${RED}  git exited $git_status with no message${NC}" >&2
+  fi
+  return 1
+}
+
 # List all worktrees
 list_worktrees() {
   echo -e "${BLUE}Available worktrees:${NC}"
@@ -551,20 +606,48 @@ cleanup_worktrees() {
 
   echo ""
   echo -e "${BLUE}Cleaning up $found worktree(s)...${NC}"
+  # A batch verb: one worktree that could not be removed must be reported and
+  # the loop must reach every sibling the old code did reach. So each failure
+  # only records itself here and the non-zero return waits for the end.
+  local cleanup_failed=false
   for worktree_path in "${to_remove[@]}"; do
     # The display name again, not a recomputed basename: this name is not
     # printed text here, it is the argument to serve_stop (the dev-server.json
     # key) and to `git branch -D`. Against the branch bug/issue-149-pr-body,
     # `git branch -D issue-149-pr-body` answers "branch not found" and exits
-    # 1 -- swallowed whole by the `2>/dev/null || true` below -- so a
-    # basename here would remove the worktree and silently leave its branch.
+    # 1 -- which is why the branch check below asks whether the REF survived
+    # rather than trusting git's exit status -- so a basename here would
+    # remove the worktree and silently leave its branch.
     local worktree_name=$(_worktree_display_name "$worktree_path")
     # Best-effort stop before removal — see remove_worktree's own comment for
     # why: an unconditional cleanup that skips this would orphan any dev
     # server still running against one of these worktrees.
     serve_stop "$worktree_name" || true
-    git worktree remove "$worktree_path" --force 2>/dev/null || true
-    git branch -D "$worktree_name" 2>/dev/null || true
+
+    # Capture instead of swallowing: `2>/dev/null || true` is what made a
+    # refused removal indistinguishable from a real one. Assignment and
+    # status are collected on the same statement so `set -e` never sees a
+    # bare failing command.
+    local remove_out="" remove_rc=0
+    remove_out=$(git worktree remove "$worktree_path" --force 2>&1) || remove_rc=$?
+    if ! _assert_worktree_removed "$worktree_path" "$worktree_name" "$remove_rc" "$remove_out"; then
+      cleanup_failed=true
+      continue
+    fi
+
+    # cleanup has no --keep-branch: it always deletes the branch too.
+    local branch_out="" branch_rc=0
+    branch_out=$(git branch -D "$worktree_name" 2>&1) || branch_rc=$?
+    # The POST-state again, for the same reason: `git branch -D` exits 1 for a
+    # branch that was never there, which is the benign case, and exits 1 for a
+    # branch it could not delete, which is not. Only the surviving ref tells
+    # the two apart.
+    if [[ "$branch_rc" -ne 0 ]] && git show-ref --verify --quiet "refs/heads/$worktree_name"; then
+      echo -e "${RED}✗ Branch still present after delete: $worktree_name${NC}" >&2
+      echo -e "${RED}  git (exit $branch_rc): $branch_out${NC}" >&2
+      cleanup_failed=true
+    fi
+
     echo -e "${GREEN}✓ Removed: $worktree_name${NC}"
     _prune_empty_worktree_parents "$worktree_path"
   done
@@ -572,6 +655,11 @@ cleanup_worktrees() {
   # Clean up empty directory if nothing left
   if [[ -z "$(ls -A "$WORKTREE_DIR" 2>/dev/null)" ]]; then
     rmdir "$WORKTREE_DIR" 2>/dev/null || true
+  fi
+
+  if [[ "$cleanup_failed" == true ]]; then
+    echo -e "${RED}Cleanup finished with failures — see the lines above${NC}" >&2
+    return 1
   fi
 
   echo -e "${GREEN}Cleanup complete!${NC}"
@@ -615,12 +703,64 @@ remove_worktree() {
   # running:true forever.
   serve_stop "$worktree_name" || true
 
-  local worktree_path="$WORKTREE_DIR/$worktree_name"
+  # Resolve the target from the git REGISTER, not from the directory layout --
+  # the shape US-003 already applied to list_worktrees and cleanup_worktrees,
+  # arriving here last. Composing "$WORKTREE_DIR/$worktree_name" asks the
+  # wrong question: in container mode the story worktree lives one level
+  # deeper (`.worktrees/bug/cont/.worktrees/bug/cont-US-001`), so the composed
+  # path does not exist, and the benign "may already be removed" line was
+  # printed over a worktree that was registered AND on disk.
+  local composed_path="$WORKTREE_DIR/$worktree_name"
+  local worktree_path=""
+  local nested_owner=""
+  local registered_path registered_name
+  while IFS= read -r registered_path; do
+    registered_name=$(_worktree_display_name "$registered_path")
+    if [[ "$registered_name" == "$worktree_name" ]]; then
+      worktree_path="$registered_path"
+      break
+    fi
+    # Registered under some OTHER container's own .worktrees/: this root is
+    # not the one that can remove it. Remembered, not acted on, so an exact
+    # match later in the register still wins.
+    if [[ "$registered_name" == */.worktrees/"$worktree_name" ]]; then
+      nested_owner="$registered_path"
+    fi
+  done < <(_registered_worktree_paths)
 
-  if [[ -d "$worktree_path" ]]; then
-    git worktree remove "$worktree_path" --force 2>/dev/null || true
-    echo -e "${GREEN}✓ Removed worktree: $worktree_name${NC}"
+  if [[ -z "$worktree_path" ]] && [[ -d "$composed_path" ]]; then
+    # git has forgotten a directory that is still on disk. Still worth trying
+    # to clean, which is what the pre-register code did for every case.
+    worktree_path="$composed_path"
+  fi
+
+  local removal_failed=false
+
+  if [[ -n "$worktree_path" ]]; then
+    # Capture instead of swallowing -- `2>/dev/null || true` is the whole
+    # defect. Both the status and git's own words are needed: the status
+    # decides, the words explain, and a transcript with neither cannot tell a
+    # locked working tree from a container this root cannot reach.
+    local remove_out="" remove_rc=0
+    remove_out=$(git worktree remove "$worktree_path" --force 2>&1) || remove_rc=$?
+    if _assert_worktree_removed "$worktree_path" "$worktree_name" "$remove_rc" "$remove_out"; then
+      echo -e "${GREEN}✓ Removed worktree: $worktree_name${NC}"
+      _prune_empty_worktree_parents "$worktree_path"
+    else
+      removal_failed=true
+    fi
+  elif [[ -n "$nested_owner" ]]; then
+    # Loud, and non-zero: the worktree exists, it is registered, and it is not
+    # this root's to remove. Reporting it "already removed" at exit 0 is what
+    # let an orchestrator believe it had cleaned up.
+    echo -e "${RED}Error: $worktree_name is registered inside another container and cannot be removed from here${NC}" >&2
+    echo -e "${RED}  registered at: $nested_owner${NC}" >&2
+    echo -e "${RED}  run remove from that container, or: git worktree remove '$nested_owner' --force${NC}" >&2
+    exit 1
   else
+    # Genuinely nothing to remove: no register entry, no directory. Idempotent
+    # teardown is what fifteen call sites in commands/ rely on, several of
+    # them as the last line of a bash block, so this stays exit 0.
     echo -e "${YELLOW}Worktree directory not found: $worktree_name (may already be removed)${NC}"
     # Still try to clean up git worktree tracking
     git worktree prune 2>/dev/null || true
@@ -630,12 +770,30 @@ remove_worktree() {
   if [[ "$keep_branch" == true ]]; then
     echo -e "${BLUE}ℹ️  Preserving branch: $worktree_name${NC}"
   else
-    git branch -D "$worktree_name" 2>/dev/null || true
+    local branch_out="" branch_rc=0
+    branch_out=$(git branch -D "$worktree_name" 2>&1) || branch_rc=$?
+    # Ask the POST-state, not git's exit status: `git branch -D` exits 1 both
+    # for a branch that was never there (benign -- the already-removed path
+    # above reaches this line every time) and for one it could not delete.
+    # Only a surviving ref separates them. A failed worktree removal
+    # GUARANTEES this one fails too, since git refuses to delete a branch
+    # checked out in a worktree -- so this is the consequence of the failure
+    # above, not a second independent surprise, and it is the ref that the
+    # next `create` would otherwise silently reuse.
+    if [[ "$branch_rc" -ne 0 ]] && git show-ref --verify --quiet "refs/heads/$worktree_name"; then
+      echo -e "${RED}✗ Branch still present after delete: $worktree_name${NC}" >&2
+      echo -e "${RED}  git (exit $branch_rc): $branch_out${NC}" >&2
+      removal_failed=true
+    fi
   fi
 
   # Remove empty .worktrees directory
   if [[ -d "$WORKTREE_DIR" ]] && [[ -z "$(ls -A "$WORKTREE_DIR" 2>/dev/null)" ]]; then
     rmdir "$WORKTREE_DIR" 2>/dev/null || true
+  fi
+
+  if [[ "$removal_failed" == true ]]; then
+    exit 1
   fi
 }
 
