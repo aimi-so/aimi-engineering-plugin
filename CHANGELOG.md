@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.133.0] - 2026-09-09
+
+### Added
+
+- A researcher that returns without writing its file now says so.
+  `commands/plan.md` gains `### Confirm Each Research File Landed` at the end
+  of Run Research Agents. It checks each researcher's own `outputPath` for
+  existence AND a 512-byte floor, once per researcher and only after that
+  researcher's own Task has returned -- never mid-flight and never once for
+  the group, since a researcher that has not returned has not finished
+  writing. Existence alone was rejected by measurement rather than by taste:
+  a 207-byte placeholder stub reading `PROBE - write-channel test in
+  progress.` sat at an `outputPath` for about three minutes and passes a bare
+  `[ -f ]`, while the nine real files under `.aimi/research/` on this tree run
+  from 2483 to 42600 bytes -- so the floor sits about 2.5x above the stub and
+  about 4.8x below the smallest legitimate file, and neither edge is close.
+  The check never blocks, retries or re-spawns, and a run whose files all land
+  prints nothing new. Phase 1.5b names the same subsection rather than
+  carrying a copy, so all four researcher spawn sites share one definition in
+  flat and phase mode alike.
+
+### Changed
+
+- Both downstream research lists key on the file being on disk instead of on
+  "the agent returned". The `allResearchPaths` union computed before the
+  research-conflict gate -- which feeds Phases 1.7, 1.8, 3c.5 and 3d -- and
+  Phase 4's fresh-written source for `metadata.researchPaths` now read a
+  `researchWritten` working-memory list built by the check above. The phrase
+  `that completed successfully` defined both sites and now occurs zero times
+  in the file; naming only one of them would have left a path that names no
+  file reaching five phases with one of them filtering it.
+- Two exclusions are stated with their reasons rather than left implicit. A
+  path taken from `reusedResearch` is not checked here, because no Task was
+  spawned for it this run and Phase 1.7's ingestion catches a vanished reuse
+  on its own. The Phase-Scoped Research Reuse glob is left exactly as it is,
+  because a glob that finds no candidate is answering "nothing to reuse",
+  which is a legitimate answer and not a missing deliverable -- making it warn
+  would print a line on every fresh run.
+
+### Fixed
+
+- Phase 1.7's Research File Ingestion stops skipping an absent path in
+  silence. The step named the behaviour outright -- **silently skip** it,
+  emit no warning -- and now emits one line naming the file before continuing
+  with the next path. A `researchPaths` entry pointing at nothing is visible
+  instead of being inferred from a context that came back shorter than
+  expected.
+
 ## [1.132.0] - 2026-09-09
 
 ### Added
