@@ -1901,6 +1901,72 @@ def finalize_claimed_files(finalize):
     return [entry for entry in files if isinstance(entry, str)]
 
 
+def prototype_dropped_shape_errors(dropped):
+    """`metadata.prototypeDropped`'s shape, for R21. Returns a list of suffixes.
+
+    ABSENT IS VALID AND IS THE WHOLE CONTRACT OF THE KEY, exactly as it is for
+    finalize_shape_errors above. `metadata.prototypeDropped` records the
+    prototype blocks /aimi:plan weighed and did NOT load, so a plan that
+    dropped nothing has nothing to declare, and every tasks.json written before
+    the key existed must keep validating byte for byte -- which is why the
+    caller skips this helper entirely on a `None`. It follows the
+    omitted-when-empty convention `baseRef`, `pluginVersion` and `issues`
+    already have: the key is written when something was dropped and left out
+    otherwise, never `[]` and never `{}`.
+
+    `null` AND ABSENT ARE THE SAME VALUE HERE, and that is jq's doing rather
+    than a softening of the rule, the same position R18 is in:
+    `.metadata.prototypeDropped` answers `null` for a key that is missing and
+    for a key that is explicitly null, so nothing on this side of the read can
+    tell them apart. An explicit `null` is therefore ACCEPTED.
+
+    THE EMPTY ARRAY GETS A MESSAGE OF ITS OWN because `[]` is the exact mistake
+    the convention exists to prevent, and " is not an array" would misdescribe
+    it -- it IS an array. The writer is told to omit the key instead.
+
+    Well-formed means a non-empty array whose every element is an object
+    carrying `path` (non-empty string), `reason` (non-empty string) and `bytes`
+    (a number). `bytes` rejects the JSON literals `true`/`false` explicitly,
+    checking `bool` BEFORE `int`, since Python's bool is an int subclass and
+    `isinstance(True, int)` would otherwise let the literal through as a size.
+
+    `reason` is checked as a non-empty string and NOT against an enum: the
+    writer decides which reasons exist, and a validator enum written before its
+    writer would refuse that writer's first legitimate new value.
+    """
+    if jq_type(dropped) != "array":
+        return [" is not an array (expected [{path, reason, bytes}, …])"]
+
+    if not dropped:
+        return [
+            " is an empty array — omit the key entirely when nothing was dropped"
+        ]
+
+    problems = []
+    for index, entry in enumerate(dropped):
+        where = "[" + str(index) + "]"
+        owner = ".metadata.prototypeDropped" + where
+        if jq_type(entry) != "object":
+            problems.append(
+                where + " is not an object (expected {path, reason, bytes})"
+            )
+            continue
+
+        path = jq_index(entry, "path", owner)
+        if not isinstance(path, str) or not path:
+            problems.append(where + ".path is missing or not a non-empty string")
+
+        reason = jq_index(entry, "reason", owner)
+        if not isinstance(reason, str) or not reason:
+            problems.append(where + ".reason is missing or not a non-empty string")
+
+        size = jq_index(entry, "bytes", owner)
+        if isinstance(size, bool) or not isinstance(size, (int, float)):
+            problems.append(where + ".bytes is missing or not a number")
+
+    return problems
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -2300,6 +2366,51 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         "story's execution context"
                     )
                     break
+
+    # R21 -- metadata.prototypeDropped's shape. An ERROR where R16, R17, R19
+    # and R20 warn, and R18 is the precedent rather than a coin toss. Those
+    # four warn because each is a question to a human author about a plan that
+    # is still legible. This one is not: the key has exactly one writer --
+    # /aimi:plan's aggregate-ceiling path -- so a malformed value is never an
+    # author's judgement call. It is the plugin having written a record its own
+    # future reader cannot parse, which is precisely R18's stated reason for
+    # reaching `errors`.
+    #
+    # AND A WARNING WOULD HAND BACK THE SILENCE THE RECORD EXISTS TO BREAK. An
+    # unparseable record is indistinguishable from no record at all, so a round
+    # that dropped a prototype would once again end with no artifact separating
+    # "the planner saw the prototype" from "the planner saw the filename" --
+    # the exact failure this key was added to close.
+    #
+    # ABSENT DOES NOTHING AT ALL -- R18's guard-rail, held for R18's reason:
+    # every tasks.json written before the key existed must validate byte for
+    # byte on both channels, and the caller's `is None` skip is what guarantees
+    # it. The error can therefore only fire on a document that deliberately
+    # wrote the key.
+    #
+    # NO PATH CONFINEMENT, decided rather than forgotten. The repo CLAUDE.md
+    # routes a new document-sourced path behind require_in_project or
+    # confined_spec_path and never behind a fresh check; this path belongs
+    # behind NEITHER, because it is not a path the pipeline opens -- it names a
+    # file that was explicitly NOT loaded. Every confined sibling is confined
+    # because something acts on it: designBundle's spec paths are read by
+    # validate-tasks itself, and researchPaths/prototypePaths are moved and
+    # deleted by archive-task. Nothing reads, moves or stats a
+    # prototypeDropped path, so STORY_CONTEXT_METADATA_KEYS and archive-task's
+    # own two-key tuple are both left alone to keep it that way. A later story
+    # that makes something open one of these paths is the story that adds
+    # require_in_project -- not this one.
+    #
+    # It sits BELOW R20 for R17's own stated reason: a rule appended after the
+    # last one already present can only add lines after everything the golden
+    # corpus recorded, in either channel, and can never reorder one.
+    #
+    # `doc0_metadata` is R20's own local, reused rather than re-read: a third
+    # read of the same field would be a third thing to keep in step.
+    prototype_dropped = jq_index(doc0_metadata, "prototypeDropped", ".metadata")
+    if prototype_dropped is not None:
+        for problem in prototype_dropped_shape_errors(prototype_dropped):
+            errors.append(tasks_file + ": metadata.prototypeDropped" + problem)
 
     return errors
 

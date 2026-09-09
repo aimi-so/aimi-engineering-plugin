@@ -2403,6 +2403,249 @@ def test_brainstormpath_present_alongside_the_same_decision_never_warns(tmp_path
     assert actual["stderr"] == ""
 
 
+def _replay_prototype_dropped(dropped, tmp_path):
+    """One story through the real CLI, carrying `metadata.prototypeDropped` as
+    given.
+
+    R21's own replay, built here for the reason _replay_implementation and
+    _replay_brainstorm_decision are: bash never ran this rule, so there is no
+    jq recording to replay and adding a case to `validate_tasks_cases` would be
+    recording the Python. schemaVersion 3.3 is load-bearing for the same reason
+    those two give -- R1 returns before validate_tasks on anything older, so a
+    3.2 fixture would pass on nothing.
+
+    `dropped` reuses the same `_ABSENT` sentinel: `None`, `[]` and "no key at
+    all" are three different fixtures for this rule -- the first two are
+    accepted and refused respectively, the third is the guard-rail -- and only
+    a sentinel can express the third.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if dropped is not _ABSENT:
+        metadata["prototypeDropped"] = dropped
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+_WELL_FORMED_DROP = {
+    "path": ".aimi/brainstorms/prototypes/x-variant-c.html",
+    "reason": "aggregate-cap",
+    "bytes": 214003,
+}
+
+
+def _assert_refuses_prototype_dropped(actual):
+    """Every refusing case asserts the same three things, so they are written
+    down once: exit 1, `valid: false` on stdout, and an errors[] entry naming
+    the key. The per-case assertion each test adds on top is the part that
+    tells that case apart from its siblings."""
+    assert actual["exit"] == 1
+    verdict = json.loads(actual["stdout"])
+    assert verdict["valid"] is False
+    assert any(
+        "metadata.prototypeDropped" in entry for entry in verdict["errors"]
+    ), verdict["errors"]
+    return verdict
+
+
+def test_no_prototypedropped_key_at_all_validates_exactly_as_before(tmp_path):
+    """GUARD-RAIL, passes BEFORE and AFTER, and the whole rule is built around
+    it. A plan that dropped nothing is the ordinary shape of a tasks.json and
+    must be untouched on all three channels -- exit status, stdout and stderr
+    -- the way R18 leaves an absent metadata.finalize alone."""
+    actual = _replay_prototype_dropped(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_explicit_null_is_accepted_like_an_absent_key(tmp_path):
+    """jq's doing, not a softening: `.metadata.prototypeDropped` answers null
+    for a missing key and for an explicitly null one, so nothing on the read
+    side can tell them apart -- exactly R18's position on metadata.finalize."""
+    actual = _replay_prototype_dropped(None, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_a_well_formed_prototypedropped_is_accepted_silently(tmp_path):
+    """THE POSITIVE CONTROL, and a guard-rail by construction -- it passed
+    before the rule existed too, since an unknown metadata key is simply
+    ignored. It discriminates only together with the refusals below, and it is
+    here so the new rule cannot pass by refusing everything: this is the exact
+    shape the writer will emit."""
+    actual = _replay_prototype_dropped([_WELL_FORMED_DROP], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_empty_array_is_refused_and_told_to_omit_the_key(tmp_path):
+    """`[]` is the exact mistake the omitted-when-empty convention exists to
+    prevent, so it gets a message of its own rather than the generic
+    not-an-array one, which would misdescribe it -- it IS an array."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([], tmp_path)
+    )
+    assert any("omit the key entirely" in entry for entry in verdict["errors"]), verdict[
+        "errors"
+    ]
+
+
+def test_an_empty_object_is_refused_as_not_an_array(tmp_path):
+    """The other half of absent-vs-empty: `{}` is not an array at all, so it
+    takes the generic message the empty array is kept away from."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped({}, tmp_path)
+    )
+    assert any("is not an array" in entry for entry in verdict["errors"]), verdict[
+        "errors"
+    ]
+
+
+def test_a_bare_string_where_the_array_belongs_is_refused(tmp_path):
+    """One path written as a scalar instead of a one-element array -- the
+    shape a writer reaches for when it has exactly one thing to record."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped(_WELL_FORMED_DROP["path"], tmp_path)
+    )
+
+
+def test_an_element_that_is_a_bare_string_is_refused(tmp_path):
+    """The array is right and the element is not: a list of paths rather than
+    a list of records, which loses both the reason and the size."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([_WELL_FORMED_DROP["path"]], tmp_path)
+    )
+
+
+def test_an_element_with_no_path_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["path"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_an_element_whose_path_is_the_empty_string_is_refused(tmp_path):
+    """Present but empty is the same defect as absent here: a record naming no
+    file records nothing."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, path="")], tmp_path)
+    )
+
+
+def test_an_element_with_no_reason_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["reason"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_an_element_whose_reason_is_the_empty_string_is_refused(tmp_path):
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, reason="")], tmp_path)
+    )
+
+
+def test_bytes_carried_as_a_string_is_refused(tmp_path):
+    """The size is weighed against a numeric ceiling, so a stringified one is
+    a record the ceiling's own reader cannot compare against."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, bytes="214003")], tmp_path)
+    )
+
+
+def test_bytes_carried_as_the_json_literal_true_is_refused(tmp_path):
+    """The case a naive `isinstance(x, int)` accepts, because Python's bool is
+    an int SUBCLASS -- so `isinstance(True, int)` is true and the literal would
+    pass for a size of 1. The helper checks bool BEFORE int for this reason,
+    and this test is what holds that order in place."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, bytes=True)], tmp_path)
+    )
+
+
+def test_an_element_with_no_bytes_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["bytes"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_every_malformed_element_is_reported_and_not_just_the_first(tmp_path):
+    """The helper collects suffixes rather than returning on the first one, so
+    a document with two bad elements reports both -- the same choice
+    finalize_shape_errors makes across its three fields."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped(
+            [dict(_WELL_FORMED_DROP, path=""), dict(_WELL_FORMED_DROP, bytes=True)],
+            tmp_path,
+        )
+    )
+    named = [entry for entry in verdict["errors"] if "metadata.prototypeDropped" in entry]
+    assert any("[0].path" in entry for entry in named), named
+    assert any("[1].bytes" in entry for entry in named), named
+
+
+def test_prototypedropped_acquired_no_consumer():
+    """The record must stay a record. Nothing may open, move, delete or
+    resolve a path named only in `prototypeDropped`, which is what lets the
+    rule carry no path confinement -- so the two places that WOULD act on such
+    a path are asserted unchanged rather than read off the diff.
+
+    STORY_CONTEXT_METADATA_KEYS is the executor payload's projection: a key
+    added there travels into every spawned story's context. archive-task's own
+    tuple is the cleanup loop that MOVES and DELETES the paths it names.
+    """
+    assert T.STORY_CONTEXT_METADATA_KEYS == (
+        "designBundle", "designTokens", "prototypePaths"
+    )
+    assert "prototypeDropped" not in T.STORY_CONTEXT_METADATA_KEYS
+    cleanup = inspect.getsource(T.op_archive_task)
+    assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
+    assert "prototypeDropped" not in cleanup
+
+
+def test_only_r21_and_its_helper_name_the_key_anywhere_in_tasks_py():
+    """Widens the test above from the two known consumers to the whole module.
+
+    The key must be named by R21's read inside `validate_tasks` and by its own
+    shape helper, and by nothing else -- that is what makes "nothing opens,
+    moves or stats a prototypeDropped path" a property of the module rather
+    than a claim about the two functions somebody thought to check. A future
+    story that gives the key a real consumer moves this assertion in the same
+    commit that adds the confinement such a consumer would then need.
+    """
+    naming = {
+        name
+        for name, value in vars(T).items()
+        if inspect.isfunction(value)
+        and value.__module__ == T.__name__
+        and "prototypeDropped" in inspect.getsource(value)
+    }
+    assert naming == {"prototype_dropped_shape_errors", "validate_tasks"}
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
