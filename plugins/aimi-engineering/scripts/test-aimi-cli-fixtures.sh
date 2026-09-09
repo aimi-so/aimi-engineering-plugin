@@ -69,6 +69,14 @@ source_cache_functions() {
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_extract_version_from_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_resolve_latest_cache_path()/,/^}/p' "$CLI")"
+  # Layer 0-pin and the foreign-root notice, both eval'd BEFORE the two
+  # functions that call them: read_global_cli_cache consults _pinned_cli_path
+  # ahead of either cache file, cmd_prime_cache consults it again to keep a pin
+  # out of its already-current check, and _validate_cached_cli_path's
+  # versioned-cache arm calls _report_foreign_cache_root. Same ordering rule
+  # this helper's header states for _worktree_manager_beside below.
+  eval "$(sed -n '/^_pinned_cli_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_report_foreign_cache_root()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_cli_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_worktree_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"
@@ -505,14 +513,98 @@ teardown_fake_gh_fixture() {
     FAKE_GH_AUTH_STATUS_HONORS_ENV_TOKEN FAKE_GH_ENV_TOKEN_ACCOUNT
 }
 
+# Resolves <tool> to a real executable path and prints it, or REFUSES: one
+# line on stderr NAMING the binary that did not resolve, plus a non-zero
+# return. Every argument after <tool> is a candidate directory, consulted in
+# order, whenever `command -v` comes up empty OR answers something that is not
+# executable -- which is not a corner case: `printf` is a shell BUILTIN, so
+# `command -v printf` answers the bare word `printf`, and symlinking that
+# answer is how the shim directory below acquired a self-referential, dangling
+# `printf` entry for as long as this fixture has existed.
+#
+# It exists because BOTH sandbox fixtures in this file used to end a failed
+# resolution SILENTLY -- one by skipping straight to the next loop iteration,
+# the other by leaving `resolved=""` and skipping the link -- and a sandbox
+# built without a tool still builds, so the test still runs and still goes
+# green. What it proves then is the verb's FALLBACK, not the verb. b168bc1's
+# comment inside setup_forge_cli_sandbox, preserved verbatim below, states the
+# cost exactly for one tool: strip `sort` and forge-issue-scan answers [] for
+# every description -- and [] is ALREADY the right answer for two of that
+# verb's three cases, so the missing binary stays invisible in two tests out
+# of three. A fallback whose value coincides with a legitimate answer hides
+# the failure, so a fixture that cannot build the environment it promises has
+# to say so instead of quietly handing back a smaller one.
+#
+# sha256sum and shasum are an ALTERNATIVE PAIR, not two requirements.
+# _default_branch_cache_key falls back to a portable slugification only when
+# NEITHER is on PATH, so a host carrying just one of them is a legitimate host
+# and demanding both would fail it for nothing. When one of the pair is absent
+# and the other resolves, this returns 0 with EMPTY stdout: nothing to link,
+# nothing to refuse. Callers therefore test the printed path for emptiness
+# before linking it. The rule lives here, once, so both fixtures inherit it
+# rather than each restating it.
+#
+# The refusal is a printf on stderr plus a non-zero return, and deliberately
+# NOT an assert_* call. Only the four assert_* families increment the runtime
+# counter test-aimi-cli.sh pins with EXPECTED_ASSERTIONS, and these fixtures
+# are called from dozens of sites -- asserting here would move that number by
+# three digits to report what is an environment fault, not a test result.
+require_sandbox_binary() {
+  local tool="$1"
+  shift
+  local resolved partner
+  resolved=$(_resolve_sandbox_binary "$tool" "$@")
+  if [ -n "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  case "$tool" in
+    sha256sum) partner=shasum ;;
+    shasum) partner=sha256sum ;;
+    *) partner="" ;;
+  esac
+  if [ -n "$partner" ] && [ -n "$(_resolve_sandbox_binary "$partner" "$@")" ]; then
+    return 0
+  fi
+  printf 'FIXTURE REFUSED: %s did not resolve to an executable on this host. The sandbox would be built WITHOUT it, and a verb deprived of a tool falls back to an answer that can coincide with the right one -- so the test would pass for the wrong reason. Install %s or repair PATH.\n' \
+    "$tool" "$tool" >&2
+  return 1
+}
+
+# Prints the executable path for <tool>, or nothing. Silent by design: this is
+# the resolution half, and require_sandbox_binary above owns the refusal, so
+# the alternative-pair probe can ask about a partner without a failed probe
+# printing anything. Same two steps both fixtures used before there was a
+# helper: `command -v` first, then each candidate directory given, in order.
+_resolve_sandbox_binary() {
+  local tool="$1"
+  shift
+  local resolved candidate dir
+  resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
+  if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  for dir in "$@"; do
+    candidate="$dir/$tool"
+    if [ -x "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Prints a PATH value with every occurrence of <binary> made unresolvable,
 # while every OTHER tool aimi-cli.sh depends on remains reachable under its
 # real name. A naive "strip every PATH directory containing <binary>"
 # approach is unsafe here: on a machine where gh happens to live in
 # /usr/bin alongside bash/jq/git/sed/..., stripping that directory would
 # also hide the interpreter and break the whole suite. Instead this mirrors
-# ONLY the fixed set of tools aimi-cli.sh actually shells out to (resolved
-# via `command -v` against the CALLER's real PATH, first match wins) into a
+# ONLY the fixed set of tools aimi-cli.sh actually shells out to (resolved by
+# require_sandbox_binary above -- `command -v` against the CALLER's real PATH
+# first, then /usr/bin and /bin for a name whose `command -v` answer is not a
+# path, which is what a shell builtin like `printf` answers) into a
 # fresh directory, deliberately omitting <binary> -- so PATH="$(_path_
 # without_binary gh)" simulates gh being entirely absent, not merely
 # shadowed, without disturbing bash/jq/git/etc. Reusable by name for any
@@ -522,9 +614,17 @@ _path_without_binary() {
   shim_dir=$(mktemp -d)
   local tools=(env bash jq git sed grep awk mktemp wc tr basename dirname stat sha256sum shasum flock date cut find sort xargs cat head tail realpath printf)
   for tool in "${tools[@]}"; do
+    # DELIBERATE OMISSION, and the entire purpose of this fixture: <binary> is
+    # the tool the caller wants ABSENT, so skipping it here is the feature and
+    # never a fault. Do not confuse it with the refusal on the line below --
+    # that line used to skip its tool just as quietly as this one skips the
+    # excluded one, which looked almost identical and meant the opposite thing.
     [ "$tool" = "$exclude" ] && continue
-    real=$(command -v "$tool" 2>/dev/null) || continue
-    ln -s "$real" "$shim_dir/$tool" 2>/dev/null
+    real=$(require_sandbox_binary "$tool" /usr/bin /bin) || { rm -rf "$shim_dir"; return 1; }
+    # Empty means "member of a satisfied alternative pair": nothing to link.
+    if [ -n "$real" ]; then
+      ln -s "$real" "$shim_dir/$tool" 2>/dev/null
+    fi
   done
   printf '%s' "$shim_dir"
 }
@@ -538,8 +638,8 @@ _path_without_binary() {
 # the cleanup the tests that called _path_without_binary directly never did.
 #
 # NOT to be confused with setup_forge_cli_sandbox: that one is a broader
-# offline sandbox (a different, smaller tool allowlist plus a
-# command-v-then-/usr/bin-then-/bin fallback) whose 20+ callers mostly drop
+# offline sandbox (a different, smaller tool allowlist -- the resolution step
+# itself is one require_sandbox_binary for both now) whose 20+ callers mostly drop
 # their own scripted fake `gh` into it afterwards -- "gh present but scripted",
 # not "gh absent". Merging the two would have to either widen its allowlist or
 # narrow this one, changing what one set of tests actually proves, so it is
@@ -590,18 +690,17 @@ setup_forge_cli_sandbox() {
   # its `|| candidates=""` fallback and answers [] for EVERY description --
   # which is the correct answer for two of that verb's three cases, so its
   # absence would have been invisible in two tests out of three.
-  local tool resolved candidate
+  # The loop below used to END a failed resolution in silence: `resolved=""`,
+  # both fallback directories missed, and the `ln -sf` was simply skipped --
+  # so the sandbox came out one tool short and every test using it still went
+  # green against the fallback the paragraph above describes. That silence is
+  # what require_sandbox_binary replaces; it also owns the sha256sum/shasum
+  # alternative-pair rule, so a host carrying only one of the two still builds.
+  local tool resolved
   for tool in bash jq git mktemp cat rm grep sed sort tr tail dirname basename sha256sum shasum awk; do
-    resolved=$(command -v "$tool" 2>/dev/null) || resolved=""
-    if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
-      for candidate in "/usr/bin/$tool" "/bin/$tool"; do
-        if [ -x "$candidate" ]; then
-          resolved="$candidate"
-          break
-        fi
-      done
-    fi
-    if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+    resolved=$(require_sandbox_binary "$tool" /usr/bin /bin) || { rm -rf "$sandbox"; return 1; }
+    # Empty means "member of a satisfied alternative pair": nothing to link.
+    if [ -n "$resolved" ]; then
       ln -sf "$resolved" "$sandbox/$tool"
     fi
   done
