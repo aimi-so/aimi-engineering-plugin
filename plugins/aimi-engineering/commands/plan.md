@@ -1136,6 +1136,36 @@ Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
 
 If any spawned agent fails, proceed with available results.
 
+### Confirm Each Research File Landed
+
+An agent that fails says so. An agent that returns a well-formed pointer block and never writes its file says nothing at all — and its `outputPath` then travels into `metadata.researchPaths` and into every phase that reads it. Confirm on disk that each file you told a researcher to write actually landed.
+
+**Timing — once per researcher, and only after that researcher's own Task has returned.** Run the check as each research Task comes back. Never run it while a Task is still in flight, and never once for the whole group: a researcher that has not returned has not finished writing, so an early check reads an absent file and warns about work that is still happening. This is not hypothetical — the neighbouring liveness cross-check was once hoisted into the middle of a wave and reported `stopped` for two agents that were working normally, and the next reader of a per-path predicate will want to run it early for the same reason.
+
+**Predicate — the file exists AND `wc -c` reports at least 512 bytes.** Existence alone was rejected by measurement, not by taste: a researcher once left a 207-byte placeholder reading `PROBE - write-channel test in progress. This file will be overwritten with full findings.` at its `outputPath` for about three minutes, and a bare `[ -f ]` passes that file — so a consumer checking existence reads a stub that says nothing as a success. Measured over the nine files in `.aimi/research/` on this tree: smallest legitimate file 2483 bytes, largest 42600, and the stub 207. A floor of 512 sits about 2.5x above the stub and about 4.8x below the smallest real file, so neither edge is close.
+
+Run this once per researcher, against the `outputPath` that researcher was handed:
+
+```bash
+RESEARCH_OUT="[the outputPath this researcher was handed]"
+RESEARCH_BYTES=0
+[ -f "$RESEARCH_OUT" ] && RESEARCH_BYTES=$(wc -c < "$RESEARCH_OUT" | tr -d '[:space:]')
+if [ "${RESEARCH_BYTES:-0}" -lt 512 ]; then
+  echo "warning: research file not written or below the 512-byte floor (${RESEARCH_BYTES} bytes) - dropping: $RESEARCH_OUT"
+fi
+```
+
+**Accumulate `researchWritten`.** Keep a working-memory list named `researchWritten`. When the block above prints nothing, append that researcher's `outputPath` to `researchWritten` — the file landed and is above the floor. When the block prints its warning line, append nothing: that path is dropped here and must not reach any downstream list. `researchWritten` is the list both downstream research lists read — the `allResearchPaths` union computed before the research-conflict gate, and Phase 4's fresh-written source for `metadata.researchPaths` — so both key on the file being on disk rather than on "the agent returned".
+
+**The check never blocks.** It emits at most one line per failing path and always continues: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status. This extends the `If any spawned agent fails, proceed with available results.` promise directly above rather than replacing it — an agent that fails loudly and an agent that returns without writing now leave the run in the same, visible state. A run whose files all land prints nothing new at all.
+
+**Scope — every researcher Task this run actually spawns.** The check is not conditional on `ROADMAP_MODE`, on `researchDepth`, or on the host: it applies in flat mode and in phase mode alike, and to both spawn sites — Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below.
+
+Two exclusions are deliberate:
+
+- **A path taken from `reusedResearch` is not checked here.** No Task was spawned for it this run, so there is nothing that was supposed to land. A reused path that has since vanished is caught downstream by Phase 1.7's Research File Ingestion, which names it in a warning of its own.
+- **The Phase-Scoped Research Reuse glob is left exactly as it is.** A glob that finds no candidate is answering "nothing to reuse", which is a legitimate answer and not a missing deliverable; making it warn would print a line on every fresh run.
+
 ### Bundle Researcher (Bundle-Direct Mode)
 
 **Guard:** When `designBundleMeta` is non-null AND no brainstorm was loaded in Phase 0 (plan invoked directly with a bundle, skipping the brainstorm step), spawn the bundle researcher. Otherwise skip — when a brainstorm WAS loaded, brainstorm already ran the bundle researcher and the OQs live in the brainstorm doc. When `designBundleMeta` is null, this block is skipped entirely — no log noise, no behavior change for non-bundle plan invocations.
@@ -1169,6 +1199,8 @@ Compute `researchDepth` and store in metadata: `skip` (internal + strong pattern
 ## Phase 1.5b: External Research (Conditional, Parallel)
 
 Only if Phase 1.5 decides external research is needed, run the applicable agents in parallel:
+
+Both researchers below are covered by Phase 1 § Confirm Each Research File Landed — apply that same check once per researcher as each Task returns, and append to the same `researchWritten` list. Do not restate the predicate here; one definition, two spawn sites.
 
 **If `reusedResearch["best-practices"]` is unset** (no valid best-practices research from brainstorm):
 
@@ -1282,7 +1314,7 @@ tagging rule in section 2 without needing a judgement call:
 [CONFLICT-ESCALATE] research/2026-09-03-x-codebase.md cites 134 preambles at 430 bytes; re-running its measure block gives 131 at 279. Stories sized against the cited figure need re-checking.
 ```
 
-**Define `allResearchPaths`.** Before Phase 1.6b runs, compute the working-memory list `allResearchPaths` as the union of (a) every `.aimi/research/` file path written this run by a Phase 1 or Phase 1.5b researcher agent that completed successfully — the same `outputPath` values Phase 4 later collects as its "fresh-written paths" source — and (b) every path value in the `reusedResearch` map — Phase 4's "reused paths" source. Deduplicate (insertion-order, first-occurrence wins). This is necessary because `metadata.researchPaths` itself is not populated until Phase 4, well after Phase 1.7, Phase 1.8, Phase 3c.5, and Phase 3d all run — `allResearchPaths` gives every phase between here and Phase 4 a single, always-current list of "every research file available this run," including runs where every source file was reused rather than freshly written (the common `/aimi:brainstorm` → `/aimi:plan` flow).
+**Define `allResearchPaths`.** Before Phase 1.6b runs, compute the working-memory list `allResearchPaths` as the union of (a) every path in the `researchWritten` working-memory list — the `.aimi/research/` files this run's Phase 1 and Phase 1.5b researchers were confirmed to have actually written, per Phase 1 § Confirm Each Research File Landed, and the same list Phase 4 later collects as its "fresh-written paths" source — and (b) every path value in the `reusedResearch` map — Phase 4's "reused paths" source. Deduplicate (insertion-order, first-occurrence wins). This is necessary because `metadata.researchPaths` itself is not populated until Phase 4, well after Phase 1.7, Phase 1.8, Phase 3c.5, and Phase 3d all run — `allResearchPaths` gives every phase between here and Phase 4 a single, always-current list of "every research file available this run," including runs where every source file was reused rather than freshly written (the common `/aimi:brainstorm` → `/aimi:plan` flow).
 
 ### Phase 1.6b: Research Conflict Escalation Gate
 
@@ -1319,7 +1351,7 @@ where `<N>` is the count of items deferred this phase.
 
 1. Start with every path in `metadata.researchPaths`.
 2. Deduplicate against the values in `reusedResearch` (the files Phase 1.6 already reads directly) — any path that appears as a value in the `reusedResearch` map is already in context; skip it.
-3. For each remaining path: attempt to read the file. If the file is missing from disk, **silently skip** it — emit no warning, do not abort.
+3. For each remaining path: attempt to read the file. If the file is missing from disk, skip it and emit one warning line naming it — `warning: research file listed in researchPaths not found on disk - skipping: <path>` — then continue with the next path. Do not abort.
 4. Apply **no per-file size cap and no aggregate cap** — ingest the full file contents.
 
 **Wrapper format:**
@@ -3050,7 +3082,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 - **brainstormPath**: Path to brainstorm if one was used, otherwise omit
 - **researchDepth**: Value computed in Phase 1.5 (`skip`, `quick`, `standard`, `deep`), or omit if not computed
 - **researchPaths**: Populate from three sources, then deduplicate:
-  1. **Fresh-written paths** — every `.aimi/research/` file written this run by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs). Collect the `outputPath` that was passed to each agent that completed successfully.
+  1. **Fresh-written paths** — the `researchWritten` working-memory list: every `.aimi/research/` file written this run by Phase 1 agents (codebase, learnings) and Phase 1.5b agents (best-practices, framework-docs) that passed Phase 1 § Confirm Each Research File Landed. Read that list; do not re-collect `outputPath` values from the agent returns, or a researcher that returned a well-formed pointer block without writing anything puts a path here that names no file.
   2. **Reused paths** — the path values in `reusedResearch` (i.e., `reusedPaths` collected in Phase 0). These are always included regardless of `researchDepth`.
   3. **Foundation proposals (one per accepted root, Phase 1.9)** — include **every** value in `foundationProposalPathByRoot` (Phase 1.9's Working-Memory Shape), in `foundationRoots` order, same as the fresh-written/reused sources above. This is what protects each proposal from `research-gc`'s orphan sweep, the same protection every other registered research file gets — and it is per repository: a run that accepted N proposals must register all N, or the ones it leaves out are swept once they age past 30 days. Two accepted roots whose paths resolve to the same file need no special handling here; the dedup below collapses them. When no root accepted, this source contributes nothing, unchanged from today.
   Normalize each path: relative to `AIMI_ROOT`, no leading `./`, no `..` components. Deduplicate the combined list (insertion-order, first-occurrence wins). If a tasks.json being updated does not already have a `researchPaths` key, create the array. Omit the key entirely when `researchDepth` is `skip` and `reusedPaths` is empty and no research files were written this run and `foundationProposalPathByRoot` is empty. Every file in `SPLIT_FILES` is patched with this same `researchPaths` value (see the patch rule below), so on a PROJECT-axis split each repository's own tasks.json lists all N accepted proposals rather than only its own — existing behaviour of the shared-metadata patch, not a per-repo filter applied here.
