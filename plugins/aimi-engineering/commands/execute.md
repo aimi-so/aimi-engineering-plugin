@@ -131,6 +131,8 @@ The `case` guard prepends `p` when the sanitized stem would not start alphanumer
 
 `PLAN_DISC` is a **PREFIX** and the story id stays LAST: the composed name is `[PLAN_DISC]-[branchName]-[story.id]` in flat and container mode, `[PLAN_DISC]-[PHASE_BRANCH]-[story.id]` in phase mode. The suffix position of the id is a hard external constraint rather than a preference — `${CLAUDE_PLUGIN_ROOT}/skills/story-executor/SKILL.md` requires in two places that the branch a story executor finds checked out END in `-<STORY_ID>`, and classifies a mismatch as a refusal to stage or commit. Appending the discriminator after the id would break both at once, silently, at the moment an executor refuses to commit finished work.
 
+`PLAN_DISC` governs one more shared namespace, and that one is not a git namespace at all: the **scratchpad directory**. Every agent in a session is handed the same scratchpad path, and it outlives the session — it is shared across runs and therefore across PLANS, so a filename chosen for what it MEANS rather than for who owns it is a filename two writers pick independently. Measured in the 2026-09-08 known-gap `orq-scratchpad-compartilhado-entre-executores`: two of five executors in one wave ran a sibling's file believing it was their own, and this orchestrator was itself one of the writers — it left a `v.sh` in that same directory. A rule that reaches only the spawned executors would leave the polluter out, so it reaches here too: **every file this orchestrator writes into the scratchpad is named `[PLAN_DISC]-orch-<whatever>`.** The executors' half of the same rule is `SCRATCH_PREFIX`, composed in Step 4's spawn block below and carried into `${CLAUDE_PLUGIN_ROOT}/skills/story-executor/SKILL.md`'s `<task_pointer>`.
+
 Every cleanup sweep in this document scans the prefixed pattern, because no placement of a discriminator preserves the old glob — measured in both directions, `feat/a-STEM-US-001` and `STEM-feat/a-US-001` both fail `feat/a-US-*`. The un-prefixed shape is legacy and keeps exactly one home per sweep family: Post-Loop Cleanup's **One-time migration safeguard** for the flat/container shape, and the legacy pass beside the phase/container sweep for the `EXEC_BRANCH` one.
 
 ### Per-Project Cleanup Rule
@@ -2954,6 +2956,18 @@ while true:
                   its own get-story-context call, so the spawned executor reads this orchestrator's
                   file even when a sibling split orchestrator's init-session call last wrote the
                   shared pointer
+                - SCRATCH_PREFIX = PLAN_DISC + "-" + full_story.id  ← the executor's scratchpad
+                  namespace, handed over ALREADY COMPOSED rather than left to be chosen. `PLAN_DISC`
+                  is READ here and never recomposed nor re-sanitized: `### Plan Discriminator` under
+                  Multi-Repo Handling derived it once from WAVE_TASKS_FILE, its sanitization is
+                  load-bearing (`validate_branch_name` refuses a single dot), and a second derivation
+                  is only a second chance to disagree with the first.
+                  The axis is the PLAN and the story id comes SECOND, which is why that order is
+                  not arbitrary. The collision measured on 2026-09-08 was not
+                  sibling-against-sibling: a `verify-US-002.sh` left in the shared scratchpad by an
+                  EARLIER plan's run was read by this run's US-002, whose id happened to be the same
+                  string. A prefix keyed on the story id alone composes the identical name for both
+                  and would have separated nothing — only the plan's own identity does.
                 - Do NOT modify the tasks.json file — report result (success/failure + details)
             ]
         )

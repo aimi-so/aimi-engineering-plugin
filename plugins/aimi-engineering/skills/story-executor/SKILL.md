@@ -294,6 +294,7 @@ If HEADED_MODE is false or absent:
 
 STORY_ID: [STORY_ID]
 TASKS_FILE_PATH: [TASKS_FILE_PATH]
+SCRATCH_PREFIX: [SCRATCH_PREFIX]
 
 Your first action is to resolve the CLI path, then fetch full story context.
 
@@ -307,6 +308,8 @@ $AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 ```
 
 `--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file, threaded through explicitly so this call reads it even when a sibling split orchestrator's `init-session` last overwrote the shared current-tasks pointer — never fall back to the bare form.
+
+**`SCRATCH_PREFIX` is your scratchpad namespace and it arrives already composed: EVERY file you write into the scratchpad directory is named `[SCRATCH_PREFIX]-<whatever>`.** This is a prefix you are HANDED, never an invitation to pick a name you judge unique — picking a good name is precisely what failed. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names that already collided in that directory, each one chosen by an agent who believed it was theirs; treat all five as non-examples rather than as a list to avoid and then improvise around. The scratchpad is shared with every sibling executor of this wave, with the orchestrator, and with every run that used it before yours, so before executing a script you believe you wrote, confirm the path you are running is the one you wrote. `SCRATCH_PREFIX` leads with the PLAN's identity and ends with your story id because the collision that was measured crossed PLANS rather than siblings: the file read by mistake belonged to an earlier plan's run whose story carried the same `US-NNN`, so a prefix keyed on the story id alone would have composed the same name twice. This rule does NOT reach the `verify-probe` artifact — that file lands beside the tasks file under a name the verb itself chooses and announces on stderr, and step 1.5 below tells you to read that path rather than compose one.
 
 Parse the returned JSON for five top-level fields:
 - `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
@@ -567,6 +570,7 @@ If HEADED_MODE is false or absent:
 <task_pointer>
 STORY_ID: [STORY_ID]
 TASKS_FILE_PATH: [TASKS_FILE_PATH]
+SCRATCH_PREFIX: [SCRATCH_PREFIX]
 
 First action — re-read `$AIMI_CLI` from cache, then fetch story context:
 
@@ -577,6 +581,8 @@ $AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 ```
 
 `--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file — pass it explicitly rather than the bare form, which would fall back to whichever sibling split orchestrator's `init-session` call last wrote the shared current-tasks pointer.
+
+**`SCRATCH_PREFIX` arrives already composed: EVERY file you write into the scratchpad directory is named `[SCRATCH_PREFIX]-<whatever>`.** A mandatory prefix you are handed — never an invitation to choose a name you judge unique, which is the thing that failed. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names that already collided in that shared directory; they are non-examples, not a denylist to improvise around. It leads with the PLAN's identity and ends with your story id because the measured collision was plan-against-plan — an earlier plan's leftover file for a story carrying the same `US-NNN` — so a story-id-only prefix would have separated nothing. Check the path before running a script you think you wrote. The `verify-probe` artifact is outside this rule: it lands beside the tasks file under a name the verb chooses and announces, and you read that path rather than composing one.
 
 Parse `{story, metadata, skills, designContext, skillsDropped}` from the returned JSON. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions; a non-empty `skillsDropped[]` names a declared skill the 100KB cap excluded, and belongs in the completion report. Read `designContext.decisions` as design intent for UI-touching work. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
 </task_pointer>
