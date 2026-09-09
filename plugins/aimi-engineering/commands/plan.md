@@ -156,7 +156,7 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
      …sanitized file contents…
      </prototype_html>
      ```
-6. **Aggregate size cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. Log one warning line per dropped block: `prototype <path> dropped — aggregate prototype context exceeded 200KB`.
+6. **Aggregate size cap — the aggregate prototype drop cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. The aggregate prototype drop cap **removes whole wrapped blocks and never truncates one** — a block that does not fit is gone in its entirety, so a prototype that survives this step is present in full and one that does not is absent altogether, with no partial block left behind to suggest otherwise. Log one warning line per removed block: `prototype <path> removed entirely — aggregate prototype drop cap of 200KB exceeded`.
 7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Pass 2 sub-agent prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully.
 
 ### Design Bundle Detection
@@ -265,12 +265,14 @@ When `designBundleMeta` is non-null:
 - Extract `designSpec` path from `designBundleMeta` (may be `null`). Store as `designSpecPath`.
 
 When `businessSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
-- Read the file verbatim; enforce a **per-file cap of 200 KB** (truncate with a warning if exceeded).
+- Read the file verbatim; enforce the **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
 - Store contents as `businessSpecContent`.
 
 When `designSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
-- Read the file verbatim; enforce the same **200 KB** per-file cap.
+- Read the file verbatim; enforce the same **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
 - Store contents as `designSpecContent`.
+
+Both bullets name the **same** ceiling: the per-file spec truncation cap is one ceiling applied once per file, not two independent ceilings, and it always shortens an oversized spec in place — it never removes one.
 
 When either spec file is missing from disk, log a warning and set the corresponding content variable to `null`; continue — do not abort plan.
 
@@ -2197,9 +2199,9 @@ PAYLOAD_JSON=$($AIMI_CLI estimate-payload \
   2>&1)
 ```
 
-This is purely advisory — `estimate-payload` always exits 0 for valid input and never blocks, trims, or otherwise alters the pipeline. Read `PAYLOAD_JSON.overBudget`:
+The ceiling `estimate-payload` resolves and reports `overBudget` against is the **advisory payload budget**. This is purely advisory — `estimate-payload` always exits 0 for valid input and never blocks, trims, or otherwise alters the pipeline. Read `PAYLOAD_JSON.overBudget`:
 
-- **`false`:** proceed silently to Phase 3d.
+- **`false`:** proceed silently to Phase 3d. An `overBudget` of `false` does not mean nothing was dropped — the aggregate prototype drop cap in Phase 0 may already have removed whole prototype blocks before this estimate was taken, so the advisory payload budget can only vouch for what reached it.
 - **`true`:** surface the CLI's own generic warning (`PAYLOAD_JSON.warning`) plus a concrete, phase-specific split hint the CLI cannot compute on its own (it has no visibility into individual outline entries): take the **second half** of `outline.json`'s entries (rounded down; e.g. 7 entries → last 3) and name them as split candidates:
   ```
   Payload estimate for phase [SELECTED_PHASE_ID] exceeds budget ([PAYLOAD_JSON.totalBytes] bytes > [PAYLOAD_JSON.budgetBytes] byte budget).
