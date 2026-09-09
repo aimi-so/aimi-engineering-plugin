@@ -69,6 +69,14 @@ source_cache_functions() {
   eval "$(sed -n '/^_global_worktree_cache_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_extract_version_from_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_resolve_latest_cache_path()/,/^}/p' "$CLI")"
+  # Layer 0-pin and the foreign-root notice, both eval'd BEFORE the two
+  # functions that call them: read_global_cli_cache consults _pinned_cli_path
+  # ahead of either cache file, cmd_prime_cache consults it again to keep a pin
+  # out of its already-current check, and _validate_cached_cli_path's
+  # versioned-cache arm calls _report_foreign_cache_root. Same ordering rule
+  # this helper's header states for _worktree_manager_beside below.
+  eval "$(sed -n '/^_pinned_cli_path()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_report_foreign_cache_root()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_cli_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_validate_cached_worktree_path()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^write_global_cli_cache()/,/^}/p' "$CLI")"

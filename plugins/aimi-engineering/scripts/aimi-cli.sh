@@ -677,6 +677,69 @@ _dev_dir_path() {
   printf '%s\n' "$dev_dir"
 }
 
+# Validate AIMI_CLI_PINNED -- LAYER 0-pin, the per-call pin consulted AHEAD of
+# every cache layer and written into none of them.
+#
+# Usage: pinned=$(_pinned_cli_path)
+#   Prints the pinned path when the variable is set and valid.
+#   Prints nothing when it is unset -- "no pin" is a normal answer, not a
+#   failure.
+#   Prints nothing when it is set and invalid. It says nothing about that
+#   itself: main() announces both outcomes once per process, so a helper that
+#   several call sites consult cannot print one refusal three times in a run.
+#   ALWAYS RETURNS 0, for the reason _validate_directory_source_identity's
+#   header spells out -- callers read it through `$( )` under `set -euo
+#   pipefail`, and a non-zero last statement would corrupt their assignment.
+#
+# WHY A PIN EXISTS AT ALL. "Which CLI is this?" has one answer per plugin cache
+# root on the machine, and it can answer differently between two Bash calls of
+# ONE run. The asymmetry that allows it is exact and is worth naming, because
+# both halves look correct in isolation: `_resolve_latest_cache_path` is
+# parameterized on `config_dir` and every one of its call sites passes
+# `_claude_config_dir()`, so the WRITER of the cache always knows which root is
+# the right one -- while `_validate_cached_cli_path`'s versioned-cache arm is
+# `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, whose leading
+# `*/` anchors no root at all, so the READER accepts a path under any of them
+# and never asks. A caller that has already decided which install it means says
+# so here, once, instead of re-deriving an answer per call and then comparing
+# two findings that came out of two different files.
+#
+# [ -x ], NEVER [ -f ] OR [ -e ]. That is the rule `CV_CLI` in
+# `commands/execute.md` and `PROBE_CLI` in `skills/story-executor/SKILL.md`
+# already apply to their own per-call CLI choice, and this is the third
+# instance of the same shape one level down: a file that is present but not
+# executable resolves nothing, so admitting it only moves the failure to the
+# invocation, where it reads as a broken CLI rather than as a bad pin.
+# Validating by textual prefix instead is precisely what let a symlink into a
+# worktree past write_global_cli_cache's own guard and produced the exit 127
+# recorded in golden_from_jq.json's cv-fix-simlink-worktrees-cc.
+#
+# IT IS NEVER PERSISTED, and no path here or elsewhere may make it so.
+# write_global_cli_cache refuses a `/.worktrees/` path in two places, and
+# _dev_dir_path refuses one on identical grounds: a pin names the tree that is
+# right for THIS run, so writing it into ~/.config/aimi/cli-path would hand it
+# to every later session in every project on the machine and reintroduce the
+# vanishing-worktree bug those two guards exist to close. Nothing in this
+# function writes; read_global_cli_cache consults it ahead of the cache file
+# and returns; and cmd_prime_cache deliberately does not let a pin answer its
+# already-current check, so a pin cannot suppress a real cache write either.
+_pinned_cli_path() {
+  if [ -z "${AIMI_CLI_PINNED:-}" ]; then
+    return 0
+  fi
+  local pinned="${AIMI_CLI_PINNED%/}"
+  # Absolute, for _dev_dir_path's reason: a relative value resolves against the
+  # caller's CWD, handing execution to any repository that ships an executable
+  # scripts/aimi-cli.sh of its own.
+  if [ "${pinned#/}" = "$pinned" ]; then
+    return 0
+  fi
+  if [ ! -x "$pinned" ]; then
+    return 0
+  fi
+  printf '%s\n' "$pinned"
+}
+
 # Resolve the Aimi config directory (XDG-compliant, host-agnostic).
 # Honors AIMI_CONFIG_DIR env var; falls back to ${XDG_CONFIG_HOME:-$HOME/.config}/aimi.
 # When AIMI_CONFIG_DIR is set, validates it is an absolute path.
@@ -971,6 +1034,47 @@ _validate_directory_source_identity() {
   return 0
 }
 
+# _report_foreign_cache_root: REPORT -- never refuse -- a cached path that
+# resolves under a plugin cache root other than the one _claude_config_dir()
+# names. Takes the path, prints at most one line to stderr, returns 0 always.
+#
+# THE ASYMMETRY THIS MAKES VISIBLE, and it is the cause of the flip-flop rather
+# than a symptom of it. `_resolve_latest_cache_path` is parameterized on
+# `config_dir` and every one of its call sites passes `_claude_config_dir()`,
+# so the WRITER of the cache always knows which root is the right one. The
+# reader's versioned-cache arm below is
+# `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` -- the leading
+# `*/` anchors no root, so the READER never asks. With two cache roots on one
+# machine the cache can therefore hold a path the writer would never have
+# written, the reader accepts it without comment, and "which CLI is this"
+# answers differently between two calls of one run with nothing on either side
+# saying so.
+#
+# ONE LINE OF STDERR, NOT A REFUSAL, and the difference is the whole design.
+# Refusing would break hosts that are legitimately arranged this way -- a
+# CLAUDE_CONFIG_DIR moved after the cache was written is the ordinary case --
+# and the breakage would land at some later invocation, far from its cause.
+# Naming BOTH roots costs one parameter expansion and is what lets a reader
+# holding two contradictory findings tell which root each of them came from.
+#
+# NOT MIRRORED ONTO _validate_cached_worktree_path, deliberately, even though
+# that function is otherwise this one's exact twin: the worktree pointer is
+# never resolved on its own. _persist_worktree_pointer_for derives it from the
+# CLI install path it is handed (_worktree_manager_beside strips
+# `/scripts/aimi-cli.sh` and looks beside it), so a foreign worktree root is a
+# consequence of a foreign cli-path root that this line has already reported
+# once. A second copy would print the same finding twice for one cause.
+_report_foreign_cache_root() {
+  local cached_path="$1"
+  local cached_root="${cached_path%%/plugins/cache/*}"
+  local expected_root=""
+  expected_root=$(_claude_config_dir 2>/dev/null) || expected_root=""
+  if [ -n "$expected_root" ] && [ -n "$cached_root" ] && [ "$cached_root" != "$expected_root" ]; then
+    echo "Notice: cached cli-path resolves under $cached_root, but the configured Claude config directory is $expected_root; two plugin cache roots are in play, so CLI resolution can answer differently between calls (set AIMI_CLI_PINNED to fix one answer for this run)." >&2
+  fi
+  return 0
+}
+
 # _validate_cached_cli_path: run a path through the whitelist case statement
 # Returns the path unchanged if valid, empty string if rejected
 #
@@ -993,6 +1097,11 @@ _validate_cached_cli_path() {
       fi
       ;;
     */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
+      # Accepted under ANY root -- that is what the leading `*/` above means.
+      # Report the root before returning it, so an accepted-but-foreign entry
+      # is at least visible; see _report_foreign_cache_root for why this is a
+      # notice rather than a fourth admission condition.
+      _report_foreign_cache_root "$cached_path"
       printf '%s\n' "$cached_path"
       return 0
       ;;
@@ -1003,7 +1112,18 @@ _validate_cached_cli_path() {
 # Read and validate the cached CLI path from the global cache file
 # Tries new XDG path first, falls back to legacy path if new is absent.
 # Returns the cached path if valid, empty string otherwise.
+#
+# LAYER 0-pin RUNS FIRST, ahead of both cache files: when AIMI_CLI_PINNED names
+# an absolute executable path it IS the answer for this call, and neither file
+# is opened. See _pinned_cli_path's header for why the pin is per-call, why it
+# is validated with `[ -x ]`, and why nothing anywhere writes it back.
 read_global_cli_cache() {
+  local pinned
+  pinned=$(_pinned_cli_path)
+  if [ -n "$pinned" ]; then
+    printf '%s\n' "$pinned"
+    return 0
+  fi
   local cache_file
   cache_file=$(_global_cache_path)
   if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
@@ -12626,8 +12746,19 @@ cmd_prime_cache() {
   # consecutive run re-answers "ok" rather than "already_current". Both are
   # documented outcomes of this verb's contract; widening that whitelist
   # reaches outside cmd_prime_cache, which is this story's declared scope.
-  local existing_cache
-  existing_cache=$(read_global_cli_cache)
+  #
+  # A PIN MUST NEVER ANSWER THIS COMPARISON, and this is where "never
+  # persisted" stays true rather than merely being asserted. read_global_cli_cache
+  # consults AIMI_CLI_PINNED ahead of the cache file (Layer 0-pin), which is the
+  # right answer for a caller asking "which CLI answers this call" and the wrong
+  # one for the single verb whose job is curating the file on disk: a pin that
+  # happened to equal resolved_path would report already_current and skip a
+  # write the cache genuinely needed, leaving the pin's choice looking persisted
+  # when nothing had been written at all.
+  local existing_cache=""
+  if [ -z "$(_pinned_cli_path)" ]; then
+    existing_cache=$(read_global_cli_cache)
+  fi
   if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
     # already_current is about the CLI pointer alone. The worktree pointer can
     # be absent or stale while this one is right -- that asymmetry is exactly
@@ -16710,6 +16841,17 @@ ENVIRONMENT:
                        check-version answers status "dev-override" without
                        attempting --fix, so the global cli-path cache is never
                        repointed at a development tree.
+    AIMI_CLI_PINNED    Layer 0-pin: the CLI this run means, consulted AHEAD of
+                       the global cache layers and honored on EVERY host. Must
+                       be an absolute path to an executable file (tested with
+                       [ -x ], never [ -f ]); a value failing either check is
+                       reported once on stderr and ignored, and resolution
+                       falls through to the ordinary layers. PER-CALL ONLY --
+                       nothing writes it to ~/.config/aimi/cli-path or to any
+                       other pointer, and prime-cache will not let it answer
+                       its already-current check. Set it when more than one
+                       plugin cache root is installed and "which CLI is this"
+                       must have one answer for the length of a run.
 
 EXAMPLES:
     # Layer 0 first: the development override, honored on any host.
@@ -16793,6 +16935,28 @@ main() {
   fi
   if [ -n "$_dev_dir" ]; then
     echo "Notice: AIMI_DEV_DIR override is active; aimi resolution points at $_dev_dir/scripts/aimi-cli.sh (development tree, shadowing any installed plugin)." >&2
+  fi
+
+  # ---- Layer 0-pin: the AIMI_CLI_PINNED announcement, on the same terms and
+  # for the same reason -- a change of which install answers, that says
+  # nothing, is the defect and not the fix. Announced HERE, once per process,
+  # rather than inside _pinned_cli_path, which several call sites consult and
+  # which would otherwise print one refusal three times in a run.
+  #
+  # A BAD VALUE IS NOT FATAL HERE, and that is the one place this diverges from
+  # AIMI_DEV_DIR directly above. An invalid dev dir means the operator asked
+  # for a tree and would silently get the install instead, so it exits. A pin
+  # only fixes ONE answer out of several the ordinary layers can still reach,
+  # so a stale one degrades to those layers -- loudly, naming the value, which
+  # is what keeps the degrade from being the silent kind.
+  if [ -n "${AIMI_CLI_PINNED:-}" ]; then
+    local _pinned_cli=""
+    _pinned_cli=$(_pinned_cli_path)
+    if [ -n "$_pinned_cli" ]; then
+      echo "Notice: AIMI_CLI_PINNED is set; cli-path resolution answers $_pinned_cli for this call, ahead of the global cache. Per-call only -- nothing persists it." >&2
+    else
+      echo "Warning: AIMI_CLI_PINNED is set but does not name an absolute path to an executable file: ${AIMI_CLI_PINNED}. Ignoring the pin and resolving through the ordinary cache layers." >&2
+    fi
   fi
 
   # Skip auto-discovery for commands that don't touch .aimi/
