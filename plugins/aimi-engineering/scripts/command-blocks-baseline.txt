@@ -38,7 +38,6 @@
 syntax	deepen.md	Step 2b: Read Research Depth (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
 syntax	deepen.md	3b: Freshness Check (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
 syntax	deepen.md	Step 5.5: Post-Enrichment Validation (block 1)	# <angle-bracket> placeholder; bash reads it as a redirection to a filename it cannot resolve
-syntax	open-pr.md	5b. Create the PR (block 1)	# heredoc body carries fences of its own, so extraction truncates it mid-command-substitution
 syntax	skills/agent-browser/SKILL.md	Navigation (block 1)	# usage listing: `agent-browser open <url>` is the same <angle-bracket> placeholder convention as the deepen.md entries above
 
 # --- loop-scope -------------------------------------------------------------
