@@ -7,6 +7,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.135.0] - 2026-09-09
+
+### Added
+
+- `AIMI_CLI_PINNED` -- Layer 0-pin, a per-call pin naming the install a run
+  means. `_pinned_cli_path` is consulted at the top of
+  `read_global_cli_cache`, ahead of BOTH cache files, and is honored on every
+  host with no `CLAUDECODE` gate. It closes an asymmetry rather than adding a
+  preference, and both halves of that asymmetry look correct in isolation:
+  `_resolve_latest_cache_path` is parameterized on `config_dir` and every one
+  of its call sites passes `_claude_config_dir()`, so the WRITER of the cache
+  always knows which plugin cache root is the right one -- while
+  `_validate_cached_cli_path`'s versioned-cache arm is
+  `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, whose leading
+  `*/` anchors no root, so the READER accepts a path under any of them and
+  never asks. With two roots on one machine, "which CLI is this" can answer
+  differently between two calls of a single run with nothing on either side
+  saying so. Validated with `[ -x ]` plus an absolute-path test, never `[ -f
+  ]` or `[ -e ]` -- the rule `CV_CLI` in `commands/execute.md` and
+  `PROBE_CLI` in `skills/story-executor/SKILL.md` already apply one level up,
+  since a file that is present but not executable resolves nothing and
+  admitting it only moves the failure to the invocation, where it reads as a
+  broken CLI rather than as a bad pin. Validating by textual prefix instead
+  is exactly what let a symlink into a worktree past
+  `write_global_cli_cache`'s guard and produced the exit 127 recorded in
+  `golden_from_jq.json`'s `cv-fix-simlink-worktrees-cc`. It is NEVER
+  persisted -- not to `~/.config/aimi/cli-path`, not to the legacy path, not
+  to the worktree pointer -- and `cmd_prime_cache` additionally refuses to
+  let a pin answer its already-current check, so a pin cannot suppress a
+  cache write the file genuinely needed and then look as though it had been
+  persisted. Set-but-invalid is reported and ignored rather than fatal, the
+  one place this diverges from `AIMI_DEV_DIR` immediately above it in
+  `main()`: an invalid dev dir would silently hand the operator the install
+  they did not ask for, so it exits 1, while a pin fixes only ONE answer out
+  of several the ordinary layers can still reach, so a stale one degrades to
+  those layers loudly. Either way `main()` prints one line per process -- a
+  notice naming the honored path, a warning naming the rejected value --
+  which is why the announcement lives there and not in `_pinned_cli_path`,
+  whose three call sites would otherwise print one refusal three times in a
+  run. Documented in the `--help` ENVIRONMENT block and as `### Layer 0-pin`
+  in `commands/references/cli-path-resolution.md`, deliberately WITHOUT a
+  command-side snippet: the fenced blocks in that file are matched literally
+  by `hooks/auto-approve-cli.sh`, so a new resolution line there owes a new
+  hook pattern, a legacy twin beside it and a byte-identical copy on every
+  other carrier, in one commit -- a cost the pin never has to pay, because it
+  is honored inside the CLI where no snippet is needed at all.
+- `SCRATCH_PREFIX`, composed as `[PLAN_DISC]-[story.id]` in `execute.md`'s
+  Step 4 spawn block and carried into both `<task_pointer>` templates of
+  `skills/story-executor/SKILL.md`. The scratchpad directory is handed to
+  every agent in a session, it outlives that session, and it is therefore
+  shared across runs and across PLANS -- so a filename chosen for what it
+  MEANS rather than for who owns it is a filename two writers pick
+  independently. `PLAN_DISC` is READ here and never recomposed nor
+  re-sanitized: `### Plan Discriminator` derived it once from
+  `WAVE_TASKS_FILE` and its sanitization is load-bearing, so a second
+  derivation is only a second chance to disagree with the first. The axis is
+  the PLAN and the story id comes SECOND, which is what makes the order
+  load-bearing rather than arbitrary: the collision measured on 2026-09-08 in
+  the known gap `orq-scratchpad-compartilhado-entre-executores` was not
+  sibling-against-sibling but an EARLIER plan's `verify-US-002.sh`, read by
+  this run's `US-002` because the two ids were the same string, so a prefix
+  keyed on the story id alone would have composed the identical name for both
+  and separated nothing. Both templates name `verify.sh`, `verify.log`,
+  `probe.sh`, `probe.err` and `v.sh` as real names that already collided
+  there, and state that they are non-examples rather than a denylist to
+  improvise around -- picking a good name is precisely what failed. The
+  `verify-probe` artifact is explicitly outside the rule: it lands beside the
+  tasks file under a name the verb itself chooses and announces on stderr,
+  and step 1.5 already says to read that path rather than compose one.
+- `require_sandbox_binary` and its silent resolution half
+  `_resolve_sandbox_binary` in `test-aimi-cli-fixtures.sh`: one helper both
+  sandbox fixtures now share, which resolves a tool via `command -v` and then
+  each candidate directory in order, and REFUSES when nothing resolves --
+  one stderr line naming the binary, plus a non-zero return the caller turns
+  into a torn-down fixture. `sha256sum` and `shasum` are handled as an
+  ALTERNATIVE PAIR rather than as two requirements, because
+  `_default_branch_cache_key` falls back to portable slugification only when
+  NEITHER is on PATH; when one of the pair is missing and the other resolves,
+  the helper returns 0 with empty stdout and callers skip the link. The
+  refusal is deliberately a `printf` and a status, never an `assert_*` call:
+  only the four `assert_*` families increment the counter
+  `test-aimi-cli.sh` pins with `EXPECTED_ASSERTIONS`, and these fixtures are
+  called from dozens of sites, so asserting here would move that number by
+  three digits to report an environment fault rather than a test result.
+  `EXPECTED_ASSERTIONS` is unchanged.
+
+### Changed
+
+- `_validate_cached_cli_path`'s versioned-cache arm REPORTS a second plugin
+  cache root instead of ranking it in silence. When an accepted path resolves
+  under a root other than the one `_claude_config_dir()` names,
+  `_report_foreign_cache_root` prints one stderr line naming BOTH roots and
+  the path is still returned. A notice and not a refusal, because refusing
+  would break hosts that are legitimately arranged that way -- a
+  `CLAUDE_CONFIG_DIR` moved after the cache was written is the ordinary case
+  -- and the breakage would land at some later invocation, far from its
+  cause. Naming both roots costs one parameter expansion and is what lets a
+  reader holding two contradictory findings tell which root each came from.
+  It is NOT mirrored onto `_validate_cached_worktree_path`, that function's
+  otherwise exact twin, because the worktree pointer is never resolved on its
+  own: `_persist_worktree_pointer_for` derives it from the CLI install path,
+  so a foreign worktree root is a consequence of a foreign cli-path root this
+  line has already reported once, and a second copy would print one finding
+  twice for one cause.
+- The `/aimi:execute` orchestrator prefixes its OWN scratchpad files
+  `[PLAN_DISC]-orch-<whatever>`, under a new paragraph in `execute.md`'s Plan
+  Discriminator section. A rule that reached only the spawned executors would
+  have left the polluter out: in the measured gap this orchestrator was
+  itself one of the writers, leaving a `v.sh` in the same shared directory
+  two of five executors in one wave then read believing it was their own.
+- `command-size-baseline.txt` is reconciled by the same commits that moved
+  the files, as its two-way ratchet requires: `execute.md` to 406739,
+  `references/cli-path-resolution.md` to 37540, and
+  `skills/story-executor/SKILL.md` to 60238.
+
+### Fixed
+
+- Both sandbox fixtures stop building a smaller environment than they
+  promise. `_path_without_binary` ended a failed resolution with `|| continue`
+  and `setup_forge_cli_sandbox` ended one by leaving `resolved=""` and
+  skipping the link -- two lines that looked almost identical to the
+  deliberate `[ "$tool" = "$exclude" ] && continue` beside them and meant the
+  opposite thing. A sandbox built without a tool still builds, so the test
+  still runs and still goes green, and what it proves then is the verb's
+  FALLBACK rather than the verb: strip `sort` and `forge-issue-scan` answers
+  `[]` for every description, which is ALREADY the right answer for two of
+  that verb's three cases, so the missing binary stayed invisible in two
+  tests out of three. Both sites now route through `require_sandbox_binary`
+  and the count of silently skipped tools is zero. Found and fixed alongside
+  it: `command -v printf` answers the bare word `printf` because it is a
+  shell BUILTIN, so `ln -s` was handed a non-path and every shim directory
+  this fixture has ever built acquired a self-referential dangling `printf`
+  entry; the `[ -x ]` test on the resolved answer, plus the `/usr/bin` and
+  `/bin` candidates behind it, is what now catches that class.
+- The root `CLAUDE.md` stops crediting its list of seven resolution-idiom
+  surfaces to `grep -rn "plugins/cache/\*/aimi-engineering"`, a measurement
+  that does not reproduce: scoped to `plugins/`, that grep returns EIGHT
+  files. The list is curated, and the eighth --
+  `hooks/tests/test_auto_approve_cli.py` -- is left out deliberately, because
+  its two matches sit inside `LEGACY_FORMS`, which freezes the glob as it was
+  spelled BEFORE the numeric version filter so that a command body which
+  entered a conversation before that change is still auto-approved when it is
+  run verbatim afterwards. Patterns `7L`/`8L` in `hooks/auto-approve-cli.sh`
+  exist for those two strings and nothing else, so an edit that "corrects"
+  the count to eight would DELETE that coverage rather than complete the
+  list.
+- `commands/references/cli-path-resolution.md`'s mirror-cost paragraph drops
+  two names it should never have carried, both re-measured rather than
+  argued. The top-level `CLAUDE.md` is not a carrier: it holds zero
+  occurrences of the pipeline fragment `sort -V | tail -1`, and its one hit
+  for the cache glob is prose describing Layer 2, not a line anything
+  executes -- a document that DESCRIBES the idiom costs a sentence to update
+  and cannot drift into a permission prompt. And it is ONE test suite, not
+  three: only `scripts/test-aimi-cli-part1-core.sh` carries the pipeline, as
+  `_test_latest_installed_cli_path`. Of the two other files a careless grep
+  turns up, `scripts/tests/test_version_cache.py` mentions `sort -V` only in
+  prose and `hooks/tests/test_auto_approve_cli.py`'s occurrences are the
+  frozen `LEGACY_FORMS` spelling that must NOT move with the idiom.
+  Overstating the mirror cost is not the safe direction to be wrong in: this
+  is the paragraph the next person reads to decide whether a new layer is
+  affordable.
+
 ## [1.134.0] - 2026-09-09
 
 ### Added
