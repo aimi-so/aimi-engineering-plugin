@@ -13424,6 +13424,135 @@ $anchor"
   return 0
 }
 
+# Usage: extract-prototype-sections <file> --anchors "<view names, newline-separated>"
+# Print only the requested <section data-view="X"> blocks of a prototype HTML file,
+# concatenated verbatim in the order the anchors were requested.
+# Each requested view is emitted as its WHOLE block -- from the line carrying its
+# opening <section ... data-view="X" ...> through its matching </section>, tracked by
+# <section>/</section> depth so a nested <section> inside a matched block does not end
+# it early. An opening section with no closing tag prints to EOF rather than erroring.
+# Only double-quoted data-view attribute values are matched -- the prototype author's
+# HTML-escaping rule requires a literal '"' inside an attribute to be written &quot;, so
+# a double-quoted value is always the form actually emitted.
+# View-name text is matched case-insensitively; an anchor with no matching section is
+# skipped (not a fatal error) but is named in a "no section matched anchor" warning on
+# stderr; a run whose anchors match nothing prints empty output, still exit 0. A file
+# with no data-view attribute at all likewise prints empty output at exit 0.
+# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
+# stderr and skipped -- defense in depth, mirroring extract-sections.
+# Path confinement mirrors extract-sections: resolve_path + validate_path_in_project.
+# Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
+cmd_extract_prototype_sections() {
+  local file_path=""
+  local anchors_raw=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --anchors)
+        if [ $# -lt 2 ]; then
+          echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+          exit 1
+        fi
+        anchors_raw="$2"
+        shift 2
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+        exit 1
+        ;;
+      *)
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ] || [ -z "$anchors_raw" ]; then
+    echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # Resolve and validate the target file path
+  local resolved_file
+  resolved_file=$(resolve_path "$file_path")
+  validate_path_in_project "$resolved_file"
+
+  # Split --anchors on newlines only; trim and lowercase each entry; skip blanks.
+  # Extract each anchor's <section data-view="X"> block (first matching section only)
+  # in request order.
+  local anchor anchor_lc unmatched_anchors=""
+  while IFS= read -r anchor; do
+    anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$anchor" ] && continue
+
+    # Defense in depth: view names are orchestrator-composed, not raw user input, but
+    # this CLI must not rely on that boundary holding. Reject only characters dangerous
+    # inside a double-quoted shell argument -- hyphen, underscore, period and spaces
+    # are all legitimate view-name punctuation and MUST keep working.
+    case "$anchor" in
+      *'$'*|*'`'*|*'"'*|*'\'*)
+        echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
+        continue ;;
+    esac
+
+    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+
+    # awk streams matched section lines straight to stdout (byte-for-byte, blank
+    # lines and all) and reports match status via its own exit code -- this avoids
+    # a $(...) capture, which would silently swallow trailing blank lines.
+    if awk -v target="$anchor_lc" '
+      BEGIN { in_section = 0; matched = 0; depth = 0 }
+      {
+        line_lc = tolower($0)
+
+        if (!in_section && !matched && line_lc ~ /<section/ &&
+            match(line_lc, /[<[:space:]]data-view[[:space:]]*=[[:space:]]*"[^"]*"/)) {
+          attr = substr(line_lc, RSTART, RLENGTH)
+          q1 = index(attr, "\"")
+          rest = substr(attr, q1 + 1)
+          q2 = index(rest, "\"")
+          value = substr(rest, 1, q2 - 1)
+          if (value == target) {
+            in_section = 1
+            matched = 1
+            depth = 0
+          }
+        }
+
+        if (in_section) {
+          print
+          tmp = line_lc
+          open_count = gsub(/<section/, "", tmp)
+          tmp = line_lc
+          close_count = gsub(/<\/section>/, "", tmp)
+          depth += open_count - close_count
+          if (depth <= 0) { in_section = 0 }
+        }
+      }
+      END { exit (matched ? 0 : 1) }
+    ' "$resolved_file"; then
+      :
+    else
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+    fi
+  done < <(printf '%s\n' "$anchors_raw")
+
+  if [ -n "$unmatched_anchors" ]; then
+    while IFS= read -r anchor; do
+      [ -z "$anchor" ] && continue
+      echo "Warning: no section matched anchor: $anchor" >&2
+    done <<< "$unmatched_anchors"
+  fi
+
+  return 0
+}
+
 # Usage: research-gc
 # Garbage-collect orphaned research files from .aimi/research/*.md.
 # A file is deleted only when BOTH conditions are true:
@@ -16068,6 +16197,20 @@ COMMANDS:
                               Path confinement mirrors research-lookup (resolve_path +
                               validate_path_in_project); missing file or missing
                               <file>/--anchors arg -> error/usage on stderr, exit 1.
+    extract-prototype-sections <file> --anchors "<view names>"
+                              Print only the requested <section data-view="X"> blocks
+                              of a prototype HTML file, concatenated verbatim in
+                              request order. Each block spans its opening
+                              <section ... data-view="X" ...> through its matching
+                              </section>, tracked by tag depth.
+                              --anchors accepts newline-separated view names; matching
+                              is case-insensitive, double-quoted attribute values only.
+                              A view with no matching section is skipped (not an
+                              error); anchors matching nothing, or a file with no
+                              data-view attribute at all, -> empty output, exit 0.
+                              Path confinement mirrors extract-sections (resolve_path +
+                              validate_path_in_project); missing file or missing
+                              <file>/--anchors arg -> error/usage on stderr, exit 1.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
@@ -16754,6 +16897,7 @@ main() {
     research-lookup)   shift; cmd_research_lookup "$@" ;;
     research-gc)       cmd_research_gc ;;
     extract-sections)  shift; cmd_extract_sections "$@" ;;
+    extract-prototype-sections) shift; cmd_extract_prototype_sections "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;

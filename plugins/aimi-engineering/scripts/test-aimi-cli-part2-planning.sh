@@ -1553,6 +1553,227 @@ RESEOF
   rm -rf "$es_dir"
 }
 
+test_extract_prototype_sections() {
+  echo ""
+  echo "=== Testing extract-prototype-sections subcommand ==="
+
+  local eps_dir
+  eps_dir=$(mktemp -d)
+  mkdir -p "$eps_dir/.aimi"
+
+  # Built to look like what aimi-bundle-prototype-author actually emits: an x-data
+  # root div, a <nav> of view buttons, several <section data-view="..." x-show="...">
+  # blocks with real content, and the Alpine <script>. The fourth section's view name
+  # exercises ordinary punctuation (- _ . and a space) that must keep matching.
+  local proto_file="$eps_dir/.aimi/proto.html"
+  cat > "$proto_file" << 'PROTOEOF'
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Design Decisions Channel Prototype</title></head>
+<body>
+<div x-data="{ active: 'overview' }">
+  <nav>
+    <button @click="active = 'overview'">Overview</button>
+    <button @click="active = 'detail'">Detail</button>
+    <button @click="active = 'settings'">Settings</button>
+    <button @click="active = 'notes'">Notes</button>
+  </nav>
+
+  <section data-view="overview" x-show="active === 'overview'">
+    <h2>Overview</h2>
+    <p>This is the overview view body, with enough content to make this section
+    meaningfully sized relative to the whole fixture file.</p>
+  </section>
+
+  <section data-view="detail" x-show="active === 'detail'">
+    <h2>Detail</h2>
+    <p>This is the detail view body, also padded with enough content that a
+    single-view slice is clearly and measurably smaller than the whole file.</p>
+    <ul>
+      <li>Detail point one</li>
+      <li>Detail point two</li>
+    </ul>
+  </section>
+
+  <section data-view="settings" x-show="active === 'settings'">
+    <h2>Settings</h2>
+    <p>This is the settings view body, with its own padding content so the
+    fixture reads like something the bundle-prototype-author would really emit.</p>
+  </section>
+
+  <section data-view="detail-notes_v1.2 extra" x-show="active === 'notes'">
+    <h2>Detail Notes</h2>
+    <p>This view name exercises ordinary punctuation -- hyphen, underscore, period
+    and a space -- which must all keep matching normally.</p>
+  </section>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {});
+</script>
+</body>
+</html>
+PROTOEOF
+
+  local stdout exit_code stderr_out
+
+  # --- Test 1: single-anchor match emits the WHOLE block, no bleed ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: single anchor exits 0"
+  assert_contains 'data-view="detail"' "$stdout" "extract-prototype-sections: single anchor includes opening tag"
+  assert_contains "Detail point two" "$stdout" "extract-prototype-sections: single anchor includes content through to the closing tag"
+  local detail_close_count
+  detail_close_count=$(printf '%s\n' "$stdout" | grep -c '</section>')
+  assert_eq "1" "$detail_close_count" "extract-prototype-sections: single anchor emits exactly one closing tag (whole block, not truncated or duplicated)"
+  local single_bleed="yes"
+  [[ "$stdout" == *"Overview"* || "$stdout" == *"Settings"* ]] || single_bleed="no"
+  assert_eq "no" "$single_bleed" "extract-prototype-sections: single anchor excludes unrelated views"
+
+  # --- Test 2: multi-anchor match, concatenated in request order ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "$(printf 'settings\noverview')" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: multi-anchor exits 0"
+  assert_contains 'data-view="settings"' "$stdout" "extract-prototype-sections: multi-anchor includes first requested view"
+  assert_contains 'data-view="overview"' "$stdout" "extract-prototype-sections: multi-anchor includes second requested view"
+  local settings_pos overview_pos order_ok="no"
+  settings_pos=$(printf '%s' "$stdout" | grep -n 'data-view="settings"' | head -1 | cut -d: -f1)
+  overview_pos=$(printf '%s' "$stdout" | grep -n 'data-view="overview"' | head -1 | cut -d: -f1)
+  [ -n "$settings_pos" ] && [ -n "$overview_pos" ] && [ "$settings_pos" -lt "$overview_pos" ] && order_ok="yes"
+  assert_eq "yes" "$order_ok" "extract-prototype-sections: multi-anchor preserves request order"
+
+  # --- Test 3: one-view slice is strictly smaller than the whole fixture (wc -c) ---
+  local slice_bytes fixture_bytes smaller_ok="no" nonzero_ok="no"
+  pushd "$eps_dir" >/dev/null
+  "$CLI" extract-prototype-sections "$proto_file" --anchors "detail" > "$eps_dir/.aimi/slice.out" 2>/dev/null
+  exit_code=$?
+  popd >/dev/null
+  slice_bytes=$(wc -c < "$eps_dir/.aimi/slice.out")
+  fixture_bytes=$(wc -c < "$proto_file")
+  rm -f "$eps_dir/.aimi/slice.out"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: single-view slice exits 0"
+  [ "$slice_bytes" -gt "0" ] && nonzero_ok="yes"
+  assert_eq "yes" "$nonzero_ok" "extract-prototype-sections: single-view slice is non-empty"
+  [ "$slice_bytes" -lt "$fixture_bytes" ] && smaller_ok="yes"
+  assert_eq "yes" "$smaller_ok" "extract-prototype-sections: single-view slice (wc -c) is strictly smaller than the whole fixture (wc -c)"
+
+  # --- Test 4: view with no matching section -> skipped, empty stdout, exit 0, warns ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "nonexistent-view" 2>"$eps_dir/.aimi/stderr4.out") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$eps_dir/.aimi/stderr4.out"); rm -f "$eps_dir/.aimi/stderr4.out"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: unmatched view exits 0"
+  assert_eq "" "$stdout" "extract-prototype-sections: unmatched view produces empty stdout"
+  assert_contains "no section matched anchor: nonexistent-view" "$stderr_out" "extract-prototype-sections: unmatched view warns on stderr naming the view"
+
+  # --- Test 5: HTML with no data-view attribute at all -> empty stdout, exit 0 ---
+  # Distinct from Test 4 -- a caller must be able to tell "nothing in this file has
+  # data-view" apart from "this anchor did not match".
+  local plain_file="$eps_dir/.aimi/plain.html"
+  printf '%s\n' '<html><body><p>no anchors here</p></body></html>' > "$plain_file"
+
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$plain_file" --anchors "detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: anchor-less file exits 0"
+  assert_eq "" "$stdout" "extract-prototype-sections: anchor-less file produces empty stdout"
+
+  # --- Test 6: missing file -> error on stderr, exit non-zero ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$eps_dir/.aimi/does-not-exist.html" --anchors "detail" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: missing file exits non-zero"
+  assert_contains "not found" "$stderr_out" "extract-prototype-sections: missing file logs error on stderr"
+
+  # --- Test 7: relative traversal path (../x) rejected ---
+  local parent_dir="$(dirname "$eps_dir")"
+  local outside_file="$parent_dir/eps-outside-$$.html"
+  printf '%s\n' '<section data-view="outside"><p>outside</p></section>' > "$outside_file"
+
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "../$(basename "$outside_file")" --anchors "outside" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: relative traversal path rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-prototype-sections: relative traversal path error on stderr"
+  rm -f "$outside_file"
+
+  # --- Test 8: absolute path outside project root rejected ---
+  local abs_outside_file="$parent_dir/eps-abs-outside-$$.html"
+  printf '%s\n' '<section data-view="outside"><p>outside</p></section>' > "$abs_outside_file"
+
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$abs_outside_file" --anchors "outside" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: absolute path outside project root rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-prototype-sections: absolute path outside project root error on stderr"
+  rm -f "$abs_outside_file"
+
+  # --- Test 9: --anchors given with no following value -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$proto_file" --anchors 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: --anchors with no value exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: --anchors with no value prints usage"
+
+  # --- Test 10: --anchors given an empty value -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$proto_file" --anchors "" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: --anchors with empty value exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: --anchors with empty value prints usage"
+
+  # --- Test 11: missing <file> argument -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections --anchors "detail" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: missing file argument exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: missing file argument prints usage"
+
+  # --- Test 12: ordinary view-name punctuation (- _ . and a space) keeps matching ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "detail-notes_v1.2 extra" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: punctuated view name exits 0"
+  assert_contains 'data-view="detail-notes_v1.2 extra"' "$stdout" "extract-prototype-sections: punctuated view name (- _ . and space) matches normally"
+
+  # --- Test 13: anchors with shell metacharacters are rejected and skipped, never
+  # interpolated into the matcher; a valid anchor in the same run still processes ---
+  local metachar_anchors metachar_stderr_file
+  metachar_anchors=$(printf 'overview\n$(evil)\nbad`tick\nbad"quote\nbad\\slash')
+  metachar_stderr_file="$eps_dir/.aimi/stderr13.out"
+
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "$metachar_anchors" 2>"$metachar_stderr_file") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$metachar_stderr_file"); rm -f "$metachar_stderr_file"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: run with rejected metachar anchors still exits 0"
+  assert_contains 'data-view="overview"' "$stdout" "extract-prototype-sections: valid anchor still processed alongside rejected ones"
+  local rejected_count
+  rejected_count=$(printf '%s' "$stderr_out" | grep -c "anchor rejected (shell metacharacter)")
+  assert_eq "4" "$rejected_count" "extract-prototype-sections: all four dangerous-metacharacter anchors rejected with a warning"
+  assert_contains '$(evil)' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the \$( anchor"
+  assert_contains 'bad`tick' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the backtick anchor"
+  assert_contains 'bad"quote' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the double-quote anchor"
+  assert_contains 'bad\slash' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the backslash anchor"
+
+  rm -rf "$eps_dir"
+}
+
 # measure-command-file: the structural size of one markdown file.
 #
 # THE FIXTURE IS THE TEST. Its five top-level fences are chosen so that a
@@ -7915,6 +8136,7 @@ main() {
   echo ""
   echo "--- Extract Sections Tests ---"
   test_extract_sections
+  test_extract_prototype_sections
 
   # measure-command-file tests — own isolated temp dir, own .aimi/ root
   echo ""
