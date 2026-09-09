@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.132.0] - 2026-09-09
+
+### Added
+
+- The prototype is sliced per outline entry instead of broadcast whole.
+  `scripts/aimi-cli.sh` gains `extract-prototype-sections <file> --anchors
+  "<view names>"`, which emits the `<section data-view="X">` blocks a caller
+  names by counting `<section>`/`</section>` depth. It reuses
+  `cmd_extract_sections`' argument parsing, `resolve_path` +
+  `validate_path_in_project` confinement, metacharacter rejection and
+  silent-skip-on-miss byte for byte, because a second, subtly different
+  confinement rule beside the first is how one of them ends up wrong.
+  `commands/plan.md` grows `### Per-Entry View-Scoped Prototype Block
+  Preparation` beside its research-slicing sibling and interpolates a per-entry
+  `prototypeViewBlock` where the Phase 3d template used to interpolate the whole
+  `prototypeBlocks` broadcast; the Phase 1 researcher spawn keeps the whole-file
+  form, since it runs once per researcher rather than once per entry.
+
+### Changed
+
+- The story expander cites a prototype slice by view, not by a line range.
+  `agents/workflow/aimi-story-expander.md` prefers `(prototype: <path>
+  §<view-name>)` and admits the line-range fallback only for numbers `counted
+  over the whole file on disk`. The rule is provenance rather than a marker
+  check on purpose: `plan.md` wraps a slice and a whole file in the same
+  `<prototype_html label=... path=...>` tag and `label` is a letter, so a rule
+  shaped "if the block is marked a slice" would never fire. Its reading
+  permission widens from one purpose to two in the same commit, since the new
+  guidance instructs a Read the old bullet forbade.
+- `metadata.prototypeDropped` is documented as having two writers. Phase 4's
+  metadata bullet, the schema template line and `plugins/aimi-engineering/
+  CLAUDE.md` stop asserting `reason` is the literal `aggregate-cap` and name
+  both it and `no-view-anchors`. `validate-tasks` R21 is untouched: it checks
+  `reason` as a non-empty string and enforces no enum, which is what let this
+  second writer land without a validator change -- the foresight that decision
+  was recorded for.
+
+### Fixed
+
+- A prototype with no `data-view` anchor takes a declared path instead of an
+  undefined one: the whole block goes to the first outline entry, every other
+  entry receives the path plus the read-on-demand instruction, and one
+  `{path, reason: "no-view-anchors", bytes}` record is appended. The per-entry
+  20 KB cap applies to slices only, so that first entry receives the block
+  complete up to the 200 KB aggregate ceiling.
+- The new section triggers on the loaded prototype HTML files rather than on
+  `resolvedPrototypePaths`, which also carries the tokens sidecar. Without the
+  distinction, a run whose aggregate cap dropped every prototype but whose
+  sidecar loaded would have fired the whole section over a JSON file, found no
+  anchors, and written a `no-view-anchors` record naming a file that is not a
+  prototype and was never dropped.
+
 ## [1.131.0] - 2026-09-08
 
 ### Added
