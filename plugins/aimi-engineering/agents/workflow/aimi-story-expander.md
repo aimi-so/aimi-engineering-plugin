@@ -172,9 +172,13 @@ This is the same principle as the Typecheck rule below, applied generally: becau
 
 A criterion asserting a reduction — "cuts the file by 400 bytes", "saves 2KB of prompt", "shrinks the command body" — is a criterion `verify` must *execute*, and executing it means measuring **both** sides. The current size read from disk proves nothing alone: a file always has some size, so an assertion about a saving nobody measured is satisfied by whatever the story happens to leave behind. That is the failure this rule exists for — a story claimed a byte saving in its prose and its `verify` never opened the previous version, so the claim was never once checked.
 
-**The "before" side comes from `metadata.baseRef`, named explicitly.** That field is the 40-character SHA `/aimi:plan` records for the commit this tasks file's stories were planned against (`commands/plan.md`'s metadata contract writes it; `commands/execute.md` already reads it back). Name it in the `verify` you write instead of leaving the executor to choose a base. `HEAD` is the wrong choice, and wrong in the way nobody notices: by the time the check runs the story's own edit is in the tree and may already be committed, so `git show HEAD:<path>` can hand back the file the story just wrote and report a reduction of zero — as a pass.
+**The "before" side is the commit where THIS story branched, derived from `metadata.branchName`.** That field names the branch the plan commits onto — the phase's branch in phase mode, the plan's branch otherwise — so `git merge-base HEAD "$BRANCH"` resolves to the point this story diverged from it. It resolves the same way in every execution mode, which is what makes it usable here: nothing tells you which mode `/aimi:execute` picked, so an anchor that needed to know would not be writable at all. Name that derivation in the `verify` you write instead of leaving the executor to choose a base. `HEAD` is the wrong choice, and wrong in the way nobody notices: by the time the check runs the story's own edit is in the tree and may already be committed, so `git show HEAD:<path>` can hand back the file the story just wrote and report a reduction of zero — as a pass.
 
-`baseRef` is optional in the schema, because a plan written before the field existed omits it. So the `verify` must **fail** when it resolves empty rather than substituting another base. An unresolvable base means the claim cannot be checked, and saying so is the correct outcome — a silent fallback turns an unverifiable claim into a green one.
+**Not `metadata.baseRef`, and the two only disagree once a sibling has landed.** `baseRef` is the commit the whole PLAN was written against, so a `verify` anchored there asserts *"no story in this plan reduced the file"* — not *"this story reduced it"*. The two answers agree right up until a sibling story touches the same file legitimately before you; from that commit onwards every later story in the plan inherits a failure it did not cause. Nothing here repoints or redefines `baseRef`: it stays the factual record of the commit the plan was written against, and keeps its own reader in `commands/execute.md`'s Plan Base Freshness advisory. It is simply the wrong side of the fork to measure one story from.
+
+`branchName` can resolve empty — an older tasks file, a `metadata` call that fails — and `git merge-base` can fail on its own when the branch it names is gone. So the `verify` must **fail** when the base resolves empty rather than substituting another base. An unresolvable base means the claim cannot be checked, and saying so is the correct outcome — a silent fallback turns an unverifiable claim into a green one.
+
+**Do not recover the branch from the worktree's directory name.** The obvious-looking recipe — strip the trailing story id off `$(basename "$PWD")` with a substitution and treat what is left as the branch — was true for about a day. `/aimi:execute` now names each story worktree `[PLAN_DISC]-[branchName]-[story.id]`, with the plan discriminator on the FRONT, so removing the suffix leaves the discriminator attached. Measured in this tree, what comes back is `falha-visivel-phase-3-tasks-fix/falha-visivel-phase-3-ambiente-que-mente`, which `git show-ref` refuses; the real branch was `fix/falha-visivel-phase-3-ambiente-que-mente`. Worse, that recipe ended in `|| true`, so the refusal became an empty base and the claim went green — the exact defect this section exists to stop, written into the remedy. `metadata.branchName` needs no string surgery and does not care what the worktree is called.
 
 **Read `metadata` through the executor's own tasks file, never the bare form.** `skills/story-executor/SKILL.md` exports `TASKS_FILE_PATH` into the environment `implementation.verify` runs in — the tasks file this story was expanded into, resolved without depending on the shared `current-tasks` pointer a sibling split orchestrator's own `init-session` may have overwritten since. Pass it with `--tasks-file "$TASKS_FILE_PATH"` whenever the variable is set. A `verify` run by hand, outside the executor, has no `TASKS_FILE_PATH` to read; branch on that rather than emitting a command that fails unexplained — fall back to the bare `metadata` call, which resolves the same shared pointer a lone manual run already expects, with no sibling orchestrator around to have overwritten it.
 
@@ -182,17 +186,19 @@ The shape, with `AIMI_CLI` bound per the two rules above, `<path>` from `impleme
 
 ```
 if [ -n "${TASKS_FILE_PATH:-}" ]; then
-  BASE=$("$AIMI_CLI" metadata --tasks-file "$TASKS_FILE_PATH" | jq -r '.baseRef // empty')
+  BRANCH=$("$AIMI_CLI" metadata --tasks-file "$TASKS_FILE_PATH" | jq -r '.branchName // empty')
 else
-  BASE=$("$AIMI_CLI" metadata | jq -r '.baseRef // empty')
+  BRANCH=$("$AIMI_CLI" metadata | jq -r '.branchName // empty')
 fi
-[ -n "$BASE" ] || { echo 'FAIL: metadata.baseRef absent - the reduction cannot be measured'; exit 1; }
+[ -n "$BRANCH" ] || { echo 'FAIL: metadata.branchName absent - the fork point cannot be resolved'; exit 1; }
+BASE=$(git merge-base HEAD "$BRANCH" 2>/dev/null) || BASE=""
+[ -n "$BASE" ] || { echo "FAIL: no merge-base between HEAD and $BRANCH - the reduction cannot be measured"; exit 1; }
 BEFORE=$(git show "$BASE:<path>" | wc -c)
 AFTER=$(wc -c < "<path>")
 [ "$((BEFORE - AFTER))" -ge N ] || { echo "FAIL: reduced $((BEFORE - AFTER))B, claimed ${N}B"; exit 1; }
 ```
 
-Emit the measurement in that order — resolve, refuse-if-empty, read both sides, compare — so the message a reader gets names which of the three ways it failed.
+Emit the measurement in that order — resolve the branch, refuse-if-empty, derive the fork point, refuse-if-empty again, read both sides, compare — so the message a reader gets names which of the four ways it failed. The two refusals stay separate on purpose: a tasks file with no `branchName` and a branch that no longer resolves are different repairs, and one message covering both would name neither. And the `|| BASE=""` on the derive line is not the `|| true` refused above — it is there so a failed `merge-base` reaches the refusal on the very next line carrying a message, instead of aborting under `set -e` with none. What made that recipe's `|| true` a defect was being the LAST word: nothing after it ever looked at what it had swallowed.
 
 **A reduction with no number is not a claim.** A criterion saying a file "gets smaller" without saying by how much admits no `verify` at all: every outcome satisfies it, one byte included. Rewrite it to carry the number you actually expect, or drop the size language and keep what the criterion was really about — a section removed, a duplication collapsed, a block that no longer appears — as something `verify` can execute. Never emit an unquantified saving: it is a sentence that looks like an acceptance criterion and cannot function as one.
 

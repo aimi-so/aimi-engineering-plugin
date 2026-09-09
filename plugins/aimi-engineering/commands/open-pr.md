@@ -531,6 +531,35 @@ Derive a **feature-level** PR title — one that describes the whole change, not
 3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
+# How many plans declare this branch? `metadata` answers the session's ACTIVE
+# tasks file, so it can say "this document is not this branch's" but never "how
+# many others said they were". `find-tasks-all` enumerates every live plan and
+# `metadata --tasks-file` reads each one's own branchName, so the number below
+# is measured from the documents themselves. Never counted from merge-commit
+# subjects: the plugin emits no such string, so counting by one would be
+# counting whichever wording a person happened to type.
+BRANCH_PLAN_COUNT=0
+ALL_PLAN_FILES=$($AIMI_CLI find-tasks-all 2>/dev/null)
+if [ -n "$ALL_PLAN_FILES" ]; then
+  while IFS= read -r plan_file; do
+    [ -n "$plan_file" ] || continue
+    plan_branch=$($AIMI_CLI metadata --tasks-file "$plan_file" 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+    if [ "$plan_branch" = "$CURRENT_BRANCH" ]; then
+      BRANCH_PLAN_COUNT=$((BRANCH_PLAN_COUNT + 1))
+    fi
+  done <<PLAN_BRANCH_SCAN
+$ALL_PLAN_FILES
+PLAN_BRANCH_SCAN
+fi
+# One clause, appended to whichever `PR title from …` line wins below — the same
+# announcing machine, not a second one. Three cases, not two: 0 is as ordinary
+# as 2, and far more common.
+case "$BRANCH_PLAN_COUNT" in
+  0) PLAN_COUNT_NOTE="0 plans declare $CURRENT_BRANCH as their branchName, so no metadata could pass the branchName gate: this title comes from the branch's own commits, and metadata.issues fell to the same gate — no Closes line is rendered either." ;;
+  1) PLAN_COUNT_NOTE="1 plan declares $CURRENT_BRANCH as its branchName." ;;
+  *) PLAN_COUNT_NOTE="$BRANCH_PLAN_COUNT plans declare $CURRENT_BRANCH as their branchName, so this title names at most one of them and the rest of the branch goes unnamed." ;;
+esac
+
 # Source 1: feature-level metadata title (guarded, like Step 4c). The
 # `metadata` subcommand emits the metadata object itself, so the title, the
 # branch and the issue list are at the top level (`.title`, `.branchName`,
@@ -559,7 +588,7 @@ fi
 
 if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
   PR_TITLE="$METADATA_TITLE"
-  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH)." >&2
+  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH). $PLAN_COUNT_NOTE" >&2
 else
   if [ -n "$METADATA_TITLE" ]; then
     echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
@@ -574,9 +603,9 @@ else
   # Source 3: branch name when there are no commits ahead of base.
   if [ -z "$PR_TITLE" ]; then
     PR_TITLE="$CURRENT_BRANCH"
-    echo "PR title from the branch name — no commits ahead of $BASE_BRANCH to read a subject from." >&2
+    echo "PR title from the branch name — no commits ahead of $BASE_BRANCH to read a subject from. $PLAN_COUNT_NOTE" >&2
   else
-    echo "PR title from the first commit on $CURRENT_BRANCH." >&2
+    echo "PR title from the first commit on $CURRENT_BRANCH. $PLAN_COUNT_NOTE" >&2
   fi
 fi
 ```
@@ -585,20 +614,32 @@ Store as `$PR_TITLE`.
 
 **Each of the three sources announces itself.** Whichever one wins, one `PR title from …` line goes to stderr, so the transcript records which of the three produced the title that was opened. Only source 1 can be silently wrong — sources 2 and 3 read this branch — so the mismatch that rejects it prints a second line naming the branch it found, which is what makes "why is this titled after another feature" answerable without re-reading the tasks file. The placeholder special-case above is deliberately upstream of all of this: it empties `$METADATA_TITLE` before the branch comparison, so a skeleton title falls to source 2 as it always has and the mismatch note stays quiet about a title that was never a title.
 
+**How many plans declare this branch is part of that same announcement, and the answer has THREE cases, not two.** The `PR title from …` line says which source won; `$PLAN_COUNT_NOTE`, appended to whichever one fires, says how many plans claimed this branch, which is what turns "the guard rejected source 1" into a reason. No second announcing machine is introduced for it — the count is computed once at the top of the block above and the existing three lines carry it.
+
+- **`N == 0` — no plan declares this branch.** This is the common case, not the exotic one, and it is what phase mode produces: each phase's tasks file declares its own phase branch (`fix/<feature>-phase-3-…`), so the long-lived integration branch those phases merge into is the `branchName` of no plan at all. Both gates above then reject: the title falls to source 2 — the subject of the branch's *first* commit, one story out of however many the branch carries — and `metadata.issues` is suppressed by the same comparison, so **no `Closes` line is rendered either**. Those two consequences already have notes of their own above; the count is what explains why nothing matched, and it is the reason the `N == 0` clause names the lost `Closes` line rather than leaving it to be discovered from a second note.
+- **`N == 1` — the case the `==` guard was written for.** One plan owns the branch. Note the count still answers a question the guard does not: a `1` beside a *rejected* source 1 means the plan that declares this branch is not the session's active tasks file.
+- **`N >= 2` — several plans on one long-lived branch, every one of them satisfying `==`.** Whichever is active wins, and its `metadata.title` names its own feature while the other N−1 go unnamed in a title nobody re-reads against the diff.
+
+**A warning conditioned only on `>= 2` would never fire in the case that actually happens.** That is measured rather than assumed: on the integration branch these phases merge into, `grep -rl '"branchName": *"<that branch>"' .aimi/tasks .aimi/archive` returns **0** — every live plan names a phase branch instead. Treating `0` as a fourth, silent state is exactly the gap this count closes.
+
+**The count is not built on merge-commit subjects, and that exclusion is measured too.** grepping `plugins/` for the merge-commit subject these integration branches carry — the one naming a phase number — returns **0**: the plugin emits no such string anywhere, and every one of those subjects was typed by hand. A count derived from them would be counting one person's habit; `find-tasks-all` plus each file's own `metadata.branchName` counts what the documents declare.
+
+**Say the number; never auto-title from the union.** The decision recorded here is that the machine ANNOUNCES how many plans it found, not that it composes a title out of several of them. A title synthesized from two features is less readable than a partial title that says it is partial, and a reader who is told "3 plans declare this branch" can pick the right title by hand — which is more than a merged one would let them do.
+
 **The mismatch branch empties `$METADATA_TITLE` too, not only the placeholder special-case above.** `$PR_TITLE` is not this gate's only consumer — Step 5c's backend issue title reads `$METADATA_TITLE` as well (see Step 4c and Step 5c below), and it never re-checks `branchName` itself. Emptying the variable here, right beside the note that already explains why, means that check never needs writing a second time at the point of use: every downstream reader of `$METADATA_TITLE` sees the same "not this feature" verdict this gate already reached, the same way the placeholder case already made source 2 the answer for both without either consumer needing to know why.
 
 **`$METADATA_ISSUES` gets the same verdict, and it is written as a separate `if` rather than a line inside the title's mismatch branch.** That branch is reached only when `$METADATA_TITLE` was non-empty — it exists to explain a title that was rejected — so a tasks file carrying `issues` but no usable `title` (absent, or emptied by the placeholder case) would sail past it with the wrong feature's issue list intact. The issue gate therefore compares `$METADATA_BRANCH` against `$CURRENT_BRANCH` on its own, and its consequence is heavier than the title's: a wrong title is read once and corrected by hand, while a wrong `Closes` line **shuts a real issue the moment the PR merges** — someone else's work, silently marked done. Both gates ask the same question because `metadata` answers the session's active tasks file rather than this branch's, and the ordinary state after switching work is that those two are different documents.
 
 ### 4b. PR Description
 
-Build the description from git state with three core sections, plus one conditional trailer:
+Build the description from git state with three core sections, plus one conditional trailer. This step decides **what each section contains**; Step 4d is where they are rendered, measured against the forge's cap and trimmed — the two were one step until a body could only be measured after the branch had already been pushed.
 
-- **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. If every commit body is empty, concatenate the commit **subjects** instead — apply the **story-tag strip** below to each subject first.
+- **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. A commit with an empty body contributes nothing — there is deliberately no fallback to its subject, because **Changes** below already renders every subject, and a fallback Summary would restate that section verbatim on exactly the branches whose body is under the most pressure.
 - **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
 - **Closes lines** (conditional): one `Closes #<N>` line per entry of `$METADATA_ISSUES`, the issue list Step 4a already read and already gated on `branchName`. Rendered last, after every section above, so a merged PR retires the issues the plan named. Nothing is emitted at all — no heading, no blank section — when the list is empty, which covers all three of its causes at once: a plan that named no issue, a `metadata.issues` key that is absent (it is omitted entirely rather than written as `[]` or `null`), and a list Step 4a's branchName gate discarded as another feature's.
 
-**Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets or the **Summary** subject-fallback, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
+**Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
 
 ```bash
 s_clean=$(printf '%s' "$s" | sed -E \
@@ -607,7 +648,7 @@ s_clean=$(printf '%s' "$s" | sed -E \
   -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//')
 ```
 
-**Closes lines.** Build them into `$CLOSES_SECTION`, which Step 5b appends verbatim to the end of `$PR_BODY`. The variable is initialised to the empty string *before* the guard, so the absent-issues case needs no special handling anywhere downstream — an empty `$CLOSES_SECTION` appends nothing and the body ends exactly where it does today:
+**Closes lines.** Build them into `$CLOSES_SECTION`, which Step 4d appends verbatim to the end of the body — after the Backend Implementation Spec when that section is present. The variable is initialised to the empty string *before* the guard, so the absent-issues case needs no special handling anywhere downstream — an empty `$CLOSES_SECTION` appends nothing and the body ends exactly where it does today:
 
 ```bash
 CLOSES_SECTION=""
@@ -695,40 +736,43 @@ When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata
 
   Omit any sub-section whose array is empty or absent.
 
-## Step 5: Push Branch and Create PR
+### 4d. Assemble the body into a file and measure it against the forge's cap
 
-### 5a. Push branch to origin
+**This step exists because of the ORDER, not because of the cap.** Until it was written, Step 5a's `git push -u origin` ran *before* `$PR_BODY` existed at all — the body was assembled one block later, in Step 5b — so a body the forge refused left the branch published on `origin` and no PR against it. Publishing a branch is irreversible in practice, and refusing after publishing is the worse of the two orders: the operator is left holding a half state they did not ask for and cannot undo. The body is therefore built, measured and trimmed here, and **nothing is pushed until this step has exited zero**.
 
-Works unchanged for a branch not checked out anywhere, as long as the local ref exists — `git push` does not require checkout.
+**Each Bash tool call is its own shell, so `$PR_BODY` cannot travel from this step to Step 5b — a file can.** That is the whole reason this is not simply an `if` bolted onto Step 5b: a guard in the block that already holds the body could only refuse *after* the push in the block above it had already happened. The body is written to `$PR_BODY_FILE` inside the worktree's own git directory — never in the working tree, so it is never staged, never committed, and never collides with a sibling worktree's copy. Step 5b reads it back and passes it verbatim; nothing retypes a body assembled from repository content.
+
+**The cap is GitHub's, and it is written down as GitHub's.** `PR_BODY_CAP=65536` is the limit GitHub enforces on a pull request body. It is applied to every adapter because no adapter declares one of its own — measured, `forge-contract.md` states no body size limit anywhere, for any of the three shipped backends (GitHub `gh`, GitLab `glab`, Gitea/Forgejo `tea`). GitHub's number is used as the floor for all three rather than as a universal truth: a body that fits GitHub's cap fits a more generous one, and the two others are not known to be smaller. When an adapter is found to enforce a *lower* cap, that per-forge value belongs in `forge-contract.md` beside the adapter's other capability facts, and this constant becomes the fallback for a forge that declares none.
+
+**The trimming is by section, and the shape is `DECISIONS_CAP`'s.** `DECISIONS_CAP` in `scripts/tasks.py::design_decisions()` stopped being a byte-slice point for a reason worth not rediscovering: `head -c 65536` cut a stream mid-sentence, so it became a whole-section eviction budget that names every section it dropped. This step is the same two-pass shape over the same 65536, one level down — the unit that survives whole or is dropped whole is a **commit**, never a byte and never a line:
+
+- **Changes** and **Files Changed** are never trimmed. Measured on this branch, they are 1635 and 1667 bytes against a 40002-byte Summary — Summary is **92%** of a 43358-byte body — so cutting them would save about 5% and cost the reviewer the two sections they navigate the diff by.
+- The **Summary** is what gets spent out of the remainder. Commit bodies are kept newest-first and dropped **oldest-first**, which is `design_decisions()`'s `kept.pop()` exactly: `git log` emits newest-first, so the oldest commit is the last element and popping from the end leaves a prefix either way.
+- **The count of what was dropped is written into the body itself**, the way `_decisions_dropped_marker()` names every heading it evicted. Truncating and saying how much was truncated are two different things, and only the second one keeps the degradation from being silent — the exact defect this change exists to close, which leaving the notice out would reproduce inside the PR body.
+
+**The notice is reserved in the budget before it is needed, which is where this diverges from the precedent.** `_decisions_dropped_marker()` is appended *after* eviction and its own bytes are never counted, so its result can land just over the cap it was trimmed to. Here the notice is rendered at its widest — every commit omitted, so the largest digit count — and charged to the fixed cost whether or not it ends up firing. It costs about 130 bytes in the common case where nothing is dropped, and in exchange the cap holds unconditionally rather than nearly.
 
 ```bash
-git push -u origin "$CURRENT_BRANCH"
-```
+PR_BODY_CAP=65536
+PR_BODY_FILE="$(git rev-parse --absolute-git-dir)/aimi-pr-body.md"
+PR_SUMMARY_FILE="$PR_BODY_FILE.summary"
 
-### 5b. Create the PR
+# Changes: every commit subject as a bullet, story-tag-stripped — the same
+# three expressions Step 4a and Step 4b apply, over subjects only.
+CHANGES_SECTION=$(printf '%s' "$COMMIT_LOG" \
+  | LC_ALL=C awk -v RS='\036' -F'\037' 'NF { print $2 }' \
+  | sed -E \
+    -e 's/[[:space:]]*(—|–|-)[[:space:]]*(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]]*$//' \
+    -e 's/[[:space:]]*\[(Story[[:space:]]+)?US-[0-9]{3}[a-z]?\][[:space:]]*$//' \
+    -e 's/^(Story[[:space:]]+)?US-[0-9]{3}[a-z]?[[:space:]:—–-]+//' \
+  | sed -e 's/^/- /')
 
-Render the body into a captured shell variable first — `$PR_BODY` — instead of embedding a HEREDOC directly as the `--body` argument, then call `forge-pr-create` with that variable plus the title, base, and head values. The Summary/Changes/Files Changed sections always appear. The Backend Implementation Spec section is appended only when `$INCLUDE_BACKEND_SPEC=1`, and Step 4b's `$CLOSES_SECTION` is appended last, after both, only when it is non-empty:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-PR_BODY=$(cat <<'EOF'
-## Summary
-
-<aggregated commit bodies from $COMMIT_LOG (fallback to concatenated subjects if all bodies empty)>
-
-## Changes
-
-- <commit subject 1>
-- <commit subject 2>
-
-## Files Changed
-
-```
-<$DIFF_STAT output>
-```
-
-<if $INCLUDE_BACKEND_SPEC=1, append the following section>
+# Backend Implementation Spec: rendered from metadata.backendSpec per Step 4c,
+# and held whole like Changes and Files Changed. A real `if` on the flag Step
+# 4c set, in place of the `<if ...>` pseudo-markup this template used to carry.
+BACKEND_SECTION=""
+if [ "$INCLUDE_BACKEND_SPEC" = "1" ]; then
+  BACKEND_SECTION=$(cat <<'BACKEND_EOF'
 
 ## Backend Implementation Spec
 
@@ -762,35 +806,135 @@ PR_BODY=$(cat <<'EOF'
 
 **Success Criteria:**
 - <item from businessContext.successCriteria[]>
-
-<omit any sub-section whose array is empty or absent>
-<if businessContext is a plain string (legacy), render as a single paragraph instead>
-
-</if>
-
-<$CLOSES_SECTION from Step 4b — one "Closes #<N>" line per entry, already
-branchName-gated; when it is empty append nothing at all, not even this blank
-line, so the body ends where it did before>
-EOF
+BACKEND_EOF
 )
+fi
 
-PR_CREATE_JSON=$($AIMI_CLI forge-pr-create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$PR_BODY")
+COMMIT_COUNT=$(printf '%s' "$COMMIT_LOG" | LC_ALL=C awk -v RS='\036' 'NF { n++ } END { print n + 0 }')
+OMIT_NOTICE_FMT='_%s of %s commits omitted from the Summary — the body reached its %s-byte cap. Changes and Files Changed below are complete._'
+
+# One renderer, called twice: once with an empty Summary to price everything
+# that is never trimmed, once for real. Two call sites cannot drift into two
+# different bodies, which a second copy of the scaffold would allow.
+render_body() {
+  printf '## Summary\n\n%s\n' "$RENDER_SUMMARY"
+  if [ -n "$RENDER_NOTICE" ]; then
+    printf '\n%s\n' "$RENDER_NOTICE"
+  fi
+  printf '\n## Changes\n\n%s\n' "$CHANGES_SECTION"
+  printf '\n## Files Changed\n\n```\n%s\n```\n' "$DIFF_STAT"
+  printf '%s%s' "$BACKEND_SECTION" "$CLOSES_SECTION"
+}
+
+RENDER_SUMMARY=""
+RENDER_NOTICE=$(printf "$OMIT_NOTICE_FMT" "$COMMIT_COUNT" "$COMMIT_COUNT" "$PR_BODY_CAP")
+FIXED_BYTES=$(render_body | LC_ALL=C wc -c | tr -d '[:space:]')
+
+if [ "$FIXED_BYTES" -gt "$PR_BODY_CAP" ]; then
+  echo "Error: the sections that are never trimmed already total $FIXED_BYTES bytes against the ${PR_BODY_CAP}-byte cap, with the Summary empty. NOTHING WAS PUSHED — the branch is still local. Split this PR, or shorten the diff." >&2
+  exit 1
+fi
+
+# Fill the Summary newest-first out of what is left, dropping whole commits
+# from the oldest end. awk counts bytes because LC_ALL=C is set, the same unit
+# DECISIONS_CAP counts in; the body of each commit survives whole or not at all.
+OMIT_STATS=$(printf '%s' "$COMMIT_LOG" | LC_ALL=C awk -v RS='\036' -F'\037' \
+  -v budget="$((PR_BODY_CAP - FIXED_BYTES))" -v out="$PR_SUMMARY_FILE" '
+  NF {
+    body = $3
+    gsub(/^[ \t\r\n]+/, "", body)
+    gsub(/[ \t\r\n]+$/, "", body)
+    if (body != "") { n++; block[n] = body }
+  }
+  END {
+    kept = 0
+    used = 0
+    for (i = 1; i <= n; i++) {
+      cost = length(block[i]) + 2
+      if (used + cost > budget) break
+      used += cost
+      kept = i
+    }
+    printf "" > out
+    for (i = 1; i <= kept; i++) {
+      if (i > 1) printf "\n\n" >> out
+      printf "%s", block[i] >> out
+    }
+    close(out)
+    print n - kept, n
+  }')
+
+# Both halves of the notice count the same population: commits that HAVE a
+# body. A body-less commit was never Summary content, so counting it as
+# "omitted" would report a loss the cap did not cause; it still appears in
+# Changes, which renders every subject.
+OMITTED_COUNT=${OMIT_STATS%% *}
+SUMMARIZED_COUNT=${OMIT_STATS##* }
+
+RENDER_SUMMARY=$(cat "$PR_SUMMARY_FILE")
+RENDER_NOTICE=""
+if [ "$OMITTED_COUNT" -gt 0 ]; then
+  RENDER_NOTICE=$(printf "$OMIT_NOTICE_FMT" "$OMITTED_COUNT" "$SUMMARIZED_COUNT" "$PR_BODY_CAP")
+fi
+render_body > "$PR_BODY_FILE"
+rm -f "$PR_SUMMARY_FILE"
+
+PR_BODY_BYTES=$(LC_ALL=C wc -c < "$PR_BODY_FILE" | tr -d '[:space:]')
+echo "PR body: $PR_BODY_BYTES bytes of $PR_BODY_CAP; $OMITTED_COUNT of $SUMMARIZED_COUNT commits omitted from the Summary." >&2
+if [ "$PR_BODY_BYTES" -gt "$PR_BODY_CAP" ]; then
+  echo "Error: PR body is $PR_BODY_BYTES bytes after trimming, still over the ${PR_BODY_CAP}-byte cap. NOTHING WAS PUSHED — the branch is still local." >&2
+  exit 1
+fi
+```
+
+**When every commit has an empty body, the Summary is empty rather than falling back to subjects.** That fallback lived in Step 4b's description of the Summary and is gone: `Changes` already renders every subject, one per line, so a subject-fallback Summary duplicated the section directly below it — and it did so precisely on the branches where the body was under the most pressure. A reader loses nothing, and the bytes go to commits that have something to say.
+
+**When the fixed sections alone do not fit, this step refuses and nothing is published.** With `Changes`, `Files Changed` and the conditional sections held whole by rule, a Summary trimmed to zero commits is all this step has left to give. The refusal is cheap exactly because it happens here: the branch is still local, so the operator can split the PR, shorten the diff, or raise the cap by hand, and no half state was created on the way to finding out.
+
+## Step 5: Push Branch and Create PR
+
+### 5a. Push branch to origin
+
+Works unchanged for a branch not checked out anywhere, as long as the local ref exists — `git push` does not require checkout.
+
+**This runs only after Step 4d exited zero**, which is the ordering that whole step exists to establish. If Step 4d refused, stop here: the branch is still local, and that is the point.
+
+```bash
+git push -u origin "$CURRENT_BRANCH"
+```
+
+### 5b. Create the PR
+
+Read back the body Step 4d wrote and measured, and pass it to `forge-pr-create` with the title, base, and head values. Nothing is rendered here — re-rendering would be a second, unmeasured body, and the measurement is only worth having if it describes the bytes that are actually sent. The file path is recomputed rather than carried, because this is a new shell:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PR_BODY_FILE="$(git rev-parse --absolute-git-dir)/aimi-pr-body.md"
+if [ ! -s "$PR_BODY_FILE" ]; then
+  echo "Error: no measured PR body at $PR_BODY_FILE — Step 4d did not run, or refused. Run Step 4d before this one." >&2
+  exit 1
+fi
+PR_CREATE_JSON=$($AIMI_CLI forge-pr-create --title "$PR_TITLE" --base "$BASE_BRANCH" --head "$CURRENT_BRANCH" --body "$(cat "$PR_BODY_FILE")")
 PR_STATUS=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.status // empty' 2>/dev/null)
 if [ "$PR_STATUS" != "created" ] && [ "$PR_STATUS" != "unchanged" ]; then
   echo "Error: forge-pr-create reported status ${PR_STATUS:-<none>} — see the manual create-it-yourself instructions above (mandatory-print degradation, forge-contract.md's Degradation Contract)." >&2
   exit 1
 fi
+rm -f "$PR_BODY_FILE"
 PR_URL=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.url')
 PR_NUMBER=$(printf '%s' "$PR_CREATE_JSON" | jq -r '.data.number')
 echo "PR_URL=$PR_URL"
 echo "PR_NUMBER=$PR_NUMBER"
 ```
 
+**The body file is removed once the PR exists, and its absence is a hard error above.** A leftover body from an earlier run is a stale body: it was measured against a different commit range, and reusing it would open a PR describing work this branch no longer has. The `-s` test is what makes that impossible to do silently — a run that skipped Step 4d stops here rather than opening a PR with an empty description.
+
 `forge-pr-create` returns `forge-contract.md`'s write-verb envelope — `{status, data: {url, number}, message}` with `status` one of `created`, `unchanged`, or `degraded` (Write-Verb Status Convention). `unchanged` means an open PR already existed for this branch and was reused rather than duplicated; both it and `created` carry a usable `data.url`/`data.number`, which is why the check above accepts either and treats everything else — a `degraded` envelope, or no envelope at all — as the failure case.
 
 If `forge-pr-create` itself exits non-zero (an unsupported forge, a missing `gh` binary, or the `gh pr create` call failing), it has already printed manual create-it-yourself instructions to stderr — mandatory-print degradation, `forge-contract.md`'s Degradation Contract, since opening a PR has no other fallback — **and** now emits a `status: "degraded"` envelope on stdout carrying the same reason in its `message` field. The exit code is unchanged; the envelope is an additional in-band signal, not a replacement for it. Report those instructions to the user and STOP.
 
-**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section — or after the `Closes` lines, when Step 4b produced any. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility.
+**Important**: The Backend Implementation Spec section is rendered entirely from the `backendSpec` metadata object, by Step 4d's `$BACKEND_SECTION` block. No LLM generation is used — all content comes from deterministic template rendering of the structured data. When `$INCLUDE_BACKEND_SPEC=0` (no tasks file, `frontendOnly` is false, or `backendSpec` is null), the section is omitted entirely and the PR body ends after the Files Changed section — or after the `Closes` lines, when Step 4b produced any. If `businessContext` is a plain string (legacy format), render it as a single paragraph for backwards compatibility. Like Changes and Files Changed, this section is **never trimmed** by the cap: it is charged to Step 4d's fixed cost and the Summary is spent out of what remains.
 
 ### 5c. Create backend issue and link to PR (conditional)
 
@@ -897,7 +1041,7 @@ fi
 
 Where `$ISSUE_TITLE_SOURCE` is `$METADATA_TITLE` from Step 4a when Step 4a's branchName gate kept it, or `$PR_TITLE` when that gate discarded it (mismatch or placeholder) — the issue title always says which source it came from on stderr, the same guarantee Step 4a already gives the PR title. `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
 
-**Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 5b). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
+**Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 4d, which holds that section whole against the cap). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 
 **On success**: The issue URL and number are read from the envelope's nested `data.url` and `data.number` fields — the same nesting `forge-pr-create` and `forge-pr-edit` use, and the `grep -oE '[0-9]+$'` derivation is gone — and `forge-pr-edit` appends a "Related issue: #N" link to the PR body whenever `$PR_BODY` was re-read successfully. When it was not, the issue is still created and reported, and the message says so instead of claiming a link that was never appended.
 

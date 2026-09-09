@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.136.0] - 2026-09-09
+
+Phase 4 of `falha-visivel`, and the last one: the roadmap closes here. Its four
+phases share one defect shape -- a failure that does not announce itself. Phase
+1 took the silence out of a missing research file, phase 2 the verb that
+reported work it had not done and the story planted on the wrong branch, phase
+3 the environment and the tooling that misreported themselves. This phase
+closes the two that were left: a size guard-rail that measured the wrong pair
+of commits and failed a story for a sibling's legitimate edit, and a PR body
+that was only assembled after the branch had already been pushed.
+
+### Added
+
+- **`/aimi:open-pr` builds, measures and trims the PR body BEFORE it pushes**,
+  in a new `### 4d. Assemble the body into a file and measure it against the
+  forge's cap`. The defect was the ORDER, not the size: Step 5a's `git push -u
+  origin` ran while `$PR_BODY` did not yet exist -- the body was assembled one
+  block later, in Step 5b -- so a body the forge refused left the branch
+  published on `origin` and no PR against it. Publishing a branch is
+  irreversible in practice, and refusing after publishing is the worse of the
+  two orders. An `if` inside Step 5b could not have fixed it: each Bash block is
+  its own shell, so that guard could only refuse after the push in the block
+  above had already happened. Step 4d therefore writes the body to a file inside
+  the worktree's own git directory -- never in the working tree, so never
+  staged, never committed, and never colliding with a sibling worktree's copy --
+  and Step 5b reads it back, passes it verbatim and deletes it. Its absence
+  there is a hard error, so a body measured against a different commit range can
+  never open a PR.
+
+  The degradation is by section, in the shape `DECISIONS_CAP` already
+  established in `scripts/tasks.py::design_decisions()` -- evict whole sections
+  rather than slice the stream at a byte. **Changes** and **Files Changed** are
+  never trimmed: measured on this branch they are 1635 and 1667 bytes against a
+  40002-byte Summary, so cutting them would save about 5% and cost the reviewer
+  the two sections they navigate the diff by. The **Summary** is spent out of
+  what remains, by WHOLE COMMITS, oldest first -- `design_decisions()`'s
+  `kept.pop()` exactly, since `git log` emits newest-first -- and never cut
+  inside a commit or inside a line. The count of what was dropped is written
+  into the body itself, the way `_decisions_dropped_marker()` names each heading
+  it evicted: truncating and saying how much was truncated are two different
+  things, and without the second the degradation is silent, which is the defect
+  this phase exists to close.
+
+  One deliberate divergence from that precedent: the notice is reserved in the
+  budget at its widest before it is needed. `_decisions_dropped_marker()` is
+  appended after eviction and its own bytes are never counted, so its result can
+  land just over the cap it was trimmed to; here the cap holds unconditionally,
+  at a cost of about 130 bytes in the common case where nothing is dropped.
+  `PR_BODY_CAP=65536` is GitHub's limit and is written down as GitHub's:
+  measured, `references/forge-contract.md` declares no body cap for any of the
+  three shipped backends, so GitHub's number is used as a floor for all three
+  rather than as a universal truth, and an adapter found to enforce a LOWER one
+  declares its own value there beside its other capability facts. When the
+  never-trimmed sections alone do not fit, Step 4d refuses with the Summary
+  already at zero commits -- and nothing has been pushed, which is the whole
+  point of where it sits.
+
+- **`/aimi:open-pr` says how many plans declare the current branch**, as one
+  clause appended to whichever of the three existing `PR title from ...` lines
+  wins -- the same announcing machine, not a second one. The count comes from
+  `find-tasks-all` plus each file's own `metadata.branchName`, so it is measured
+  from the documents themselves. There are THREE cases, not two, and `N == 0` is
+  the ordinary one: in phase mode every tasks file declares its own phase
+  branch, so the integration branch those phases merge into is the `branchName`
+  of no plan at all. Measured on this tree, zero live plans declare it, and a
+  warning conditioned only on `N >= 2` would never have fired. The `N == 0`
+  clause names what falls with it, too: the same `==` gate that discards the
+  title also suppresses `metadata.issues`, so no `Closes` line is rendered
+  either. The count is deliberately not derived from merge-commit subjects --
+  the plugin emits no such string anywhere, so counting by one would be counting
+  whichever wording a person happened to type. The decision recorded is to SAY
+  the number, never to auto-title from the union: a title synthesized from two
+  features is less readable than a partial title announced as partial.
+
+### Changed
+
+- **The PR Summary no longer falls back to commit subjects when every commit
+  body is empty.** **Changes** already renders every subject, one per line, so
+  the fallback restated the section directly below it -- and did so precisely on
+  the branches whose body is under the most pressure. A commit with an empty
+  body now contributes nothing to the Summary and still appears in Changes,
+  where the bytes go to commits that have something to say.
+
+### Fixed
+
+- **The byte-reduction guard-rail `agents/workflow/aimi-story-expander.md`
+  emits now measures the story that claimed the reduction.** Its `A size claim
+  measures both sides, or stops being a claim` section named `metadata.baseRef`
+  as the "before" side. That field is the commit the whole PLAN was written
+  against, so the emitted assertion actually measured *"no story in this plan
+  reduced the file"* rather than *"this story reduced it"*. The two readings
+  agree right up until a sibling story touches the same file legitimately; from
+  that commit onwards every later story in the plan inherits a failure it did
+  not cause. The "before" side is now the point where THIS story branched,
+  derived from `metadata.branchName` via `git merge-base HEAD "$BRANCH"` -- a
+  change of which field the `metadata` call already there reads, not a new
+  mechanism. `branchName` names the plan's branch in plan mode and the phase's
+  branch in phase mode, so one reading serves both, which matters because the
+  expander is never told which mode `/aimi:execute` picked. `metadata.baseRef`
+  is neither repointed nor redefined: it stays the factual record of the commit
+  the plan was written against, and keeps its own reader in
+  `commands/execute.md`'s Plan Base Freshness advisory. An unresolvable base
+  still fails loudly, now as two separate refusals -- an absent `branchName` and
+  a `merge-base` that answers nothing are different repairs, and one message
+  would name neither. The recipe recorded in the 2026-09-08 known-gap --
+  recover the branch by stripping the `-US-NNN` suffix off the worktree
+  directory name -- was deliberately not followed, and the file says why: each
+  story worktree now carries a plan discriminator on the FRONT, so stripping the
+  suffix returns a name `git show-ref` refuses, and that recipe closed in `||
+  true`, turning the refusal into an empty base and the claim into a pass -- the
+  exact family of defect the section exists to prevent.
+- `command-blocks-baseline.txt` loses its `syntax open-pr.md 5b. Create the PR`
+  entry: the heredoc whose own fences truncated extraction no longer exists, so
+  that finding stopped firing and the baseline shrinks by one.
+
 ## [1.135.0] - 2026-09-09
 
 ### Added
