@@ -13887,6 +13887,7 @@ $rp_entry"
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>|<project>:NN]...
+#           [--feature <slug> --phase <id>]
 # ============================================================================
 #
 # Everything from "read the staging directory" to "the files are on disk" lives
@@ -13902,6 +13903,12 @@ $rp_entry"
 # has not computed yet.
 cmd_story_merge() {
   local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false
+  # The --feature/--phase pair, and the three values they let this half answer
+  # for the other one: where the roadmap is, what commit this merge sits on,
+  # and which plugin version is running. Each stays empty when the pair is
+  # absent, and an empty value is never forwarded -- that is the whole of the
+  # "omit the key entirely, never null, never a placeholder" rule.
+  local feature="" phase_id="" roadmap_path="" base_ref="" plugin_version=""
   # --foundation is the one REPEATABLE flag here: injection is per project
   # group, so a multi-repo plan names one foundation per repo. Collected, never
   # deduplicated in bash -- story_merge.py's own dedup is the single source of
@@ -13928,6 +13935,20 @@ cmd_story_merge() {
         ;;
       --phase-aware)
         phase_aware=true
+        ;;
+      --feature)
+        shift
+        feature="${1:-}"
+        ;;
+      # --phase names a roadmap phase, and it is not --phase-aware, the arm
+      # directly above: that one is a boolean about the --output basename's
+      # trailing "-tasks" segment and reads no roadmap at all. Two
+      # near-homonyms with unrelated semantics is how a flag becomes noise, so
+      # the difference is stated here rather than left to be inferred from a
+      # name that only differs by a suffix.
+      --phase)
+        shift
+        phase_id="${1:-}"
         ;;
       --foundation)
         shift
@@ -14008,6 +14029,54 @@ cmd_story_merge() {
     esac
   fi
 
+  # --feature and --phase are the phase-scoped pair, and they are validated
+  # here -- with the other flag checks, before any document is opened -- so a
+  # bad value costs the caller one line and never a partial read.
+  if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+    # Half a pair is refused rather than guessed: --feature alone cannot invent
+    # a phase id and --phase alone cannot invent a feature slug. cmd_write_review
+    # refuses exactly this pair for exactly this reason; the wording is modelled
+    # on its line rather than invented a second time.
+    if [ -z "$feature" ] || [ -z "$phase_id" ]; then
+      echo "Error: story-merge: --feature and --phase must be given together, or neither at all -- got one without the other" >&2
+      exit 1
+    fi
+    # On the PROJECT axis both branchName AND baseRef resolve PER REPOSITORY --
+    # each file's baseRef comes from a rev-parse in that entry's own project
+    # root, and the key is omitted on an entry whose rev-parse fails rather
+    # than borrowing a sibling's -- and story-merge never cds into a project.
+    # Accepting the flags here and ignoring them would be a silent no-op, and
+    # filling some fields from the wrong repository would be worse, so the
+    # boundary is one refusal line instead.
+    if [ "$split_mode" = "full-stack" ]; then
+      echo "Error: story-merge: --feature/--phase are not accepted with --split full-stack: there baseRef resolves per repository and story-merge never enters a project root" >&2
+      exit 1
+    fi
+    # Both helpers already own these two rules and both take a verb label for
+    # exactly this, so no new regex literal is introduced here. The phase-id
+    # pattern is stricter than a bare numeric one on purpose: it refuses a
+    # leading zero, because every --phase consumer parses the id with
+    # json.loads and JSON has no "02".
+    _roadmap_validate_feature "$feature" "story-merge"
+    _roadmap_validate_phase_id "$phase_id" "story-merge"
+    # The preamble every other roadmap verb uses: it composes the path with
+    # _roadmap_path, confines it with validate_path_in_project (the standing
+    # authority over every path arriving as a CLI ARGUMENT), and refuses a
+    # missing or malformed roadmap with a verb-prefixed message.
+    roadmap_path=$(_roadmap_require "story-merge" "$feature" " (run roadmap-init first)")
+    # The two values bash is the right half to answer. pluginVersion must come
+    # from the CLI that is actually RUNNING -- story_merge.py could only guess
+    # it from a plugin.json at a path derived from __file__, and Layer 0-dev
+    # exists precisely because a development checkout and the installed cache
+    # sit at different versions. Guarding each with 2>/dev/null plus
+    # `|| var=""` is this file's own degrade-to-silence idiom under set -e;
+    # cmd_version's internal `exit 1` ends only the command substitution's
+    # subshell, so a plugin.json declaring no string version yields an empty
+    # value here rather than killing the merge.
+    base_ref=$(git rev-parse HEAD 2>/dev/null) || base_ref=""
+    plugin_version=$(cmd_version 2>/dev/null) || plugin_version=""
+  fi
+
   # --- Validate paths are inside project ---
   validate_path_in_project "$staging_dir"
   local output_parent
@@ -14047,6 +14116,19 @@ cmd_story_merge() {
   for _fv in "${foundation_vals[@]+"${foundation_vals[@]}"}"; do
     sm_args+=(--foundation "$_fv")
   done
+  # The phase-scoped pair travels with the absolute roadmap path this half
+  # already resolved and confined -- Python only reads it. baseRef and
+  # pluginVersion are appended ONLY when non-empty, so an absent flag is an
+  # absent metadata key and the omit rule has exactly one home.
+  if [ -n "$feature" ]; then
+    sm_args+=(--feature "$feature" --phase "$phase_id" --roadmap "$roadmap_path")
+    if [ -n "$base_ref" ]; then
+      sm_args+=(--base-ref "$base_ref")
+    fi
+    if [ -n "$plugin_version" ]; then
+      sm_args+=(--plugin-version "$plugin_version")
+    fi
+  fi
   python3 "$(_aimi_script_py story_merge.py)" "${sm_args[@]}"
 }
 
@@ -16413,6 +16495,7 @@ COMMANDS:
                               [--split legacy|full-stack] [--agent-mode]
                               [--phase-aware]
                               [--foundation <NN>|<project>:NN]...
+                              [--feature <slug> --phase <id>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -16515,6 +16598,25 @@ COMMANDS:
                               own stderr note separate from the ordinary
                               drop-count banner. The SIDE axis emits no
                               foundationEdge field.
+                              --feature <slug> --phase <id>, given TOGETHER or
+                              not at all: fill the four metadata keys a
+                              phase-scoped merge already knows —
+                              roadmapPath (".aimi/tasks/<slug>/roadmap.json",
+                              composed from the flag), phase {id, dir} read
+                              VERBATIM from that phase's own roadmap entry (so
+                              a decimal phase keeps its dot), baseRef (the full
+                              git rev-parse HEAD) and pluginVersion (this CLI's
+                              own version verb). baseRef and pluginVersion are
+                              OMITTED ENTIRELY when their source answers empty
+                              — never null, never "". branchName is NOT derived
+                              or validated here and the phase entry's own
+                              .branch is read for nothing: the branch prefix is
+                              metadata.type, which /aimi:plan decides AFTER
+                              this merge runs. Half a pair is refused, as is
+                              either flag with --split full-stack (there
+                              baseRef resolves per repository and this verb
+                              never enters a project root). Omitted: the four
+                              keys stay absent, byte-unchanged.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
     split-detect [--dir <phase-dir>]

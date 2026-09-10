@@ -5080,6 +5080,168 @@ EOF
   rm -rf "$stg" "${phase_dir%/*}"
 }
 
+# One refusal of the --feature/--phase pair: exits 1, names the reason, and
+# leaves no output file behind. Three assertions per call, always.
+_sm_phase_refusal() {
+  local dir="$1" needle="$2" label="$3"
+  shift 3
+  local stg=".aimi/stg-refuse" out=".aimi/tasks/tc13-refuse-tasks.json"
+  rm -rf "$dir/$stg"
+  rm -f "$dir/$out"
+  mkdir -p "$dir/$stg"
+  _sm_make_story "$dir/$stg/01-a.json" "Probe story"
+
+  local output exit_code
+  output=$(cd "$dir" && "$CLI" story-merge --staging-dir "$stg" --output "$out" "$@" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "$label: exits 1"
+  assert_contains "$needle" "$output" "$label: the error names the reason"
+  if [ -f "$dir/$out" ]; then
+    assert_eq "no output file" "an output file was written" "$label: the refusal wrote nothing"
+  else
+    assert_eq "no output file" "no output file" "$label: the refusal wrote nothing"
+  fi
+  rm -rf "$dir/$stg"
+}
+
+# TC56: --feature and --phase fill the FOUR metadata fields story-merge can
+# derive -- roadmapPath, phase{id,dir}, baseRef, pluginVersion -- while leaving
+# branchName and title exactly as the legacy writer has always written them.
+#
+# The fixture is its own root rather than TEST_DIR because baseRef comes from
+# `git rev-parse HEAD` run in the resolved AIMI_ROOT, and TEST_DIR is a bare
+# mktemp -d with no repository. The omitted-baseRef branch is covered where it
+# is free instead: scripts/tests/test_story_merge.py's non-git tmp_path root.
+#
+# phase 1.1 is what proves `dir` is READ and never re-derived -- a derivation
+# from the id would produce phase-1-1-beta, naming no directory on disk -- and
+# phase 2 carries a hand-authored .branch that must reach neither the document
+# nor stderr, because branchName is not this verb's to compose.
+test_story_merge_derives_phase_metadata() {
+  echo ""
+  echo "=== TC56: story-merge --feature/--phase derives four metadata fields ==="
+
+  local d
+  d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks/tc13-feature"
+  (
+    cd "$d" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    echo "fixture" > README.md
+    git add README.md
+    git commit -qm "init"
+  ) >/dev/null 2>&1
+
+  cat > "$d/.aimi/tasks/tc13-feature/roadmap.json" << 'EOF'
+{
+  "roadmapVersion": "2.0",
+  "feature": "tc13-feature",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "phases": [
+    {"id": 1, "name": "Phase 1", "slug": "alpha", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-1-alpha", "branch": null, "status": "pending", "dependsOn": []},
+    {"id": 1.1, "name": "Phase 1.1", "slug": "beta", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-1.1-beta", "branch": null, "status": "pending", "dependsOn": []},
+    {"id": 2, "name": "Phase 2", "slug": "gamma", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-2-gamma", "branch": "feat/hand-authored-override", "status": "pending",
+     "dependsOn": []},
+    {"id": 3, "name": "Phase 3", "slug": "delta", "goal": "g", "successCriteria": ["s"],
+     "dir": null, "branch": null, "status": "pending", "dependsOn": []}
+  ]
+}
+EOF
+
+  local head version
+  head=$(git -C "$d" rev-parse HEAD)
+  version=$("$CLI" version)
+
+  # --- The four fields, integer phase id ---
+  local out output exit_code
+  out=".aimi/tasks/tc13-int-tasks.json"
+  mkdir -p "$d/.aimi/stg-int"
+  _sm_make_story "$d/.aimi/stg-int/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-int" --output "$out" \
+    --feature tc13-feature --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: --feature/--phase merge exits 0"
+  assert_eq ".aimi/tasks/tc13-feature/roadmap.json" \
+    "$(jq -r '.metadata.roadmapPath' "$d/$out" 2>/dev/null)" \
+    "TC56: roadmapPath is composed from the --feature value"
+  assert_eq '{"id":1,"dir":"phase-1-alpha"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: phase {id,dir} comes from that phase's own roadmap entry"
+  assert_eq "$head" "$(jq -r '.metadata.baseRef' "$d/$out" 2>/dev/null)" \
+    "TC56: baseRef is the full HEAD sha"
+  assert_eq "$version" "$(jq -r '.metadata.pluginVersion' "$d/$out" 2>/dev/null)" \
+    "TC56: pluginVersion is what the running CLI's own version verb prints"
+  # The scope boundary, on the very path that fills the four.
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: branchName is untouched by the derivation"
+  assert_eq "feat: merged tasks" "$(jq -r '.metadata.title' "$d/$out" 2>/dev/null)" \
+    "TC56: title is untouched by the derivation"
+
+  # --- A decimal phase id keeps its dot in BOTH halves ---
+  out=".aimi/tasks/tc13-dec-tasks.json"
+  mkdir -p "$d/.aimi/stg-dec"
+  _sm_make_story "$d/.aimi/stg-dec/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-dec" --output "$out" \
+    --feature tc13-feature --phase 1.1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: decimal phase id merge exits 0"
+  assert_eq '{"id":1.1,"dir":"phase-1.1-beta"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: dir is read verbatim, so phase-1.1-beta is not re-derived as phase-1-1-beta"
+
+  # --- A non-null .branch is read for NOTHING ---
+  out=".aimi/tasks/tc13-branch-tasks.json"
+  mkdir -p "$d/.aimi/stg-branch"
+  _sm_make_story "$d/.aimi/stg-branch/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-branch" --output "$out" \
+    --feature tc13-feature --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: a phase carrying a .branch still merges"
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: the roadmap .branch does not become branchName"
+  assert_eq '{"id":2,"dir":"phase-2-gamma"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: phase {id,dir} carries no branch key"
+  assert_eq "0" "$(grep -cF 'feat/hand-authored-override' "$d/$out" || true)" \
+    "TC56: the roadmap .branch value reaches neither the document nor stderr"
+
+  # --- GUARDRAIL: neither flag, nothing new. Passes before AND after. ---
+  out=".aimi/tasks/tc13-bare-tasks.json"
+  mkdir -p "$d/.aimi/stg-bare"
+  _sm_make_story "$d/.aimi/stg-bare/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-bare" --output "$out" 2>&1) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: a merge with neither flag still exits 0"
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: no-flag merge still writes branchName feat/merged"
+  local key
+  for key in roadmapPath phase baseRef pluginVersion; do
+    assert_eq "false" "$(jq -r --arg k "$key" '.metadata | has($k)' "$d/$out" 2>/dev/null)" \
+      "TC56: no-flag merge omits metadata.$key"
+  done
+
+  # --- Every bad input is refused by name, before any write ---
+  _sm_phase_refusal "$d" "together" "TC56 (--feature alone)" \
+    --feature tc13-feature
+  _sm_phase_refusal "$d" "together" "TC56 (--phase alone)" \
+    --phase 1
+  _sm_phase_refusal "$d" "numeric phase id" "TC56 (malformed phase id)" \
+    --feature tc13-feature --phase 1.1.1
+  _sm_phase_refusal "$d" "single path component" "TC56 (malformed feature slug)" \
+    --feature "tc13 feature" --phase 1
+  _sm_phase_refusal "$d" "roadmap not found" "TC56 (no roadmap.json)" \
+    --feature tc13-absent --phase 1
+  _sm_phase_refusal "$d" "not found in" "TC56 (phase absent from the roadmap)" \
+    --feature tc13-feature --phase 9
+  _sm_phase_refusal "$d" "has no dir" "TC56 (phase entry with no dir)" \
+    --feature tc13-feature --phase 3
+  _sm_phase_refusal "$d" "full-stack" "TC56 (with --split full-stack)" \
+    --feature tc13-feature --phase 1 --split full-stack
+
+  rm -rf "$d"
+}
+
 # TC9: outline.json sidecar in staging dir is ignored (Phase 3b artifact)
 test_story_merge_outline_sidecar_ignored() {
   echo ""
@@ -8249,6 +8411,7 @@ main() {
   test_story_merge_rule22_routing
   test_story_merge_full_stack_split
   test_story_merge_phase_aware_split
+  test_story_merge_derives_phase_metadata
   test_story_merge_outline_sidecar_ignored
   test_story_merge_dead_code_positive
   test_story_merge_dead_code_negative

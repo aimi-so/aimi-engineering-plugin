@@ -1390,8 +1390,8 @@ def _merge(tmp_path, files, args=None):
     """Run a real story-merge over a staging directory built from `files`."""
     root = str(tmp_path)
     staging = os.path.join(root, ".aimi", "stg")
-    os.makedirs(os.path.join(root, ".aimi", "tasks"))
-    os.makedirs(staging)
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    os.makedirs(staging, exist_ok=True)
     for name, value in files.items():
         with open(os.path.join(staging, name), "w", encoding="utf-8") as handle:
             handle.write(value if isinstance(value, str) else json.dumps(value))
@@ -1575,3 +1575,146 @@ def test_a_successful_merge_deletes_the_staging_dir_and_a_refusal_keeps_it():
     assert ".aimi/stg/" not in CASES["feliz-uma-historia"]["tree"]
     for label in ("ciclo", "inventario-nao-julgado", "proj-colisao-slug"):
         assert ".aimi/stg/" in CASES[label]["tree"], label
+
+
+# ---------------------------------------------------------------------------
+# The four metadata fields --feature/--phase derive
+# ---------------------------------------------------------------------------
+
+
+def _roadmap(tmp_path, feature, phases):
+    """Seed a roadmap.json where the CLI's own _roadmap_path composes it."""
+    directory = os.path.join(str(tmp_path), ".aimi", "tasks", feature)
+    os.makedirs(directory, exist_ok=True)
+    document = {
+        "roadmapVersion": "2.0",
+        "feature": feature,
+        "createdAt": "2026-01-01T00:00:00Z",
+        "phases": phases,
+    }
+    with open(os.path.join(directory, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2)
+
+
+def _phase(pid, slug, directory, branch=None):
+    return {
+        "id": pid,
+        "name": "Phase " + str(pid),
+        "slug": slug,
+        "goal": "g",
+        "successCriteria": ["s"],
+        "dir": directory,
+        "branch": branch,
+        "status": "pending",
+        "dependsOn": [],
+    }
+
+
+def test_a_feature_and_a_phase_fill_the_four_metadata_fields(tmp_path):
+    """Two of the four land, and the other two are OMITTED rather than nulled.
+
+    tmp_path is not a git repository -- _merge only ever creates .aimi/tasks and
+    .aimi/stg -- so `git rev-parse HEAD` in the bash half answers nothing and
+    baseRef must be ABSENT: not None, not "", not a placeholder. That is the
+    omit rule under measurement rather than under description, and it is free
+    here, where the CLI-level suite has to `git init` a fixture to see the other
+    branch. pluginVersion still lands, because cmd_version reads the plugin.json
+    beside the script rather than anything under the merge root.
+
+    phase.dir is read VERBATIM, which the decimal id is what proves: a
+    re-derivation from the id would yield phase-1-1-beta and name no directory
+    on disk. The entry's own .branch is read for nothing -- branchName stays the
+    literal the legacy writer has always written.
+    """
+    _roadmap(
+        tmp_path,
+        "featslug",
+        [
+            _phase(1, "alpha", "phase-1-alpha"),
+            _phase(1.1, "beta", "phase-1.1-beta", branch="feat/hand-authored-override"),
+            _phase(3, "delta", None),
+        ],
+    )
+    files = {"01-a.json": _staging_story("A")}
+
+    proc, doc = _merge(tmp_path, files, ["--feature", "featslug", "--phase", "1"])
+    assert proc.returncode == 0, proc.stderr
+    metadata = doc["metadata"]
+    assert metadata["roadmapPath"] == ".aimi/tasks/featslug/roadmap.json"
+    assert metadata["phase"] == {"id": 1, "dir": "phase-1-alpha"}
+    assert "baseRef" not in metadata, "an unanswered source must omit the key, never null it"
+    assert metadata["pluginVersion"]
+    assert metadata["branchName"] == "feat/merged"
+    assert metadata["title"] == "feat: merged tasks"
+
+    proc, doc = _merge(tmp_path, files, ["--feature", "featslug", "--phase", "1.1"])
+    assert proc.returncode == 0, proc.stderr
+    assert doc["metadata"]["phase"] == {"id": 1.1, "dir": "phase-1.1-beta"}
+    assert doc["metadata"]["branchName"] == "feat/merged"
+    assert "feat/hand-authored-override" not in json.dumps(doc)
+    assert "feat/hand-authored-override" not in proc.stderr
+
+
+def test_the_no_flag_path_stays_byte_unchanged(tmp_path):
+    """The golden corpus's own invariant, restated where a reader can see it.
+
+    Zero of the 92 recorded story_merge_cases write .metadata into their output,
+    which is why the new emission moves no recorded line -- but that is an
+    argument about a file, and this is the assertion.
+    """
+    proc, doc = _merge(tmp_path, {"01-a.json": _staging_story("A")})
+    assert proc.returncode == 0, proc.stderr
+    assert doc["metadata"]["branchName"] == "feat/merged"
+    for key in ("roadmapPath", "phase", "baseRef", "pluginVersion"):
+        assert key not in doc["metadata"], key
+
+
+@pytest.mark.parametrize(
+    "args,needle",
+    [
+        (["--feature", "featslug"], "must be given together"),
+        (["--phase", "1"], "must be given together"),
+        (["--feature", "featslug", "--phase", "1.1.1"], "numeric phase id"),
+        (["--feature", "feat slug", "--phase", "1"], "single path component"),
+        (["--feature", "absentslug", "--phase", "1"], "roadmap not found"),
+        (["--feature", "featslug", "--phase", "9"], "not found in"),
+        (["--feature", "featslug", "--phase", "3"], "has no dir"),
+        (["--feature", "featslug", "--phase", "1", "--split", "full-stack"], "full-stack"),
+    ],
+)
+def test_every_bad_phase_input_is_refused_before_any_write(tmp_path, args, needle):
+    """A refusal writes no output file and keeps the staging dir for a retry.
+
+    The phase with a null `dir` is refused rather than reconstructed, which is
+    the enforcement of "dir is never re-derived": roadmap-init already composed
+    and validated that segment, and rebuilding it from the id would name a
+    directory that does not exist.
+    """
+    _roadmap(
+        tmp_path,
+        "featslug",
+        [_phase(1, "alpha", "phase-1-alpha"), _phase(3, "delta", None)],
+    )
+    proc, doc = _merge(tmp_path, {"01-a.json": _staging_story("A")}, args)
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert needle in proc.stderr, proc.stderr
+    assert doc is None, "a refusal wrote an output file"
+    assert os.path.isdir(os.path.join(str(tmp_path), ".aimi", "stg"))
+
+
+def test_a_phase_is_matched_numerically_and_never_by_string():
+    """2.10 and 2.1 are one number and must name one phase; 1.0 must find 1.
+
+    A stored id that is a string, a bool or absent matches nothing -- Python's
+    True == 1 is the trap the bool arm closes, and roadmap.json is a file people
+    hand-edit.
+    """
+    assert SM._same_number(2.1, 2.10)
+    assert SM._same_number(1, 1.0)
+    assert SM._same_number(0, 0)
+    assert not SM._same_number("1", 1)
+    assert not SM._same_number(True, 1)
+    assert not SM._same_number(None, 1)
+    assert SM._jq_number(1.0) == 1 and isinstance(SM._jq_number(1.0), int)
+    assert SM._jq_number(1.1) == 1.1
+    assert SM._num(1.0) == "1" and SM._num(1.1) == "1.1"
