@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.137.0] - 2026-09-10
+
+### Added
+- `validate-wave-contention`: refuses a wave whose stories declare the same path in `implementation.files`. Two such stories passed all five existing validators; `/aimi:execute` dispatches by wave, so they collide at merge. Wired into `plan.md` Phase 4.5.
+- `unwritten_findings:` pointer-block key. A research agent that cannot write its file now says so and carries its findings; `plan.md`'s `Confirm Each Research File Landed` persists them at the path it dictated instead of dropping them. Recovers the write half of the research channel; a truncated return is still lost.
+- `retired:` / `supersededBy:` frontmatter for `.aimi/known-gaps/`. Four entries measured as false or already-fixed are retired with their reason; Phase 1.7b includes a retired entry with its retirement stated rather than dropping it, since two of the four are partial and one carries the refutation that retires another.
+
+### Fixed
+- `verify-probe` no longer scores an unterminated quote as a discriminating check. Six residual states (`single-quote`, `double-quote`, `backtick`, `paren`, `brace`, `compound`) fused every following assertion into one segment whose syntax error read as exit != 0, so a verify bash refuses to parse scored a perfect 1.0 discrimination ratio — strictly higher than an honest verify carrying a guard-rail can reach. Unterminated heredocs are excluded: `bash -n` accepts and runs them.
+- Known-gap filenames carry the plan discriminator, so two plans producing the same story id on one day no longer overwrite each other. Appended, not prefixed: `_GAP_FILENAME` anchors the date at position 0.
+- The research agents' Output Contract names the required outcome rather than the `Write` tool, in all seven files.
+- `get-story-context` is auto-approved by `hooks/auto-approve-cli.sh` — it is the first verb every story executor runs.
+- The `jq` census in `plugins/aimi-engineering/CLAUDE.md` re-measured against its own commit: `commands/` 212 → 239, `aimi-cli.sh` 244 → 269 invocations.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
