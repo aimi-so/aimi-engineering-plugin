@@ -90,7 +90,7 @@ case " $ARGUMENTS " in
 esac
 ```
 
-If `PHASE_OVERRIDE` is non-empty but does not match `^[0-9]+(\.[0-9]+)?$`, report `Invalid --phase value: [PHASE_OVERRIDE]. Must be a numeric phase id.` and STOP.
+If `PHASE_OVERRIDE` is non-empty but does not match `^[0-9]+(\.[0-9]+)?$`, refuse and STOP. Compose that refusal in the reader's own language per the **Adaptive Language Rule** (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`) rather than emitting a fixed English sentence, and have it name both the value that was typed and the ceiling it broke — a phase id carries at most one decimal level, so `1.1` is one and `1.1.1` is not. The same regex is enforced a second time, as an executed `case`, in the `--phase` override block of Rolling-Wave Phase Selection below: that block runs in its own shell and cannot see this check.
 
 From this point forward, `$ARGUMENTS_STRIPPED` (not raw `$ARGUMENTS`) feeds the `--non-interactive` extraction below and every downstream feature-description derivation.
 
@@ -541,20 +541,34 @@ That is a deliberate divergence from a sibling call site, not an oversight. `/ai
 
 ```bash
 case "$PHASE_OVERRIDE" in
-  ''|*[!0-9.]*)
-    echo "Invalid --phase value: $PHASE_OVERRIDE. Must be a numeric phase id." >&2
+  ''|*[!0-9.]*|.*|*.|*.*.*)
+    echo "PHASE_GATE_OUTCOME=INVALID_SHAPE PHASE_OVERRIDE=$PHASE_OVERRIDE MAX_DECIMAL_LEVELS=1" >&2
     exit 1
     ;;
 esac
-PHASE_VERDICT_JSON=$(printf '%s' "$PHASE_VERDICTS_JSON" | jq -c ".phases[] | select(.id == $PHASE_OVERRIDE)")
-SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq ".phases[] | select(.id == $PHASE_OVERRIDE)")
+PHASE_VERDICT_JSON=$(printf '%s' "$PHASE_VERDICTS_JSON" | jq -ce ".phases[] | select(.id == $PHASE_OVERRIDE)")
+PHASE_VERDICT_RC=$?
+SELECTED_PHASE_JSON=$(printf '%s' "$ROADMAP_JSON" | jq -e ".phases[] | select(.id == $PHASE_OVERRIDE)")
+SELECTED_PHASE_RC=$?
+if [ "$PHASE_VERDICT_RC" = 0 ] && [ "$SELECTED_PHASE_RC" = 0 ]; then
+  PHASE_GATE_OUTCOME=PRESENT
+else
+  PHASE_GATE_OUTCOME=ABSENT
+fi
+echo "PHASE_GATE_OUTCOME=$PHASE_GATE_OUTCOME"
 ```
 
-The id is interpolated from the shell rather than bound as a jq variable, and the `case` above is the gate that makes that safe **in this same block** — blocks are executed one per isolated shell, so the `^[0-9]+(\.[0-9]+)?$` check in the argument-parsing step near the top of this file cannot protect this one. Digits and dots are all that survives it, which leaves nothing for jq or the shell to interpret.
+The id is interpolated from the shell rather than bound as a jq variable, and the `case` above is the gate that makes that safe **in this same block** — blocks are executed one per isolated shell, so the `^[0-9]+(\.[0-9]+)?$` check in the argument-parsing step near the top of this file cannot protect this one. The gate stays a `case` rather than a `grep -E` because `grep` matches line by line and would admit a multi-line value whose first line is all digits, while a `case` pattern is tested against the whole string — the same reasoning `check_argument_gate_same_block` in `scripts/test-command-blocks.sh` already records for numeric identifiers.
+
+**Digits and dots are enough for injection safety and not enough for parseability — which is what the five arms are for.** A value made only of digits and dots leaves nothing for jq or the shell to interpret, and that half was always true. But `1.1.1` is made only of digits and dots and is not a JSON number: jq refuses to **compile** the program at all (`jq: error: Invalid numeric literal at EOF ... (while parsing '1.1.1')`, exit 3), and the `$( )` around it swallows that status into an empty string — so the reader used to be told a phase they never typed was missing from the roadmap. The arms above admit at most one dot, so what reaches jq is both uninterpretable *and* a literal jq can compile. That is also what makes `jq -e`'s status readable below: exit 3 is unreachable from here, so a non-zero status means "no phase carries that id" and nothing else.
 
 Matching is therefore **numeric**, against the phase id as a JSON number: `--phase 2.10` selects phase `2.1`, and `--phase 02` selects phase `2`. That is correct — `2.10` and `2.1` are the same number — and it is the same reading every other `--phase` consumer in the CLI already applies.
 
-- **Not found:** `PHASE_VERDICT_JSON` is empty — no phase in the roadmap carries that id. Report `Phase [PHASE_OVERRIDE] not found in [featureSlug]'s roadmap.` and STOP.
+Branch on `PHASE_GATE_OUTCOME`, the block's own last line — three outcomes, one of which used to be indistinguishable from another:
+
+- **`PHASE_GATE_OUTCOME=INVALID_SHAPE`** — the `case` refused the value before jq ran and the block exited 1, having emitted `PHASE_GATE_OUTCOME=INVALID_SHAPE PHASE_OVERRIDE=<the value> MAX_DECIMAL_LEVELS=1` on stderr. Compose the refusal from exactly those three fields per the Adaptive Language Rule above: name the value the person typed, and name the ceiling it broke — a phase id carries at most one decimal level, so `1.1` is one and `1.1.1` is not. This outcome has a branch of its own because it used to have none: an id like `1.1.1` reached jq, jq failed to compile the program, the `$( )` swallowed the error, and the person was told a phase they never typed was not in the roadmap.
+- **`PHASE_GATE_OUTCOME=ABSENT`** — the shape was legal and no phase in the roadmap carries that id (`jq -e` produced no value for the verdict select, the roadmap select, or both). Report `Phase [PHASE_OVERRIDE] not found in [featureSlug]'s roadmap.` and STOP. Reporting is all this outcome does here — do not offer to create the phase.
+- **`PHASE_GATE_OUTCOME=PRESENT`** — both selects produced a record, `PHASE_VERDICT_JSON` carries the phase's verdict and `SELECTED_PHASE_JSON` its full object from the roadmap document. The phase exists; the two bullets below continue this outcome and decide whether it may be expanded.
 - **Found but not eligible** (`PHASE_VERDICT_JSON`'s `.eligible` is `false`): refuse **before any research or expansion Task is spawned**. Compose the refusal from that record's own fields — never a generic message — taking the first reason that applies:
   - `.status` is not `pending`:
     ```
@@ -3589,7 +3603,7 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 4 | File write fails | Report error with path |
 | Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |
 | Phase 4.5 | Validation fails | Fix issues and re-run until passing |
-| Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` | Report `Invalid --phase value: [N]. Must be a numeric phase id.` and STOP |
+| Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` — enforced twice, as prose in the argument-parsing step and as the executed `case` in the `--phase` override block, which emits `PHASE_GATE_OUTCOME=INVALID_SHAPE PHASE_OVERRIDE=<N> MAX_DECIMAL_LEVELS=1` on stderr and exits 1 | Compose the refusal from those fields per the Adaptive Language Rule — name the value and the one-decimal-level ceiling — and STOP. Never report it as a phase missing from the roadmap; that is the separate `ABSENT` outcome on the row below |
 | Rolling-Wave Phase Selection | `--phase <N>` not found in roadmap | Report `Phase [N] not found in [featureSlug]'s roadmap.` and STOP |
 | Rolling-Wave Phase Selection | `--phase <N>` found but ineligible (wrong status, unmet dependsOn, or claimed) | Refuse before any research/expansion Task is spawned; name the phase and list every unmet dependency by id and status; STOP |
 | Rolling-Wave Phase Selection | Bare invocation, no eligible pending phase | List **every** phase in the roadmap with its own status-keyed reason — never a filtered subset, which is how this report came to print a heading above an empty list; STOP — do not fall back to the flat pipeline |
