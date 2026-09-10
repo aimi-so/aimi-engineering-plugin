@@ -13020,6 +13020,40 @@ cmd_validate_waves() {
   python3 "$(_aimi_tasks_py)" validate-waves --tasks-file "$tasks_file"
 }
 
+# Validate wave contention: refuse a wave whose stories claim the same path in
+# implementation.files -- a new verb, not a widening of validate-waves above.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+cmd_validate_wave_contention() {
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-wave-contention [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # A pure reader, same shape as cmd_validate_deps above: no lock, no temp
+  # file, one crossing, and the exit status IS the crossing's own -- unlike
+  # validate-waves, this verb's invalid verdict really does exit non-zero.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-wave-contention --tasks-file "$tasks_file"
+}
+
 # Validate tasks file citation fields
 # For schemaVersion >= 3.3: validates DesignSpec verbatim citations for visual
 # stories and BusinessSpec field citations for a frontend-only file's endpoints,
@@ -15885,6 +15919,8 @@ COMMANDS:
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-wave-contention [--tasks-file <path>]
+                              Refuse a wave whose stories claim the same path in implementation.files
     validate-tasks [--tasks-file <path>]
                               Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id> [--tasks-file <path>]
@@ -17035,6 +17071,7 @@ main() {
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
+    validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
     cascade-skip)      shift; cmd_cascade_skip "$@" ;;
     reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;

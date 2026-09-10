@@ -1388,6 +1388,72 @@ def validate_waves(doc):
     return _verdict(errors)
 
 
+def wave_contention(doc):
+    """One error per `implementation.files` path two or more stories in the
+    SAME wave both claim -- the check that catches two executors racing each
+    other for one literal, which `validate_waves` never asked about at all.
+
+    KEYED ON THE COMPUTED WAVE, NEVER THE STORED ONE. `list-ready` never reads
+    `wave` -- `ready_stories` decides readiness from status plus completed
+    dependencies, and the schema itself says `wave` is informational only,
+    never consumed by dispatch. So `computed_waves` is the static model of what
+    `/aimi:execute`'s dynamic ready-set will actually dispatch together, and a
+    stale STORED wave must never be allowed to hide a real contention.
+
+    Path comparison is exact string equality -- `a/b.py` and `./a/b.py` read
+    as different paths. That is a false NEGATIVE (a missed contention), never a
+    false positive, and is accepted rather than routed through path
+    confinement: this is a question of identity between two document values,
+    not of whether either escapes the project root.
+
+    A story `computed_waves` never assigned (a cycle, a dangling `dependsOn`)
+    is skipped, exactly as `validate_waves` skips it -- reporting those is
+    `validate_deps`' job. A story whose own `implementation` is not an object,
+    or whose `implementation.files` is not a list, is skipped too: the guard is
+    R17's, reused verbatim rather than respelled (see its comment, and the
+    account beside `.project` in `validate_stories`). Each story's own repeated
+    paths are deduplicated before comparison, so a story cannot contend with
+    itself.
+
+    Errors are built in a deterministic order because the verdict is compared
+    byte for byte by tests: waves ascending, paths in first-appearance document
+    order within a wave, ids in document order -- which plain dict insertion
+    order already gives, since stories are walked in document order throughout.
+    """
+    stories = _stories(doc)
+    assigned = computed_waves(stories)
+    by_wave = {}
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        wave = assigned.get(story_id)
+        if wave is None:
+            continue
+        implementation = jq_index(story, "implementation", STORY)
+        if jq_type(implementation) != "object":
+            continue
+        files = jq_index(implementation, "files", STORY + ".implementation")
+        if not isinstance(files, list):
+            continue
+        claims = by_wave.setdefault(wave, {})
+        seen = set()
+        for entry in files:
+            if not isinstance(entry, str) or entry in seen:
+                continue
+            seen.add(entry)
+            claims.setdefault(entry, []).append(story_id)
+
+    errors = []
+    for wave in sorted(by_wave):
+        for path, ids in by_wave[wave].items():
+            if len(ids) > 1:
+                errors.append(
+                    "Wave contention: wave " + str(wave)
+                    + " path " + path
+                    + " claimed by " + ", ".join(ids)
+                )
+    return _verdict(errors)
+
+
 # ---------------------------------------------------------------------------
 # validate-tasks: fifteen rules, and the three pieces of scaffolding that died
 # ---------------------------------------------------------------------------
@@ -3810,6 +3876,26 @@ def op_validate_waves(argv):
     for doc in read_docs(path, "validate-waves"):
         _emit(validate_waves(doc))
     return 0
+
+
+def op_validate_wave_contention(argv):
+    """One verdict per document, and -- unlike its `validate-waves` neighbour
+    -- a real exit status: return 1 when ANY verdict is invalid, 0 otherwise.
+
+    A new verb inherits no legacy contract, so it takes the shape the other
+    three real validators already have rather than copying `validate-waves`'
+    preserved jq accident, or `op_validate_deps`' `valid_lines == "true"`
+    quirk, or `op_validate_stories`' last-document-wins rule -- there is no
+    caller of THIS verb to keep compatible with a jq body that no longer
+    exists.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-wave-contention --tasks-file <path>")
+    verdicts = [wave_contention(doc) for doc in read_docs(path, "validate-wave-contention")]
+    for verdict in verdicts:
+        _emit(verdict)
+    return 0 if all(v["valid"] for v in verdicts) else 1
 
 
 def op_validate_tasks(argv):
@@ -6697,6 +6783,7 @@ _OPS = {
     "validate-stories": op_validate_stories,
     "validate-ids": op_validate_ids,
     "validate-waves": op_validate_waves,
+    "validate-wave-contention": op_validate_wave_contention,
     "validate-tasks": op_validate_tasks,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),

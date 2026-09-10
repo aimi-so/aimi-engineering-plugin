@@ -1371,6 +1371,83 @@ def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# validate-wave-contention: a brand-new verb, so these are hand-written rather
+# than a golden replay -- there is no jq implementation it ports and none to
+# compare against. A NEW verb, not a widening of validate-waves above: the two
+# read different fields and have different remedies (normalize-waves recomputes
+# a stored wave; it cannot move a path out of implementation.files).
+# ---------------------------------------------------------------------------
+
+
+def _contention_story(story_id, depends_on, files, wave="omit"):
+    story = _wave_story(story_id, depends_on, wave)
+    story["implementation"] = {"files": files, "approach": "a", "verify": "true"}
+    return story
+
+
+def _run_validate_wave_contention(tmp_path, stories):
+    """One live validate-wave-contention over a document written for the
+    occasion. Mirrors _run_validate_waves; unlike that verb this one really
+    does carry an exit status, so a caller reads proc.returncode too."""
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    with open(
+        os.path.join(tasks_dir, "2020-01-01-contention-tasks.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "validate-wave-contention"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc, json.loads(proc.stdout)
+
+
+def test_wave_contention_is_reported_with_the_exact_message(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1, "unlike validate-waves, an invalid verdict here exits non-zero"
+
+
+def test_disjoint_implementation_files_pass_clean(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["b.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_dependson_edge_clears_the_contention(tmp_path):
+    """The documented remedy, executed: chaining US-002 after US-001 moves it
+    to computed wave 2, even though both stories still declare the identical
+    path. The fix for a real contention is a dependsOn edge, never a file
+    split."""
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", ["US-001"], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
+    stories = [
+        _wave_story("US-001", []),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    assert "implementation" not in stories[0]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+# ---------------------------------------------------------------------------
 # normalize-waves: a brand-new verb, so these are hand-written rather than a
 # golden replay -- there is no jq implementation it ports and none to compare
 # against. The rule itself is asserted only by import (compute_waves lives in
@@ -5079,6 +5156,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-stories",
         "validate-ids",
         "validate-waves",
+        "validate-wave-contention",
         "validate-tasks",
         "validate-story-exists",
         "mark-complete",
