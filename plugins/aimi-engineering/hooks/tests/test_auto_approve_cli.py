@@ -33,6 +33,7 @@ import pytest
 HOOKS_DIR = Path(__file__).parent.parent
 HOOK = HOOKS_DIR / "auto-approve-cli.sh"
 COMMANDS_DIR = HOOKS_DIR.parent / "commands"
+STORY_EXECUTOR_SKILL = HOOKS_DIR.parent / "skills" / "story-executor" / "SKILL.md"
 
 # A line is a "resolution line" when it assigns, guards, validates or persists
 # $AIMI_CLI / $WORKTREE_MGR. These are the shapes commands/ emits; the hook is
@@ -200,6 +201,90 @@ def test_every_resolution_line_in_commands_is_approved(line, origin):
     )
 
 
+def collect_bootstrap_calls() -> list[str]:
+    """Every get-story-context line skills/story-executor/SKILL.md emits.
+
+    Same shape as collect_resolution_lines above and for the same reason: a
+    line only counts inside a ```bash fence, because that is what a
+    Task-spawned story executor actually runs. `[STORY_ID]` and
+    `[TASKS_FILE_PATH]` are the skill's own placeholder tokens -- substituted
+    here with a realistic story id and tasks path, the way a real invocation
+    fills them in, rather than typed from memory into a hardcoded case that
+    could drift the way the hook itself once did.
+    """
+    calls: list[str] = []
+    in_bash_fence = False
+    for raw in STORY_EXECUTOR_SKILL.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            in_bash_fence = stripped.startswith("```bash") and not in_bash_fence
+            continue
+        if not in_bash_fence or "get-story-context" not in raw:
+            continue
+        line = (
+            raw.strip()
+            .replace("[STORY_ID]", "US-001")
+            .replace(
+                "[TASKS_FILE_PATH]",
+                ".aimi/tasks/2026-09-10-residuos-provados-tasks.json",
+            )
+        )
+        calls.append(line)
+    return calls
+
+
+BOOTSTRAP_CALLS = collect_bootstrap_calls()
+
+
+def test_the_bootstrap_corpus_is_not_empty():
+    """Guard the guard: an empty scan would make the case below vacuous."""
+    assert BOOTSTRAP_CALLS, (
+        "scanned skills/story-executor/SKILL.md and found no get-story-context "
+        "line -- the scanner is broken, not the skill. The case below would "
+        "pass vacuously."
+    )
+
+
+@pytest.mark.parametrize(
+    "line",
+    BOOTSTRAP_CALLS,
+    ids=[f"story-executor:{line[:48]}" for line in BOOTSTRAP_CALLS],
+)
+def test_get_story_context_is_approved_in_the_shape_the_executor_emits(line):
+    """The bootstrap line skills/story-executor/SKILL.md tells a worker to run
+    as its first action must be auto-approved, or every wave of N stories
+    costs N permission prompts for the read that hands each story its own
+    work."""
+    assert run_hook(line), (
+        f"skills/story-executor/SKILL.md emits a get-story-context line the "
+        f"hook does not approve, so a story executor's first Bash call "
+        f"prompts the user instead:\n  {line}"
+    )
+
+
+GET_STORY_CONTEXT_SHAPES = [
+    pytest.param(
+        "$AIMI_CLI get-story-context US-001 --tasks-file .aimi/tasks.json",
+        id="canonical-with-relative-tasks-file",
+    ),
+    pytest.param(
+        "$AIMI_CLI get-story-context US-001",
+        id="bare-no-tasks-file",
+    ),
+    pytest.param(
+        "${AIMI_CLI} get-story-context US-001 --tasks-file /abs/tasks.json",
+        id="braced-with-absolute-tasks-file",
+    ),
+]
+
+
+@pytest.mark.parametrize("line", GET_STORY_CONTEXT_SHAPES)
+def test_get_story_context_is_approved(line):
+    """The other two shapes Pattern 2 admits for every already-whitelisted
+    verb must be approved for get-story-context too."""
+    assert run_hook(line), f"a get-story-context shape was not auto-approved:\n  {line}"
+
+
 # Older spellings that older installs may still carry. The hook keeps matching
 # them on purpose; a fix for today's text must not un-approve yesterday's.
 LEGACY_FORMS = [
@@ -272,6 +357,10 @@ ADVERSARIAL = [
     pytest.param("$AIMI_CLI forge-pr-merge --pr 1 --style squash", id="subcommand-off-whitelist"),
     pytest.param("mkdir -p /etc/aimi", id="mkdir-outside-the-aimi-dir"),
     pytest.param("$AIMI_CLI status; cat /etc/shadow", id="whitelisted-subcommand-then-chain"),
+    pytest.param(
+        "$AIMI_CLI get-story-context US-001; cat /etc/shadow",
+        id="get-story-context-then-chain",
+    ),
 ]
 
 
