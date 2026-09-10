@@ -8183,6 +8183,37 @@ def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path
     )
 
 
+def test_a_retired_gap_reports_its_reason_and_superseder(tmp_path):
+    """The three formats the contract distinguishes: a file that declares both
+    `retired:` and `supersededBy:` reports both strings; a file that declares
+    neither reports both null; and a file that declares `supersededBy:` with
+    no `retired:` also reports both null -- a pointer to what replaced a gap
+    is not a retirement unless the reason for retiring it is there too, and
+    reporting the pointer alone would hand the reader a superseder for a gap
+    nobody marked as gone."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-01-01-a.md": (
+                "---\nfeature: fx\nretired: reproduzido falso\n"
+                "supersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+            "2026-01-02-b.md": "---\nfeature: fx\n---\nKNOWN-GAP: alegacao\n",
+            "2026-01-03-c.md": (
+                "---\nfeature: fx\nsupersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+        },
+    )
+    resolved = {
+        entry["file"]: (entry["retired"], entry["supersededBy"]) for entry in entries
+    }
+    assert resolved == {
+        "2026-01-01-a.md": ("reproduzido falso", "docs/superseder.md"),
+        "2026-01-02-b.md": (None, None),
+        "2026-01-03-c.md": (None, None),
+    }
+
+
 def _dated(created_at):
     return {"schemaVersion": "3.3", "metadata": {"title": "t", "createdAt": created_at}}
 

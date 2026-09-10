@@ -6788,6 +6788,15 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
     it is the guess this parser refuses everywhere else. The two filters differ
     because their nulls do: a null date cannot be compared, a null feature can
     be reported.
+
+    `retired` and `supersededBy` read the same `declared` frontmatter dict
+    `feature` already reads, with the same `or None` rule for an empty value.
+    Retirement is a property of the FILE, not of one block inside it -- so
+    every entry `gap_blocks` cuts a single file into inherits the same
+    pair. A `supersededBy` with no `retired` is not a retirement -- a pointer to
+    what replaced a gap nobody marked as gone would hand the reader a
+    superseder for a gap that is still live, so the pointer is read only when
+    the reason is present, and both come back null otherwise.
     """
     gaps_dir = os.path.join(aimi_dir, "known-gaps")
     try:
@@ -6815,6 +6824,8 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
         # bare-prose rule doing exactly the right thing to the wrong input.
         declared, body = gap_frontmatter(body)
         entry_feature = declared.get("feature") or None
+        entry_retired = declared.get("retired") or None
+        entry_superseded_by = (declared.get("supersededBy") or None) if entry_retired else None
         slug = matched.group("slug") if matched else None
         if entry_feature is None and (slug is not None or date is not None):
             if scan is None:
@@ -6837,6 +6848,8 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
                     "feature": entry_feature,
                     "text": text,
                     "file": name,
+                    "retired": entry_retired,
+                    "supersededBy": entry_superseded_by,
                 }
             )
 
