@@ -135,6 +135,10 @@ The `case` guard prepends `p` when the sanitized stem would not start alphanumer
 
 Every cleanup sweep in this document scans the prefixed pattern, because no placement of a discriminator preserves the old glob — measured in both directions, `feat/a-STEM-US-001` and `STEM-feat/a-US-001` both fail `feat/a-US-*`. The un-prefixed shape is legacy and keeps exactly one home per sweep family: Post-Loop Cleanup's **One-time migration safeguard** for the flat/container shape, and the legacy pass beside the phase/container sweep for the `EXEC_BRANCH` one.
 
+`PLAN_DISC` governs a THIRD shared namespace, after the worktree name and the scratchpad directory above: **`.aimi/known-gaps/`**, one flat directory shared by every plan. A known-gap file is named `${GAP_DATE}-[full_story.id]-[PLAN_DISC].md` (Step 4, mark-stories-complete) for the identical reason the other two are prefixed/suffixed — story ids restart at `US-001` in every plan, so `<date>-<story.id>.md` is a path two plans compose identically on the same day, and the writer is a plain `>` redirect that truncates whichever run loses the race with no error and no trace. Measured at 3b871aa on 2026-09-10: 33 of the 121 `.md` files already under `.aimi/known-gaps/` carry the collidable `<YYYY-MM-DD>-US-NNN.md` shape. The same defect was fixed once already, on a sibling artifact, in exactly this way: `.aimi/known-gaps/2026-09-07-US-002-nome-do-probe-colide-entre-planos.md` records `verify-probe`'s own artifact colliding the same way in `.aimi/tasks/`, fixed by keying the name on the tasks file's own stem — `probe_verify()` in `scripts/tasks.py` does exactly that, and this reuses the same identity rather than inventing a second scheme.
+
+Unlike the worktree case, the discriminator here is a **SUFFIX**, and a parser forces the inversion rather than a preference choosing it. `_GAP_FILENAME` in `scripts/tasks.py` anchors `date` at position 0 and an optional `US-NNN` immediately after it — prefixing `PLAN_DISC` would leave both `date` and `story` null, and every `--since` call drops an entry whose date is null. Appended, the stem lands in the pattern's optional `slug` group instead, where `known_gap_entries()` believes a slug only when it names a feature that already exists; a tasks-file stem is never a feature name, so the entry falls through to the same date index a slug-less name already falls through to today, and the attribution every entry already gets is unchanged. No existing file under `.aimi/known-gaps/` is renamed by this — `<date>-US-NNN-<feature>.md` admits one file per story, date and feature, so renaming two same-day gaps for one story id onto that shape would collide on the rename itself and lose one of them.
+
 ### Per-Project Cleanup Rule
 
 After each wave (and in Post-Loop safety cleanup), for each unique `project_root` (including CWD for the DEFAULT group):
@@ -3273,9 +3277,14 @@ while true:
                 else
                   WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP( \([^)]+\))?:' || true)
                 fi
+                # Discriminated by PLAN_DISC, this run's own plan identity (see
+                # `### Plan Discriminator` under Multi-Repo Handling) — two plans
+                # that both produce a gap for the same story id on the same day
+                # would otherwise compose the same path and silently truncate
+                # each other's finding.
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
-                  GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id].md"
+                  GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id]-[PLAN_DISC].md"
                   printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
                 fi
                 # --- Extract verify evidence: the FOURTH result_json field this
@@ -4666,7 +4675,7 @@ if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
   echo "## Known Gaps"
   for gap_file in .aimi/known-gaps/*.md; do
     [ -f "$gap_file" ] || continue
-    story_id=$(basename "$gap_file" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//')
+    story_id=$(basename "$gap_file" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//; s/^(US-[0-9]+).*/\1/')
     echo ""
     echo "### $story_id"
     cat "$gap_file"

@@ -1371,6 +1371,83 @@ def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# validate-wave-contention: a brand-new verb, so these are hand-written rather
+# than a golden replay -- there is no jq implementation it ports and none to
+# compare against. A NEW verb, not a widening of validate-waves above: the two
+# read different fields and have different remedies (normalize-waves recomputes
+# a stored wave; it cannot move a path out of implementation.files).
+# ---------------------------------------------------------------------------
+
+
+def _contention_story(story_id, depends_on, files, wave="omit"):
+    story = _wave_story(story_id, depends_on, wave)
+    story["implementation"] = {"files": files, "approach": "a", "verify": "true"}
+    return story
+
+
+def _run_validate_wave_contention(tmp_path, stories):
+    """One live validate-wave-contention over a document written for the
+    occasion. Mirrors _run_validate_waves; unlike that verb this one really
+    does carry an exit status, so a caller reads proc.returncode too."""
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    with open(
+        os.path.join(tasks_dir, "2020-01-01-contention-tasks.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "validate-wave-contention"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc, json.loads(proc.stdout)
+
+
+def test_wave_contention_is_reported_with_the_exact_message(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1, "unlike validate-waves, an invalid verdict here exits non-zero"
+
+
+def test_disjoint_implementation_files_pass_clean(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["b.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_dependson_edge_clears_the_contention(tmp_path):
+    """The documented remedy, executed: chaining US-002 after US-001 moves it
+    to computed wave 2, even though both stories still declare the identical
+    path. The fix for a real contention is a dependsOn edge, never a file
+    split."""
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", ["US-001"], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
+    stories = [
+        _wave_story("US-001", []),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    assert "implementation" not in stories[0]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+# ---------------------------------------------------------------------------
 # normalize-waves: a brand-new verb, so these are hand-written rather than a
 # golden replay -- there is no jq implementation it ports and none to compare
 # against. The rule itself is asserted only by import (compute_waves lives in
@@ -5079,6 +5156,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-stories",
         "validate-ids",
         "validate-waves",
+        "validate-wave-contention",
         "validate-tasks",
         "validate-story-exists",
         "mark-complete",
@@ -6263,6 +6341,95 @@ def test_the_docstring_names_the_shape_it_now_tracks():
     assert "HEREDOC" in doc
     for form in ("<<'X'", '<<"X"', "<<X", "<<-X"):
         assert form in doc, form
+
+
+# ---------------------------------------------------------------------------
+# verify_unterminated: a degraded segmentation is NAMED rather than swallowed
+# (US-006). Measured at 3b871aa: an unbalanced single quote fuses a
+# three-assertion verify to two segments with nothing said, and probe_verify
+# then runs the fused blob, watches bash refuse to parse it, and publishes
+# that refusal as `discriminates: True` -- a syntax error scored as an
+# exemplary check.
+# ---------------------------------------------------------------------------
+
+_UNTERM_OK = "[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_OK_DQ = '[ 1 = 1 ] || echo "the verb\'s x"\n[ 2 = 2 ]\n[ 3 = 3 ]'
+_UNTERM_OK_CMT = "# the verb's own name\n[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_ECHO = "[ 1 = 1 ]\necho don't\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_GREP = "grep -c it's f\n[ 1 = 1 ]\n[ 2 = 2 ]"
+
+
+def test_ac2_the_already_correct_cases_are_unchanged():
+    """AC2: all three were already right at 3b871aa (3, 4, 3 segments) and
+    must stay byte-for-byte right -- a widened splitter that "fixes" the
+    defect by cutting inside a double-quoted string, or by resurrecting a
+    dropped comment as a segment, fails right here. None of the three names a
+    residual state."""
+    for text, n in ((_UNTERM_OK, 3), (_UNTERM_OK_DQ, 4), (_UNTERM_OK_CMT, 3)):
+        assert len(T.verify_segments(text)) == n, (n, text)
+        assert T.verify_unterminated(text) is None, text
+
+
+def test_ac1_the_defect_is_named():
+    """AC1: at 3b871aa these fused to 2 and 1 segments with nothing said. The
+    unbalanced single quote is now named rather than silently absorbed."""
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        assert T.verify_unterminated(text) == "single-quote", text
+
+
+def test_ac4_every_residual_state_bash_refuses_is_named():
+    """AC4: the scope is every residual state bash refuses, not the single
+    quote alone -- all six fused a 3-assertion text to 2 segments identically
+    at 3b871aa, because `top` is one condition and every term in it is a way
+    to be left open at end-of-text."""
+    siblings = [
+        ('[ 1 = 1 ]\necho "oops\n[ 2 = 2 ]', "double-quote"),
+        ("[ 1 = 1 ]\necho `date\n[ 2 = 2 ]", "backtick"),
+        ("[ 1 = 1 ]\n( echo x\n[ 2 = 2 ]", "paren"),
+        ("[ 1 = 1 ]\n{ echo x\n[ 2 = 2 ]", "brace"),
+        ("[ 1 = 1 ]\nif true; then echo x\n[ 2 = 2 ]", "compound"),
+    ]
+    for text, name in siblings:
+        assert T.verify_unterminated(text) == name, (text, name)
+
+
+def test_ac5_an_unterminated_heredoc_is_not_flagged():
+    """AC5: `bash -n` accepts an unterminated heredoc (warning only) and RUNS
+    it, where every AC4 state is a hard syntax error -- so the heredoc stays
+    on the other side of the line, exactly as the closed sibling defect
+    (known-gap 2026-09-07-US-002) needs it to."""
+    hd = "cat <<'X'\nbody line\necho after\n"
+    assert T.verify_unterminated(hd) is None, hd
+    assert len(T.verify_segments(hd)) == 1, T.verify_segments(hd)
+
+
+def test_ac3_probe_verify_invents_no_verdict_for_an_unterminated_verify(tmp_path):
+    """AC3: at 3b871aa the fused blob WAS run, bash refused to parse it (exit
+    2), and that refusal was published as `discriminates: True` -- a
+    three-assertion verify bash will not run, scored as one perfectly
+    discriminating check. Now `probe_verify` consults `verify_unterminated`
+    before its segment loop, returns exactly one entry with no verdict, and
+    runs nothing at all."""
+    where = str(tmp_path)
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        probed = T.probe_verify(text, where)
+        assert len(probed) == 1, probed
+        entry = probed[0]
+        assert entry["exit"] is None, entry
+        assert entry["discriminates"] is None, entry
+        assert entry["unterminated"] == "single-quote", entry
+        assert entry["segment"] == text.strip(), entry
+    assert all(e.get("discriminates") is not True for e in probed), probed
+
+
+def test_ac3_a_parseable_verify_keeps_every_real_verdict(tmp_path):
+    """AC3, other direction: the withholding does not leak onto a healthy
+    verify -- the parseable control still returns one entry per assertion,
+    every one of them a real (non-null) verdict."""
+    probed = T.probe_verify(_UNTERM_OK, str(tmp_path))
+    assert len(probed) == 3, probed
+    assert [e["discriminates"] for e in probed] == [False, False, False], probed
+    assert all("unterminated" not in e for e in probed), probed
 
 
 def test_a_probed_heredoc_runs_as_one_segment_instead_of_line_by_line(tmp_path):
@@ -8014,6 +8181,37 @@ def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path
         None,
         "verify-creates-excludes-miss-this-repo",
     )
+
+
+def test_a_retired_gap_reports_its_reason_and_superseder(tmp_path):
+    """The three formats the contract distinguishes: a file that declares both
+    `retired:` and `supersededBy:` reports both strings; a file that declares
+    neither reports both null; and a file that declares `supersededBy:` with
+    no `retired:` also reports both null -- a pointer to what replaced a gap
+    is not a retirement unless the reason for retiring it is there too, and
+    reporting the pointer alone would hand the reader a superseder for a gap
+    nobody marked as gone."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-01-01-a.md": (
+                "---\nfeature: fx\nretired: reproduzido falso\n"
+                "supersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+            "2026-01-02-b.md": "---\nfeature: fx\n---\nKNOWN-GAP: alegacao\n",
+            "2026-01-03-c.md": (
+                "---\nfeature: fx\nsupersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+        },
+    )
+    resolved = {
+        entry["file"]: (entry["retired"], entry["supersededBy"]) for entry in entries
+    }
+    assert resolved == {
+        "2026-01-01-a.md": ("reproduzido falso", "docs/superseder.md"),
+        "2026-01-02-b.md": (None, None),
+        "2026-01-03-c.md": (None, None),
+    }
 
 
 def _dated(created_at):

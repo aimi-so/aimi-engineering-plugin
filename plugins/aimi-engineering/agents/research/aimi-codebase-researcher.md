@@ -97,7 +97,7 @@ Migration-aware existence checks (below) are exempt from this ceiling: never rep
 4. Prioritize official documentation over inferred patterns
 5. Note any inconsistencies or areas lacking documentation
 
-**Output Contract:**
+## Output Contract
 
 Before returning results to the caller, persist full findings to a research file.
 
@@ -115,10 +115,10 @@ Before returning results to the caller, persist full findings to a research file
    mkdir -p .aimi/research
    ```
 
-4. **Write full findings** via the Write tool to:
+4. **A file must exist at** this path when you return:
    `.aimi/research/YYYY-MM-DD-<topic-slug>-<HHmmss>-codebase.md`
 
-   where `YYYY-MM-DD` is today's date and `HHmmss` is the current wall-clock time (run `date +%H%M%S` once at write time when no caller path was provided).
+   where `YYYY-MM-DD` is today's date and `HHmmss` is the current wall-clock time (run `date +%H%M%S` once at write time when no caller path was provided). Any tool that leaves the file there — the Write tool, a Bash heredoc, or anything else — satisfies this; if none is available, use `unwritten_findings:` in step 5's pointer block instead.
 
    Include frontmatter:
    ```markdown
@@ -145,9 +145,11 @@ Before returning results to the caller, persist full findings to a research file
    sections:
      - "## <h2 or h3 heading from the file>"
      - "## ..."
+   # unwritten_findings: |
+   #   <complete findings body, verbatim — present only when step 4's file does not exist>
    ```
 
-   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block.
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
 
 6. **Safety escape:** Security findings, compliance issues, or conflicts with other researchers auto-expand beyond caps — user safety overrides brevity.
 

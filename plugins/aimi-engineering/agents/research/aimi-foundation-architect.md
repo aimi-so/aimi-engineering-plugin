@@ -60,7 +60,7 @@ Specifically, when synthesizing `## CLAUDE.md Draft` and `## AGENTS.md Draft` fr
 5. Work through Decision Rules (Layering, Module Boundaries, Naming, and — when `mode` is `brownfield` — Lint and Format Config) and select the subset that applies to the resolved stack and feature shape, informed by the repo inspection in Step 2 when in brownfield mode.
 6. Draft all nine Output Contract sections in order, each as a decision plus a one-line rationale.
 7. Re-read the draft against Reviewable-Defaults Framing — convert any lingering question into a decision with a rationale, or move it to `## Open Questions` if it is a genuine unknown.
-8. Write the complete file once to `outputPath` via the Write tool.
+8. A file must exist at `outputPath` when you return — write it once, however your tools allow.
 9. Return the Return Contract pointer block. Do not inline the proposal body in the response.
 
 ## Decision Rules
@@ -175,7 +175,7 @@ When no stack has been decided anywhere in `resolvedDecisions` or `stackHints`, 
 
 ## Output Contract
 
-1. Write the complete proposal to the caller-supplied `outputPath` exactly once via the Write tool — never derive your own path or filename; the `YYYY-MM-DD-<topicSlug>-<RUN_TS>-foundation.md` convention under `.aimi/research/` is the caller's responsibility.
+1. A file must exist at the caller-supplied `outputPath`, written exactly once, when you return — never derive your own path or filename; the `YYYY-MM-DD-<topicSlug>-<RUN_TS>-foundation.md` convention under `.aimi/research/` is the caller's responsibility. Any tool that leaves the file there — the Write tool, a Bash heredoc, or anything else — satisfies this; if none is available, use `unwritten_findings:` in the Return Contract below instead.
 2. The file body must contain exactly these nine `##` sections, in this order:
    - `## Stack` — the named/inferred stack, or the single proposed default with its rationale.
    - `## Layering` — the layering scheme this proposal commits to, derived from Decision Rules.
@@ -204,9 +204,11 @@ summary:
   - <headline: stack decision + one-word rationale>
   - <headline: layering/module-boundary decision>
   - <headline: any Open Questions count, or "none">
+# unwritten_findings: |
+#   <complete proposal body, verbatim — present only when step 8's file does not exist>
 ```
 
-`summary` must contain **exactly 3** headline bullets, compressed per `plugins/aimi-engineering/AGENTS.md`. The on-disk proposal file is uncapped; only this return follows the pointer-block contract.
+`summary` must contain **exactly 3** headline bullets, compressed per `plugins/aimi-engineering/AGENTS.md`. The on-disk proposal file is uncapped; only this return follows the pointer-block contract. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
 
 ## Pitfalls
 
