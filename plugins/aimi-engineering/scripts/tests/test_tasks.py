@@ -6343,6 +6343,95 @@ def test_the_docstring_names_the_shape_it_now_tracks():
         assert form in doc, form
 
 
+# ---------------------------------------------------------------------------
+# verify_unterminated: a degraded segmentation is NAMED rather than swallowed
+# (US-006). Measured at 3b871aa: an unbalanced single quote fuses a
+# three-assertion verify to two segments with nothing said, and probe_verify
+# then runs the fused blob, watches bash refuse to parse it, and publishes
+# that refusal as `discriminates: True` -- a syntax error scored as an
+# exemplary check.
+# ---------------------------------------------------------------------------
+
+_UNTERM_OK = "[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_OK_DQ = '[ 1 = 1 ] || echo "the verb\'s x"\n[ 2 = 2 ]\n[ 3 = 3 ]'
+_UNTERM_OK_CMT = "# the verb's own name\n[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_ECHO = "[ 1 = 1 ]\necho don't\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_GREP = "grep -c it's f\n[ 1 = 1 ]\n[ 2 = 2 ]"
+
+
+def test_ac2_the_already_correct_cases_are_unchanged():
+    """AC2: all three were already right at 3b871aa (3, 4, 3 segments) and
+    must stay byte-for-byte right -- a widened splitter that "fixes" the
+    defect by cutting inside a double-quoted string, or by resurrecting a
+    dropped comment as a segment, fails right here. None of the three names a
+    residual state."""
+    for text, n in ((_UNTERM_OK, 3), (_UNTERM_OK_DQ, 4), (_UNTERM_OK_CMT, 3)):
+        assert len(T.verify_segments(text)) == n, (n, text)
+        assert T.verify_unterminated(text) is None, text
+
+
+def test_ac1_the_defect_is_named():
+    """AC1: at 3b871aa these fused to 2 and 1 segments with nothing said. The
+    unbalanced single quote is now named rather than silently absorbed."""
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        assert T.verify_unterminated(text) == "single-quote", text
+
+
+def test_ac4_every_residual_state_bash_refuses_is_named():
+    """AC4: the scope is every residual state bash refuses, not the single
+    quote alone -- all six fused a 3-assertion text to 2 segments identically
+    at 3b871aa, because `top` is one condition and every term in it is a way
+    to be left open at end-of-text."""
+    siblings = [
+        ('[ 1 = 1 ]\necho "oops\n[ 2 = 2 ]', "double-quote"),
+        ("[ 1 = 1 ]\necho `date\n[ 2 = 2 ]", "backtick"),
+        ("[ 1 = 1 ]\n( echo x\n[ 2 = 2 ]", "paren"),
+        ("[ 1 = 1 ]\n{ echo x\n[ 2 = 2 ]", "brace"),
+        ("[ 1 = 1 ]\nif true; then echo x\n[ 2 = 2 ]", "compound"),
+    ]
+    for text, name in siblings:
+        assert T.verify_unterminated(text) == name, (text, name)
+
+
+def test_ac5_an_unterminated_heredoc_is_not_flagged():
+    """AC5: `bash -n` accepts an unterminated heredoc (warning only) and RUNS
+    it, where every AC4 state is a hard syntax error -- so the heredoc stays
+    on the other side of the line, exactly as the closed sibling defect
+    (known-gap 2026-09-07-US-002) needs it to."""
+    hd = "cat <<'X'\nbody line\necho after\n"
+    assert T.verify_unterminated(hd) is None, hd
+    assert len(T.verify_segments(hd)) == 1, T.verify_segments(hd)
+
+
+def test_ac3_probe_verify_invents_no_verdict_for_an_unterminated_verify(tmp_path):
+    """AC3: at 3b871aa the fused blob WAS run, bash refused to parse it (exit
+    2), and that refusal was published as `discriminates: True` -- a
+    three-assertion verify bash will not run, scored as one perfectly
+    discriminating check. Now `probe_verify` consults `verify_unterminated`
+    before its segment loop, returns exactly one entry with no verdict, and
+    runs nothing at all."""
+    where = str(tmp_path)
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        probed = T.probe_verify(text, where)
+        assert len(probed) == 1, probed
+        entry = probed[0]
+        assert entry["exit"] is None, entry
+        assert entry["discriminates"] is None, entry
+        assert entry["unterminated"] == "single-quote", entry
+        assert entry["segment"] == text.strip(), entry
+    assert all(e.get("discriminates") is not True for e in probed), probed
+
+
+def test_ac3_a_parseable_verify_keeps_every_real_verdict(tmp_path):
+    """AC3, other direction: the withholding does not leak onto a healthy
+    verify -- the parseable control still returns one entry per assertion,
+    every one of them a real (non-null) verdict."""
+    probed = T.probe_verify(_UNTERM_OK, str(tmp_path))
+    assert len(probed) == 3, probed
+    assert [e["discriminates"] for e in probed] == [False, False, False], probed
+    assert all("unterminated" not in e for e in probed), probed
+
+
 def test_a_probed_heredoc_runs_as_one_segment_instead_of_line_by_line(tmp_path):
     """End to end, through the CLI: the shape this defect was found in -- a
     Python heredoc between two shell assertions.
