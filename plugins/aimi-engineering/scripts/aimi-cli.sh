@@ -13883,6 +13883,261 @@ $rp_entry"
 }
 
 # ============================================================================
+# research-figures: measure one research file's evidence, mechanically
+# Usage: aimi-cli.sh research-figures <path>
+# ============================================================================
+#
+# Three advisory counts over one research .md file, printed as one JSON object:
+#
+#   blocks           lines matching the anchored measure fence
+#   figures_outside  bare integers sitting OUTSIDE every measure block, with
+#                    four-digit years excluded via ^(19|20)[0-9]{2}$
+#   dead_keys        per measure block, the names its command indexes a
+#                    STRUCTURED subject by that the subject does not carry
+#
+# THE RULE ALREADY EXISTED; WHAT WAS MISSING IS THE MEASUREMENT. The three
+# research agents' Structured Findings Format has required a ```measure block
+# under every repository figure for five contract mentions, and a recursive
+# grep for the anchored fence across .aimi/ returned ZERO files. A sixth
+# mention produces the same zero, so this verb makes the absence detectable
+# instead of restating the rule.
+#
+# WHY THE THIRD COUNT EXISTS, AND WHAT IT STILL DOES NOT PROVE. `blocks`
+# proves a block is THERE; plan.md Phase 1.6's re-execution proves it
+# REPRODUCES; neither proves the command addresses the subject it names. A
+# figure produced by `x.get('output','')` over case objects carrying no
+# `output` key returned its default for every input -- 0 for ANY corpus,
+# including an empty one -- and Phase 1.6 re-executed and PASSED it twice,
+# because a wrong-but-deterministic command reproduces its own wrong output
+# forever. `dead_keys` closes that third gap and no more: none of the three
+# proves the command answers the question the prose asks. That last step is
+# human reading, and this verb does not claim it.
+#
+# `dead_keys` follows the omitted-when-empty convention `metadata.baseRef`,
+# `metadata.pluginVersion` and `metadata.prototypeDropped` already use:
+# written only when something was actually found, absent otherwise, never
+# `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
+# which is what every caller written before this third count reads.
+#
+# Nothing here is executed. The file is read and counted, never sourced, and
+# the commands inside its measure blocks are treated as text -- which is why
+# this verb needs no read-only allowlist of its own.
+#
+# THE THRESHOLD IS THE CALLER'S. This verb reports; commands/plan.md's
+# "Confirm Each Research File Landed" section owns the "blocks is 0 AND
+# figures_outside is at least 10" cut, and that 10 is an arbitrary round
+# number chosen against real data, not a constant with a reason behind it.
+
+# The indexed names one measure block's command reads a structured subject by.
+# Two shapes are extracted from a QUOTED name, which is what the caller can
+# attribute with no static analysis of the command's language:
+#
+#   .get('K') / .get("K")   python-shaped lookup with a default
+#   ['K'] / ["K"]           python-shaped subscript
+#
+# and a third from jq, whose index is not quoted:
+#
+#   .K, .K.K2               ONLY inside a quoted segment of a command that
+#                           actually invokes jq, and only where the leading dot
+#                           is NOT preceded by a word character
+#
+# That last narrowing is what keeps `commands/plan.md` and `"x.md"` file names
+# rather than keys. Nesting level is deliberately not resolved: that needs real
+# static analysis of the command's language and buys nothing, because the
+# caller's membership test is any-depth and a level-aware test could only ever
+# narrow it.
+# Usage: _research_figures_indexed_names "<command text, one or more lines>"
+_research_figures_indexed_names() {
+  local cmds="$1"
+  {
+    printf '%s\n' "$cmds" \
+      | grep -oE "\.get\(['\"][A-Za-z_][A-Za-z0-9_]*['\"]" \
+      | sed -E "s/^\.get\(['\"]//; s/['\"]$//" || true
+    printf '%s\n' "$cmds" \
+      | grep -oE "\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\]" \
+      | sed -E "s/^\[['\"]//; s/['\"]\]$//" || true
+    if printf '%s\n' "$cmds" | grep -qE '\bjq\b'; then
+      printf '%s\n' "$cmds" \
+        | grep -oE "'[^']*'|\"[^\"]*\"" \
+        | grep -oE "[^A-Za-z0-9_](\.[A-Za-z_][A-Za-z0-9_]*)+" \
+        | sed -E 's/^[^.]*//' \
+        | tr '.' '\n' || true
+    fi
+  } | grep -vE '^[[:space:]]*$' | sort -u || true
+}
+
+# One TSV record per dead key: block index, the dead name, the subjects it was
+# checked against. Prints nothing when the file carries no measure block, when
+# no block indexes anything, or when no block names a subject that parses as
+# JSON -- that last case is the INTENDED degradation: a grep or an awk over a
+# .md extracts no names against a structured subject and is never reported.
+# Usage: _research_figures_dead_keys "<research file path>"
+_research_figures_dead_keys() {
+  local file_path="$1"
+
+  # Every command a block runs, tagged with its own block's 1-based index. A
+  # block whose command carries no `$ ` prompt contributes nothing.
+  #
+  # A command may span SEVERAL lines, and that is the shape the defect this
+  # check exists for actually had: `$ python3 -c "` opens a double quote and
+  # the indexing lives on the continuation lines, so reading the `$ ` line
+  # alone finds nothing to check. Continuation lines are therefore joined until
+  # the accumulated text's DOUBLE-quote count is even again.
+  #
+  # Parity is tracked on `"` alone, deliberately. A `'` inside a double-quoted
+  # command (`d['cases']`, `print(n,'/',t)`) is balanced anyway, while requiring
+  # `'` parity too would make `grep -n "don't" f` look unterminated and start
+  # swallowing the block's OUTPUT lines into the command. The cost is a
+  # `'`-quoted multi-line command, which is read as its first line only -- a
+  # silent miss in an advisory count, never a wrong verdict, and an awk or sed
+  # body indexes no JSON subject anyway. An accumulation still unbalanced when
+  # the closing fence arrives is DROPPED rather than reported on: no verdict
+  # beats one computed over text that may be half output.
+  local block_cmds
+  block_cmds=$(awk '
+    function dq(s,   n, i) {
+      n = 0
+      for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == "\"") n++
+      return n
+    }
+    /^```measure[[:space:]]*$/ { inblock = 1; idx++; acc = ""; open = 0; next }
+    inblock && /^```[[:space:]]*$/ { inblock = 0; open = 0; acc = ""; next }
+    inblock && open {
+      acc = acc " " $0
+      if (dq(acc) % 2 == 0) { print idx "\t" acc; acc = ""; open = 0 }
+      next
+    }
+    inblock && /^\$ / {
+      acc = substr($0, 3)
+      if (dq(acc) % 2 == 0) { print idx "\t" acc; acc = "" } else { open = 1 }
+      next
+    }
+    { next }
+  ' "$file_path")
+  [ -n "$block_cmds" ] || return 0
+
+  local indices idx cmds names subjects subject resolved
+  local keys subject_keys checked name
+  indices=$(printf '%s\n' "$block_cmds" | cut -f1 | sort -n -u)
+
+  for idx in $indices; do
+    cmds=$(printf '%s\n' "$block_cmds" \
+      | awk -F'\t' -v i="$idx" '$1 == i { print substr($0, index($0, "\t") + 1) }')
+
+    names=$(_research_figures_indexed_names "$cmds")
+    [ -n "$names" ] || continue
+
+    # Subjects are the `.json`-suffixed tokens the command names. Each is
+    # resolved against the cwd (already PROJECT_ROOT by the time a verb runs)
+    # and then against PROJECT_ROOT explicitly, confined with the silent
+    # predicate rather than the fatal wrapper -- a path arriving from a FILE'S
+    # CONTENTS must degrade to "not a subject", never abort the count -- and
+    # kept only when jq parses it.
+    subjects=$(printf '%s\n' "$cmds" | grep -oE '[A-Za-z0-9_./-]+\.json' | sort -u || true)
+    keys=""
+    checked=""
+    for subject in $subjects; do
+      resolved="$subject"
+      if [ ! -f "$resolved" ] && [ -f "$PROJECT_ROOT/$subject" ]; then
+        resolved="$PROJECT_ROOT/$subject"
+      fi
+      [ -f "$resolved" ] || continue
+      path_within_project "$resolved" || continue
+      subject_keys=$(jq -r '[paths | .[-1] | select(type == "string")] | unique | .[]' \
+        "$resolved" 2>/dev/null || true)
+      [ -n "$subject_keys" ] || continue
+      keys="$keys
+$subject_keys"
+      if [ -z "$checked" ]; then checked="$subject"; else checked="$checked,$subject"; fi
+    done
+    [ -n "$checked" ] || continue
+
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if ! printf '%s\n' "$keys" | grep -qxF -- "$name"; then
+        printf '%s\t%s\t%s\n' "$idx" "$name" "$checked"
+      fi
+    done <<< "$names"
+  done
+}
+
+cmd_research_figures() {
+  local file_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh research-figures <path>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -n "$file_path" ]; then
+          echo "Error: research-figures: one path at a time (unexpected: $1)" >&2
+          exit 1
+        fi
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ]; then
+    echo "Usage: aimi-cli.sh research-figures <path>" >&2
+    exit 1
+  fi
+
+  # Confinement FIRST, before this path is stat'd, opened or handed to awk.
+  # It arrived as a CLI ARGUMENT, which makes validate_path_in_project the sole
+  # authority over it -- no second check is written beside it. The subject
+  # paths inside the file's own measure blocks are a different category and are
+  # confined by _research_figures_dead_keys with the silent predicate.
+  validate_path_in_project "$file_path"
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: research-figures: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # grep -c prints 0 AND exits 1 on a zero count. `|| echo 0` would append a
+  # SECOND line and the next numeric test would die on "0\n0"; `|| true` keeps
+  # the single line grep has already printed.
+  local blocks
+  blocks=$(grep -cE '^```measure[[:space:]]*$' "$file_path" || true)
+
+  # The partition is an in/out state machine: enter on the anchored measure
+  # fence, leave on a bare closing fence, print only the lines OUTSIDE. Then
+  # word-boundary integers, then the year exclusion, then a count. `\b` is what
+  # keeps `Big130` and `v1` out -- a digit run glued to a word is not a figure.
+  local figures
+  figures=$(awk '
+    /^```measure[[:space:]]*$/ { inblock = 1; next }
+    inblock && /^```[[:space:]]*$/ { inblock = 0; next }
+    !inblock { print }
+  ' "$file_path" \
+    | grep -oE '\b[0-9]+\b' \
+    | grep -vE '^(19|20)[0-9]{2}$' \
+    | wc -l || true)
+  figures=$(printf '%s' "$figures" | tr -d '[:space:]')
+
+  local dead_records dead_json
+  dead_records=$(_research_figures_dead_keys "$file_path")
+  dead_json=$(printf '%s' "$dead_records" \
+    | jq -R -s 'split("\n")
+        | map(select(length > 0)
+        | split("\t")
+        | {block: (.[0] | tonumber), key: .[1], subject: .[2]})')
+
+  jq -n \
+    --argjson blocks "${blocks:-0}" \
+    --argjson figures "${figures:-0}" \
+    --argjson dead "$dead_json" \
+    'if ($dead | length) > 0
+       then {blocks: $blocks, figures_outside: $figures, dead_keys: $dead}
+       else {blocks: $blocks, figures_outside: $figures}
+     end'
+}
+
+# ============================================================================
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
@@ -16432,6 +16687,25 @@ COMMANDS:
                                 Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
                               Flag accepted in either position relative to the path arg.
+    research-figures <path>
+                              Advisory evidence count over one research .md file, as JSON:
+                              blocks (lines matching the anchored ```measure fence),
+                              figures_outside (bare word-boundary integers OUTSIDE every
+                              measure block, four-digit years excluded via
+                              ^(19|20)[0-9]{2}$), and dead_keys -- per block, the names its
+                              command indexes a structured subject by that the subject does
+                              not carry. dead_keys is omitted entirely when empty (the
+                              baseRef/prototypeDropped convention), never [], so a clean
+                              file prints exactly blocks and figures_outside.
+                              A block whose subject is not structured (a grep or awk over a
+                              .md) contributes no names and is never reported.
+                              Reports only: nothing is executed, no threshold is applied and
+                              the exit status never depends on the counts. The caller owns
+                              the cut -- see commands/plan.md's Confirm Each Research File
+                              Landed section.
+                              Path confinement mirrors research-lookup (validate_path_in_project
+                              on the ARGUMENT, before the file is opened); missing file or
+                              missing <path> arg -> error/usage on stderr, exit 1.
     extract-sections <file> --anchors "<titles>"
                               Print only the requested '## '/'### ' sections of a
                               research .md file, concatenated verbatim in request order.
@@ -17198,6 +17472,7 @@ main() {
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
     research-lookup)   shift; cmd_research_lookup "$@" ;;
+    research-figures)  shift; cmd_research_figures "$@" ;;
     research-gc)       cmd_research_gc ;;
     extract-sections)  shift; cmd_extract_sections "$@" ;;
     extract-prototype-sections) shift; cmd_extract_prototype_sections "$@" ;;

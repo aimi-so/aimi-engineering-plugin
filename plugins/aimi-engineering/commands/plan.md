@@ -1224,6 +1224,32 @@ fi
 
 **Accumulate `researchWritten`.** Keep a working-memory list named `researchWritten`. When the block above prints nothing, append that researcher's `outputPath` to `researchWritten` — the file landed and is above the floor. When the block prints its warning line, append nothing: that path is dropped here and must not reach any downstream list. `researchWritten` is the list both downstream research lists read — the `allResearchPaths` union computed before the research-conflict gate, and Phase 4's fresh-written source for `metadata.researchPaths` — so both key on the file being on disk rather than on "the agent returned".
 
+**Then measure the evidence, for each path that reached `researchWritten`.** The 512-byte floor above proves a file LANDED; it says nothing about whether the findings in it carry any evidence at all. The three research agents' Structured Findings Format has required a ` ```measure ` block under every figure about this repository for five contract mentions, and a recursive grep for that fence across `.aimi/` returned ZERO files — the contract had never once been honoured, so a sixth mention produces the same zero. This measures the absence instead of restating the rule. It runs only for a path already in `researchWritten` (a clean landing, or a `recovered:` one) and never for a file this section just dropped: a stub is not worth measuring.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+RESEARCH_OUT="[the outputPath this researcher was handed, already appended to researchWritten]"
+FIGURES_JSON=$($AIMI_CLI research-figures "$RESEARCH_OUT" 2>/dev/null || printf '')
+MEASURE_BLOCKS=$(printf '%s' "$FIGURES_JSON" | jq -r '.blocks // empty' 2>/dev/null)
+BARE_FIGURES=$(printf '%s' "$FIGURES_JSON" | jq -r '.figures_outside // empty' 2>/dev/null)
+DEAD_KEYS=$(printf '%s' "$FIGURES_JSON" | jq -r '(.dead_keys // []) | map("block \(.block) reads \(.key) against \(.subject)") | join("; ")' 2>/dev/null)
+if [ "${MEASURE_BLOCKS:-1}" = 0 ] && [ "${BARE_FIGURES:-0}" -ge 10 ]; then
+  echo "warning: research file carries no measure block - blocks=${MEASURE_BLOCKS}, figures_outside=${BARE_FIGURES}, so every figure in it is UNVERIFIED: $RESEARCH_OUT"
+fi
+if [ -n "${DEAD_KEYS:-}" ]; then
+  echo "warning: a measure block indexes a name its own subject does not carry, so its figure is independent of the corpus - ${DEAD_KEYS}: $RESEARCH_OUT"
+fi
+```
+
+**`${MEASURE_BLOCKS:-1}` defaults to a NON-zero on purpose.** A verb that could not answer — an older CLI that has no `research-figures`, a host with no `python3` behind the CLI, an unreadable path — leaves the variable empty, and a default of `0` would then print the warning for every file on such a host. Defaulting to 1 makes a CLI that failed print nothing at all, which is the honest answer: nothing was measured, so nothing is claimed.
+
+**The threshold 10 is arbitrary, and it is a knob rather than a constant.** Nothing in the codebase, in the contract or in any measurement implies 10 over 8 or 15: the two research files measured on 2026-09-10 scored 130 and 196 bare figures against 0 blocks, and a synthetic violator scored 12, so 10 is a round number with margin on both sides. Retune it once real data arrives. It is also a FLOOR and not a ratio — the same 12 figures accompanied by ONE token block pass — and that is deliberate rather than an oversight: a ratio needs a calibration set of files that actually carry blocks, and this floor is what generates it.
+
+**The `dead_keys` line answers a different question, and the three together still leave a fourth open.** `blocks` proves a block EXISTS. Phase 1.6's re-execution below proves it REPRODUCES. `dead_keys` proves its subject is ADDRESSED — it is what catches a figure produced by `x.get('output','')` over case objects that carry no `output` key, which returned its default for every input and was therefore independent of the corpus, and which re-execution had PASSED twice, because a wrong-but-deterministic command reproduces its own wrong output forever. None of the three proves the command answers the question the prose asks. That last step is human reading, and nothing here claims it.
+
+**The measure-block warning never blocks**, and neither does the `dead_keys` one. Both are advisory in the same way: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status, and no path is dropped from `researchWritten` by either. They add at most two more lines per path to the at-most-two-lines-and-always-continues promise below, which they extend rather than replace. Their scope is this section's own — every researcher Task this run actually spawns, at both spawn sites (Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below) — and never a path taken from `reusedResearch`, for which no Task was spawned this run and so nothing was promised to land.
+
 **Recover before you drop.** This branch fires only when the block above printed its warning — the file did not land. Look at the same Task return's pointer block for an `unwritten_findings:` key before giving up on that researcher.
 
 - **`unwritten_findings` present** — the agent still holds the findings it could not write. Persist that key's value verbatim, with the `Write` tool, to the `outputPath` this command handed that researcher — never to the path the return names, since `research_file` in the pointer block is agent-authored text and a return that could redirect a write could write anywhere. A bash heredoc is the wrong tool for this: the payload is agent-returned prose that may carry unbalanced quotes, backticks and `$(...)`, and these fences are executed literally, one per isolated shell, under zsh or bash — interpolating the payload into one would be exactly the quoting hazard this convention exists to avoid.

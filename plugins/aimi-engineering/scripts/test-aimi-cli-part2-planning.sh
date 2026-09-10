@@ -20,6 +20,7 @@ set -uo pipefail
 #   - Research Lookup Tests
 #   - Extract Sections Tests
 #   - Measure Command File Tests
+#   - Research Figures Tests
 #   - Research GC Tests
 #   - Interactivity Mode Detection Tests
 #   - resolve-models Tests
@@ -1915,6 +1916,206 @@ MCFEOF
   assert_contains "Usage:" "$stderr_out" "measure-command-file: no path argument prints usage"
 
   rm -rf "$mcf_dir"
+}
+
+# research-figures: the mechanical floor under a research file's evidence.
+#
+# The detector is asserted in BOTH directions, and that is the point of the
+# six-row table rather than a decoration on it. A detector that only ever
+# fires is not validated: the three clean rows carry their own failure
+# messages naming what a false positive would mean, because a floor that
+# flags a narrative file is a floor nobody will leave switched on.
+#
+# Every row asserts BOTH printed counts and the verdict plan.md computes from
+# them -- the verdict is derived from the verb's OWN output here rather than
+# from the row's expected counts, so it cannot pass tautologically.
+#
+# The year exclusion has a row of its own because it is the one rule that
+# makes the count about FIGURES rather than about digits: a file dated 1998,
+# 2026, 2019 and 1999 carries four four-digit numerals and zero figures.
+#
+# dead_keys is asserted two-sided over a structured subject, and TWICE over
+# the shape that produced the requirement: the defect lived in a MULTI-LINE
+# `python3 -c "` command, whose indexing sits on continuation lines the `$ `
+# prompt line does not carry. A checker that reads the prompt line alone
+# finds nothing to check and reports clean, which is the false negative the
+# multi-line row exists to catch.
+#
+# The fixture is its own mktemp -d with its own .aimi/ inside, pushd'd into --
+# test_measure_command_file's pattern, and the reason is the same: the
+# fixture's own .aimi/ is what gives the CLI a PROJECT_ROOT to accept the
+# fixture path against. Subject paths inside the measure blocks are written
+# RELATIVE for the same reason, which also exercises the PROJECT_ROOT-relative
+# resolution the verb applies to a path it read out of a file.
+test_research_figures() {
+  echo ""
+  echo "=== Testing research-figures subcommand ==="
+
+  local rf_dir
+  rf_dir=$(mktemp -d)
+  mkdir -p "$rf_dir/.aimi"
+
+  { echo '# Big130'; echo; seq 1 130 | tr '\n' ' '; echo; } > "$rf_dir/big130.md"
+  { echo '# Big196'; echo; seq 1 196 | tr '\n' ' '; echo; } > "$rf_dir/big196.md"
+  printf '# Violator\n\nFound 3 callers, 7 sites, 12 refs, 45 lines, 88 bytes, 91 hits, 5 files, 6 dirs, 2 modules, 4 verbs, 9 tests, 11 gaps.\nWritten in 2026 and 1998.\n' > "$rf_dir/violator.md"
+  printf '# Narrative\n\nThe guard exists and the rule is prose. Nothing here is counted.\n' > "$rf_dir/narrative.md"
+  printf '# Years\n\nDated 1998, 2026, 2019 and 1999 - no figures at all.\n' > "$rf_dir/years.md"
+  cat > "$rf_dir/honest.md" << 'RFHONESTEOF'
+# Honest
+
+```measure
+$ grep -c foo bar
+7
+```
+
+The verb answers in 2 places, and the count came back 9.
+
+```measure
+$ wc -l baz
+42 baz
+```
+RFHONESTEOF
+
+  local row rf_name rf_want_blocks rf_want_figs rf_want_verdict
+  local rf_out rf_rc rf_blocks rf_figs rf_verdict
+  for row in "big130 0 130 flag" "big196 0 196 flag" "violator 0 12 flag" \
+             "narrative 0 0 clean" "years 0 0 clean" "honest 2 2 clean"; do
+    # shellcheck disable=SC2086
+    set -- $row
+    rf_name="$1"; rf_want_blocks="$2"; rf_want_figs="$3"; rf_want_verdict="$4"
+
+    pushd "$rf_dir" >/dev/null
+    rf_out=$("$CLI" research-figures "$rf_dir/$rf_name.md" 2>/dev/null) && rf_rc=0 || rf_rc=$?
+    popd >/dev/null
+
+    assert_exit_code "0" "$rf_rc" "research-figures: $rf_name.md is measured, exit 0"
+    rf_blocks=$(printf '%s' "$rf_out" | jq -r '.blocks')
+    rf_figs=$(printf '%s' "$rf_out" | jq -r '.figures_outside')
+    assert_eq "$rf_want_blocks" "$rf_blocks" \
+      "research-figures: $rf_name.md reports $rf_want_blocks measure blocks"
+    assert_eq "$rf_want_figs" "$rf_figs" \
+      "research-figures: $rf_name.md reports $rf_want_figs figures outside them"
+
+    # The cut commands/plan.md applies, computed from the verb's own output.
+    if [ "${rf_blocks:-1}" = 0 ] && [ "${rf_figs:-0}" -ge 10 ]; then
+      rf_verdict=flag
+    else
+      rf_verdict=clean
+    fi
+    assert_eq "$rf_want_verdict" "$rf_verdict" \
+      "research-figures: $rf_name.md gate verdict is $rf_want_verdict (a detector that only fires is not validated)"
+  done
+
+  # A file with nothing dead prints exactly the two counts: dead_keys follows
+  # the omitted-when-empty convention, so every caller written before that
+  # third key reads the same object it always did.
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/honest.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "blocks,figures_outside" "$(printf '%s' "$rf_out" | jq -r '[keys[]] | join(",")')" \
+    "research-figures: a clean file prints exactly blocks and figures_outside"
+
+  # --- dead_keys, two-sided over a structured subject ---
+  printf '{"cases": [{"args": ["a"], "files": {"x": "metadata"}, "stdout": "s"}]}\n' > "$rf_dir/subject.json"
+  cat > "$rf_dir/dead.md" << 'RFDEADEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "import json; d=json.load(open('subject.json')); print(len(d['cases']), sum(1 for x in d['cases'] if x.get('output')))"
+1 0
+```
+RFDEADEOF
+  cat > "$rf_dir/live.md" << 'RFLIVEEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "import json; d=json.load(open('subject.json')); print(len(d['cases']), sum(1 for x in d['cases'] if x.get('files')))"
+1 1
+```
+RFLIVEEOF
+  cat > "$rf_dir/multiline-dead.md" << 'RFMLEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "
+import json
+d=json.load(open('subject.json'))
+c=d['cases']
+print(len(c), sum(1 for x in c if x.get('output','')))"
+1 0
+```
+RFMLEOF
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/dead.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a name the subject does not carry is reported once"
+  assert_eq "output" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].key')" \
+    "research-figures: dead_keys names the dead key itself"
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].block')" \
+    "research-figures: dead_keys names the block the dead key was read in"
+  assert_contains "subject.json" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].subject')" \
+    "research-figures: dead_keys names the subject it was checked against"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/live.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "0" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a name the subject DOES carry is never reported dead"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/multiline-dead.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a MULTI-LINE command's indexing is read too, not just its \$ prompt line"
+  assert_eq "output" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].key')" \
+    "research-figures: the multi-line block names the same dead key"
+
+  # A block whose subject is not structured extracts no names against a JSON
+  # subject and is therefore never reported -- the intended degradation.
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/honest.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "0" "$(printf '%s' "$rf_out" | jq -r '(.dead_keys // []) | length')" \
+    "research-figures: a grep over a plain file names no dead key"
+
+  # --- refusals: the same shape every path-taking verb has ---
+  local rf_err
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures "$rf_dir/does-not-exist.md" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: a missing file exits non-zero"
+  assert_contains "File not found" "$rf_err" "research-figures: a missing file says so on stderr"
+
+  local rf_outside
+  rf_outside="$(dirname "$rf_dir")/rf-outside-$$.md"
+  printf '# outside\n' > "$rf_outside"
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures "$rf_outside" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  rm -f "$rf_outside"
+  assert_exit_code "1" "$rf_rc" "research-figures: a path outside the project root is refused"
+  assert_contains "escapes project root" "$rf_err" \
+    "research-figures: the refusal names the confinement rule"
+
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: no path argument exits non-zero"
+  assert_contains "Usage:" "$rf_err" "research-figures: no path argument prints usage"
+
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures --no-such-flag "$rf_dir/narrative.md" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: an unknown flag exits non-zero"
+  assert_contains "Usage:" "$rf_err" "research-figures: an unknown flag prints usage"
+
+  # The verb is reachable by name, and help says it exists.
+  assert_contains "research-figures" "$("$CLI" help 2>/dev/null)" \
+    "research-figures: the usage text names the verb"
+
+  rm -rf "$rf_dir"
 }
 
 # The archivable predicate and research-gc's referenced-set walk, whose jq left
@@ -8304,6 +8505,11 @@ main() {
   echo ""
   echo "--- Measure Command File Tests ---"
   test_measure_command_file
+
+  # research-figures tests — own isolated temp dir, own .aimi/ root
+  echo ""
+  echo "--- Research Figures Tests ---"
+  test_research_figures
 
   # Research-gc tests — each creates its own isolated temp dir
   echo ""
