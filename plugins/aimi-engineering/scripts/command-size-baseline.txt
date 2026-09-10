@@ -65,5 +65,5 @@ deepen.md	18029
 skills/story-executor/SKILL.md	60238
 skills/task-planner/SKILL.md	23042
 
-agents/research/aimi-foundation-architect.md	20651
+agents/research/aimi-foundation-architect.md	21092
 agents/workflow/aimi-story-expander.md	38925
