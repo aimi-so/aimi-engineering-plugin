@@ -1157,7 +1157,29 @@ fi
 
 **Accumulate `researchWritten`.** Keep a working-memory list named `researchWritten`. When the block above prints nothing, append that researcher's `outputPath` to `researchWritten` — the file landed and is above the floor. When the block prints its warning line, append nothing: that path is dropped here and must not reach any downstream list. `researchWritten` is the list both downstream research lists read — the `allResearchPaths` union computed before the research-conflict gate, and Phase 4's fresh-written source for `metadata.researchPaths` — so both key on the file being on disk rather than on "the agent returned".
 
-**The check never blocks.** It emits at most one line per failing path and always continues: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status. This extends the `If any spawned agent fails, proceed with available results.` promise directly above rather than replacing it — an agent that fails loudly and an agent that returns without writing now leave the run in the same, visible state. A run whose files all land prints nothing new at all.
+**Recover before you drop.** This branch fires only when the block above printed its warning — the file did not land. Look at the same Task return's pointer block for an `unwritten_findings:` key before giving up on that researcher.
+
+- **`unwritten_findings` present** — the agent still holds the findings it could not write. Persist that key's value verbatim, with the `Write` tool, to the `outputPath` this command handed that researcher — never to the path the return names, since `research_file` in the pointer block is agent-authored text and a return that could redirect a write could write anywhere. A bash heredoc is the wrong tool for this: the payload is agent-returned prose that may carry unbalanced quotes, backticks and `$(...)`, and these fences are executed literally, one per isolated shell, under zsh or bash — interpolating the payload into one would be exactly the quoting hazard this convention exists to avoid.
+- **`unwritten_findings` absent** — no file and no payload offered. There is nothing left to recover: report the drop with its own distinguishable line and move on, inventing nothing.
+
+Neither branch is a claim the return itself makes. The return never asserts success — this whole section measures the disk, and that measurement is already the status field, which is why the pointer block carries no separate success key of its own. A well-formed return with no `unwritten_findings` key looks identical in both cases above — file landed, or nothing to recover — and the disk check is what separates them.
+
+Once the payload is written, confirm it landed the same way the predicate above did:
+
+```bash
+RESEARCH_OUT="[the outputPath this researcher was handed]"
+RESEARCH_BYTES=0
+[ -f "$RESEARCH_OUT" ] && RESEARCH_BYTES=$(wc -c < "$RESEARCH_OUT" | tr -d '[:space:]')
+if [ "${RESEARCH_BYTES:-0}" -ge 512 ]; then
+  echo "recovered: research payload persisted from the Task return (${RESEARCH_BYTES} bytes): $RESEARCH_OUT"
+else
+  echo "warning: recovered payload still below the 512-byte floor (${RESEARCH_BYTES} bytes) - dropping: $RESEARCH_OUT"
+fi
+```
+
+On the `recovered:` line, append the path to `researchWritten` exactly as the predicate above does on a clean landing. On the `warning:` line, append nothing — a recovered payload that is itself under the floor is still dropped. This recovery only survives an untruncated return: the payload travels inside the Task return itself, and GitHub issue #153 records that a return was truncated twice in the very run that motivated this recovery — 2 of 8 sections never arrived, and a follow-up SendMessage carrying the missing findings was truncated too. Detecting a truncated return is issue #153 direction 3 and is deliberately out of scope here.
+
+**The check never blocks.** It emits at most two lines per failing path — the original drop warning above, plus one branch-specific line reporting the recovery attempt or the missing payload — and always continues: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status. This extends the `If any spawned agent fails, proceed with available results.` promise directly above rather than replacing it — an agent that fails loudly and an agent that returns without writing now leave the run in the same, visible state. A run whose files all land prints nothing new at all.
 
 **Scope — every researcher Task this run actually spawns.** The check is not conditional on `ROADMAP_MODE`, on `researchDepth`, or on the host: it applies in flat mode and in phase mode alike, and to both spawn sites — Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below.
 
