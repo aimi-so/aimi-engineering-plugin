@@ -5223,6 +5223,38 @@ def verify_segments(text):
     handed to `eval` to be split; the quoting state is tracked character by
     character, which is the only way a separator inside a quoted string can be
     told from one between two commands without running the string first.
+
+    A STATE LEFT UNTERMINATED AT END-OF-TEXT -- an unbalanced `'`, `"`,
+    backtick, `(`, `{` or compound (`if`/`for`/`while`/`case`/...) -- makes
+    `top` false for the REST of the text, so every `;`, newline, `&&` and
+    `||` after the point it opened is absorbed into the text still being
+    scanned rather than treated as a separator. This function still returns
+    whatever that fuses into, unchanged, because it answers "what are the
+    segments" and a fused blob is still segments; `verify_unterminated`
+    below answers the other question -- was this text a well-formed script at
+    all -- and `_probe_verify_segments` is the caller that acts on it.
+    """
+    return _verify_scan(text)[0]
+
+
+def _verify_scan(text):
+    """The body `verify_segments` used to be, returning `(segments, residual)`
+    instead of `segments` alone. `residual` is the name of whichever quoting
+    or grouping state is still open when the scan reaches end-of-text, or
+    `None` when the text closed everything it opened -- see
+    `verify_unterminated`, the public wrapper around the second half of this
+    pair.
+
+    DEFINED AFTER `verify_segments` ON PURPOSE, not before it despite being
+    the callee: `test_nothing_in_the_decomposition_reaches_eval` slices the
+    module's source between the `verify_segments` definition and the
+    `op_verify_probe` one (found by searching for each one's own `"def "`
+    prefix) and asserts no `eval` appears in that slice. Hoisting this
+    function above `verify_segments` would move the scanner body out of the
+    slice the guard reads, shrinking its coverage to nothing while leaving
+    the guard itself green. Keeping the leading-underscore helper below its
+    public wrapper is the file's exception to its own habit of defining
+    helpers first, and it exists for that one reason.
     """
     segments = []
     buf = []
@@ -5405,7 +5437,70 @@ def verify_segments(text):
         i += 1
 
     flush()
-    return segments
+
+    # RESIDUAL, computed once after the final flush, from the states this
+    # scan already tracks -- nothing new is measured here, only read back.
+    # The order below is a REPORTING choice, not a claim about nesting: a
+    # single quote wins over every other state, because while `quote == "'"`
+    # bash is not looking at `(`, `{` or a keyword at all -- literally
+    # nothing inside single quotes is special, so nothing else could have
+    # opened after it in a text bash would actually read. `heredocs` is
+    # deliberately NOT consulted here: `bash -n` accepts an unterminated
+    # heredoc (with a warning) and RUNS it, where every other state named
+    # below is a hard syntax error bash refuses outright -- see
+    # `verify_unterminated` for the measurement that draws that line.
+    if quote == "'":
+        residual = "single-quote"
+    elif quote == '"':
+        residual = "double-quote"
+    elif backtick:
+        residual = "backtick"
+    elif parens:
+        residual = "paren"
+    elif braces:
+        residual = "brace"
+    elif keywords:
+        residual = "compound"
+    else:
+        residual = None
+
+    return segments, residual
+
+
+def verify_unterminated(text):
+    """The name of the quoting or grouping state still open when `text` ends,
+    or `None` when everything `text` opened was also closed.
+
+    THE SIX STATES THIS NAMES ARE EVERY WAY `_verify_scan`'s `top` test can be
+    left permanently false: an unbalanced `'` (`single-quote`), `"`
+    (`double-quote`), backtick (`backtick`), an unclosed `(` or `$(` (`paren`),
+    an unclosed `{ ... }` group (`brace`), or an unclosed compound command --
+    `if`, `for`, `while`, `until`, `case`, `select` without its matching `fi`/
+    `done`/`esac` (`compound`). Once any one of them opens and never closes,
+    every `;`, newline, `&&` and `||` after that point stops separating
+    anything, and `verify_segments` silently fuses the rest of the text into
+    the segment that was open when it happened -- three assertions can vanish
+    behind one invented one this way, and the invented one still gets a
+    verdict from `probe_verify` unless this function is consulted first.
+
+    AN UNTERMINATED HEREDOC IS DELIBERATELY EXCLUDED, on a measured rather
+    than a stylistic line: `bash -n` refuses the whole file for all six states
+    named above (`syntax error: unexpected end of file` or the equivalent),
+    and ACCEPTS an unterminated heredoc at exit 0, with only a warning,
+    running it. So "would bash refuse to parse this script" is the line drawn
+    here, and it is a measured one: a heredoc falls on the side that runs.
+    `verify_segments`'s own docstring already documents taking an
+    unterminated heredoc body whole as matching bash, and the closed sibling
+    defect at `.aimi/known-gaps/2026-09-07-US-002-heredoc-citado-verdicto-retido.md`
+    depends on that staying true -- re-flagging a heredoc here would undo it.
+
+    NO POSITION IS REPORTED, only the state's name. A correct line or column
+    for a nested `(`/`{`/compound would need a stack of opening offsets, which
+    this report does not carry -- the caller already has the full text in
+    `probe_verify`'s `segment` field, and a name is enough to know what to
+    look for in it.
+    """
+    return _verify_scan(text)[1]
 
 
 def verify_words(segment):
@@ -5911,6 +6006,22 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     the snapshot exists to prevent -- and would do it at the request of someone
     who only meant to save time.
 
+    A THIRD WAY TO NOT RUN A SEGMENT IS NEITHER DELIBERATE NOR ACCIDENTAL, IT
+    IS STRUCTURAL: `text` itself can leave a quote, a backtick or a grouping
+    UNTERMINATED at end-of-text, which means bash would refuse to parse it as
+    a script at all (`verify_unterminated` names the measurement). That is
+    checked before any segment runs, and on a hit this whole function returns
+    ONE entry for the whole text -- `discriminates: None`, carrying
+    `unterminated` instead of `skipped` or `timedOut` -- rather than running
+    whatever `verify_segments` fused the remaining text into. The fused blob
+    IS runnable bash-wise in the narrow sense that `subprocess.run` will start
+    it, and it fails -- but that failure is bash refusing to parse a script
+    that was never well-formed, not a verdict about any assertion the story's
+    verify actually names, and publishing it as one is the exact
+    "already passes before the work" reading this whole function exists to
+    prevent, pointed the other, more dangerous direction: a syntax error
+    dressed up as an exemplary discriminating check.
+
     THIS IS A MITIGATION AND NOT A CURE, and saying so is part of the fix.
     `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` records that
     probing a verify which ends in a suite costs that suite's whole run time
@@ -5950,6 +6061,24 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     """`probe_verify`'s loop, split out so the marker above owns one try/finally
     rather than wrapping a hundred lines of body. See that function's docstring
     for every rule this implements; nothing is decided here."""
+    # THE UNTERMINATED CHECK RUNS FIRST -- before `re.compile`, before
+    # `tempfile.mkstemp`, before the loop below ever starts. `text` left a
+    # quote or a grouping open at end-of-text is not a script with weak
+    # assertions in it; it is not a script bash will parse at all (see
+    # `verify_unterminated`'s own docstring for the `bash -n` measurement
+    # this is drawn on), so nothing here is going to run, and no scratch
+    # file is created for a run that never happens.
+    unterminated = verify_unterminated(text)
+    if unterminated is not None:
+        return [
+            {
+                "segment": text.strip(),
+                "exit": None,
+                "discriminates": None,
+                "unterminated": unterminated,
+            }
+        ]
+
     results = []
     # Compiled once for the whole run rather than once per segment. A pattern
     # that does not compile raises HERE -- inside `probe_verify`'s
