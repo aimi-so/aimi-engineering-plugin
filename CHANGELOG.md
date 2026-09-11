@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.138.0] - 2026-09-10
+
+### Added
+- `research-figures <path>`: prints `blocks`, `figures_outside` and `dead_keys` for a research file. The ` ```measure ` contract had required a block under every figure about this repository for five contract mentions, and a recursive grep for that anchored fence across `.aimi/` returned zero files — it had never once been honoured, so a sixth mention would have produced the same zero. `dead_keys` names, per block, the keys a command indexes a structured subject by that the subject does not carry: the gap that let a figure computed by `x.get('output','')` over case objects with no `output` key return its default for every input — 0 for any corpus, including an empty one — while `plan.md` Phase 1.6 re-executed it and passed it twice, because a wrong-but-deterministic command reproduces its own wrong output forever. Continuation lines are read, not just the `$ ` prompt line, since that defect lived inside a multi-line `python3 -c`. Omitted when empty, so a clean file prints exactly the two counts. Called from `Confirm Each Research File Landed` after the 512-byte floor; it never blocks and changes no exit status.
+- `story-merge --feature <slug> --phase <id>`: derives `metadata.roadmapPath`, `metadata.phase` (`{id, dir}`, `dir` taken verbatim off the selected phase's roadmap entry), `metadata.baseRef` and `metadata.pluginVersion` for a phase-scoped merge. Refuses half a pair, and refuses the pair together with `--split full-stack` — a split run resolves `branchName` and `baseRef` per repository and cannot answer them for N repositories at once.
+
+### Fixed
+- `/aimi:plan` distinguishes an invalid `--phase` shape from a phase that is absent from the roadmap. The two outcomes shared one message, so a typo and a phase not yet authored were indistinguishable to the reader.
+- The ABSENT phase outcome is an offer to author that phase rather than a stop.
+- Phase 4 verifies the four fields `story-merge` derives instead of overwriting them. The unconditional sentence telling the orchestrator to overwrite every metadata field is retired: on the flagged path it discarded four values the merge had already validated, and it re-derived `phase.dir` — the one field story-merge takes verbatim precisely because re-deriving it turns `phase-1.1-beta` into a directory that does not exist. `branchName` stays fully authored, since its prefix is `metadata.type`, decided inside Phase 4 and therefore after the merge call.
+- Phase 3e passes `--feature` and `--phase`, so the two flags above have a caller. Measured before the fix: `story-merge` is invoked in exactly one place in the tree, and that fence named neither flag — the four derived fields stayed absent on every real run and Phase 4's prose described a path nobody took. Both conditionals pass the raw `SELECTED_PHASE_ID`, never the dot-slugified form: the raw id names the phase file on disk and matches `roadmap.json`'s numeric id, and only branch names slugify the dot.
+
 ## [1.137.0] - 2026-09-10
 
 ### Added
