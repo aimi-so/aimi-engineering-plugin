@@ -1053,6 +1053,119 @@ def group_key(value):
     return norm_project(value)
 
 
+# ---------------------------------------------------------------------------
+# The four metadata fields a --feature/--phase merge already knows
+# ---------------------------------------------------------------------------
+
+
+def _jq_number(value):
+    """Collapse an integral float to an int, the way jq renders every number.
+
+    roadmap.py's jq_numbers does this over a whole document; what is needed
+    here is the same collapse over ONE scalar, so it is reproduced rather than
+    imported. A cross-import between the two document modules is exactly the
+    dependency sanitize.py was extracted to prevent -- "the one rule both
+    import, so neither owns it" -- and jq_numbers carries jq's whole rendering
+    contract over documents, which nothing here reads.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _num(value):
+    """Render a JSON number the way jq's tostring does: 2 not 2.0.
+
+    Only ever used in a refusal message, so "phase 1 not found" reads the way
+    the caller spelled the flag rather than as "phase 1.0 not found".
+    """
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _same_number(stored, wanted):
+    """Numeric equality on a phase id, over a document people hand-edit.
+
+    Phases are matched NUMERICALLY, never by string: 2.10 and 2.1 are one
+    number and must name one phase, and 1.0 must find 1. A stored id that is a
+    string, a bool or absent matches nothing -- Python's True == 1 is the trap
+    the bool arm closes.
+    """
+    if isinstance(stored, bool) or not isinstance(stored, (int, float)):
+        return False
+    return stored == wanted
+
+
+def derive_phase_metadata(roadmap_path, feature, phase_raw, base_ref, plugin_version):
+    """The four metadata keys a phase-scoped merge can answer for itself.
+
+    Called once, early -- before --foundation, cycle detection, the sweeps and
+    every write -- for the reason resolve_axis's own docstring gives about its
+    placement: a refusal here costs nothing and cannot warn about a plan that
+    was never going to be written.
+
+    THE PHASE ENTRY'S `.branch` IS READ FOR NOTHING. branchName is not derived,
+    not validated and not reported here, and the value never reaches the
+    document or stderr. Its prefix is metadata.type, which /aimi:plan decides
+    inside Phase 4 -- AFTER the Phase 3e call that runs this merge -- so no
+    caller can hand a composed name over at merge time and this function cannot
+    compose one either: type is authored, has no validator anywhere, and a
+    hardcoded "feat/" is wrong for most of the tasks files on disk.
+
+    `dir` is taken VERBATIM and an entry without a usable one is REFUSED rather
+    than reconstructed. roadmap-init already composed and validated that
+    segment; re-deriving it from the id would turn phase-1.1-beta into
+    phase-1-1-beta, which names no directory on disk. The refusal is the
+    enforcement of "never re-derived", not politeness.
+
+    roadmapPath is composed from the --feature VALUE, while the absolute
+    --roadmap path (already confined by the bash half) is what gets read. One
+    input, one slug, so the two can never disagree -- which matters, because on
+    disk a feature directory and its document's own .feature field are measured
+    to disagree, and the flag is what names the path.
+    """
+    try:
+        with open(roadmap_path, encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError) as exc:
+        die("Error: story-merge: unreadable roadmap.json: " + roadmap_path + ": " + str(exc))
+    try:
+        wanted = _jq_number(json.loads(phase_raw))
+    except ValueError:
+        die("Error: story-merge: --phase <id> must be a numeric phase id, got: " + phase_raw)
+    if isinstance(wanted, bool) or not isinstance(wanted, (int, float)):
+        die("Error: story-merge: --phase <id> must be a numeric phase id, got: " + phase_raw)
+    entry = next(
+        (
+            p
+            for p in _list(doc.get("phases") if isinstance(doc, dict) else None)
+            if isinstance(p, dict) and _same_number(p.get("id"), wanted)
+        ),
+        None,
+    )
+    if entry is None:
+        die("Error: story-merge: phase " + _num(wanted) + " not found in " + roadmap_path)
+    directory = entry.get("dir")
+    if not isinstance(directory, str) or directory == "":
+        die("Error: story-merge: phase " + _num(wanted) + " has no dir in " + roadmap_path)
+    derived = {
+        "roadmapPath": ".aimi/tasks/" + feature + "/roadmap.json",
+        # The entry's own JSON value, so an integer id stays 1 and a decimal
+        # stays 1.1 -- the shape already on disk.
+        "phase": {"id": entry.get("id"), "dir": directory},
+    }
+    # Each key exists only when its source answered: an absent flag is an
+    # absent key, never null, never "" and never a placeholder.
+    if base_ref:
+        derived["baseRef"] = base_ref
+    if plugin_version:
+        derived["pluginVersion"] = plugin_version
+    return derived
+
+
 def resolve_axis(stories, split_mode):
     """Echo "project" or "side", or refuse what the axis cannot route.
 
@@ -1226,8 +1339,16 @@ def _emit(value):
     sys.stdout.write("\n")
 
 
-def write_legacy(stories, output_path, staging_dir, smells):
-    document = _document(_metadata("feat: merged tasks", "feat/merged", smells), stories)
+def write_legacy(stories, output_path, staging_dir, smells, phase_metadata=None):
+    metadata = _metadata("feat: merged tasks", "feat/merged", smells)
+    # Merged AFTER _metadata's own keys, which is where the hand-patched
+    # phase-scoped files on disk carry them. _metadata's arguments are
+    # untouched, so branchName still arrives from this caller as the literal it
+    # has always been; with no phase metadata the dict is byte-identical to the
+    # one this line built before.
+    if phase_metadata:
+        metadata.update(phase_metadata)
+    document = _document(metadata, stories)
     os.makedirs(_dirname(output_path), exist_ok=True)
     if write_atomically(output_path, document) != 0:
         die("Error: story-merge: failed to write output file: " + output_path)
@@ -1791,7 +1912,15 @@ def main(argv):
     foundation_values = _flags_all(args, "--foundation")
     branch_regex = _flag(args, "--branch-regex", "")
     agent_mode = "--agent-mode" in args
+    # --phase-aware is the --output-basename boolean; --phase below is the
+    # roadmap phase id. Near-homonyms, unrelated semantics -- see the same note
+    # beside cmd_story_merge's own two arms.
     phase_aware = "--phase-aware" in args
+    feature = _flag(args, "--feature", "")
+    phase_raw = _flag(args, "--phase", "")
+    roadmap_path = _flag(args, "--roadmap", "")
+    base_ref = _flag(args, "--base-ref", "")
+    plugin_version = _flag(args, "--plugin-version", "")
 
     paths = staging_files(staging_dir)
     if not paths:
@@ -1811,6 +1940,15 @@ def main(argv):
     # nothing and cannot warn about a plan that was never going to be written.
     # The axis is decided ONCE, here, and the writers below only read the answer.
     split_axis = resolve_axis(stories, split_mode)
+
+    # Same placement, same argument: ahead of --foundation, cycle detection and
+    # every sweep, so a bad phase costs nothing. The bash half has already
+    # refused half a pair, so both values are present or neither is.
+    phase_metadata = (
+        derive_phase_metadata(roadmap_path, feature, phase_raw, base_ref, plugin_version)
+        if feature and phase_raw
+        else None
+    )
 
     foundation_ids = inject_foundation(stories, foundation_values) if foundation_values else []
 
@@ -1995,7 +2133,7 @@ def main(argv):
         else:
             write_side_split(stories, output_path, staging_dir, smells, phase_aware)
     else:
-        write_legacy(stories, output_path, staging_dir, smells)
+        write_legacy(stories, output_path, staging_dir, smells, phase_metadata)
     return 0
 
 
