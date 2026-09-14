@@ -55,8 +55,9 @@ from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa:
 # is correct rather than a gap — bash parses it as `FOO=a &` followed by
 # `b git commit`, so no commit runs. Excluding `&` from the value class is
 # faithful shell semantics.
-# Also: `effective_cwd` (hook_utils) resolves a `cd <path> &&` prefix only at
-# string start, so a `cd` inside a `do`/`then` body — newly detected here —
+# Also: `effective_cwd` (hook_utils) resolves a leading `cd <path>` prefix in
+# any of bash's three chaining forms (`&&`, `;`, newline), but only at string
+# start, so a `cd` inside a `do`/`then` body — newly detected here — still
 # falls back to the session cwd and may check the wrong repository's branch.
 # Closing the quote-wrapped cases above would require quote/paren-aware shell
 # parsing, which is out of scope here.

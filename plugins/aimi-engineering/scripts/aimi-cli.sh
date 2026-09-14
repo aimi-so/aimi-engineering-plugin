@@ -677,6 +677,69 @@ _dev_dir_path() {
   printf '%s\n' "$dev_dir"
 }
 
+# Validate AIMI_CLI_PINNED -- LAYER 0-pin, the per-call pin consulted AHEAD of
+# every cache layer and written into none of them.
+#
+# Usage: pinned=$(_pinned_cli_path)
+#   Prints the pinned path when the variable is set and valid.
+#   Prints nothing when it is unset -- "no pin" is a normal answer, not a
+#   failure.
+#   Prints nothing when it is set and invalid. It says nothing about that
+#   itself: main() announces both outcomes once per process, so a helper that
+#   several call sites consult cannot print one refusal three times in a run.
+#   ALWAYS RETURNS 0, for the reason _validate_directory_source_identity's
+#   header spells out -- callers read it through `$( )` under `set -euo
+#   pipefail`, and a non-zero last statement would corrupt their assignment.
+#
+# WHY A PIN EXISTS AT ALL. "Which CLI is this?" has one answer per plugin cache
+# root on the machine, and it can answer differently between two Bash calls of
+# ONE run. The asymmetry that allows it is exact and is worth naming, because
+# both halves look correct in isolation: `_resolve_latest_cache_path` is
+# parameterized on `config_dir` and every one of its call sites passes
+# `_claude_config_dir()`, so the WRITER of the cache always knows which root is
+# the right one -- while `_validate_cached_cli_path`'s versioned-cache arm is
+# `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, whose leading
+# `*/` anchors no root at all, so the READER accepts a path under any of them
+# and never asks. A caller that has already decided which install it means says
+# so here, once, instead of re-deriving an answer per call and then comparing
+# two findings that came out of two different files.
+#
+# [ -x ], NEVER [ -f ] OR [ -e ]. That is the rule `CV_CLI` in
+# `commands/execute.md` and `PROBE_CLI` in `skills/story-executor/SKILL.md`
+# already apply to their own per-call CLI choice, and this is the third
+# instance of the same shape one level down: a file that is present but not
+# executable resolves nothing, so admitting it only moves the failure to the
+# invocation, where it reads as a broken CLI rather than as a bad pin.
+# Validating by textual prefix instead is precisely what let a symlink into a
+# worktree past write_global_cli_cache's own guard and produced the exit 127
+# recorded in golden_from_jq.json's cv-fix-simlink-worktrees-cc.
+#
+# IT IS NEVER PERSISTED, and no path here or elsewhere may make it so.
+# write_global_cli_cache refuses a `/.worktrees/` path in two places, and
+# _dev_dir_path refuses one on identical grounds: a pin names the tree that is
+# right for THIS run, so writing it into ~/.config/aimi/cli-path would hand it
+# to every later session in every project on the machine and reintroduce the
+# vanishing-worktree bug those two guards exist to close. Nothing in this
+# function writes; read_global_cli_cache consults it ahead of the cache file
+# and returns; and cmd_prime_cache deliberately does not let a pin answer its
+# already-current check, so a pin cannot suppress a real cache write either.
+_pinned_cli_path() {
+  if [ -z "${AIMI_CLI_PINNED:-}" ]; then
+    return 0
+  fi
+  local pinned="${AIMI_CLI_PINNED%/}"
+  # Absolute, for _dev_dir_path's reason: a relative value resolves against the
+  # caller's CWD, handing execution to any repository that ships an executable
+  # scripts/aimi-cli.sh of its own.
+  if [ "${pinned#/}" = "$pinned" ]; then
+    return 0
+  fi
+  if [ ! -x "$pinned" ]; then
+    return 0
+  fi
+  printf '%s\n' "$pinned"
+}
+
 # Resolve the Aimi config directory (XDG-compliant, host-agnostic).
 # Honors AIMI_CONFIG_DIR env var; falls back to ${XDG_CONFIG_HOME:-$HOME/.config}/aimi.
 # When AIMI_CONFIG_DIR is set, validates it is an absolute path.
@@ -971,6 +1034,47 @@ _validate_directory_source_identity() {
   return 0
 }
 
+# _report_foreign_cache_root: REPORT -- never refuse -- a cached path that
+# resolves under a plugin cache root other than the one _claude_config_dir()
+# names. Takes the path, prints at most one line to stderr, returns 0 always.
+#
+# THE ASYMMETRY THIS MAKES VISIBLE, and it is the cause of the flip-flop rather
+# than a symptom of it. `_resolve_latest_cache_path` is parameterized on
+# `config_dir` and every one of its call sites passes `_claude_config_dir()`,
+# so the WRITER of the cache always knows which root is the right one. The
+# reader's versioned-cache arm below is
+# `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh` -- the leading
+# `*/` anchors no root, so the READER never asks. With two cache roots on one
+# machine the cache can therefore hold a path the writer would never have
+# written, the reader accepts it without comment, and "which CLI is this"
+# answers differently between two calls of one run with nothing on either side
+# saying so.
+#
+# ONE LINE OF STDERR, NOT A REFUSAL, and the difference is the whole design.
+# Refusing would break hosts that are legitimately arranged this way -- a
+# CLAUDE_CONFIG_DIR moved after the cache was written is the ordinary case --
+# and the breakage would land at some later invocation, far from its cause.
+# Naming BOTH roots costs one parameter expansion and is what lets a reader
+# holding two contradictory findings tell which root each of them came from.
+#
+# NOT MIRRORED ONTO _validate_cached_worktree_path, deliberately, even though
+# that function is otherwise this one's exact twin: the worktree pointer is
+# never resolved on its own. _persist_worktree_pointer_for derives it from the
+# CLI install path it is handed (_worktree_manager_beside strips
+# `/scripts/aimi-cli.sh` and looks beside it), so a foreign worktree root is a
+# consequence of a foreign cli-path root that this line has already reported
+# once. A second copy would print the same finding twice for one cause.
+_report_foreign_cache_root() {
+  local cached_path="$1"
+  local cached_root="${cached_path%%/plugins/cache/*}"
+  local expected_root=""
+  expected_root=$(_claude_config_dir 2>/dev/null) || expected_root=""
+  if [ -n "$expected_root" ] && [ -n "$cached_root" ] && [ "$cached_root" != "$expected_root" ]; then
+    echo "Notice: cached cli-path resolves under $cached_root, but the configured Claude config directory is $expected_root; two plugin cache roots are in play, so CLI resolution can answer differently between calls (set AIMI_CLI_PINNED to fix one answer for this run)." >&2
+  fi
+  return 0
+}
+
 # _validate_cached_cli_path: run a path through the whitelist case statement
 # Returns the path unchanged if valid, empty string if rejected
 #
@@ -993,6 +1097,11 @@ _validate_cached_cli_path() {
       fi
       ;;
     */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh)
+      # Accepted under ANY root -- that is what the leading `*/` above means.
+      # Report the root before returning it, so an accepted-but-foreign entry
+      # is at least visible; see _report_foreign_cache_root for why this is a
+      # notice rather than a fourth admission condition.
+      _report_foreign_cache_root "$cached_path"
       printf '%s\n' "$cached_path"
       return 0
       ;;
@@ -1003,7 +1112,18 @@ _validate_cached_cli_path() {
 # Read and validate the cached CLI path from the global cache file
 # Tries new XDG path first, falls back to legacy path if new is absent.
 # Returns the cached path if valid, empty string otherwise.
+#
+# LAYER 0-pin RUNS FIRST, ahead of both cache files: when AIMI_CLI_PINNED names
+# an absolute executable path it IS the answer for this call, and neither file
+# is opened. See _pinned_cli_path's header for why the pin is per-call, why it
+# is validated with `[ -x ]`, and why nothing anywhere writes it back.
 read_global_cli_cache() {
+  local pinned
+  pinned=$(_pinned_cli_path)
+  if [ -n "$pinned" ]; then
+    printf '%s\n' "$pinned"
+    return 0
+  fi
   local cache_file
   cache_file=$(_global_cache_path)
   if [ -f "$cache_file" ] && [ -r "$cache_file" ]; then
@@ -1974,6 +2094,53 @@ cmd_list_known_gaps() {
   [ -n "$feature" ] && args+=(--feature "$feature")
   [ -n "$since" ] && args+=(--since "$since")
   python3 "$(_aimi_tasks_py)" "${args[@]}"
+}
+
+# Extract a brainstorm's Design Decisions section, for /aimi:plan's Phase 1.7c
+# to thread into the Phase 3d story-expander prompt.
+#
+# --brainstorm-path arrives as a CLI ARGUMENT, so it is confined by
+# validate_path_in_project here, before python3 ever starts -- the
+# CLI-argument half of the split the top-level CLAUDE.md's "Path confinement
+# is split on a real boundary" section names. This is deliberately distinct
+# from design_context()'s own document-sourced read of metadata.brainstormPath
+# inside get-story-context (the story EXECUTOR's read, reached at execute
+# time), which stays unconfined by that function's own docstring and is
+# unchanged by this verb -- the two paths enter at different points and one
+# crossing a document does not blur into the other.
+#
+# Prints {"decisions": "..."} -- empty string when the file is missing or
+# unreadable, mirroring design_context()'s own degrade. Read-only, no lock:
+# nothing here touches tasks.json.
+#
+# Flags: --brainstorm-path <path> (required)
+cmd_design_decisions() {
+  local brainstorm_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --brainstorm-path)
+        shift
+        brainstorm_path="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh design-decisions --brainstorm-path <path>" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$brainstorm_path" ]; then
+    echo "Usage: aimi-cli.sh design-decisions --brainstorm-path <path>" >&2
+    exit 1
+  fi
+
+  brainstorm_path=$(resolve_path "$brainstorm_path")
+  validate_path_in_project "$brainstorm_path"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" design-decisions --brainstorm-path "$brainstorm_path"
 }
 
 # Mark a story as in-progress
@@ -12579,8 +12746,19 @@ cmd_prime_cache() {
   # consecutive run re-answers "ok" rather than "already_current". Both are
   # documented outcomes of this verb's contract; widening that whitelist
   # reaches outside cmd_prime_cache, which is this story's declared scope.
-  local existing_cache
-  existing_cache=$(read_global_cli_cache)
+  #
+  # A PIN MUST NEVER ANSWER THIS COMPARISON, and this is where "never
+  # persisted" stays true rather than merely being asserted. read_global_cli_cache
+  # consults AIMI_CLI_PINNED ahead of the cache file (Layer 0-pin), which is the
+  # right answer for a caller asking "which CLI answers this call" and the wrong
+  # one for the single verb whose job is curating the file on disk: a pin that
+  # happened to equal resolved_path would report already_current and skip a
+  # write the cache genuinely needed, leaving the pin's choice looking persisted
+  # when nothing had been written at all.
+  local existing_cache=""
+  if [ -z "$(_pinned_cli_path)" ]; then
+    existing_cache=$(read_global_cli_cache)
+  fi
   if [ -n "$existing_cache" ] && [ "$existing_cache" = "$resolved_path" ]; then
     # already_current is about the CLI pointer alone. The worktree pointer can
     # be absent or stale while this one is right -- that asymmetry is exactly
@@ -12840,6 +13018,40 @@ cmd_validate_waves() {
   # test-aimi-cli-part1-core.sh asserts the 0 against a wave-mismatch fixture.
   check_python3
   python3 "$(_aimi_tasks_py)" validate-waves --tasks-file "$tasks_file"
+}
+
+# Validate wave contention: refuse a wave whose stories claim the same path in
+# implementation.files -- a new verb, not a widening of validate-waves above.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+cmd_validate_wave_contention() {
+  local tasks_file=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file)
+        shift
+        tasks_file="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh validate-wave-contention [--tasks-file <path>]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # A pure reader, same shape as cmd_validate_deps above: no lock, no temp
+  # file, one crossing, and the exit status IS the crossing's own -- unlike
+  # validate-waves, this verb's invalid verdict really does exit non-zero.
+  check_python3
+  python3 "$(_aimi_tasks_py)" validate-wave-contention --tasks-file "$tasks_file"
 }
 
 # Validate tasks file citation fields
@@ -13377,6 +13589,135 @@ $anchor"
   return 0
 }
 
+# Usage: extract-prototype-sections <file> --anchors "<view names, newline-separated>"
+# Print only the requested <section data-view="X"> blocks of a prototype HTML file,
+# concatenated verbatim in the order the anchors were requested.
+# Each requested view is emitted as its WHOLE block -- from the line carrying its
+# opening <section ... data-view="X" ...> through its matching </section>, tracked by
+# <section>/</section> depth so a nested <section> inside a matched block does not end
+# it early. An opening section with no closing tag prints to EOF rather than erroring.
+# Only double-quoted data-view attribute values are matched -- the prototype author's
+# HTML-escaping rule requires a literal '"' inside an attribute to be written &quot;, so
+# a double-quoted value is always the form actually emitted.
+# View-name text is matched case-insensitively; an anchor with no matching section is
+# skipped (not a fatal error) but is named in a "no section matched anchor" warning on
+# stderr; a run whose anchors match nothing prints empty output, still exit 0. A file
+# with no data-view attribute at all likewise prints empty output at exit 0.
+# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
+# stderr and skipped -- defense in depth, mirroring extract-sections.
+# Path confinement mirrors extract-sections: resolve_path + validate_path_in_project.
+# Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
+cmd_extract_prototype_sections() {
+  local file_path=""
+  local anchors_raw=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --anchors)
+        if [ $# -lt 2 ]; then
+          echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+          exit 1
+        fi
+        anchors_raw="$2"
+        shift 2
+        ;;
+      -*)
+        echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+        exit 1
+        ;;
+      *)
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ] || [ -z "$anchors_raw" ]; then
+    echo "Usage: aimi-cli.sh extract-prototype-sections <file> --anchors \"<view names>\"" >&2
+    exit 1
+  fi
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # Resolve and validate the target file path
+  local resolved_file
+  resolved_file=$(resolve_path "$file_path")
+  validate_path_in_project "$resolved_file"
+
+  # Split --anchors on newlines only; trim and lowercase each entry; skip blanks.
+  # Extract each anchor's <section data-view="X"> block (first matching section only)
+  # in request order.
+  local anchor anchor_lc unmatched_anchors=""
+  while IFS= read -r anchor; do
+    anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$anchor" ] && continue
+
+    # Defense in depth: view names are orchestrator-composed, not raw user input, but
+    # this CLI must not rely on that boundary holding. Reject only characters dangerous
+    # inside a double-quoted shell argument -- hyphen, underscore, period and spaces
+    # are all legitimate view-name punctuation and MUST keep working.
+    case "$anchor" in
+      *'$'*|*'`'*|*'"'*|*'\'*)
+        echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
+        continue ;;
+    esac
+
+    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+
+    # awk streams matched section lines straight to stdout (byte-for-byte, blank
+    # lines and all) and reports match status via its own exit code -- this avoids
+    # a $(...) capture, which would silently swallow trailing blank lines.
+    if awk -v target="$anchor_lc" '
+      BEGIN { in_section = 0; matched = 0; depth = 0 }
+      {
+        line_lc = tolower($0)
+
+        if (!in_section && !matched && line_lc ~ /<section/ &&
+            match(line_lc, /[<[:space:]]data-view[[:space:]]*=[[:space:]]*"[^"]*"/)) {
+          attr = substr(line_lc, RSTART, RLENGTH)
+          q1 = index(attr, "\"")
+          rest = substr(attr, q1 + 1)
+          q2 = index(rest, "\"")
+          value = substr(rest, 1, q2 - 1)
+          if (value == target) {
+            in_section = 1
+            matched = 1
+            depth = 0
+          }
+        }
+
+        if (in_section) {
+          print
+          tmp = line_lc
+          open_count = gsub(/<section/, "", tmp)
+          tmp = line_lc
+          close_count = gsub(/<\/section>/, "", tmp)
+          depth += open_count - close_count
+          if (depth <= 0) { in_section = 0 }
+        }
+      }
+      END { exit (matched ? 0 : 1) }
+    ' "$resolved_file"; then
+      :
+    else
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+    fi
+  done < <(printf '%s\n' "$anchors_raw")
+
+  if [ -n "$unmatched_anchors" ]; then
+    while IFS= read -r anchor; do
+      [ -z "$anchor" ] && continue
+      echo "Warning: no section matched anchor: $anchor" >&2
+    done <<< "$unmatched_anchors"
+  fi
+
+  return 0
+}
+
 # Usage: research-gc
 # Garbage-collect orphaned research files from .aimi/research/*.md.
 # A file is deleted only when BOTH conditions are true:
@@ -13542,10 +13883,266 @@ $rp_entry"
 }
 
 # ============================================================================
+# research-figures: measure one research file's evidence, mechanically
+# Usage: aimi-cli.sh research-figures <path>
+# ============================================================================
+#
+# Three advisory counts over one research .md file, printed as one JSON object:
+#
+#   blocks           lines matching the anchored measure fence
+#   figures_outside  bare integers sitting OUTSIDE every measure block, with
+#                    four-digit years excluded via ^(19|20)[0-9]{2}$
+#   dead_keys        per measure block, the names its command indexes a
+#                    STRUCTURED subject by that the subject does not carry
+#
+# THE RULE ALREADY EXISTED; WHAT WAS MISSING IS THE MEASUREMENT. The three
+# research agents' Structured Findings Format has required a ```measure block
+# under every repository figure for five contract mentions, and a recursive
+# grep for the anchored fence across .aimi/ returned ZERO files. A sixth
+# mention produces the same zero, so this verb makes the absence detectable
+# instead of restating the rule.
+#
+# WHY THE THIRD COUNT EXISTS, AND WHAT IT STILL DOES NOT PROVE. `blocks`
+# proves a block is THERE; plan.md Phase 1.6's re-execution proves it
+# REPRODUCES; neither proves the command addresses the subject it names. A
+# figure produced by `x.get('output','')` over case objects carrying no
+# `output` key returned its default for every input -- 0 for ANY corpus,
+# including an empty one -- and Phase 1.6 re-executed and PASSED it twice,
+# because a wrong-but-deterministic command reproduces its own wrong output
+# forever. `dead_keys` closes that third gap and no more: none of the three
+# proves the command answers the question the prose asks. That last step is
+# human reading, and this verb does not claim it.
+#
+# `dead_keys` follows the omitted-when-empty convention `metadata.baseRef`,
+# `metadata.pluginVersion` and `metadata.prototypeDropped` already use:
+# written only when something was actually found, absent otherwise, never
+# `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
+# which is what every caller written before this third count reads.
+#
+# Nothing here is executed. The file is read and counted, never sourced, and
+# the commands inside its measure blocks are treated as text -- which is why
+# this verb needs no read-only allowlist of its own.
+#
+# THE THRESHOLD IS THE CALLER'S. This verb reports; commands/plan.md's
+# "Confirm Each Research File Landed" section owns the "blocks is 0 AND
+# figures_outside is at least 10" cut, and that 10 is an arbitrary round
+# number chosen against real data, not a constant with a reason behind it.
+
+# The indexed names one measure block's command reads a structured subject by.
+# Two shapes are extracted from a QUOTED name, which is what the caller can
+# attribute with no static analysis of the command's language:
+#
+#   .get('K') / .get("K")   python-shaped lookup with a default
+#   ['K'] / ["K"]           python-shaped subscript
+#
+# and a third from jq, whose index is not quoted:
+#
+#   .K, .K.K2               ONLY inside a quoted segment of a command that
+#                           actually invokes jq, and only where the leading dot
+#                           is NOT preceded by a word character
+#
+# That last narrowing is what keeps `commands/plan.md` and `"x.md"` file names
+# rather than keys. Nesting level is deliberately not resolved: that needs real
+# static analysis of the command's language and buys nothing, because the
+# caller's membership test is any-depth and a level-aware test could only ever
+# narrow it.
+# Usage: _research_figures_indexed_names "<command text, one or more lines>"
+_research_figures_indexed_names() {
+  local cmds="$1"
+  {
+    printf '%s\n' "$cmds" \
+      | grep -oE "\.get\(['\"][A-Za-z_][A-Za-z0-9_]*['\"]" \
+      | sed -E "s/^\.get\(['\"]//; s/['\"]$//" || true
+    printf '%s\n' "$cmds" \
+      | grep -oE "\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\]" \
+      | sed -E "s/^\[['\"]//; s/['\"]\]$//" || true
+    if printf '%s\n' "$cmds" | grep -qE '\bjq\b'; then
+      printf '%s\n' "$cmds" \
+        | grep -oE "'[^']*'|\"[^\"]*\"" \
+        | grep -oE "[^A-Za-z0-9_](\.[A-Za-z_][A-Za-z0-9_]*)+" \
+        | sed -E 's/^[^.]*//' \
+        | tr '.' '\n' || true
+    fi
+  } | grep -vE '^[[:space:]]*$' | sort -u || true
+}
+
+# One TSV record per dead key: block index, the dead name, the subjects it was
+# checked against. Prints nothing when the file carries no measure block, when
+# no block indexes anything, or when no block names a subject that parses as
+# JSON -- that last case is the INTENDED degradation: a grep or an awk over a
+# .md extracts no names against a structured subject and is never reported.
+# Usage: _research_figures_dead_keys "<research file path>"
+_research_figures_dead_keys() {
+  local file_path="$1"
+
+  # Every command a block runs, tagged with its own block's 1-based index. A
+  # block whose command carries no `$ ` prompt contributes nothing.
+  #
+  # A command may span SEVERAL lines, and that is the shape the defect this
+  # check exists for actually had: `$ python3 -c "` opens a double quote and
+  # the indexing lives on the continuation lines, so reading the `$ ` line
+  # alone finds nothing to check. Continuation lines are therefore joined until
+  # the accumulated text's DOUBLE-quote count is even again.
+  #
+  # Parity is tracked on `"` alone, deliberately. A `'` inside a double-quoted
+  # command (`d['cases']`, `print(n,'/',t)`) is balanced anyway, while requiring
+  # `'` parity too would make `grep -n "don't" f` look unterminated and start
+  # swallowing the block's OUTPUT lines into the command. The cost is a
+  # `'`-quoted multi-line command, which is read as its first line only -- a
+  # silent miss in an advisory count, never a wrong verdict, and an awk or sed
+  # body indexes no JSON subject anyway. An accumulation still unbalanced when
+  # the closing fence arrives is DROPPED rather than reported on: no verdict
+  # beats one computed over text that may be half output.
+  local block_cmds
+  block_cmds=$(awk '
+    function dq(s,   n, i) {
+      n = 0
+      for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == "\"") n++
+      return n
+    }
+    /^```measure[[:space:]]*$/ { inblock = 1; idx++; acc = ""; open = 0; next }
+    inblock && /^```[[:space:]]*$/ { inblock = 0; open = 0; acc = ""; next }
+    inblock && open {
+      acc = acc " " $0
+      if (dq(acc) % 2 == 0) { print idx "\t" acc; acc = ""; open = 0 }
+      next
+    }
+    inblock && /^\$ / {
+      acc = substr($0, 3)
+      if (dq(acc) % 2 == 0) { print idx "\t" acc; acc = "" } else { open = 1 }
+      next
+    }
+    { next }
+  ' "$file_path")
+  [ -n "$block_cmds" ] || return 0
+
+  local indices idx cmds names subjects subject resolved
+  local keys subject_keys checked name
+  indices=$(printf '%s\n' "$block_cmds" | cut -f1 | sort -n -u)
+
+  for idx in $indices; do
+    cmds=$(printf '%s\n' "$block_cmds" \
+      | awk -F'\t' -v i="$idx" '$1 == i { print substr($0, index($0, "\t") + 1) }')
+
+    names=$(_research_figures_indexed_names "$cmds")
+    [ -n "$names" ] || continue
+
+    # Subjects are the `.json`-suffixed tokens the command names. Each is
+    # resolved against the cwd (already PROJECT_ROOT by the time a verb runs)
+    # and then against PROJECT_ROOT explicitly, confined with the silent
+    # predicate rather than the fatal wrapper -- a path arriving from a FILE'S
+    # CONTENTS must degrade to "not a subject", never abort the count -- and
+    # kept only when jq parses it.
+    subjects=$(printf '%s\n' "$cmds" | grep -oE '[A-Za-z0-9_./-]+\.json' | sort -u || true)
+    keys=""
+    checked=""
+    for subject in $subjects; do
+      resolved="$subject"
+      if [ ! -f "$resolved" ] && [ -f "$PROJECT_ROOT/$subject" ]; then
+        resolved="$PROJECT_ROOT/$subject"
+      fi
+      [ -f "$resolved" ] || continue
+      path_within_project "$resolved" || continue
+      subject_keys=$(jq -r '[paths | .[-1] | select(type == "string")] | unique | .[]' \
+        "$resolved" 2>/dev/null || true)
+      [ -n "$subject_keys" ] || continue
+      keys="$keys
+$subject_keys"
+      if [ -z "$checked" ]; then checked="$subject"; else checked="$checked,$subject"; fi
+    done
+    [ -n "$checked" ] || continue
+
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      if ! printf '%s\n' "$keys" | grep -qxF -- "$name"; then
+        printf '%s\t%s\t%s\n' "$idx" "$name" "$checked"
+      fi
+    done <<< "$names"
+  done
+}
+
+cmd_research_figures() {
+  local file_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -*)
+        echo "Usage: aimi-cli.sh research-figures <path>" >&2
+        exit 1
+        ;;
+      *)
+        if [ -n "$file_path" ]; then
+          echo "Error: research-figures: one path at a time (unexpected: $1)" >&2
+          exit 1
+        fi
+        file_path="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [ -z "$file_path" ]; then
+    echo "Usage: aimi-cli.sh research-figures <path>" >&2
+    exit 1
+  fi
+
+  # Confinement FIRST, before this path is stat'd, opened or handed to awk.
+  # It arrived as a CLI ARGUMENT, which makes validate_path_in_project the sole
+  # authority over it -- no second check is written beside it. The subject
+  # paths inside the file's own measure blocks are a different category and are
+  # confined by _research_figures_dead_keys with the silent predicate.
+  validate_path_in_project "$file_path"
+
+  if [ ! -f "$file_path" ]; then
+    echo "Error: research-figures: File not found: $file_path" >&2
+    exit 1
+  fi
+
+  # grep -c prints 0 AND exits 1 on a zero count. `|| echo 0` would append a
+  # SECOND line and the next numeric test would die on "0\n0"; `|| true` keeps
+  # the single line grep has already printed.
+  local blocks
+  blocks=$(grep -cE '^```measure[[:space:]]*$' "$file_path" || true)
+
+  # The partition is an in/out state machine: enter on the anchored measure
+  # fence, leave on a bare closing fence, print only the lines OUTSIDE. Then
+  # word-boundary integers, then the year exclusion, then a count. `\b` is what
+  # keeps `Big130` and `v1` out -- a digit run glued to a word is not a figure.
+  local figures
+  figures=$(awk '
+    /^```measure[[:space:]]*$/ { inblock = 1; next }
+    inblock && /^```[[:space:]]*$/ { inblock = 0; next }
+    !inblock { print }
+  ' "$file_path" \
+    | grep -oE '\b[0-9]+\b' \
+    | grep -vE '^(19|20)[0-9]{2}$' \
+    | wc -l || true)
+  figures=$(printf '%s' "$figures" | tr -d '[:space:]')
+
+  local dead_records dead_json
+  dead_records=$(_research_figures_dead_keys "$file_path")
+  dead_json=$(printf '%s' "$dead_records" \
+    | jq -R -s 'split("\n")
+        | map(select(length > 0)
+        | split("\t")
+        | {block: (.[0] | tonumber), key: .[1], subject: .[2]})')
+
+  jq -n \
+    --argjson blocks "${blocks:-0}" \
+    --argjson figures "${figures:-0}" \
+    --argjson dead "$dead_json" \
+    'if ($dead | length) > 0
+       then {blocks: $blocks, figures_outside: $figures, dead_keys: $dead}
+       else {blocks: $blocks, figures_outside: $figures}
+     end'
+}
+
+# ============================================================================
 # story-merge: Consolidate staging files into a validated tasks.json
 # Usage: aimi-cli.sh story-merge --staging-dir <dir> --output <path>
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>|<project>:NN]...
+#           [--feature <slug> --phase <id>]
 # ============================================================================
 #
 # Everything from "read the staging directory" to "the files are on disk" lives
@@ -13561,6 +14158,12 @@ $rp_entry"
 # has not computed yet.
 cmd_story_merge() {
   local staging_dir="" output_path="" split_mode="legacy" agent_mode=false phase_aware=false
+  # The --feature/--phase pair, and the three values they let this half answer
+  # for the other one: where the roadmap is, what commit this merge sits on,
+  # and which plugin version is running. Each stays empty when the pair is
+  # absent, and an empty value is never forwarded -- that is the whole of the
+  # "omit the key entirely, never null, never a placeholder" rule.
+  local feature="" phase_id="" roadmap_path="" base_ref="" plugin_version=""
   # --foundation is the one REPEATABLE flag here: injection is per project
   # group, so a multi-repo plan names one foundation per repo. Collected, never
   # deduplicated in bash -- story_merge.py's own dedup is the single source of
@@ -13587,6 +14190,20 @@ cmd_story_merge() {
         ;;
       --phase-aware)
         phase_aware=true
+        ;;
+      --feature)
+        shift
+        feature="${1:-}"
+        ;;
+      # --phase names a roadmap phase, and it is not --phase-aware, the arm
+      # directly above: that one is a boolean about the --output basename's
+      # trailing "-tasks" segment and reads no roadmap at all. Two
+      # near-homonyms with unrelated semantics is how a flag becomes noise, so
+      # the difference is stated here rather than left to be inferred from a
+      # name that only differs by a suffix.
+      --phase)
+        shift
+        phase_id="${1:-}"
         ;;
       --foundation)
         shift
@@ -13667,6 +14284,54 @@ cmd_story_merge() {
     esac
   fi
 
+  # --feature and --phase are the phase-scoped pair, and they are validated
+  # here -- with the other flag checks, before any document is opened -- so a
+  # bad value costs the caller one line and never a partial read.
+  if [ -n "$feature" ] || [ -n "$phase_id" ]; then
+    # Half a pair is refused rather than guessed: --feature alone cannot invent
+    # a phase id and --phase alone cannot invent a feature slug. cmd_write_review
+    # refuses exactly this pair for exactly this reason; the wording is modelled
+    # on its line rather than invented a second time.
+    if [ -z "$feature" ] || [ -z "$phase_id" ]; then
+      echo "Error: story-merge: --feature and --phase must be given together, or neither at all -- got one without the other" >&2
+      exit 1
+    fi
+    # On the PROJECT axis both branchName AND baseRef resolve PER REPOSITORY --
+    # each file's baseRef comes from a rev-parse in that entry's own project
+    # root, and the key is omitted on an entry whose rev-parse fails rather
+    # than borrowing a sibling's -- and story-merge never cds into a project.
+    # Accepting the flags here and ignoring them would be a silent no-op, and
+    # filling some fields from the wrong repository would be worse, so the
+    # boundary is one refusal line instead.
+    if [ "$split_mode" = "full-stack" ]; then
+      echo "Error: story-merge: --feature/--phase are not accepted with --split full-stack: there baseRef resolves per repository and story-merge never enters a project root" >&2
+      exit 1
+    fi
+    # Both helpers already own these two rules and both take a verb label for
+    # exactly this, so no new regex literal is introduced here. The phase-id
+    # pattern is stricter than a bare numeric one on purpose: it refuses a
+    # leading zero, because every --phase consumer parses the id with
+    # json.loads and JSON has no "02".
+    _roadmap_validate_feature "$feature" "story-merge"
+    _roadmap_validate_phase_id "$phase_id" "story-merge"
+    # The preamble every other roadmap verb uses: it composes the path with
+    # _roadmap_path, confines it with validate_path_in_project (the standing
+    # authority over every path arriving as a CLI ARGUMENT), and refuses a
+    # missing or malformed roadmap with a verb-prefixed message.
+    roadmap_path=$(_roadmap_require "story-merge" "$feature" " (run roadmap-init first)")
+    # The two values bash is the right half to answer. pluginVersion must come
+    # from the CLI that is actually RUNNING -- story_merge.py could only guess
+    # it from a plugin.json at a path derived from __file__, and Layer 0-dev
+    # exists precisely because a development checkout and the installed cache
+    # sit at different versions. Guarding each with 2>/dev/null plus
+    # `|| var=""` is this file's own degrade-to-silence idiom under set -e;
+    # cmd_version's internal `exit 1` ends only the command substitution's
+    # subshell, so a plugin.json declaring no string version yields an empty
+    # value here rather than killing the merge.
+    base_ref=$(git rev-parse HEAD 2>/dev/null) || base_ref=""
+    plugin_version=$(cmd_version 2>/dev/null) || plugin_version=""
+  fi
+
   # --- Validate paths are inside project ---
   validate_path_in_project "$staging_dir"
   local output_parent
@@ -13706,6 +14371,19 @@ cmd_story_merge() {
   for _fv in "${foundation_vals[@]+"${foundation_vals[@]}"}"; do
     sm_args+=(--foundation "$_fv")
   done
+  # The phase-scoped pair travels with the absolute roadmap path this half
+  # already resolved and confined -- Python only reads it. baseRef and
+  # pluginVersion are appended ONLY when non-empty, so an absent flag is an
+  # absent metadata key and the omit rule has exactly one home.
+  if [ -n "$feature" ]; then
+    sm_args+=(--feature "$feature" --phase "$phase_id" --roadmap "$roadmap_path")
+    if [ -n "$base_ref" ]; then
+      sm_args+=(--base-ref "$base_ref")
+    fi
+    if [ -n "$plugin_version" ]; then
+      sm_args+=(--plugin-version "$plugin_version")
+    fi
+  fi
   python3 "$(_aimi_script_py story_merge.py)" "${sm_args[@]}"
 }
 
@@ -15578,6 +16256,8 @@ COMMANDS:
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
+    validate-wave-contention [--tasks-file <path>]
+                              Refuse a wave whose stories claim the same path in implementation.files
     validate-tasks [--tasks-file <path>]
                               Validate tasks file citation fields (schemaVersion guard, no checks yet)
     cascade-skip <id> [--tasks-file <path>]
@@ -15630,6 +16310,14 @@ COMMANDS:
                               tasks file planned on the same date, else null -- never
                               dropped. Both filters are exact; --since drops a dated-less
                               entry.
+    design-decisions --brainstorm-path <path>
+                              Extract a brainstorm's Design Decisions section as
+                              {"decisions": "..."}, empty when the file is missing or
+                              carries no matching section. --brainstorm-path is confined
+                              to the project root by validate_path_in_project before
+                              python3 starts, because it arrives as a CLI argument --
+                              distinct from get-story-context's own unconfined,
+                              document-sourced read of metadata.brainstormPath.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -15999,6 +16687,25 @@ COMMANDS:
                                 Use when cited sources include to-be-created files.
                               Absolute or outside-root path -> rejected (exit 1).
                               Flag accepted in either position relative to the path arg.
+    research-figures <path>
+                              Advisory evidence count over one research .md file, as JSON:
+                              blocks (lines matching the anchored ```measure fence),
+                              figures_outside (bare word-boundary integers OUTSIDE every
+                              measure block, four-digit years excluded via
+                              ^(19|20)[0-9]{2}$), and dead_keys -- per block, the names its
+                              command indexes a structured subject by that the subject does
+                              not carry. dead_keys is omitted entirely when empty (the
+                              baseRef/prototypeDropped convention), never [], so a clean
+                              file prints exactly blocks and figures_outside.
+                              A block whose subject is not structured (a grep or awk over a
+                              .md) contributes no names and is never reported.
+                              Reports only: nothing is executed, no threshold is applied and
+                              the exit status never depends on the counts. The caller owns
+                              the cut -- see commands/plan.md's Confirm Each Research File
+                              Landed section.
+                              Path confinement mirrors research-lookup (validate_path_in_project
+                              on the ARGUMENT, before the file is opened); missing file or
+                              missing <path> arg -> error/usage on stderr, exit 1.
     extract-sections <file> --anchors "<titles>"
                               Print only the requested '## '/'### ' sections of a
                               research .md file, concatenated verbatim in request order.
@@ -16011,6 +16718,20 @@ COMMANDS:
                               An anchor with no matching heading is skipped (not an
                               error); anchors matching nothing -> empty output, exit 0.
                               Path confinement mirrors research-lookup (resolve_path +
+                              validate_path_in_project); missing file or missing
+                              <file>/--anchors arg -> error/usage on stderr, exit 1.
+    extract-prototype-sections <file> --anchors "<view names>"
+                              Print only the requested <section data-view="X"> blocks
+                              of a prototype HTML file, concatenated verbatim in
+                              request order. Each block spans its opening
+                              <section ... data-view="X" ...> through its matching
+                              </section>, tracked by tag depth.
+                              --anchors accepts newline-separated view names; matching
+                              is case-insensitive, double-quoted attribute values only.
+                              A view with no matching section is skipped (not an
+                              error); anchors matching nothing, or a file with no
+                              data-view attribute at all, -> empty output, exit 0.
+                              Path confinement mirrors extract-sections (resolve_path +
                               validate_path_in_project); missing file or missing
                               <file>/--anchors arg -> error/usage on stderr, exit 1.
     research-gc               Delete orphaned .aimi/research/*.md files not referenced by any
@@ -16048,6 +16769,7 @@ COMMANDS:
                               [--split legacy|full-stack] [--agent-mode]
                               [--phase-aware]
                               [--foundation <NN>|<project>:NN]...
+                              [--feature <slug> --phase <id>]
                               Consolidate per-story staging *.json files into a
                               validated tasks.json. Steps: glob+validate JSON,
                               assign US-NNN IDs by lex order, remap outline:NN
@@ -16150,6 +16872,25 @@ COMMANDS:
                               own stderr note separate from the ordinary
                               drop-count banner. The SIDE axis emits no
                               foundationEdge field.
+                              --feature <slug> --phase <id>, given TOGETHER or
+                              not at all: fill the four metadata keys a
+                              phase-scoped merge already knows —
+                              roadmapPath (".aimi/tasks/<slug>/roadmap.json",
+                              composed from the flag), phase {id, dir} read
+                              VERBATIM from that phase's own roadmap entry (so
+                              a decimal phase keeps its dot), baseRef (the full
+                              git rev-parse HEAD) and pluginVersion (this CLI's
+                              own version verb). baseRef and pluginVersion are
+                              OMITTED ENTIRELY when their source answers empty
+                              — never null, never "". branchName is NOT derived
+                              or validated here and the phase entry's own
+                              .branch is read for nothing: the branch prefix is
+                              metadata.type, which /aimi:plan decides AFTER
+                              this merge runs. Half a pair is refused, as is
+                              either flag with --split full-stack (there
+                              baseRef resolves per repository and this verb
+                              never enters a project root). Omitted: the four
+                              keys stay absent, byte-unchanged.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
     split-detect [--dir <phase-dir>]
@@ -16512,6 +17253,17 @@ ENVIRONMENT:
                        check-version answers status "dev-override" without
                        attempting --fix, so the global cli-path cache is never
                        repointed at a development tree.
+    AIMI_CLI_PINNED    Layer 0-pin: the CLI this run means, consulted AHEAD of
+                       the global cache layers and honored on EVERY host. Must
+                       be an absolute path to an executable file (tested with
+                       [ -x ], never [ -f ]); a value failing either check is
+                       reported once on stderr and ignored, and resolution
+                       falls through to the ordinary layers. PER-CALL ONLY --
+                       nothing writes it to ~/.config/aimi/cli-path or to any
+                       other pointer, and prime-cache will not let it answer
+                       its already-current check. Set it when more than one
+                       plugin cache root is installed and "which CLI is this"
+                       must have one answer for the length of a run.
 
 EXAMPLES:
     # Layer 0 first: the development override, honored on any host.
@@ -16597,6 +17349,28 @@ main() {
     echo "Notice: AIMI_DEV_DIR override is active; aimi resolution points at $_dev_dir/scripts/aimi-cli.sh (development tree, shadowing any installed plugin)." >&2
   fi
 
+  # ---- Layer 0-pin: the AIMI_CLI_PINNED announcement, on the same terms and
+  # for the same reason -- a change of which install answers, that says
+  # nothing, is the defect and not the fix. Announced HERE, once per process,
+  # rather than inside _pinned_cli_path, which several call sites consult and
+  # which would otherwise print one refusal three times in a run.
+  #
+  # A BAD VALUE IS NOT FATAL HERE, and that is the one place this diverges from
+  # AIMI_DEV_DIR directly above. An invalid dev dir means the operator asked
+  # for a tree and would silently get the install instead, so it exits. A pin
+  # only fixes ONE answer out of several the ordinary layers can still reach,
+  # so a stale one degrades to those layers -- loudly, naming the value, which
+  # is what keeps the degrade from being the silent kind.
+  if [ -n "${AIMI_CLI_PINNED:-}" ]; then
+    local _pinned_cli=""
+    _pinned_cli=$(_pinned_cli_path)
+    if [ -n "$_pinned_cli" ]; then
+      echo "Notice: AIMI_CLI_PINNED is set; cli-path resolution answers $_pinned_cli for this call, ahead of the global cache. Per-call only -- nothing persists it." >&2
+    else
+      echo "Warning: AIMI_CLI_PINNED is set but does not name an absolute path to an executable file: ${AIMI_CLI_PINNED}. Ignoring the pin and resolving through the ordinary cache layers." >&2
+    fi
+  fi
+
   # Skip auto-discovery for commands that don't touch .aimi/
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
@@ -16673,6 +17447,7 @@ main() {
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
+    validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
     cascade-skip)      shift; cmd_cascade_skip "$@" ;;
     reset-orphaned)    shift; cmd_reset_orphaned "$@" ;;
@@ -16681,6 +17456,7 @@ main() {
     get-story-context) shift; cmd_get_story_context "$@" ;;
     verify-probe)      shift; cmd_verify_probe "$@" ;;
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
+    design-decisions)  shift; cmd_design_decisions "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
@@ -16696,8 +17472,10 @@ main() {
     list-archivable)   cmd_list_archivable ;;
     archive-task)      cmd_archive_task "${2:-}" ;;
     research-lookup)   shift; cmd_research_lookup "$@" ;;
+    research-figures)  shift; cmd_research_figures "$@" ;;
     research-gc)       cmd_research_gc ;;
     extract-sections)  shift; cmd_extract_sections "$@" ;;
+    extract-prototype-sections) shift; cmd_extract_prototype_sections "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;

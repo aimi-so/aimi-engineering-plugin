@@ -28,11 +28,17 @@ it recorded jq PROGRAMS; get-story-context's logic was bash arrays and a shell
 loop, so the recording pins the payload's SHAPE -- which keys, in which order,
 holding what when a skill is missing or empty or oversized -- and the
 hand-written tests beside it carry the fidelity argument. It is also the one
-block whose port changed rules on purpose: three of them, named in
+block whose port changed rules on purpose: four of them, named in
 CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
 engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
 comparison strips one key (`skillsDropped`) from the actual stdout before
 comparing, and everything else still has to match the recording byte for byte.
+The fourth, brainstorm-secao-duplicada, differs from the first three in one
+way: its recorded value WAS updated to the new output (US-002's shape rule and
+provenance line), rather than kept as pre-port evidence the way
+cap-gigante-primeiro's is -- it is still named here rather than left to the
+plain comparison, so a reader scanning this table for "what changed on
+purpose" finds it without also reading the diff.
 
 A FOURTH rule then changed and it is the only one that MOVED this block rather
 than being absorbed by a table or a strip: `metadata` is now projected onto the
@@ -1365,6 +1371,83 @@ def test_a_boolean_wave_is_a_mismatch_against_a_computed_one(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# validate-wave-contention: a brand-new verb, so these are hand-written rather
+# than a golden replay -- there is no jq implementation it ports and none to
+# compare against. A NEW verb, not a widening of validate-waves above: the two
+# read different fields and have different remedies (normalize-waves recomputes
+# a stored wave; it cannot move a path out of implementation.files).
+# ---------------------------------------------------------------------------
+
+
+def _contention_story(story_id, depends_on, files, wave="omit"):
+    story = _wave_story(story_id, depends_on, wave)
+    story["implementation"] = {"files": files, "approach": "a", "verify": "true"}
+    return story
+
+
+def _run_validate_wave_contention(tmp_path, stories):
+    """One live validate-wave-contention over a document written for the
+    occasion. Mirrors _run_validate_waves; unlike that verb this one really
+    does carry an exit status, so a caller reads proc.returncode too."""
+    root = os.path.realpath(str(tmp_path))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    os.makedirs(tasks_dir, exist_ok=True)
+    with open(
+        os.path.join(tasks_dir, "2020-01-01-contention-tasks.json"), "w", encoding="utf-8"
+    ) as fh:
+        fh.write(_waves_doc(stories))
+    proc = subprocess.run(
+        ["bash", CLI, "validate-wave-contention"], cwd=root, capture_output=True, text=True, timeout=120
+    )
+    return proc, json.loads(proc.stdout)
+
+
+def test_wave_contention_is_reported_with_the_exact_message(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {
+        "valid": False,
+        "errors": ["Wave contention: wave 1 path a.sh claimed by US-001, US-002"],
+    }
+    assert proc.returncode == 1, "unlike validate-waves, an invalid verdict here exits non-zero"
+
+
+def test_disjoint_implementation_files_pass_clean(tmp_path):
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", [], ["b.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_dependson_edge_clears_the_contention(tmp_path):
+    """The documented remedy, executed: chaining US-002 after US-001 moves it
+    to computed wave 2, even though both stories still declare the identical
+    path. The fix for a real contention is a dependsOn edge, never a file
+    split."""
+    stories = [
+        _contention_story("US-001", [], ["a.sh"]),
+        _contention_story("US-002", ["US-001"], ["a.sh"]),
+    ]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+def test_a_story_with_no_implementation_key_is_skipped_not_crashed(tmp_path):
+    stories = [
+        _wave_story("US-001", []),
+        _contention_story("US-002", [], ["a.sh"]),
+    ]
+    assert "implementation" not in stories[0]
+    proc, verdict = _run_validate_wave_contention(tmp_path, stories)
+    assert verdict == {"valid": True, "errors": []} and proc.returncode == 0
+
+
+# ---------------------------------------------------------------------------
 # normalize-waves: a brand-new verb, so these are hand-written rather than a
 # golden replay -- there is no jq implementation it ports and none to compare
 # against. The rule itself is asserted only by import (compute_waves lives in
@@ -2269,6 +2352,377 @@ def test_a_null_metadata_finalize_is_read_as_absent_and_not_as_malformed(tmp_pat
     assert actual["stderr"] == ""
 
 
+def _replay_brainstorm_decision(decisions, tmp_path, brainstorm_path=_ABSENT):
+    """One story through the real CLI, carrying `metadata.decisions` and
+    `metadata.brainstormPath` as given.
+
+    R20's own replay, built here for the reason _replay_line_anchor and
+    _replay_implementation are: bash never ran this rule either, so there is
+    no jq recording to replay, and adding a case to `validate_tasks_cases`
+    would be recording the Python. schemaVersion 3.3 is load-bearing for the
+    same reason -- R1 returns before validate_tasks on anything older, so the
+    warning would never fire and the test would pass on nothing.
+
+    `decisions` reuses `_replay_implementation`'s `_ABSENT` sentinel for the
+    same reason it does: `None` and `[]` are both values the schema allows,
+    so "no metadata.decisions[] key at all" -- the false-positive control's
+    first shape -- needs a fixture distinguishable from either.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if decisions is not _ABSENT:
+        metadata["decisions"] = decisions
+    if brainstorm_path is not _ABSENT:
+        metadata["brainstormPath"] = brainstorm_path
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+_BRAINSTORM_SOURCED_DECISION = {
+    "anchor": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "source": ".aimi/brainstorms/2026-01-01-exemplo.md:L12",
+    "text": "algo decidido no brainstorm",
+    "resolution": "sim",
+}
+
+
+def test_a_brainstorm_sourced_decision_with_no_brainstormpath_warns_exactly_once(tmp_path):
+    """R20's warning half. Confirms BRAINSTORM_DECISION_SOURCE matches this
+    shape before relying on the CLI to have matched it too, so a failure here
+    can never be mistaken for a regex that silently stopped matching."""
+    assert T.BRAINSTORM_DECISION_SOURCE.match(_BRAINSTORM_SOURCED_DECISION["source"])
+    actual = _replay_brainstorm_decision([_BRAINSTORM_SOURCED_DECISION], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "exactly one warning line, for the whole document"
+    assert actual["stderr"] == (
+        "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: metadata.decisions[] cites a "
+        "brainstorm-sourced decision (.aimi/brainstorms/2026-01-01-exemplo.md:L12) but "
+        "metadata.brainstormPath is absent — every one of that brainstorm's design "
+        "decisions is silently dropped from every story's execution context\n"
+    )
+
+
+def test_no_decisions_key_at_all_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape one -- the criterion this rule exists
+    to satisfy. A plan that never went through a brainstorm at all is the
+    ordinary, legitimate shape of a tasks.json, and must produce silence on
+    both channels, exactly like every case above it that never touches
+    metadata.decisions."""
+    actual = _replay_brainstorm_decision(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_decisions_present_but_none_brainstorm_sourced_never_warns(tmp_path):
+    """THE FALSE-POSITIVE CONTROL, shape two -- decisions[] populated
+    entirely with the OTHER fixed source tags, including the two that also
+    end in ':L<line>' (businessSpec, designSpec), which
+    BRAINSTORM_DECISION_SOURCE's own negative lookahead exists to exclude."""
+    actual = _replay_brainstorm_decision(
+        [
+            {
+                "anchor": "outline:edit:03",
+                "source": "outline",
+                "text": "renomeado",
+                "resolution": "sim",
+            },
+            {
+                "anchor": "businessSpec:L12",
+                "source": "businessSpec:L12",
+                "text": "marcador",
+                "resolution": "confirmado",
+            },
+        ],
+        tmp_path,
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_brainstormpath_present_alongside_the_same_decision_never_warns(tmp_path):
+    """The rule fires on the ABSENCE of the link, never merely on the
+    presence of a brainstorm-shaped decision -- the same
+    _BRAINSTORM_SOURCED_DECISION that warns above must fall silent once
+    metadata.brainstormPath is filled in."""
+    actual = _replay_brainstorm_decision(
+        [_BRAINSTORM_SOURCED_DECISION],
+        tmp_path,
+        brainstorm_path=".aimi/brainstorms/2026-01-01-exemplo.md",
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def _replay_prototype_dropped(dropped, tmp_path):
+    """One story through the real CLI, carrying `metadata.prototypeDropped` as
+    given.
+
+    R21's own replay, built here for the reason _replay_implementation and
+    _replay_brainstorm_decision are: bash never ran this rule, so there is no
+    jq recording to replay and adding a case to `validate_tasks_cases` would be
+    recording the Python. schemaVersion 3.3 is load-bearing for the same reason
+    those two give -- R1 returns before validate_tasks on anything older, so a
+    3.2 fixture would pass on nothing.
+
+    `dropped` reuses the same `_ABSENT` sentinel: `None`, `[]` and "no key at
+    all" are three different fixtures for this rule -- the first two are
+    accepted and refused respectively, the third is the guard-rail -- and only
+    a sentinel can express the third.
+    """
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if dropped is not _ABSENT:
+        metadata["prototypeDropped"] = dropped
+    document = {
+        "schemaVersion": "3.3",
+        "metadata": metadata,
+        "userStories": [story],
+    }
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+_WELL_FORMED_DROP = {
+    "path": ".aimi/brainstorms/prototypes/x-variant-c.html",
+    "reason": "aggregate-cap",
+    "bytes": 214003,
+}
+
+
+def _assert_refuses_prototype_dropped(actual):
+    """Every refusing case asserts the same three things, so they are written
+    down once: exit 1, `valid: false` on stdout, and an errors[] entry naming
+    the key. The per-case assertion each test adds on top is the part that
+    tells that case apart from its siblings."""
+    assert actual["exit"] == 1
+    verdict = json.loads(actual["stdout"])
+    assert verdict["valid"] is False
+    assert any(
+        "metadata.prototypeDropped" in entry for entry in verdict["errors"]
+    ), verdict["errors"]
+    return verdict
+
+
+def test_no_prototypedropped_key_at_all_validates_exactly_as_before(tmp_path):
+    """GUARD-RAIL, passes BEFORE and AFTER, and the whole rule is built around
+    it. A plan that dropped nothing is the ordinary shape of a tasks.json and
+    must be untouched on all three channels -- exit status, stdout and stderr
+    -- the way R18 leaves an absent metadata.finalize alone."""
+    actual = _replay_prototype_dropped(_ABSENT, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_explicit_null_is_accepted_like_an_absent_key(tmp_path):
+    """jq's doing, not a softening: `.metadata.prototypeDropped` answers null
+    for a missing key and for an explicitly null one, so nothing on the read
+    side can tell them apart -- exactly R18's position on metadata.finalize."""
+    actual = _replay_prototype_dropped(None, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_a_well_formed_prototypedropped_is_accepted_silently(tmp_path):
+    """THE POSITIVE CONTROL, and a guard-rail by construction -- it passed
+    before the rule existed too, since an unknown metadata key is simply
+    ignored. It discriminates only together with the refusals below, and it is
+    here so the new rule cannot pass by refusing everything: this is the exact
+    shape the writer will emit."""
+    actual = _replay_prototype_dropped([_WELL_FORMED_DROP], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_an_empty_array_is_refused_and_told_to_omit_the_key(tmp_path):
+    """`[]` is the exact mistake the omitted-when-empty convention exists to
+    prevent, so it gets a message of its own rather than the generic
+    not-an-array one, which would misdescribe it -- it IS an array."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([], tmp_path)
+    )
+    assert any("omit the key entirely" in entry for entry in verdict["errors"]), verdict[
+        "errors"
+    ]
+
+
+def test_an_empty_object_is_refused_as_not_an_array(tmp_path):
+    """The other half of absent-vs-empty: `{}` is not an array at all, so it
+    takes the generic message the empty array is kept away from."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped({}, tmp_path)
+    )
+    assert any("is not an array" in entry for entry in verdict["errors"]), verdict[
+        "errors"
+    ]
+
+
+def test_a_bare_string_where_the_array_belongs_is_refused(tmp_path):
+    """One path written as a scalar instead of a one-element array -- the
+    shape a writer reaches for when it has exactly one thing to record."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped(_WELL_FORMED_DROP["path"], tmp_path)
+    )
+
+
+def test_an_element_that_is_a_bare_string_is_refused(tmp_path):
+    """The array is right and the element is not: a list of paths rather than
+    a list of records, which loses both the reason and the size."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([_WELL_FORMED_DROP["path"]], tmp_path)
+    )
+
+
+def test_an_element_with_no_path_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["path"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_an_element_whose_path_is_the_empty_string_is_refused(tmp_path):
+    """Present but empty is the same defect as absent here: a record naming no
+    file records nothing."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, path="")], tmp_path)
+    )
+
+
+def test_an_element_with_no_reason_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["reason"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_an_element_whose_reason_is_the_empty_string_is_refused(tmp_path):
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, reason="")], tmp_path)
+    )
+
+
+def test_bytes_carried_as_a_string_is_refused(tmp_path):
+    """The size is weighed against a numeric ceiling, so a stringified one is
+    a record the ceiling's own reader cannot compare against."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, bytes="214003")], tmp_path)
+    )
+
+
+def test_bytes_carried_as_the_json_literal_true_is_refused(tmp_path):
+    """The case a naive `isinstance(x, int)` accepts, because Python's bool is
+    an int SUBCLASS -- so `isinstance(True, int)` is true and the literal would
+    pass for a size of 1. The helper checks bool BEFORE int for this reason,
+    and this test is what holds that order in place."""
+    _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped([dict(_WELL_FORMED_DROP, bytes=True)], tmp_path)
+    )
+
+
+def test_an_element_with_no_bytes_is_refused(tmp_path):
+    entry = dict(_WELL_FORMED_DROP)
+    del entry["bytes"]
+    _assert_refuses_prototype_dropped(_replay_prototype_dropped([entry], tmp_path))
+
+
+def test_every_malformed_element_is_reported_and_not_just_the_first(tmp_path):
+    """The helper collects suffixes rather than returning on the first one, so
+    a document with two bad elements reports both -- the same choice
+    finalize_shape_errors makes across its three fields."""
+    verdict = _assert_refuses_prototype_dropped(
+        _replay_prototype_dropped(
+            [dict(_WELL_FORMED_DROP, path=""), dict(_WELL_FORMED_DROP, bytes=True)],
+            tmp_path,
+        )
+    )
+    named = [entry for entry in verdict["errors"] if "metadata.prototypeDropped" in entry]
+    assert any("[0].path" in entry for entry in named), named
+    assert any("[1].bytes" in entry for entry in named), named
+
+
+def test_prototypedropped_acquired_no_consumer():
+    """The record must stay a record. Nothing may open, move, delete or
+    resolve a path named only in `prototypeDropped`, which is what lets the
+    rule carry no path confinement -- so the two places that WOULD act on such
+    a path are asserted unchanged rather than read off the diff.
+
+    STORY_CONTEXT_METADATA_KEYS is the executor payload's projection: a key
+    added there travels into every spawned story's context. archive-task's own
+    tuple is the cleanup loop that MOVES and DELETES the paths it names.
+    """
+    assert T.STORY_CONTEXT_METADATA_KEYS == (
+        "designBundle", "designTokens", "prototypePaths"
+    )
+    assert "prototypeDropped" not in T.STORY_CONTEXT_METADATA_KEYS
+    cleanup = inspect.getsource(T.op_archive_task)
+    assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
+    assert "prototypeDropped" not in cleanup
+
+
+def test_only_r21_and_its_helper_name_the_key_anywhere_in_tasks_py():
+    """Widens the test above from the two known consumers to the whole module.
+
+    The key must be named by R21's read inside `validate_tasks` and by its own
+    shape helper, and by nothing else -- that is what makes "nothing opens,
+    moves or stats a prototypeDropped path" a property of the module rather
+    than a claim about the two functions somebody thought to check. A future
+    story that gives the key a real consumer moves this assertion in the same
+    commit that adds the confinement such a consumer would then need.
+    """
+    naming = {
+        name
+        for name, value in vars(T).items()
+        if inspect.isfunction(value)
+        and value.__module__ == T.__name__
+        and "prototypeDropped" in inspect.getsource(value)
+    }
+    assert naming == {"prototype_dropped_shape_errors", "validate_tasks"}
+
 def test_plan_md_s_two_response_shape_examples_come_out_the_way_plan_md_says():
     """commands/plan.md § "responseShape contract (frontend-only mode)" prints
     one ACCEPTED example and one REJECTED one. Both are in the corpus, and the
@@ -2649,6 +3103,7 @@ CONTEXT_DECISIONS = {
     "cap-multibyte-c": "the cap counts bytes; under LC_ALL=C it already did",
     "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
     "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
+    "brainstorm-secao-duplicada": "two matched sections now carry provenance instead of merging bare",
 }
 
 
@@ -2670,7 +3125,7 @@ def test_the_story_context_tables_name_only_cases_that_exist():
     assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
     assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
     assert len(CONTEXT) == 57
-    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 9, "48 of 57 match; keep this in step"
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 10, "47 of 57 match; keep this in step"
 
 
 def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
@@ -2719,7 +3174,13 @@ def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, 
     assert actual["exit"] == 0, label + ": the shell that killed this is gone"
     payload = json.loads(actual["stdout"])
     if label == "brainstorm-truncagem-64k":
-        assert payload["designContext"]["decisions"] == "<<d*65536>>", "truncated, not fatal"
+        # US-002: the 200000-byte single matched section is now dropped WHOLE
+        # with a marker, not byte-sliced to 65536 -- so the run of "d"s is gone
+        # entirely and the old `_rle`-compressed "<<d*65536>>" expectation is
+        # exactly the wrong shape to assert any more.
+        assert payload["designContext"]["decisions"] == (
+            "[design decisions dropped — cap exceeded: ## Design Decisions (200000 bytes)]"
+        ), "dropped whole, not truncated"
     else:
         assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
         assert payload["skillsDropped"] == []
@@ -3060,21 +3521,111 @@ def test_the_skills_array_is_serialized_once_rather_than_once_per_skill():
     assert op.count("_emit(") == 1
 
 
-def test_the_decisions_scanner_is_the_awk_pipeline_and_truncates_at_65536():
-    """The unit, over the shapes the corpus records: a `### ` heading stays
-    inside the section, a `## ` heading closes it, a second `## Design Decisions`
-    does NOT (awk tested that rule first and skipped the closing one), the match
-    is a PREFIX so a suffixed heading opens the section, blank lines go, and the
-    truncation counts bytes because `head -c` did."""
+def test_the_decisions_scanner_matches_heading_shape_and_evicts_whole_sections():
+    """The single-section shapes the corpus records, unchanged by the shape
+    rewrite: a `### ` heading stays inside the section, a `## ` heading closes
+    it, blank lines go. A suffixed heading (`## Design Decisions e mais`) still
+    opens a section -- not because of a prefix match any more, but because the
+    shape regex matches "Decisions" wherever it sits in the heading text."""
     assert T.design_decisions(b"## Design Decisions\num\n### Sub\ndois\n## Fim\ntres\n") == (
         "um\n### Sub\ndois"
     )
     assert T.design_decisions(b"## Design Decisions e mais\num\n") == "um"
-    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == "um\ndois"
     assert T.design_decisions(b"## Outra\num\n") == ""
     assert T.design_decisions(b"## Design Decisions\n\n  recuada  \n\n\nfim\n") == "recuada\nfim"
-    assert T.design_decisions(b"## Design Decisions\n" + b"d" * 70000) == "d" * 65536
     assert T.DECISIONS_CAP == 65536
+
+
+def test_a_second_matching_heading_still_does_not_close_the_first_but_now_carries_provenance():
+    """The merge-not-close rule survives the shape rewrite (AC #4): a second
+    `## Design Decisions` does not close the first section -- both are matched
+    individually and both survive, each now carrying its own `## <Heading>`
+    line as provenance rather than merging into one bare body the way the
+    prefix-match scanner used to (the old value here was "um\\ndois")."""
+    assert T.design_decisions(b"## Design Decisions\num\n## Design Decisions\ndois\n") == (
+        "## Design Decisions\num\n\n## Design Decisions\ndois"
+    )
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["## Design Decisions", "## Design Decisions e mais", "## Key Decisions"],
+)
+def test_the_shape_rule_accepts_every_positive_control(heading):
+    """AC #2's three positives, each as the SOLE heading in its own brainstorm
+    -- a bare-body return, since exactly one section ever matches here."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == "um"
+
+
+@pytest.mark.parametrize("heading", ["## Overview", "## Next Steps"])
+def test_the_shape_rule_rejects_both_negative_controls(heading):
+    """AC #2's two negative controls, each as the sole heading present --
+    neither carries a "Decision"/"Decisions" word, so neither matches, and
+    with no matched section at all the return is "", same as a brainstorm with
+    no decisions heading whatsoever."""
+    assert T.design_decisions((heading + "\num\n").encode("utf-8")) == ""
+
+
+def test_two_differently_named_matched_sections_concatenate_in_document_order():
+    """AC #3: `## Design Decisions` and `## Key Decisions` elsewhere in the
+    same file are two matched sections, not one -- both heading lines and both
+    bodies appear in the result, in source order."""
+    brainstorm = (
+        b"## Design Decisions\nprimeira\n"
+        b"## Overview\nnao conta\n"
+        b"## Key Decisions\nsegunda\n"
+    )
+    result = T.design_decisions(brainstorm)
+    assert result == "## Design Decisions\nprimeira\n\n## Key Decisions\nsegunda"
+    assert result.index("## Design Decisions") < result.index("## Key Decisions")
+    assert result.index("primeira") < result.index("segunda")
+
+
+def test_two_matched_sections_over_the_combined_cap_evict_the_lower_priority_one(monkeypatch):
+    """AC #5: neither section alone exceeds the cap, but their concatenation
+    does. The lowest-priority section -- last-matched in document order,
+    mirroring skills_payload()'s declaration-order eviction -- is dropped
+    whole; the higher-priority section's body survives intact and the lower
+    one's text is entirely absent, not partially present."""
+    monkeypatch.setattr(T, "DECISIONS_CAP", 100)
+    brainstorm = b"## Design Decisions\n" + b"a" * 60 + b"\n## Key Decisions\n" + b"b" * 60 + b"\n"
+    result = T.design_decisions(brainstorm)
+    assert result.startswith("## Design Decisions\n" + "a" * 60)
+    assert "b" * 60 not in result
+    assert "## Key Decisions (77 bytes)" in result
+    assert "cap exceeded" in result
+
+
+def test_a_single_oversized_matched_section_is_dropped_whole_not_sliced():
+    """AC #6, replacing the old 70000-byte truncation assertion this story's
+    rule change makes wrong: a lone matched section whose own body alone
+    exceeds DECISIONS_CAP is dropped in full -- never truncated into a partial
+    65536-byte blob -- and the return is a non-empty marker naming the dropped
+    heading and its byte size, containing none of the section's original body
+    text."""
+    result = T.design_decisions(b"## Design Decisions\n" + b"d" * 70000)
+    assert "d" * 10 not in result
+    assert len(result) < 100
+    assert "## Design Decisions (70000 bytes)" in result
+    assert "cap exceeded" in result
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_brainstorm_secao_duplicada_now_carries_provenance_end_to_end(tmp_path):
+    """AC #4, run through the CLI rather than the bare function: the golden
+    recording for this case WAS updated (unlike cap-gigante-primeiro's, kept as
+    pre-port evidence) to the new provenance-preserving value, so the ordinary
+    corpus replay would already pass it -- it is named in CONTEXT_DECISIONS
+    anyway, and this is the dedicated assertion that names why, per heading."""
+    _, payload = _context_stdout("brainstorm-secao-duplicada", tmp_path)
+    decisions = payload["designContext"]["decisions"]
+    assert decisions == "## Design Decisions\nprimeira\n\n## Design Decisions\nsegunda"
+    assert decisions.count("## Design Decisions") == 2
+    assert decisions.index("## Design Decisions") == 0
+    assert decisions.rindex("## Design Decisions") == decisions.index("segunda") - len(
+        "## Design Decisions\n"
+    )
+    assert decisions.index("primeira") < decisions.index("segunda")
 
 
 def test_the_tag_breakout_escape_is_the_seds_two_rules_in_the_seds_order(tmp_path):
@@ -3717,15 +4268,30 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     every other number in this test is unchanged. A write that had brought a
     writer of its own would have moved three of these assertions at once,
     which is the shape this ratchet exists to make visible.
+
+    THE EIGHTH open() ARRIVED WITH design-decisions, and it is a second
+    caller of the same read design_context() already does for
+    get-story-context's own metadata.brainstormPath, not a new capability:
+    same read mode, same degrade-to-empty-string on a missing file. What is
+    new is the CALLER and the CONFINEMENT that precedes it -- op_design_decisions
+    is reached from aimi-cli.sh's design-decisions verb, whose --brainstorm-path
+    argument crosses bash's validate_path_in_project before python3 starts,
+    the CLI-argument half of the split the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section names, where
+    design_context()'s own read stays unconfined by that function's own
+    docstring because its path is document-sourced rather than an argument.
+    The variable is named brainstorm_path, not path, so it cannot collide
+    with the literal the fourth open's own check above matches.
     """
     code = _code()
-    assert code.count("open(") == 7
+    assert code.count("open(") == 8
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 7
+    assert 'open(brainstorm_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 8
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -3803,8 +4369,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # the other forty keep holds here too -- no new root, no leaf this module
     # chose, and no directory created anywhere. The docstring above argues why
     # the write exists at all.
-    assert code.count("os.path.") == 44
-    assert code.count("os.path.isfile(") == 7
+    #
+    # The forty-fifth is design-decisions' own isfile() over --brainstorm-path
+    # -- bash's own argument, already run through validate_path_in_project
+    # before this module ever saw it, the same CLI-argument confinement every
+    # tasks-file path here already gets. No new root, no new leaf: the rule
+    # the other forty-four keep holds for this one too.
+    assert code.count("os.path.") == 45
+    assert code.count("os.path.isfile(") == 8
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -4570,6 +5142,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "verification-report",
         "verify-probe",
         "list-known-gaps",
+        "design-decisions",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -4583,6 +5156,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "validate-stories",
         "validate-ids",
         "validate-waves",
+        "validate-wave-contention",
         "validate-tasks",
         "validate-story-exists",
         "mark-complete",
@@ -5767,6 +6341,95 @@ def test_the_docstring_names_the_shape_it_now_tracks():
     assert "HEREDOC" in doc
     for form in ("<<'X'", '<<"X"', "<<X", "<<-X"):
         assert form in doc, form
+
+
+# ---------------------------------------------------------------------------
+# verify_unterminated: a degraded segmentation is NAMED rather than swallowed
+# (US-006). Measured at 3b871aa: an unbalanced single quote fuses a
+# three-assertion verify to two segments with nothing said, and probe_verify
+# then runs the fused blob, watches bash refuse to parse it, and publishes
+# that refusal as `discriminates: True` -- a syntax error scored as an
+# exemplary check.
+# ---------------------------------------------------------------------------
+
+_UNTERM_OK = "[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_OK_DQ = '[ 1 = 1 ] || echo "the verb\'s x"\n[ 2 = 2 ]\n[ 3 = 3 ]'
+_UNTERM_OK_CMT = "# the verb's own name\n[ 1 = 1 ]\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_ECHO = "[ 1 = 1 ]\necho don't\n[ 2 = 2 ]\n[ 3 = 3 ]"
+_UNTERM_BAD_GREP = "grep -c it's f\n[ 1 = 1 ]\n[ 2 = 2 ]"
+
+
+def test_ac2_the_already_correct_cases_are_unchanged():
+    """AC2: all three were already right at 3b871aa (3, 4, 3 segments) and
+    must stay byte-for-byte right -- a widened splitter that "fixes" the
+    defect by cutting inside a double-quoted string, or by resurrecting a
+    dropped comment as a segment, fails right here. None of the three names a
+    residual state."""
+    for text, n in ((_UNTERM_OK, 3), (_UNTERM_OK_DQ, 4), (_UNTERM_OK_CMT, 3)):
+        assert len(T.verify_segments(text)) == n, (n, text)
+        assert T.verify_unterminated(text) is None, text
+
+
+def test_ac1_the_defect_is_named():
+    """AC1: at 3b871aa these fused to 2 and 1 segments with nothing said. The
+    unbalanced single quote is now named rather than silently absorbed."""
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        assert T.verify_unterminated(text) == "single-quote", text
+
+
+def test_ac4_every_residual_state_bash_refuses_is_named():
+    """AC4: the scope is every residual state bash refuses, not the single
+    quote alone -- all six fused a 3-assertion text to 2 segments identically
+    at 3b871aa, because `top` is one condition and every term in it is a way
+    to be left open at end-of-text."""
+    siblings = [
+        ('[ 1 = 1 ]\necho "oops\n[ 2 = 2 ]', "double-quote"),
+        ("[ 1 = 1 ]\necho `date\n[ 2 = 2 ]", "backtick"),
+        ("[ 1 = 1 ]\n( echo x\n[ 2 = 2 ]", "paren"),
+        ("[ 1 = 1 ]\n{ echo x\n[ 2 = 2 ]", "brace"),
+        ("[ 1 = 1 ]\nif true; then echo x\n[ 2 = 2 ]", "compound"),
+    ]
+    for text, name in siblings:
+        assert T.verify_unterminated(text) == name, (text, name)
+
+
+def test_ac5_an_unterminated_heredoc_is_not_flagged():
+    """AC5: `bash -n` accepts an unterminated heredoc (warning only) and RUNS
+    it, where every AC4 state is a hard syntax error -- so the heredoc stays
+    on the other side of the line, exactly as the closed sibling defect
+    (known-gap 2026-09-07-US-002) needs it to."""
+    hd = "cat <<'X'\nbody line\necho after\n"
+    assert T.verify_unterminated(hd) is None, hd
+    assert len(T.verify_segments(hd)) == 1, T.verify_segments(hd)
+
+
+def test_ac3_probe_verify_invents_no_verdict_for_an_unterminated_verify(tmp_path):
+    """AC3: at 3b871aa the fused blob WAS run, bash refused to parse it (exit
+    2), and that refusal was published as `discriminates: True` -- a
+    three-assertion verify bash will not run, scored as one perfectly
+    discriminating check. Now `probe_verify` consults `verify_unterminated`
+    before its segment loop, returns exactly one entry with no verdict, and
+    runs nothing at all."""
+    where = str(tmp_path)
+    for text in (_UNTERM_BAD_ECHO, _UNTERM_BAD_GREP):
+        probed = T.probe_verify(text, where)
+        assert len(probed) == 1, probed
+        entry = probed[0]
+        assert entry["exit"] is None, entry
+        assert entry["discriminates"] is None, entry
+        assert entry["unterminated"] == "single-quote", entry
+        assert entry["segment"] == text.strip(), entry
+    assert all(e.get("discriminates") is not True for e in probed), probed
+
+
+def test_ac3_a_parseable_verify_keeps_every_real_verdict(tmp_path):
+    """AC3, other direction: the withholding does not leak onto a healthy
+    verify -- the parseable control still returns one entry per assertion,
+    every one of them a real (non-null) verdict."""
+    probed = T.probe_verify(_UNTERM_OK, str(tmp_path))
+    assert len(probed) == 3, probed
+    assert [e["discriminates"] for e in probed] == [False, False, False], probed
+    assert all("unterminated" not in e for e in probed), probed
 
 
 def test_a_probed_heredoc_runs_as_one_segment_instead_of_line_by_line(tmp_path):
@@ -7518,6 +8181,37 @@ def test_the_feature_comes_from_the_file_names_own_slug_when_it_has_one(tmp_path
         None,
         "verify-creates-excludes-miss-this-repo",
     )
+
+
+def test_a_retired_gap_reports_its_reason_and_superseder(tmp_path):
+    """The three formats the contract distinguishes: a file that declares both
+    `retired:` and `supersededBy:` reports both strings; a file that declares
+    neither reports both null; and a file that declares `supersededBy:` with
+    no `retired:` also reports both null -- a pointer to what replaced a gap
+    is not a retirement unless the reason for retiring it is there too, and
+    reporting the pointer alone would hand the reader a superseder for a gap
+    nobody marked as gone."""
+    entries = _gaps(
+        tmp_path,
+        {
+            "2026-01-01-a.md": (
+                "---\nfeature: fx\nretired: reproduzido falso\n"
+                "supersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+            "2026-01-02-b.md": "---\nfeature: fx\n---\nKNOWN-GAP: alegacao\n",
+            "2026-01-03-c.md": (
+                "---\nfeature: fx\nsupersededBy: docs/superseder.md\n---\nKNOWN-GAP: alegacao\n"
+            ),
+        },
+    )
+    resolved = {
+        entry["file"]: (entry["retired"], entry["supersededBy"]) for entry in entries
+    }
+    assert resolved == {
+        "2026-01-01-a.md": ("reproduzido falso", "docs/superseder.md"),
+        "2026-01-02-b.md": (None, None),
+        "2026-01-03-c.md": (None, None),
+    }
 
 
 def _dated(created_at):

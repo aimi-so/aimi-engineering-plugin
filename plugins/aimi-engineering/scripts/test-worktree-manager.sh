@@ -268,6 +268,160 @@ test_create_remove_default_removes_branch() {
   teardown_wtm_fixture
 }
 
+# Defect D1's discriminator: a removal git REFUSED must not print a checkmark.
+# Locking the worktree is the cheapest way to make `git worktree remove --force`
+# fail for a real, git-stated reason (exit 128, `fatal: cannot remove a locked
+# working tree`) without mocking git. Against the pre-fix tree this fails on
+# every count at once: the success line printed, the exit status was 0, and
+# git's own words never reached the transcript — while the directory, the
+# registration and the branch all survived.
+test_remove_reports_failure_when_removal_did_not_happen() {
+  echo ""
+  echo "=== Testing remove reports failure when git could not remove the worktree ==="
+
+  setup_wtm_fixture
+
+  local branch="locked-remove-branch"
+  local worktree_path="$WTM_FIXTURE_REPO/.worktrees/$branch"
+
+  bash "$WTM" create "$branch" >/dev/null 2>&1
+  git worktree lock "$worktree_path"
+
+  local out rc
+  out=$(bash "$WTM" remove "$branch" 2>&1)
+  rc=$?
+
+  assert_exit_code "1" "$rc" "remove failure: exit code is non-zero"
+
+  local success_lines
+  success_lines=$(printf '%s\n' "$out" | grep -cF '✓ Removed worktree: ' || true)
+  assert_eq "0" "$success_lines" "remove failure: no success line is printed"
+
+  # Diagnosable from a transcript alone: the REFUTED container-nesting cause
+  # produces a similar-looking symptom ("the worktree is still there
+  # afterwards"), and only git's own wording separates the two.
+  assert_contains "fatal: cannot remove a locked working tree" "$out" \
+    "remove failure: git's own message reaches the transcript"
+
+  # The failure report matches the state on disk — nothing was removed, and
+  # the branch ref the next `create` would silently reuse is still there.
+  local still_registered still_on_disk branch_count
+  still_registered=$(git worktree list | grep -cF "/.worktrees/$branch" || true)
+  still_on_disk=$([[ -d "$worktree_path" ]] && echo present || echo gone)
+  branch_count=$(git branch --list "$branch" | wc -l | tr -d ' ')
+  assert_eq "registered=1 dir=present branches=1" \
+    "registered=$still_registered dir=$still_on_disk branches=$branch_count" \
+    "remove failure: the worktree and its branch really did survive"
+
+  # Teardown needs no unlock: the fixture is an mktemp -d tree removed
+  # wholesale, and `git worktree lock` writes only inside it.
+  teardown_wtm_fixture
+}
+
+# GUARD-RAIL 2's missing coverage. Research §1.5 measured that both round-trip
+# tests above discard stdout (`>/dev/null 2>&1`), so no assertion in the tree
+# pins the success path's bytes — gating that path on a post-state check could
+# have reworded or duplicated the line with nothing to notice.
+test_remove_success_output_is_unchanged() {
+  echo ""
+  echo "=== Testing a successful remove still prints exactly its success line ==="
+
+  setup_wtm_fixture
+
+  local branch="success-output-branch"
+
+  bash "$WTM" create "$branch" >/dev/null 2>&1
+
+  local out rc
+  out=$(bash "$WTM" remove "$branch" 2>&1)
+  rc=$?
+
+  assert_exit_code "0" "$rc" "remove success: exit code stays 0"
+
+  assert_contains "✓ Removed worktree: $branch" "$out" \
+    "remove success: the success line is byte-identical"
+
+  local success_lines
+  success_lines=$(printf '%s\n' "$out" | grep -cF '✓ Removed worktree: ' || true)
+  assert_eq "1" "$success_lines" "remove success: printed exactly once"
+
+  teardown_wtm_fixture
+}
+
+# remove_worktree now calls _prune_empty_worktree_parents, closing the drift
+# against its sibling. Every story branch this plugin creates carries a slash,
+# so `.worktrees/feat` is the residue the pre-fix `remove` always left behind —
+# and that one directory is what kept the `rmdir "$WORKTREE_DIR"` at the tail of
+# remove_worktree from ever firing, making it dead code for every real name.
+test_remove_prunes_empty_parent_of_slash_named_worktree() {
+  echo ""
+  echo "=== Testing remove prunes the empty parent of a slash-named worktree ==="
+
+  setup_wtm_fixture
+
+  bash "$WTM" create feat/x-US-001 >/dev/null 2>&1
+  bash "$WTM" remove feat/x-US-001 >/dev/null 2>&1
+  local remove_rc=$?
+
+  assert_exit_code "0" "$remove_rc" "remove prune: remove — exit code"
+
+  local parent_dir wt_dir
+  parent_dir=$([[ -d "$WTM_FIXTURE_REPO/.worktrees/feat" ]] && echo present || echo gone)
+  wt_dir=$([[ -d "$WTM_FIXTURE_REPO/.worktrees" ]] && echo present || echo gone)
+  assert_eq "gone gone" "$parent_dir $wt_dir" \
+    "remove prune: no empty parent dir left under .worktrees"
+
+  teardown_wtm_fixture
+}
+
+# The known-gap fixture, reproduced: a container at `.worktrees/bug/cont` with a
+# story worktree nested at `.worktrees/bug/cont/.worktrees/bug/cont-US-001`.
+# Called from the OUTER root, the composed path `.worktrees/bug/cont-US-001` is
+# one level above the real one, so the pre-fix remove printed "may already be
+# removed" and exited 0 while the worktree was registered AND on disk. Resolving
+# from the register instead makes this the one case that becomes a NEW failure —
+# every other unmatched name keeps its benign exit 0, which fifteen call sites
+# in commands/ depend on.
+test_remove_refuses_a_name_registered_only_inside_a_nested_container() {
+  echo ""
+  echo "=== Testing remove refuses a name registered only inside a nested container ==="
+
+  setup_wtm_fixture
+
+  local container_path="$WTM_FIXTURE_REPO/.worktrees/bug/cont"
+  local story_path="$container_path/.worktrees/bug/cont-US-001"
+
+  bash "$WTM" create bug/cont --from main >/dev/null 2>&1
+  ( cd "$container_path" && bash "$WTM" create bug/cont-US-001 --from bug/cont ) >/dev/null 2>&1
+  local nested_rc=$?
+  assert_exit_code "0" "$nested_rc" "remove nested: nested create — exit code"
+
+  local out rc
+  out=$(bash "$WTM" remove bug/cont-US-001 2>&1)
+  rc=$?
+
+  # Three claims in one, the way test_cleanup_removes_worktree_on_slash_branch
+  # collapses its own: the pre-fix tree fails all three together — it exits 0,
+  # it calls the worktree already removed, and it leaves it registered.
+  local benign_line still_registered
+  benign_line=$(printf '%s\n' "$out" | grep -cF 'may already be removed' || true)
+  still_registered=$(git worktree list | grep -cF '/.worktrees/bug/cont/.worktrees/bug/cont-US-001' || true)
+  assert_eq "rc=1 benign=0 registered=1" \
+    "rc=$rc benign=$benign_line registered=$still_registered" \
+    "remove nested: refused loudly instead of reported as already removed"
+
+  # Named by its registered path, not by the composed one — that is the only
+  # text that tells the operator where the worktree actually is. Asserted on
+  # the tail rather than the absolute path, which git reports resolved.
+  assert_contains "/.worktrees/bug/cont/.worktrees/bug/cont-US-001" "$out" \
+    "remove nested: names the registered path this root cannot reach"
+
+  assert_eq "present" "$([[ -d "$story_path" ]] && echo present || echo absent)" \
+    "remove nested: the nested worktree is left untouched"
+
+  teardown_wtm_fixture
+}
+
 # ============================================================================
 # List / Cleanup Tests
 # ============================================================================
@@ -1167,6 +1321,10 @@ main() {
   echo "--- Create/Remove Tests ---"
   test_create_remove_recreate_with_keep_branch
   test_create_remove_default_removes_branch
+  test_remove_reports_failure_when_removal_did_not_happen
+  test_remove_success_output_is_unchanged
+  test_remove_prunes_empty_parent_of_slash_named_worktree
+  test_remove_refuses_a_name_registered_only_inside_a_nested_container
   test_create_emits_sentinels_on_both_branches
   test_create_defaults_from_current_branch
   test_create_does_not_create_aimi_in_worktree

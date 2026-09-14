@@ -113,7 +113,15 @@ def is_quiet_mode() -> bool:
 # empty branch name and silently disables the protected-branch guard.
 _PATH_TOKEN = r"(?:\"([^\"]+)\"|'([^']+)'|(\S+))"
 _GIT_C_PATH_RE = re.compile(r"\bgit\s+-C\s+" + _PATH_TOKEN)
-_CD_PREFIX_RE = re.compile(r"\s*cd\s+" + _PATH_TOKEN + r"\s*&&")
+# `&&`, `;` and a newline are three spellings of one sequence, and a command
+# opening with `cd <path>` has declared its directory in all three. Matching
+# only `&&` sent the other two to the tool_input["cwd"] fallback, which can
+# name a different repository -- see effective_cwd's own docstring for what
+# that costs the protected-branch guard. The trailing run is `[ \t]*` and not
+# `\s*` for the reason pre-bash-dispatcher states about its own anchor: a
+# newline is both a separator here and a `\s` character, so `\s*` would eat
+# the very newline the alternation needs to see.
+_CD_PREFIX_RE = re.compile(r"\s*cd\s+" + _PATH_TOKEN + r"[ \t]*(?:&&|;|\r?\n)")
 
 
 def _resolve_path_token(match: re.Match) -> str:
@@ -127,11 +135,20 @@ def effective_cwd(command: str, tool_input: dict) -> str:
 
     Priority:
     1. Parse ``git -C <path>`` from command string.
-    2. Parse a leading ``cd <path> &&`` from command string.
+    2. Parse a leading ``cd <path>`` from command string, whichever way it
+       chains onward -- ``&&``, ``;`` or a newline.
     3. Fall back to tool_input.get("cwd") if present.
     4. Fall back to os.getcwd().
 
     Returns an absolute path string with ~ expanded.
+
+    Priority 3 is a fallback, not an equal: tool_input's cwd is where the
+    session sits, which is not always where the command says it will run.
+    When a command declares `cd <path>` and this function fails to read it,
+    every caller downstream inspects the wrong directory -- and for
+    handle_default_branch that means reading a feature worktree's branch,
+    finding it allowed, and permitting a commit onto the protected branch
+    the guard exists to defend.
     """
     m = _GIT_C_PATH_RE.search(command)
     if m:

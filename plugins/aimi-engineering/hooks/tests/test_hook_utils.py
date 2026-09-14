@@ -178,6 +178,57 @@ def test_effective_cwd_fallback_getcwd(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# A `cd` prefix is honoured whichever way the command chains
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /tmp/bar && git commit -m 'x'",
+        "cd /tmp/bar ; git commit -m 'x'",
+        "cd /tmp/bar\ngit commit -m 'x'",
+        "cd /tmp/bar\ngit add -A\ngit commit -m 'x'",
+    ],
+)
+def test_effective_cwd_honours_cd_in_every_chaining_form(command):
+    """`cd <path>` opens the same directory however the command chains.
+
+    bash reads `&&`, `;` and a newline as three spellings of one sequence, so a
+    command that starts `cd <path>` has said where it means to run in all three.
+    Matching only `&&` sent the other two to the tool_input fallback below.
+    """
+    import os
+
+    assert hook_utils.effective_cwd(command, {}) == os.path.abspath("/tmp/bar")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd /tmp/protected && git commit -m 'x'",
+        "cd /tmp/protected ; git commit -m 'x'",
+        "cd /tmp/protected\ngit commit -m 'x'",
+    ],
+)
+def test_effective_cwd_cd_target_outranks_the_session_cwd(command):
+    """A declared `cd` target beats the session's own directory, in every form.
+
+    This is the shape the protected-branch guard depends on. The two disagree
+    exactly when it matters: the session sits in a feature worktree while the
+    command cd's into a checkout on the default branch. Falling back to
+    tool_input['cwd'] there reads the FEATURE branch, finds it allowed, and lets
+    the commit land on the protected branch the guard exists to defend -- the
+    same fail-open ending `test_effective_cwd_resolves_quoted_paths` describes
+    for unstripped quotes, reached through the separator instead.
+    """
+    import os
+
+    resolved = hook_utils.effective_cwd(command, {"cwd": "/tmp/feature-worktree"})
+    assert resolved == os.path.abspath("/tmp/protected")
+
+
+# ---------------------------------------------------------------------------
 # resolve_session_id tests
 # ---------------------------------------------------------------------------
 

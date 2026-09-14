@@ -1388,6 +1388,72 @@ def validate_waves(doc):
     return _verdict(errors)
 
 
+def wave_contention(doc):
+    """One error per `implementation.files` path two or more stories in the
+    SAME wave both claim -- the check that catches two executors racing each
+    other for one literal, which `validate_waves` never asked about at all.
+
+    KEYED ON THE COMPUTED WAVE, NEVER THE STORED ONE. `list-ready` never reads
+    `wave` -- `ready_stories` decides readiness from status plus completed
+    dependencies, and the schema itself says `wave` is informational only,
+    never consumed by dispatch. So `computed_waves` is the static model of what
+    `/aimi:execute`'s dynamic ready-set will actually dispatch together, and a
+    stale STORED wave must never be allowed to hide a real contention.
+
+    Path comparison is exact string equality -- `a/b.py` and `./a/b.py` read
+    as different paths. That is a false NEGATIVE (a missed contention), never a
+    false positive, and is accepted rather than routed through path
+    confinement: this is a question of identity between two document values,
+    not of whether either escapes the project root.
+
+    A story `computed_waves` never assigned (a cycle, a dangling `dependsOn`)
+    is skipped, exactly as `validate_waves` skips it -- reporting those is
+    `validate_deps`' job. A story whose own `implementation` is not an object,
+    or whose `implementation.files` is not a list, is skipped too: the guard is
+    R17's, reused verbatim rather than respelled (see its comment, and the
+    account beside `.project` in `validate_stories`). Each story's own repeated
+    paths are deduplicated before comparison, so a story cannot contend with
+    itself.
+
+    Errors are built in a deterministic order because the verdict is compared
+    byte for byte by tests: waves ascending, paths in first-appearance document
+    order within a wave, ids in document order -- which plain dict insertion
+    order already gives, since stories are walked in document order throughout.
+    """
+    stories = _stories(doc)
+    assigned = computed_waves(stories)
+    by_wave = {}
+    for story in stories:
+        story_id = jq_index(story, "id", STORY)
+        wave = assigned.get(story_id)
+        if wave is None:
+            continue
+        implementation = jq_index(story, "implementation", STORY)
+        if jq_type(implementation) != "object":
+            continue
+        files = jq_index(implementation, "files", STORY + ".implementation")
+        if not isinstance(files, list):
+            continue
+        claims = by_wave.setdefault(wave, {})
+        seen = set()
+        for entry in files:
+            if not isinstance(entry, str) or entry in seen:
+                continue
+            seen.add(entry)
+            claims.setdefault(entry, []).append(story_id)
+
+    errors = []
+    for wave in sorted(by_wave):
+        for path, ids in by_wave[wave].items():
+            if len(ids) > 1:
+                errors.append(
+                    "Wave contention: wave " + str(wave)
+                    + " path " + path
+                    + " claimed by " + ", ".join(ids)
+                )
+    return _verdict(errors)
+
+
 # ---------------------------------------------------------------------------
 # validate-tasks: fifteen rules, and the three pieces of scaffolding that died
 # ---------------------------------------------------------------------------
@@ -1760,6 +1826,16 @@ BRANCH_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9/_-]*")
 URL_CHARSET = r"^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$"
 SOURCE_CITATION = re.compile(r"^BusinessSpec § [0-9]+(\.[0-9]+)? L[0-9]+$")
 SOURCE_SECTION = re.compile(r"§ [0-9]+(\.[0-9]+)?")
+# A `metadata.decisions[].source` shaped like `<brainstorm-path>:L<line>` --
+# see commands/plan.md's thirteen-value source enum. Two OTHER fixed tags
+# also end in ":L<line>" -- `businessSpec:L<line>` and `designSpec:L<line>`
+# -- and both are excluded by the negative lookahead, because they name a
+# spec file rather than a brainstorm and R20 below must never warn about
+# them. Every other fixed source tag (researchFile:..., specFlow:...,
+# scopeNegVerifier, scopePosVerifier, codebaseVerified, outline, phase,
+# auditGate, researchConflict) never ends in ":L<digits>" at all, so no
+# further exclusion is needed.
+BRAINSTORM_DECISION_SOURCE = re.compile(r"^(?!businessSpec:|designSpec:).+:L[0-9]+$")
 
 VALIDATE_METADATA_FIELDS = (
     "schema_version",
@@ -1891,6 +1967,72 @@ def finalize_claimed_files(finalize):
     return [entry for entry in files if isinstance(entry, str)]
 
 
+def prototype_dropped_shape_errors(dropped):
+    """`metadata.prototypeDropped`'s shape, for R21. Returns a list of suffixes.
+
+    ABSENT IS VALID AND IS THE WHOLE CONTRACT OF THE KEY, exactly as it is for
+    finalize_shape_errors above. `metadata.prototypeDropped` records the
+    prototype blocks /aimi:plan weighed and did NOT load, so a plan that
+    dropped nothing has nothing to declare, and every tasks.json written before
+    the key existed must keep validating byte for byte -- which is why the
+    caller skips this helper entirely on a `None`. It follows the
+    omitted-when-empty convention `baseRef`, `pluginVersion` and `issues`
+    already have: the key is written when something was dropped and left out
+    otherwise, never `[]` and never `{}`.
+
+    `null` AND ABSENT ARE THE SAME VALUE HERE, and that is jq's doing rather
+    than a softening of the rule, the same position R18 is in:
+    `.metadata.prototypeDropped` answers `null` for a key that is missing and
+    for a key that is explicitly null, so nothing on this side of the read can
+    tell them apart. An explicit `null` is therefore ACCEPTED.
+
+    THE EMPTY ARRAY GETS A MESSAGE OF ITS OWN because `[]` is the exact mistake
+    the convention exists to prevent, and " is not an array" would misdescribe
+    it -- it IS an array. The writer is told to omit the key instead.
+
+    Well-formed means a non-empty array whose every element is an object
+    carrying `path` (non-empty string), `reason` (non-empty string) and `bytes`
+    (a number). `bytes` rejects the JSON literals `true`/`false` explicitly,
+    checking `bool` BEFORE `int`, since Python's bool is an int subclass and
+    `isinstance(True, int)` would otherwise let the literal through as a size.
+
+    `reason` is checked as a non-empty string and NOT against an enum: the
+    writer decides which reasons exist, and a validator enum written before its
+    writer would refuse that writer's first legitimate new value.
+    """
+    if jq_type(dropped) != "array":
+        return [" is not an array (expected [{path, reason, bytes}, …])"]
+
+    if not dropped:
+        return [
+            " is an empty array — omit the key entirely when nothing was dropped"
+        ]
+
+    problems = []
+    for index, entry in enumerate(dropped):
+        where = "[" + str(index) + "]"
+        owner = ".metadata.prototypeDropped" + where
+        if jq_type(entry) != "object":
+            problems.append(
+                where + " is not an object (expected {path, reason, bytes})"
+            )
+            continue
+
+        path = jq_index(entry, "path", owner)
+        if not isinstance(path, str) or not path:
+            problems.append(where + ".path is missing or not a non-empty string")
+
+        reason = jq_index(entry, "reason", owner)
+        if not isinstance(reason, str) or not reason:
+            problems.append(where + ".reason is missing or not a non-empty string")
+
+        size = jq_index(entry, "bytes", owner)
+        if isinstance(size, bool) or not isinstance(size, (int, float)):
+            problems.append(where + ".bytes is missing or not a number")
+
+    return problems
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -1990,15 +2132,15 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     fired or not by the time this runs. Returns the error list; warnings go to
     `warn` as they are produced, in the order stderr received them.
 
-    R16 THROUGH R19 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
+    R16 THROUGH R20 ARE THE RULES HERE BASH NEVER RAN. Each is appended below
     the last one already present, which is the only position from which a new
     rule can add lines after everything the golden corpus recorded without
     reordering either channel; each one's own comment carries why it warns or
     errors, why it sits where it sits, and why it is defensive where every rule
-    above it is faithful. R16, R17 and R19 reach the `warn` channel only. R18
-    is the one of the four that reaches `errors`, and its own comment says why
-    a malformed `metadata.finalize` is a different kind of wrong from a stale
-    line anchor or a directory that is not there yet.
+    above it is faithful. R16, R17, R19 and R20 reach the `warn` channel only.
+    R18 is the one of the five that reaches `errors`, and its own comment says
+    why a malformed `metadata.finalize` is a different kind of wrong from a
+    stale line anchor or a directory that is not there yet.
     """
     errors = []
 
@@ -2235,6 +2377,107 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         + " — the end-of-round step writes it too"
                     )
 
+    # R20 -- metadata.decisions[] carries a brainstorm-sourced entry while
+    # metadata.brainstormPath is absent. A WARNING for R16's reason: a broken
+    # link between the two is a question to the plan's author, not a verdict
+    # on the document.
+    #
+    # THE FALSE-POSITIVE CONTROL IS THE RULE THIS EXISTS TO SATISFY. A plan
+    # with no metadata.decisions[] key at all is the ordinary, legitimate
+    # shape of a plan that never went through a brainstorm, and must never
+    # trip this rule; neither must a decisions[] populated entirely with
+    # non-brainstorm sources (outline, businessSpec:L<line>, designSpec:L
+    # <line>, researchFile:..., specFlow:..., scopeNegVerifier,
+    # scopePosVerifier, codebaseVerified, phase, auditGate, researchConflict).
+    # A rule that warned on either shape would fire on the common case and
+    # teach the reader to ignore the channel.
+    #
+    # WHY THIS SIGNAL: a metadata.decisions[] entry only carries a
+    # <brainstorm-path>:L<line> source (BRAINSTORM_DECISION_SOURCE, defined
+    # above) when /aimi:plan's Phase 0.5 actually parsed a brainstorm doc's
+    # Open Questions section, so its presence is proof a brainstorm fed this
+    # plan rather than a guess -- and it costs nothing beyond a second field
+    # read off docs[0], the same read R18/R19 already make for
+    # metadata.finalize. This story's notes carry the two other candidate
+    # signals considered and rejected (a roadmap.json brainstormPath check;
+    # a .aimi/brainstorms/ slug match).
+    #
+    # It sits BELOW R19 for R17's own stated reason: a rule appended after
+    # the last one already present can only add lines after everything the
+    # golden corpus recorded, in either channel, and can never reorder one.
+    #
+    # ONE warn call for the WHOLE document, on the FIRST matching entry, not
+    # one per matching entry -- R19's own one-line-per-story precedent
+    # (a story naming three collisions is one line), widened here to one
+    # line per document: the broken link is one fact about the document, not
+    # one fact per decision that cites it.
+    doc0_metadata = jq_index(docs[0], "metadata", "") if docs else None
+    brainstorm_path = jq_index(doc0_metadata, "brainstormPath", ".metadata")
+    if not brainstorm_path:
+        decisions = jq_index(doc0_metadata, "decisions", ".metadata")
+        if isinstance(decisions, dict):
+            decisions = list(decisions.values())
+        if isinstance(decisions, list):
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                source = decision.get("source")
+                if isinstance(source, str) and BRAINSTORM_DECISION_SOURCE.match(source):
+                    warn(
+                        tasks_file
+                        + ": metadata.decisions[] cites a brainstorm-sourced decision ("
+                        + source
+                        + ") but metadata.brainstormPath is absent — every one of that "
+                        "brainstorm's design decisions is silently dropped from every "
+                        "story's execution context"
+                    )
+                    break
+
+    # R21 -- metadata.prototypeDropped's shape. An ERROR where R16, R17, R19
+    # and R20 warn, and R18 is the precedent rather than a coin toss. Those
+    # four warn because each is a question to a human author about a plan that
+    # is still legible. This one is not: the key has exactly one writer --
+    # /aimi:plan's aggregate-ceiling path -- so a malformed value is never an
+    # author's judgement call. It is the plugin having written a record its own
+    # future reader cannot parse, which is precisely R18's stated reason for
+    # reaching `errors`.
+    #
+    # AND A WARNING WOULD HAND BACK THE SILENCE THE RECORD EXISTS TO BREAK. An
+    # unparseable record is indistinguishable from no record at all, so a round
+    # that dropped a prototype would once again end with no artifact separating
+    # "the planner saw the prototype" from "the planner saw the filename" --
+    # the exact failure this key was added to close.
+    #
+    # ABSENT DOES NOTHING AT ALL -- R18's guard-rail, held for R18's reason:
+    # every tasks.json written before the key existed must validate byte for
+    # byte on both channels, and the caller's `is None` skip is what guarantees
+    # it. The error can therefore only fire on a document that deliberately
+    # wrote the key.
+    #
+    # NO PATH CONFINEMENT, decided rather than forgotten. The repo CLAUDE.md
+    # routes a new document-sourced path behind require_in_project or
+    # confined_spec_path and never behind a fresh check; this path belongs
+    # behind NEITHER, because it is not a path the pipeline opens -- it names a
+    # file that was explicitly NOT loaded. Every confined sibling is confined
+    # because something acts on it: designBundle's spec paths are read by
+    # validate-tasks itself, and researchPaths/prototypePaths are moved and
+    # deleted by archive-task. Nothing reads, moves or stats a
+    # prototypeDropped path, so STORY_CONTEXT_METADATA_KEYS and archive-task's
+    # own two-key tuple are both left alone to keep it that way. A later story
+    # that makes something open one of these paths is the story that adds
+    # require_in_project -- not this one.
+    #
+    # It sits BELOW R20 for R17's own stated reason: a rule appended after the
+    # last one already present can only add lines after everything the golden
+    # corpus recorded, in either channel, and can never reorder one.
+    #
+    # `doc0_metadata` is R20's own local, reused rather than re-read: a third
+    # read of the same field would be a third thing to keep in step.
+    prototype_dropped = jq_index(doc0_metadata, "prototypeDropped", ".metadata")
+    if prototype_dropped is not None:
+        for problem in prototype_dropped_shape_errors(prototype_dropped):
+            errors.append(tasks_file + ": metadata.prototypeDropped" + problem)
+
     return errors
 
 
@@ -2374,11 +2617,24 @@ def _named_lines(values):
 
 SKILLS_CAP = 102400
 
-# `head -c 65536` on the decisions pipeline. Bytes, like the cap above, and for
-# a stronger reason: head counts bytes and never had a locale to depend on.
+# `head -c 65536` on the decisions pipeline, before this cap became a whole-
+# section eviction budget (see design_decisions() below) rather than a byte
+# slice point. Bytes, like the skills cap above, and for the same reason: the
+# old `head -c` counted them and never had a locale to depend on, and every
+# size compared against this cap today is still `len()` on a bytes object.
 DECISIONS_CAP = 65536
 
-DECISIONS_HEADING = b"## Design Decisions"
+# The shape rule a `## ` heading's own text is tested against, from US-001's
+# corpus measurement (`.aimi/research/design-decisions-section-shapes.md`):
+# case-insensitive, matches a word starting `Decis` continuing `ion` (covers
+# "Decision"/"Decisions"), `ão` (covers "Decisão") or `õe` (covers "Decisões").
+# Confirmed against the corpus to accept "## Design Decisions", "## Design
+# Decisions e mais" and "## Key Decisions", and to reject "## Overview" and
+# "## Next Steps" (the second of which is a real heading in both corpus files,
+# correcting an earlier assumption that it did not exist). The `\b` before
+# `Decis` blocks a false hit inside an unrelated word (e.g. "indecisão") for
+# free; no such heading is in the corpus, but the guard costs nothing.
+DECISIONS_HEADING_RE = re.compile(r"(?i)^##\s+.*\bDecis(ion|ão|õe)")
 
 # The two tag-breakout escapes, in the order the per-skill `sed` applied them.
 # Order matters and is not alphabetical: the closing form has to go first, or
@@ -2515,46 +2771,133 @@ def skills_payload(names, base_dir, warn):
     return [entry for entry, _ in kept], dropped
 
 
+def _is_decisions_heading(heading_line):
+    """The shape predicate: does this `## ` heading's own text match
+    DECISIONS_HEADING_RE? Decoded to text for the regex the same way every
+    other text this module hands back to the agent is decoded -- malformed
+    UTF-8 is replaced rather than refused, matching read_skill()'s rule."""
+    return bool(DECISIONS_HEADING_RE.match(heading_line.decode("utf-8", "replace")))
+
+
+def _split_top_sections(lines):
+    """Every top-level `## ` heading and its body (to the next `## ` or EOF),
+    in document order. A deeper `### ` heading is not a boundary -- its line
+    starts with three hashes and a space, not two hashes and a space, so it
+    stays inside whichever section is open, unchanged from the pre-port
+    scanner. Content before the first `## ` heading belongs to no section and
+    is dropped, matching the pre-port scanner, which only ever started
+    collecting once a heading had already been seen."""
+    sections = []
+    heading = None
+    body = []
+    for line in lines:
+        if line.startswith(b"## "):
+            if heading is not None:
+                sections.append((heading, body))
+            heading = line
+            body = []
+        elif heading is not None:
+            body.append(line)
+    if heading is not None:
+        sections.append((heading, body))
+    return sections
+
+
+def _section_body(body_lines):
+    """`sed 's/^[[:space:]]*//;s/[[:space:]]*$//'` over every body line, then
+    the blank-line drop that used to be a squeeze-then-delete pair (see the
+    docstring this rule carried before the shape rewrite: `awk 'NF ||
+    prev_nf'` collapsed blank runs to one and the `sed '/^$/d'` right after it
+    deleted the survivor too, so the composition drops every blank line and
+    writing the squeeze out would be dead code). Bytes throughout, for the
+    same reason DECISIONS_CAP counts them."""
+    collected = [stripped for stripped in (line.strip(b" \t\v\f\r") for line in body_lines) if stripped]
+    return b"\n".join(collected)
+
+
+def _decisions_dropped_marker(dropped):
+    """One bracketed marker naming every dropped heading and the byte size of
+    the block it cost, in the order design_decisions() dropped them (oversized
+    entries first in document order, then aggregate evictions in reverse
+    document order -- see design_decisions()'s own docstring)."""
+    parts = [
+        entry_heading.strip(b" \t\v\f\r").decode("utf-8", "replace") + " (" + str(entry_size) + " bytes)"
+        for entry_heading, entry_size in dropped
+    ]
+    return ("[design decisions dropped — cap exceeded: " + "; ".join(parts) + "]").encode("utf-8")
+
+
 def design_decisions(brainstorm_bytes):
-    """The awk/sed/awk/sed/head pipeline, in one pass over the file's bytes.
+    """The awk/sed/awk/sed/head pipeline, rewritten from a single-heading
+    prefix match into a shape rule over every top-level `## ` heading (see
+    DECISIONS_HEADING_RE), because a real brainstorm can carry its decisions
+    under `## Key Decisions` with no `## Design Decisions` heading anywhere,
+    and the old prefix match silently returned "" for one.
 
-    From `## Design Decisions` (a PREFIX match, so a heading with a suffix opens
-    the section too -- brainstorm-heading-sufixado) to the next `## ` heading or
-    end of file. A deeper `### ` heading stays inside. A SECOND
-    `## Design Decisions` does not close the section: awk tested that rule
-    first and `next`ed past the closing rule, so the two sections merge, which
-    brainstorm-secao-duplicada records.
+    Every `## ` section whose heading matches DECISIONS_HEADING_RE is a
+    matched section, in document order. A SECOND matching heading does not
+    close the first -- two `## Design Decisions` sections still both survive
+    (brainstorm-secao-duplicada), the same merge-not-close rule the old
+    prefix-match scanner had, now over the wider match set. Exactly one
+    matched section returns its bare body unchanged, same as before a shape
+    rule existed at all. Two or more matched sections concatenate in document
+    order, each carrying its own `## <Heading>` line as provenance -- the
+    reader can no longer tell two concatenated sections apart by content
+    alone, so the heading is what tells them apart.
 
-    Bytes throughout, like validate-tasks' subsection scanner and for the same
-    reason: awk, sed and `head -c` all counted them.
-
-    The blank-line SQUEEZE is not implemented and its absence is the port being
-    honest. `awk 'NF || prev_nf'` collapsed runs of blank lines to one, and the
-    `sed '/^$/d'` immediately after it then deleted the survivor too -- the
-    composition drops every blank line, and writing the squeeze out would be
-    dead code pretending to be a rule.
+    DECISIONS_CAP is no longer a byte-slice point (`head -c` truncated a
+    single stream mid-sentence); it is a whole-section eviction budget, in the
+    same two-pass shape skills_payload() already uses a few functions up:
+    drop any section whose own block alone exceeds the cap before aggregating,
+    then evict whole sections from the end -- lowest priority, meaning
+    last-matched in document order -- while the remaining concatenation is
+    still over the cap. No section's body is ever byte-sliced; a section
+    either survives whole or is dropped whole, and a marker names every
+    dropped heading and the byte size of the block it cost.
     """
     lines = brainstorm_bytes.split(b"\n")
     if lines and lines[-1] == b"":
         lines.pop()
 
-    collected = []
-    in_section = False
-    for line in lines:
-        if line.startswith(DECISIONS_HEADING):
-            in_section = True
-            continue
-        if in_section and line.startswith(b"## "):
-            break
-        if in_section:
-            # `sed 's/^[[:space:]]*//;s/[[:space:]]*$//'`, over a record that can
-            # hold no newline.
-            stripped = line.strip(b" \t\v\f\r")
-            if stripped:
-                collected.append(stripped)
+    matched = [
+        (heading, _section_body(body))
+        for heading, body in _split_top_sections(lines)
+        if _is_decisions_heading(heading)
+    ]
+    if not matched:
+        return ""
 
-    stream = b"".join(line + b"\n" for line in collected)
-    return stream[:DECISIONS_CAP].rstrip(b"\n").decode("utf-8", "replace")
+    multi = len(matched) > 1
+    blocks = []
+    for heading, body in matched:
+        if not multi:
+            block = body
+        else:
+            heading_text = heading.strip(b" \t\v\f\r")
+            block = heading_text if not body else heading_text + b"\n" + body
+        blocks.append((heading, block, len(block)))
+
+    kept = []
+    dropped = []
+    for heading, block, size in blocks:
+        if size > DECISIONS_CAP:
+            dropped.append((heading, size))
+            continue
+        kept.append((heading, block, size))
+
+    aggregate = sum(size for _, _, size in kept)
+    while aggregate > DECISIONS_CAP and kept:
+        heading, block, size = kept.pop()
+        dropped.append((heading, size))
+        aggregate -= size
+
+    survivors = b"\n\n".join(block for _, block, _ in kept)
+    if not dropped:
+        return survivors.decode("utf-8", "replace")
+
+    marker = _decisions_dropped_marker(dropped)
+    result = marker if not survivors else survivors + b"\n\n" + marker
+    return result.decode("utf-8", "replace")
 
 
 BUNDLE_GUIDANCE = (
@@ -3533,6 +3876,26 @@ def op_validate_waves(argv):
     for doc in read_docs(path, "validate-waves"):
         _emit(validate_waves(doc))
     return 0
+
+
+def op_validate_wave_contention(argv):
+    """One verdict per document, and -- unlike its `validate-waves` neighbour
+    -- a real exit status: return 1 when ANY verdict is invalid, 0 otherwise.
+
+    A new verb inherits no legacy contract, so it takes the shape the other
+    three real validators already have rather than copying `validate-waves`'
+    preserved jq accident, or `op_validate_deps`' `valid_lines == "true"`
+    quirk, or `op_validate_stories`' last-document-wins rule -- there is no
+    caller of THIS verb to keep compatible with a jq body that no longer
+    exists.
+    """
+    path = _flag(argv, "--tasks-file")
+    if not path:
+        die("Usage: tasks.py validate-wave-contention --tasks-file <path>")
+    verdicts = [wave_contention(doc) for doc in read_docs(path, "validate-wave-contention")]
+    for verdict in verdicts:
+        _emit(verdict)
+    return 0 if all(v["valid"] for v in verdicts) else 1
 
 
 def op_validate_tasks(argv):
@@ -4860,6 +5223,38 @@ def verify_segments(text):
     handed to `eval` to be split; the quoting state is tracked character by
     character, which is the only way a separator inside a quoted string can be
     told from one between two commands without running the string first.
+
+    A STATE LEFT UNTERMINATED AT END-OF-TEXT -- an unbalanced `'`, `"`,
+    backtick, `(`, `{` or compound (`if`/`for`/`while`/`case`/...) -- makes
+    `top` false for the REST of the text, so every `;`, newline, `&&` and
+    `||` after the point it opened is absorbed into the text still being
+    scanned rather than treated as a separator. This function still returns
+    whatever that fuses into, unchanged, because it answers "what are the
+    segments" and a fused blob is still segments; `verify_unterminated`
+    below answers the other question -- was this text a well-formed script at
+    all -- and `_probe_verify_segments` is the caller that acts on it.
+    """
+    return _verify_scan(text)[0]
+
+
+def _verify_scan(text):
+    """The body `verify_segments` used to be, returning `(segments, residual)`
+    instead of `segments` alone. `residual` is the name of whichever quoting
+    or grouping state is still open when the scan reaches end-of-text, or
+    `None` when the text closed everything it opened -- see
+    `verify_unterminated`, the public wrapper around the second half of this
+    pair.
+
+    DEFINED AFTER `verify_segments` ON PURPOSE, not before it despite being
+    the callee: `test_nothing_in_the_decomposition_reaches_eval` slices the
+    module's source between the `verify_segments` definition and the
+    `op_verify_probe` one (found by searching for each one's own `"def "`
+    prefix) and asserts no `eval` appears in that slice. Hoisting this
+    function above `verify_segments` would move the scanner body out of the
+    slice the guard reads, shrinking its coverage to nothing while leaving
+    the guard itself green. Keeping the leading-underscore helper below its
+    public wrapper is the file's exception to its own habit of defining
+    helpers first, and it exists for that one reason.
     """
     segments = []
     buf = []
@@ -5042,7 +5437,70 @@ def verify_segments(text):
         i += 1
 
     flush()
-    return segments
+
+    # RESIDUAL, computed once after the final flush, from the states this
+    # scan already tracks -- nothing new is measured here, only read back.
+    # The order below is a REPORTING choice, not a claim about nesting: a
+    # single quote wins over every other state, because while `quote == "'"`
+    # bash is not looking at `(`, `{` or a keyword at all -- literally
+    # nothing inside single quotes is special, so nothing else could have
+    # opened after it in a text bash would actually read. `heredocs` is
+    # deliberately NOT consulted here: `bash -n` accepts an unterminated
+    # heredoc (with a warning) and RUNS it, where every other state named
+    # below is a hard syntax error bash refuses outright -- see
+    # `verify_unterminated` for the measurement that draws that line.
+    if quote == "'":
+        residual = "single-quote"
+    elif quote == '"':
+        residual = "double-quote"
+    elif backtick:
+        residual = "backtick"
+    elif parens:
+        residual = "paren"
+    elif braces:
+        residual = "brace"
+    elif keywords:
+        residual = "compound"
+    else:
+        residual = None
+
+    return segments, residual
+
+
+def verify_unterminated(text):
+    """The name of the quoting or grouping state still open when `text` ends,
+    or `None` when everything `text` opened was also closed.
+
+    THE SIX STATES THIS NAMES ARE EVERY WAY `_verify_scan`'s `top` test can be
+    left permanently false: an unbalanced `'` (`single-quote`), `"`
+    (`double-quote`), backtick (`backtick`), an unclosed `(` or `$(` (`paren`),
+    an unclosed `{ ... }` group (`brace`), or an unclosed compound command --
+    `if`, `for`, `while`, `until`, `case`, `select` without its matching `fi`/
+    `done`/`esac` (`compound`). Once any one of them opens and never closes,
+    every `;`, newline, `&&` and `||` after that point stops separating
+    anything, and `verify_segments` silently fuses the rest of the text into
+    the segment that was open when it happened -- three assertions can vanish
+    behind one invented one this way, and the invented one still gets a
+    verdict from `probe_verify` unless this function is consulted first.
+
+    AN UNTERMINATED HEREDOC IS DELIBERATELY EXCLUDED, on a measured rather
+    than a stylistic line: `bash -n` refuses the whole file for all six states
+    named above (`syntax error: unexpected end of file` or the equivalent),
+    and ACCEPTS an unterminated heredoc at exit 0, with only a warning,
+    running it. So "would bash refuse to parse this script" is the line drawn
+    here, and it is a measured one: a heredoc falls on the side that runs.
+    `verify_segments`'s own docstring already documents taking an
+    unterminated heredoc body whole as matching bash, and the closed sibling
+    defect at `.aimi/known-gaps/2026-09-07-US-002-heredoc-citado-verdicto-retido.md`
+    depends on that staying true -- re-flagging a heredoc here would undo it.
+
+    NO POSITION IS REPORTED, only the state's name. A correct line or column
+    for a nested `(`/`{`/compound would need a stack of opening offsets, which
+    this report does not carry -- the caller already has the full text in
+    `probe_verify`'s `segment` field, and a name is enough to know what to
+    look for in it.
+    """
+    return _verify_scan(text)[1]
 
 
 def verify_words(segment):
@@ -5548,6 +6006,22 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     the snapshot exists to prevent -- and would do it at the request of someone
     who only meant to save time.
 
+    A THIRD WAY TO NOT RUN A SEGMENT IS NEITHER DELIBERATE NOR ACCIDENTAL, IT
+    IS STRUCTURAL: `text` itself can leave a quote, a backtick or a grouping
+    UNTERMINATED at end-of-text, which means bash would refuse to parse it as
+    a script at all (`verify_unterminated` names the measurement). That is
+    checked before any segment runs, and on a hit this whole function returns
+    ONE entry for the whole text -- `discriminates: None`, carrying
+    `unterminated` instead of `skipped` or `timedOut` -- rather than running
+    whatever `verify_segments` fused the remaining text into. The fused blob
+    IS runnable bash-wise in the narrow sense that `subprocess.run` will start
+    it, and it fails -- but that failure is bash refusing to parse a script
+    that was never well-formed, not a verdict about any assertion the story's
+    verify actually names, and publishing it as one is the exact
+    "already passes before the work" reading this whole function exists to
+    prevent, pointed the other, more dangerous direction: a syntax error
+    dressed up as an exemplary discriminating check.
+
     THIS IS A MITIGATION AND NOT A CURE, and saying so is part of the fix.
     `.aimi/known-gaps/2026-09-03-US-004-verify-probe-cost.md` records that
     probing a verify which ends in a suite costs that suite's whole run time
@@ -5587,6 +6061,24 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     """`probe_verify`'s loop, split out so the marker above owns one try/finally
     rather than wrapping a hundred lines of body. See that function's docstring
     for every rule this implements; nothing is decided here."""
+    # THE UNTERMINATED CHECK RUNS FIRST -- before `re.compile`, before
+    # `tempfile.mkstemp`, before the loop below ever starts. `text` left a
+    # quote or a grouping open at end-of-text is not a script with weak
+    # assertions in it; it is not a script bash will parse at all (see
+    # `verify_unterminated`'s own docstring for the `bash -n` measurement
+    # this is drawn on), so nothing here is going to run, and no scratch
+    # file is created for a run that never happens.
+    unterminated = verify_unterminated(text)
+    if unterminated is not None:
+        return [
+            {
+                "segment": text.strip(),
+                "exit": None,
+                "discriminates": None,
+                "unterminated": unterminated,
+            }
+        ]
+
     results = []
     # Compiled once for the whole run rather than once per segment. A pattern
     # that does not compile raises HERE -- inside `probe_verify`'s
@@ -6296,6 +6788,15 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
     it is the guess this parser refuses everywhere else. The two filters differ
     because their nulls do: a null date cannot be compared, a null feature can
     be reported.
+
+    `retired` and `supersededBy` read the same `declared` frontmatter dict
+    `feature` already reads, with the same `or None` rule for an empty value.
+    Retirement is a property of the FILE, not of one block inside it -- so
+    every entry `gap_blocks` cuts a single file into inherits the same
+    pair. A `supersededBy` with no `retired` is not a retirement -- a pointer to
+    what replaced a gap nobody marked as gone would hand the reader a
+    superseder for a gap that is still live, so the pointer is read only when
+    the reason is present, and both come back null otherwise.
     """
     gaps_dir = os.path.join(aimi_dir, "known-gaps")
     try:
@@ -6323,6 +6824,8 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
         # bare-prose rule doing exactly the right thing to the wrong input.
         declared, body = gap_frontmatter(body)
         entry_feature = declared.get("feature") or None
+        entry_retired = declared.get("retired") or None
+        entry_superseded_by = (declared.get("supersededBy") or None) if entry_retired else None
         slug = matched.group("slug") if matched else None
         if entry_feature is None and (slug is not None or date is not None):
             if scan is None:
@@ -6345,6 +6848,8 @@ def known_gap_entries(aimi_dir, feature=None, since=None):
                     "feature": entry_feature,
                     "text": text,
                     "file": name,
+                    "retired": entry_retired,
+                    "supersededBy": entry_superseded_by,
                 }
             )
 
@@ -6375,6 +6880,34 @@ def op_list_known_gaps(argv):
     return 0
 
 
+def op_design_decisions(argv):
+    """`{"decisions": "..."}` for a brainstorm file named by --brainstorm-path,
+    reusing the same design_decisions() extractor design_context() calls for
+    the story EXECUTOR's own metadata.brainstormPath read.
+
+    --brainstorm-path already crossed aimi-cli.sh's validate_path_in_project
+    by the time this runs -- confinement of a CLI-ARGUMENT path is that
+    function's job, not this op's (see the top-level CLAUDE.md's "Path
+    confinement is split on a real boundary" section). Nothing here re-checks
+    it, the same way design_context() never re-checks the confinement its own
+    caller already applied to a --tasks-file.
+
+    Degrades to an empty string, never a refusal, when the file is missing or
+    unreadable -- mirroring design_context()'s own degrade for the identical
+    reason: a brainstorm with no Design Decisions section is a normal outcome,
+    not a planning failure.
+    """
+    brainstorm_path = _flag(argv, "--brainstorm-path")
+    if not brainstorm_path:
+        die("Usage: tasks.py design-decisions --brainstorm-path <path>")
+    decisions = ""
+    if os.path.isfile(brainstorm_path):
+        with open(brainstorm_path, "rb") as handle:
+            decisions = design_decisions(handle.read())
+    _emit({"decisions": decisions})
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -6392,6 +6925,7 @@ _OPS = {
     "validate-stories": op_validate_stories,
     "validate-ids": op_validate_ids,
     "validate-waves": op_validate_waves,
+    "validate-wave-contention": op_validate_wave_contention,
     "validate-tasks": op_validate_tasks,
     "validate-story-exists": op_validate_story_exists,
     "mark-complete": _mark_op("mark-complete"),
@@ -6412,6 +6946,7 @@ _OPS = {
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
     "list-known-gaps": op_list_known_gaps,
+    "design-decisions": op_design_decisions,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }

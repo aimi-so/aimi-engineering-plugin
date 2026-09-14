@@ -23,7 +23,7 @@ You receive the following named arguments in this prompt:
 
 ## Output Contract
 
-1. Write the finished HTML **exactly once** to `outputPath` using the Write tool.
+1. A file must exist at `outputPath`, written **exactly once** — the Write tool, a Bash heredoc, or anything else that leaves it on disk all satisfy this.
 2. Do **not** write to any other path — no sidecars, no temp files, no intermediate writes.
 3. The output file must be self-contained: all CSS lives in `<style>` tags, all JavaScript lives in `<script>` tags or CDN `<script src>` tags; no external asset references except the two CDN scripts (Tailwind Play CDN + Alpine.js CDN).
 4. If `outputPath`'s parent directory does not exist, resolve it but do NOT create the directory — write the file only; the caller is responsible for directory creation.
@@ -148,7 +148,7 @@ The assembled file structure:
 
 ## Step 6 — Write Output
 
-Write the fully assembled HTML string to `outputPath` exactly once using the Write tool. Do not write to any other location. Do not append — write the complete file in a single Write call.
+A file must exist at `outputPath`, written exactly once — any tool that leaves it on disk satisfies this. Do not write to any other location. Do not append — write the complete file in a single write.
 
 ## Pitfalls
 

@@ -2,10 +2,572 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.138.0] - 2026-09-10
+
+### Added
+- `research-figures <path>`: prints `blocks`, `figures_outside` and `dead_keys` for a research file. The ` ```measure ` contract had required a block under every figure about this repository for five contract mentions, and a recursive grep for that anchored fence across `.aimi/` returned zero files — it had never once been honoured, so a sixth mention would have produced the same zero. `dead_keys` names, per block, the keys a command indexes a structured subject by that the subject does not carry: the gap that let a figure computed by `x.get('output','')` over case objects with no `output` key return its default for every input — 0 for any corpus, including an empty one — while `plan.md` Phase 1.6 re-executed it and passed it twice, because a wrong-but-deterministic command reproduces its own wrong output forever. Continuation lines are read, not just the `$ ` prompt line, since that defect lived inside a multi-line `python3 -c`. Omitted when empty, so a clean file prints exactly the two counts. Called from `Confirm Each Research File Landed` after the 512-byte floor; it never blocks and changes no exit status.
+- `story-merge --feature <slug> --phase <id>`: derives `metadata.roadmapPath`, `metadata.phase` (`{id, dir}`, `dir` taken verbatim off the selected phase's roadmap entry), `metadata.baseRef` and `metadata.pluginVersion` for a phase-scoped merge. Refuses half a pair, and refuses the pair together with `--split full-stack` — a split run resolves `branchName` and `baseRef` per repository and cannot answer them for N repositories at once.
+
+### Fixed
+- `/aimi:plan` distinguishes an invalid `--phase` shape from a phase that is absent from the roadmap. The two outcomes shared one message, so a typo and a phase not yet authored were indistinguishable to the reader.
+- The ABSENT phase outcome is an offer to author that phase rather than a stop.
+- Phase 4 verifies the four fields `story-merge` derives instead of overwriting them. The unconditional sentence telling the orchestrator to overwrite every metadata field is retired: on the flagged path it discarded four values the merge had already validated, and it re-derived `phase.dir` — the one field story-merge takes verbatim precisely because re-deriving it turns `phase-1.1-beta` into a directory that does not exist. `branchName` stays fully authored, since its prefix is `metadata.type`, decided inside Phase 4 and therefore after the merge call.
+- Phase 3e passes `--feature` and `--phase`, so the two flags above have a caller. Measured before the fix: `story-merge` is invoked in exactly one place in the tree, and that fence named neither flag — the four derived fields stayed absent on every real run and Phase 4's prose described a path nobody took. Both conditionals pass the raw `SELECTED_PHASE_ID`, never the dot-slugified form: the raw id names the phase file on disk and matches `roadmap.json`'s numeric id, and only branch names slugify the dot.
+
+## [1.137.0] - 2026-09-10
+
+### Added
+- `validate-wave-contention`: refuses a wave whose stories declare the same path in `implementation.files`. Two such stories passed all five existing validators; `/aimi:execute` dispatches by wave, so they collide at merge. Wired into `plan.md` Phase 4.5.
+- `unwritten_findings:` pointer-block key. A research agent that cannot write its file now says so and carries its findings; `plan.md`'s `Confirm Each Research File Landed` persists them at the path it dictated instead of dropping them. Recovers the write half of the research channel; a truncated return is still lost.
+- `retired:` / `supersededBy:` frontmatter for `.aimi/known-gaps/`. Four entries measured as false or already-fixed are retired with their reason; Phase 1.7b includes a retired entry with its retirement stated rather than dropping it, since two of the four are partial and one carries the refutation that retires another.
+
+### Fixed
+- `verify-probe` no longer scores an unterminated quote as a discriminating check. Six residual states (`single-quote`, `double-quote`, `backtick`, `paren`, `brace`, `compound`) fused every following assertion into one segment whose syntax error read as exit != 0, so a verify bash refuses to parse scored a perfect 1.0 discrimination ratio — strictly higher than an honest verify carrying a guard-rail can reach. Unterminated heredocs are excluded: `bash -n` accepts and runs them.
+- Known-gap filenames carry the plan discriminator, so two plans producing the same story id on one day no longer overwrite each other. Appended, not prefixed: `_GAP_FILENAME` anchors the date at position 0.
+- The research agents' Output Contract names the required outcome rather than the `Write` tool, in all seven files.
+- `get-story-context` is auto-approved by `hooks/auto-approve-cli.sh` — it is the first verb every story executor runs.
+- The `jq` census in `plugins/aimi-engineering/CLAUDE.md` re-measured against its own commit: `commands/` 212 → 239, `aimi-cli.sh` 244 → 269 invocations.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.136.0] - 2026-09-09
+
+Phase 4 of `falha-visivel`, and the last one: the roadmap closes here. Its four
+phases share one defect shape -- a failure that does not announce itself. Phase
+1 took the silence out of a missing research file, phase 2 the verb that
+reported work it had not done and the story planted on the wrong branch, phase
+3 the environment and the tooling that misreported themselves. This phase
+closes the two that were left: a size guard-rail that measured the wrong pair
+of commits and failed a story for a sibling's legitimate edit, and a PR body
+that was only assembled after the branch had already been pushed.
+
+### Added
+
+- **`/aimi:open-pr` builds, measures and trims the PR body BEFORE it pushes**,
+  in a new `### 4d. Assemble the body into a file and measure it against the
+  forge's cap`. The defect was the ORDER, not the size: Step 5a's `git push -u
+  origin` ran while `$PR_BODY` did not yet exist -- the body was assembled one
+  block later, in Step 5b -- so a body the forge refused left the branch
+  published on `origin` and no PR against it. Publishing a branch is
+  irreversible in practice, and refusing after publishing is the worse of the
+  two orders. An `if` inside Step 5b could not have fixed it: each Bash block is
+  its own shell, so that guard could only refuse after the push in the block
+  above had already happened. Step 4d therefore writes the body to a file inside
+  the worktree's own git directory -- never in the working tree, so never
+  staged, never committed, and never colliding with a sibling worktree's copy --
+  and Step 5b reads it back, passes it verbatim and deletes it. Its absence
+  there is a hard error, so a body measured against a different commit range can
+  never open a PR.
+
+  The degradation is by section, in the shape `DECISIONS_CAP` already
+  established in `scripts/tasks.py::design_decisions()` -- evict whole sections
+  rather than slice the stream at a byte. **Changes** and **Files Changed** are
+  never trimmed: measured on this branch they are 1635 and 1667 bytes against a
+  40002-byte Summary, so cutting them would save about 5% and cost the reviewer
+  the two sections they navigate the diff by. The **Summary** is spent out of
+  what remains, by WHOLE COMMITS, oldest first -- `design_decisions()`'s
+  `kept.pop()` exactly, since `git log` emits newest-first -- and never cut
+  inside a commit or inside a line. The count of what was dropped is written
+  into the body itself, the way `_decisions_dropped_marker()` names each heading
+  it evicted: truncating and saying how much was truncated are two different
+  things, and without the second the degradation is silent, which is the defect
+  this phase exists to close.
+
+  One deliberate divergence from that precedent: the notice is reserved in the
+  budget at its widest before it is needed. `_decisions_dropped_marker()` is
+  appended after eviction and its own bytes are never counted, so its result can
+  land just over the cap it was trimmed to; here the cap holds unconditionally,
+  at a cost of about 130 bytes in the common case where nothing is dropped.
+  `PR_BODY_CAP=65536` is GitHub's limit and is written down as GitHub's:
+  measured, `references/forge-contract.md` declares no body cap for any of the
+  three shipped backends, so GitHub's number is used as a floor for all three
+  rather than as a universal truth, and an adapter found to enforce a LOWER one
+  declares its own value there beside its other capability facts. When the
+  never-trimmed sections alone do not fit, Step 4d refuses with the Summary
+  already at zero commits -- and nothing has been pushed, which is the whole
+  point of where it sits.
+
+- **`/aimi:open-pr` says how many plans declare the current branch**, as one
+  clause appended to whichever of the three existing `PR title from ...` lines
+  wins -- the same announcing machine, not a second one. The count comes from
+  `find-tasks-all` plus each file's own `metadata.branchName`, so it is measured
+  from the documents themselves. There are THREE cases, not two, and `N == 0` is
+  the ordinary one: in phase mode every tasks file declares its own phase
+  branch, so the integration branch those phases merge into is the `branchName`
+  of no plan at all. Measured on this tree, zero live plans declare it, and a
+  warning conditioned only on `N >= 2` would never have fired. The `N == 0`
+  clause names what falls with it, too: the same `==` gate that discards the
+  title also suppresses `metadata.issues`, so no `Closes` line is rendered
+  either. The count is deliberately not derived from merge-commit subjects --
+  the plugin emits no such string anywhere, so counting by one would be counting
+  whichever wording a person happened to type. The decision recorded is to SAY
+  the number, never to auto-title from the union: a title synthesized from two
+  features is less readable than a partial title announced as partial.
+
+### Changed
+
+- **The PR Summary no longer falls back to commit subjects when every commit
+  body is empty.** **Changes** already renders every subject, one per line, so
+  the fallback restated the section directly below it -- and did so precisely on
+  the branches whose body is under the most pressure. A commit with an empty
+  body now contributes nothing to the Summary and still appears in Changes,
+  where the bytes go to commits that have something to say.
+
+### Fixed
+
+- **The byte-reduction guard-rail `agents/workflow/aimi-story-expander.md`
+  emits now measures the story that claimed the reduction.** Its `A size claim
+  measures both sides, or stops being a claim` section named `metadata.baseRef`
+  as the "before" side. That field is the commit the whole PLAN was written
+  against, so the emitted assertion actually measured *"no story in this plan
+  reduced the file"* rather than *"this story reduced it"*. The two readings
+  agree right up until a sibling story touches the same file legitimately; from
+  that commit onwards every later story in the plan inherits a failure it did
+  not cause. The "before" side is now the point where THIS story branched,
+  derived from `metadata.branchName` via `git merge-base HEAD "$BRANCH"` -- a
+  change of which field the `metadata` call already there reads, not a new
+  mechanism. `branchName` names the plan's branch in plan mode and the phase's
+  branch in phase mode, so one reading serves both, which matters because the
+  expander is never told which mode `/aimi:execute` picked. `metadata.baseRef`
+  is neither repointed nor redefined: it stays the factual record of the commit
+  the plan was written against, and keeps its own reader in
+  `commands/execute.md`'s Plan Base Freshness advisory. An unresolvable base
+  still fails loudly, now as two separate refusals -- an absent `branchName` and
+  a `merge-base` that answers nothing are different repairs, and one message
+  would name neither. The recipe recorded in the 2026-09-08 known-gap --
+  recover the branch by stripping the `-US-NNN` suffix off the worktree
+  directory name -- was deliberately not followed, and the file says why: each
+  story worktree now carries a plan discriminator on the FRONT, so stripping the
+  suffix returns a name `git show-ref` refuses, and that recipe closed in `||
+  true`, turning the refusal into an empty base and the claim into a pass -- the
+  exact family of defect the section exists to prevent.
+- `command-blocks-baseline.txt` loses its `syntax open-pr.md 5b. Create the PR`
+  entry: the heredoc whose own fences truncated extraction no longer exists, so
+  that finding stopped firing and the baseline shrinks by one.
+
+## [1.135.0] - 2026-09-09
+
+### Added
+
+- `AIMI_CLI_PINNED` -- Layer 0-pin, a per-call pin naming the install a run
+  means. `_pinned_cli_path` is consulted at the top of
+  `read_global_cli_cache`, ahead of BOTH cache files, and is honored on every
+  host with no `CLAUDECODE` gate. It closes an asymmetry rather than adding a
+  preference, and both halves of that asymmetry look correct in isolation:
+  `_resolve_latest_cache_path` is parameterized on `config_dir` and every one
+  of its call sites passes `_claude_config_dir()`, so the WRITER of the cache
+  always knows which plugin cache root is the right one -- while
+  `_validate_cached_cli_path`'s versioned-cache arm is
+  `*/plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh`, whose leading
+  `*/` anchors no root, so the READER accepts a path under any of them and
+  never asks. With two roots on one machine, "which CLI is this" can answer
+  differently between two calls of a single run with nothing on either side
+  saying so. Validated with `[ -x ]` plus an absolute-path test, never `[ -f
+  ]` or `[ -e ]` -- the rule `CV_CLI` in `commands/execute.md` and
+  `PROBE_CLI` in `skills/story-executor/SKILL.md` already apply one level up,
+  since a file that is present but not executable resolves nothing and
+  admitting it only moves the failure to the invocation, where it reads as a
+  broken CLI rather than as a bad pin. Validating by textual prefix instead
+  is exactly what let a symlink into a worktree past
+  `write_global_cli_cache`'s guard and produced the exit 127 recorded in
+  `golden_from_jq.json`'s `cv-fix-simlink-worktrees-cc`. It is NEVER
+  persisted -- not to `~/.config/aimi/cli-path`, not to the legacy path, not
+  to the worktree pointer -- and `cmd_prime_cache` additionally refuses to
+  let a pin answer its already-current check, so a pin cannot suppress a
+  cache write the file genuinely needed and then look as though it had been
+  persisted. Set-but-invalid is reported and ignored rather than fatal, the
+  one place this diverges from `AIMI_DEV_DIR` immediately above it in
+  `main()`: an invalid dev dir would silently hand the operator the install
+  they did not ask for, so it exits 1, while a pin fixes only ONE answer out
+  of several the ordinary layers can still reach, so a stale one degrades to
+  those layers loudly. Either way `main()` prints one line per process -- a
+  notice naming the honored path, a warning naming the rejected value --
+  which is why the announcement lives there and not in `_pinned_cli_path`,
+  whose three call sites would otherwise print one refusal three times in a
+  run. Documented in the `--help` ENVIRONMENT block and as `### Layer 0-pin`
+  in `commands/references/cli-path-resolution.md`, deliberately WITHOUT a
+  command-side snippet: the fenced blocks in that file are matched literally
+  by `hooks/auto-approve-cli.sh`, so a new resolution line there owes a new
+  hook pattern, a legacy twin beside it and a byte-identical copy on every
+  other carrier, in one commit -- a cost the pin never has to pay, because it
+  is honored inside the CLI where no snippet is needed at all.
+- `SCRATCH_PREFIX`, composed as `[PLAN_DISC]-[story.id]` in `execute.md`'s
+  Step 4 spawn block and carried into both `<task_pointer>` templates of
+  `skills/story-executor/SKILL.md`. The scratchpad directory is handed to
+  every agent in a session, it outlives that session, and it is therefore
+  shared across runs and across PLANS -- so a filename chosen for what it
+  MEANS rather than for who owns it is a filename two writers pick
+  independently. `PLAN_DISC` is READ here and never recomposed nor
+  re-sanitized: `### Plan Discriminator` derived it once from
+  `WAVE_TASKS_FILE` and its sanitization is load-bearing, so a second
+  derivation is only a second chance to disagree with the first. The axis is
+  the PLAN and the story id comes SECOND, which is what makes the order
+  load-bearing rather than arbitrary: the collision measured on 2026-09-08 in
+  the known gap `orq-scratchpad-compartilhado-entre-executores` was not
+  sibling-against-sibling but an EARLIER plan's `verify-US-002.sh`, read by
+  this run's `US-002` because the two ids were the same string, so a prefix
+  keyed on the story id alone would have composed the identical name for both
+  and separated nothing. Both templates name `verify.sh`, `verify.log`,
+  `probe.sh`, `probe.err` and `v.sh` as real names that already collided
+  there, and state that they are non-examples rather than a denylist to
+  improvise around -- picking a good name is precisely what failed. The
+  `verify-probe` artifact is explicitly outside the rule: it lands beside the
+  tasks file under a name the verb itself chooses and announces on stderr,
+  and step 1.5 already says to read that path rather than compose one.
+- `require_sandbox_binary` and its silent resolution half
+  `_resolve_sandbox_binary` in `test-aimi-cli-fixtures.sh`: one helper both
+  sandbox fixtures now share, which resolves a tool via `command -v` and then
+  each candidate directory in order, and REFUSES when nothing resolves --
+  one stderr line naming the binary, plus a non-zero return the caller turns
+  into a torn-down fixture. `sha256sum` and `shasum` are handled as an
+  ALTERNATIVE PAIR rather than as two requirements, because
+  `_default_branch_cache_key` falls back to portable slugification only when
+  NEITHER is on PATH; when one of the pair is missing and the other resolves,
+  the helper returns 0 with empty stdout and callers skip the link. The
+  refusal is deliberately a `printf` and a status, never an `assert_*` call:
+  only the four `assert_*` families increment the counter
+  `test-aimi-cli.sh` pins with `EXPECTED_ASSERTIONS`, and these fixtures are
+  called from dozens of sites, so asserting here would move that number by
+  three digits to report an environment fault rather than a test result.
+  `EXPECTED_ASSERTIONS` is unchanged.
+
+### Changed
+
+- `_validate_cached_cli_path`'s versioned-cache arm REPORTS a second plugin
+  cache root instead of ranking it in silence. When an accepted path resolves
+  under a root other than the one `_claude_config_dir()` names,
+  `_report_foreign_cache_root` prints one stderr line naming BOTH roots and
+  the path is still returned. A notice and not a refusal, because refusing
+  would break hosts that are legitimately arranged that way -- a
+  `CLAUDE_CONFIG_DIR` moved after the cache was written is the ordinary case
+  -- and the breakage would land at some later invocation, far from its
+  cause. Naming both roots costs one parameter expansion and is what lets a
+  reader holding two contradictory findings tell which root each came from.
+  It is NOT mirrored onto `_validate_cached_worktree_path`, that function's
+  otherwise exact twin, because the worktree pointer is never resolved on its
+  own: `_persist_worktree_pointer_for` derives it from the CLI install path,
+  so a foreign worktree root is a consequence of a foreign cli-path root this
+  line has already reported once, and a second copy would print one finding
+  twice for one cause.
+- The `/aimi:execute` orchestrator prefixes its OWN scratchpad files
+  `[PLAN_DISC]-orch-<whatever>`, under a new paragraph in `execute.md`'s Plan
+  Discriminator section. A rule that reached only the spawned executors would
+  have left the polluter out: in the measured gap this orchestrator was
+  itself one of the writers, leaving a `v.sh` in the same shared directory
+  two of five executors in one wave then read believing it was their own.
+- `command-size-baseline.txt` is reconciled by the same commits that moved
+  the files, as its two-way ratchet requires: `execute.md` to 406739,
+  `references/cli-path-resolution.md` to 37540, and
+  `skills/story-executor/SKILL.md` to 60238.
+
+### Fixed
+
+- Both sandbox fixtures stop building a smaller environment than they
+  promise. `_path_without_binary` ended a failed resolution with `|| continue`
+  and `setup_forge_cli_sandbox` ended one by leaving `resolved=""` and
+  skipping the link -- two lines that looked almost identical to the
+  deliberate `[ "$tool" = "$exclude" ] && continue` beside them and meant the
+  opposite thing. A sandbox built without a tool still builds, so the test
+  still runs and still goes green, and what it proves then is the verb's
+  FALLBACK rather than the verb: strip `sort` and `forge-issue-scan` answers
+  `[]` for every description, which is ALREADY the right answer for two of
+  that verb's three cases, so the missing binary stayed invisible in two
+  tests out of three. Both sites now route through `require_sandbox_binary`
+  and the count of silently skipped tools is zero. Found and fixed alongside
+  it: `command -v printf` answers the bare word `printf` because it is a
+  shell BUILTIN, so `ln -s` was handed a non-path and every shim directory
+  this fixture has ever built acquired a self-referential dangling `printf`
+  entry; the `[ -x ]` test on the resolved answer, plus the `/usr/bin` and
+  `/bin` candidates behind it, is what now catches that class.
+- The root `CLAUDE.md` stops crediting its list of seven resolution-idiom
+  surfaces to `grep -rn "plugins/cache/\*/aimi-engineering"`, a measurement
+  that does not reproduce: scoped to `plugins/`, that grep returns EIGHT
+  files. The list is curated, and the eighth --
+  `hooks/tests/test_auto_approve_cli.py` -- is left out deliberately, because
+  its two matches sit inside `LEGACY_FORMS`, which freezes the glob as it was
+  spelled BEFORE the numeric version filter so that a command body which
+  entered a conversation before that change is still auto-approved when it is
+  run verbatim afterwards. Patterns `7L`/`8L` in `hooks/auto-approve-cli.sh`
+  exist for those two strings and nothing else, so an edit that "corrects"
+  the count to eight would DELETE that coverage rather than complete the
+  list.
+- `commands/references/cli-path-resolution.md`'s mirror-cost paragraph drops
+  two names it should never have carried, both re-measured rather than
+  argued. The top-level `CLAUDE.md` is not a carrier: it holds zero
+  occurrences of the pipeline fragment `sort -V | tail -1`, and its one hit
+  for the cache glob is prose describing Layer 2, not a line anything
+  executes -- a document that DESCRIBES the idiom costs a sentence to update
+  and cannot drift into a permission prompt. And it is ONE test suite, not
+  three: only `scripts/test-aimi-cli-part1-core.sh` carries the pipeline, as
+  `_test_latest_installed_cli_path`. Of the two other files a careless grep
+  turns up, `scripts/tests/test_version_cache.py` mentions `sort -V` only in
+  prose and `hooks/tests/test_auto_approve_cli.py`'s occurrences are the
+  frozen `LEGACY_FORMS` spelling that must NOT move with the idiom.
+  Overstating the mirror cost is not the safe direction to be wrong in: this
+  is the paragraph the next person reads to decide whether a new layer is
+  affordable.
+
+## [1.134.0] - 2026-09-09
+
+### Added
+
+- `worktree-manager.sh` gains `_assert_worktree_removed`, which answers the
+  POST-state of a removal instead of the PRE-state. Given the resolved path
+  plus the captured exit status and stderr of the `git worktree remove` call,
+  it re-asks the git register and re-tests the disk, and succeeds only when
+  both are clear. It prints nothing on the success path, so each caller keeps
+  its own wording (`✓ Removed worktree: ` and `✓ Removed: ` stay distinct),
+  and it returns rather than exits, which is what lets `cleanup`'s loop carry
+  on to the next worktree under `set -e`. Four tests in
+  `test-worktree-manager.sh` cover a refused removal, the byte-identity of the
+  success line (previously pinned by nothing, since both round-trip tests
+  discard stdout), the slash-named prune and the nested-container refusal:
+  108 passed, 0 failed.
+- `commands/execute.md` gains `### Plan Discriminator` under Multi-Repo
+  Handling. `PLAN_DISC` is the tasks file's own stem -- already dated and
+  slugged per plan, the same key `probe_verify()` in `scripts/tasks.py`
+  chooses for the same reason -- sanitized to `[A-Za-z0-9_-]`, with a `case`
+  guard prepending `p` when the result would not start alphanumerically. The
+  sanitization is load-bearing rather than defensive: `validate_branch_name`
+  accepts only `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` and `create` runs it on the
+  composed name, decimal-phase tasks files exist in the archive, and a single
+  dot makes `create` refuse the whole name while `execute.md` misreports the
+  cause as a too-old `worktree-manager.sh`.
+
+### Changed
+
+- Story worktree and branch names carry that discriminator as a PREFIX:
+  `[PLAN_DISC]-[branchName]-[story.id]` in flat and container mode,
+  `[PLAN_DISC]-[PHASE_BRANCH]-[story.id]` in phase mode. Two `/aimi:execute`
+  runs over different tasks files that share one `branchName` composed the
+  same name for their own `US-001` and were handed the same tree. The base-sha
+  check cannot catch that: it deliberately accepts a reused tree ahead of its
+  base so a story that committed and then failed can be re-run, and the other
+  plan's leftover tree on an unmoved base branch is a descendant of
+  `base_sha` -- the guard passes and the only output is `Worktree already
+  exists at:`, indistinguishable from a same-plan resume. When the base branch
+  has moved instead, that same stale tree fails the check and the story is
+  mark-failed and cascade-skipped. One cause, opposite symptoms, both closed
+  by giving the name a plan identity rather than by teaching the guard about
+  plans. The story id stays LAST because `skills/story-executor/SKILL.md`
+  requires in two places that the branch an executor finds checked out end in
+  `-<STORY_ID>` and refuses to stage or commit otherwise; `worktree_base` is
+  left alone, since it is read a second time as `--from` and must keep naming
+  a branch that really exists, so the discriminator lands in a separate
+  `worktree_prefix`.
+- Every cleanup sweep moves to the prefixed pattern, because no placement of a
+  discriminator preserves the old glob -- measured in both directions,
+  `feat/a-STEM-US-001` and `STEM-feat/a-US-001` each fail `feat/a-US-*`. The
+  Per-Project Cleanup Rule, the phase/container pass, both flat/inline passes,
+  the derivation rule, the flat-mode naming paragraph, the `-finalize`
+  non-overlap invariant and `references/container-execution.md` -- the source
+  of truth the other two defer to -- move together. The un-prefixed shape
+  keeps exactly one home per family: the one-time migration safeguard,
+  re-justified onto the legacy shape it strictly contains, and one new legacy
+  pass beside the phase/container sweep. That safeguard's removal marker named
+  **1.110.0**, twenty-three minor releases behind the release now reading it,
+  and is retargeted to **1.150.0** rather than stacked beside a dead one.
+- `remove_worktree` resolves its target from the git register
+  (`_registered_worktree_paths` + `_worktree_display_name`) instead of
+  composing `$WORKTREE_DIR/$name` -- the shape `list` and `cleanup` were given
+  and `remove` was left out of. In container mode a story worktree lives one
+  level deeper, so the composed path does not exist and the benign "may
+  already be removed" line was printed over a worktree that was registered AND
+  on disk. A name registered only inside another container's own `.worktrees/`
+  is now refused loudly at exit 1, naming the registered path; a name matching
+  nothing anywhere keeps its benign message and exit 0, because the fifteen
+  `$WORKTREE_MGR remove` invocations in `commands/` rely on idempotent
+  teardown, several of them as the last line of a bash block.
+  `remove_worktree` also calls `_prune_empty_worktree_parents`, which until
+  now only its sibling called: every story branch here carries a slash, so
+  `.worktrees/feat` was residue `remove` always left -- and that one directory
+  is what kept the `rmdir "$WORKTREE_DIR"` at its tail from ever firing.
+- Step 1.5 of `skills/story-executor/SKILL.md` chooses its instrument before
+  probing with it, and says which one it chose. `PROBE_TREE_CLI` is the
+  `aimi-cli.sh` of the working directory step 0c established, preferred when
+  `[ -x ]` holds -- `-x`, never `-f` or `-e`, since a file that is present but
+  not executable probes nothing -- and falling back to the resolved
+  `$AIMI_CLI` when it does not. All four `verify-probe` call sites across both
+  `<execution_flow>` blocks move to `"$PROBE_CLI"`, the post-failure
+  `--previous-file` re-run included, so the pre/post comparison of
+  `unsatisfiable` is made by one instrument rather than two. On a feature
+  branch the installed CLI is older than the branch's own and an old parser
+  accepts an unknown flag in silence, so with no instrument named two
+  contradictory findings about one flag are indistinguishable from each other.
+  BOTH branches announce, on one stderr line prefixed `probe-cli: ` -- a
+  deliberate divergence from the `commands/execute.md` precedent, which
+  announces only on its fallback: there the silent branch is the rare one,
+  here the tree under test is the common case, so a silent preferred branch
+  would hide exactly what this exists to show. The prefix is not
+  `verify-probe: ` because the verb already writes `verify-probe: wrote
+  <path>` to that same stream and the executor has to read that path back out
+  of it. The preference is per-call and is never persisted:
+  `write_global_cli_cache` and `_dev_dir_path` both refuse a path under
+  `.worktrees/` on purpose, after a symlink bug that exited 127, so the stderr
+  line is the substitute for persisting rather than a complement to it.
+- The root `CLAUDE.md` sentence explaining why `test-worktree-manager.sh`
+  stays serial is corrected. Both halves of the old reason were wrong when
+  measured -- the port is scanned rather than fixed, and the count was never
+  five. The conclusion survives on the real reason, which replaces them: a
+  machine-global bounded window of 20 ports from `DEV_SERVER_BASE_PORT=4100`,
+  plus a TOCTOU in `_pick_free_port` whose `_port_free` probe closes its
+  connection before the caller binds.
+- `command-size-baseline.txt` is reconciled by the same commits that moved the
+  files, as its two-way ratchet requires: `skills/story-executor/SKILL.md` to
+  57862, `execute.md` to 404568 and `references/container-execution.md` to
+  34388.
+
+### Fixed
+
+- `remove_worktree` and `cleanup_worktrees` stop reporting a removal they did
+  not make. Both gated their success line on `[[ -d "$worktree_path" ]]` -- a
+  question about the state BEFORE the attempt -- and swallowed both git calls
+  with `2>/dev/null || true`; those four swallowed calls are now zero. A
+  removal git refused (a locked working tree exits 128 with `fatal: cannot
+  remove a locked working tree`) still printed a checkmark and exited 0 while
+  the directory, the registration and the branch all survived, and the
+  surviving ref is then what the next `create` silently binds to, handing an
+  executor a tree standing on the previous plan's commit. Both calls are now
+  captured, so git's own wording -- the only text that says WHY -- reaches the
+  transcript verbatim, and the branch check asks whether the ref SURVIVED
+  rather than trusting git's exit status, since `git branch -D` exits 1 both
+  for a branch that was never there (the benign case the already-removed path
+  reaches every time) and for one it could not delete. `cleanup_worktrees`
+  records each failure and returns non-zero at the END of its loop, so one
+  worktree it could not remove no longer costs its siblings their sweep.
+
+## [1.133.0] - 2026-09-09
+
+### Added
+
+- A researcher that returns without writing its file now says so.
+  `commands/plan.md` gains `### Confirm Each Research File Landed` at the end
+  of Run Research Agents. It checks each researcher's own `outputPath` for
+  existence AND a 512-byte floor, once per researcher and only after that
+  researcher's own Task has returned -- never mid-flight and never once for
+  the group, since a researcher that has not returned has not finished
+  writing. Existence alone was rejected by measurement rather than by taste:
+  a 207-byte placeholder stub reading `PROBE - write-channel test in
+  progress.` sat at an `outputPath` for about three minutes and passes a bare
+  `[ -f ]`, while the nine real files under `.aimi/research/` on this tree run
+  from 2483 to 42600 bytes -- so the floor sits about 2.5x above the stub and
+  about 4.8x below the smallest legitimate file, and neither edge is close.
+  The check never blocks, retries or re-spawns, and a run whose files all land
+  prints nothing new. Phase 1.5b names the same subsection rather than
+  carrying a copy, so all four researcher spawn sites share one definition in
+  flat and phase mode alike.
+
+### Changed
+
+- Both downstream research lists key on the file being on disk instead of on
+  "the agent returned". The `allResearchPaths` union computed before the
+  research-conflict gate -- which feeds Phases 1.7, 1.8, 3c.5 and 3d -- and
+  Phase 4's fresh-written source for `metadata.researchPaths` now read a
+  `researchWritten` working-memory list built by the check above. The phrase
+  `that completed successfully` defined both sites and now occurs zero times
+  in the file; naming only one of them would have left a path that names no
+  file reaching five phases with one of them filtering it.
+- Two exclusions are stated with their reasons rather than left implicit. A
+  path taken from `reusedResearch` is not checked here, because no Task was
+  spawned for it this run and Phase 1.7's ingestion catches a vanished reuse
+  on its own. The Phase-Scoped Research Reuse glob is left exactly as it is,
+  because a glob that finds no candidate is answering "nothing to reuse",
+  which is a legitimate answer and not a missing deliverable -- making it warn
+  would print a line on every fresh run.
+
+### Fixed
+
+- Phase 1.7's Research File Ingestion stops skipping an absent path in
+  silence. The step named the behaviour outright -- **silently skip** it,
+  emit no warning -- and now emits one line naming the file before continuing
+  with the next path. A `researchPaths` entry pointing at nothing is visible
+  instead of being inferred from a context that came back shorter than
+  expected.
+
+## [1.132.0] - 2026-09-09
+
+### Added
+
+- The prototype is sliced per outline entry instead of broadcast whole.
+  `scripts/aimi-cli.sh` gains `extract-prototype-sections <file> --anchors
+  "<view names>"`, which emits the `<section data-view="X">` blocks a caller
+  names by counting `<section>`/`</section>` depth. It reuses
+  `cmd_extract_sections`' argument parsing, `resolve_path` +
+  `validate_path_in_project` confinement, metacharacter rejection and
+  silent-skip-on-miss byte for byte, because a second, subtly different
+  confinement rule beside the first is how one of them ends up wrong.
+  `commands/plan.md` grows `### Per-Entry View-Scoped Prototype Block
+  Preparation` beside its research-slicing sibling and interpolates a per-entry
+  `prototypeViewBlock` where the Phase 3d template used to interpolate the whole
+  `prototypeBlocks` broadcast; the Phase 1 researcher spawn keeps the whole-file
+  form, since it runs once per researcher rather than once per entry.
+
+### Changed
+
+- The story expander cites a prototype slice by view, not by a line range.
+  `agents/workflow/aimi-story-expander.md` prefers `(prototype: <path>
+  §<view-name>)` and admits the line-range fallback only for numbers `counted
+  over the whole file on disk`. The rule is provenance rather than a marker
+  check on purpose: `plan.md` wraps a slice and a whole file in the same
+  `<prototype_html label=... path=...>` tag and `label` is a letter, so a rule
+  shaped "if the block is marked a slice" would never fire. Its reading
+  permission widens from one purpose to two in the same commit, since the new
+  guidance instructs a Read the old bullet forbade.
+- `metadata.prototypeDropped` is documented as having two writers. Phase 4's
+  metadata bullet, the schema template line and `plugins/aimi-engineering/
+  CLAUDE.md` stop asserting `reason` is the literal `aggregate-cap` and name
+  both it and `no-view-anchors`. `validate-tasks` R21 is untouched: it checks
+  `reason` as a non-empty string and enforces no enum, which is what let this
+  second writer land without a validator change -- the foresight that decision
+  was recorded for.
+
+### Fixed
+
+- A prototype with no `data-view` anchor takes a declared path instead of an
+  undefined one: the whole block goes to the first outline entry, every other
+  entry receives the path plus the read-on-demand instruction, and one
+  `{path, reason: "no-view-anchors", bytes}` record is appended. The per-entry
+  20 KB cap applies to slices only, so that first entry receives the block
+  complete up to the 200 KB aggregate ceiling.
+- The new section triggers on the loaded prototype HTML files rather than on
+  `resolvedPrototypePaths`, which also carries the tokens sidecar. Without the
+  distinction, a run whose aggregate cap dropped every prototype but whose
+  sidecar loaded would have fired the whole section over a JSON file, found no
+  anchors, and written a `no-view-anchors` record naming a file that is not a
+  prototype and was never dropped.
+
+## [1.131.0] - 2026-09-08
+
+### Added
+
+- Brainstorm Design Decisions reach the story expander. `design_decisions()`
+  matches the `## Design Decisions` heading by shape rather than by exact
+  string, concatenates the sections it finds carrying the provenance of each,
+  and evicts whole sections once the aggregate passes `DECISIONS_CAP` instead
+  of slicing the stream at a byte -- a cut that could land mid-sentence and
+  hand the expander half a decision. `commands/plan.md` threads the block into
+  the Phase 3d prompts and `agents/workflow/aimi-story-expander.md` gains the
+  section that consumes it, so the block arrives somewhere that reads it rather
+  than being assembled and dropped.
+- `validate-tasks` warns when brainstorm-sourced decisions carry no
+  `brainstormPath`. A decision with no path back to the brainstorm that
+  produced it cannot be attributed later, and nothing said so before.
+
+### Fixed
+
+- `effective_cwd` honours a leading `cd <path>` in all three of bash's chaining
+  forms -- `&&`, `;` and a newline -- where it matched only `&&` before. The
+  other two fell through to `tool_input["cwd"]`, which names where the session
+  sits rather than where the command said it would run. The false denial that
+  surfaced this (a legitimate commit on a story branch, refused) was the benign
+  half. The other half is that when the two directories belong to different
+  repositories the protected-branch guard read the wrong one: `cd <checkout on
+  the default branch>` followed by a newline and a commit was ALLOWED, while
+  the identical command joined with `&&` was blocked. Reproduced through the
+  dispatcher against two real repositories, before and after.
 
 ## [1.130.0] - 2026-09-08
 

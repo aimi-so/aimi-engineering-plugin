@@ -75,11 +75,39 @@ Include provenance on the first line of each section (or inline with each rule/i
 
 ## Structured Findings Format
 
-Every factual claim in the findings body (not the pointer-block return in the Output Contract below, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly two forms — no bare assertions:
+Every factual claim in the findings body (not the pointer-block return in the Output Contract below, which stays exactly 3 summary bullets + `sections`) resolves to one of exactly three forms — no bare assertions:
 
 1. **Cited claim** — state the claim, then attach a short verbatim quote (the exact cited text, kept brief) plus its provenance citation:
    > "<verbatim quoted text>" — `BusinessSpec § 4.1 L152-174` (or `DesignSpec § 1 L3-40`, a chat transcript path:line, or a prototype `file:line`)
 2. **Inferred claim** — when no bundle artifact states it (e.g. a design-token default read from prototype CSS per the Read Order fallback, or a gap noted under Spec-Prototype Coverage Gaps), tag it inline with `[INFERRED]` immediately after the claim. This is distinct from, and composes with, the existing chat-fallback annotation `(source: chats — spec absent)` — a chat-sourced claim still needs a verbatim quote + citation; `[INFERRED]` is reserved for claims with no bundle source at all.
+3. **Measured figure** — a number about this repository (a count, a byte size, a
+   percentage) is a **third** form, and neither of the two above satisfies it.
+   State the figure, then immediately below it a ` ```measure ` block holding the
+   shell command that produced it and that command's literal output:
+
+```measure
+$ grep -c '^## ' commands/plan.md
+131
+```
+
+   The number cited in the prose must be that literal output, character for
+   character. Any figure with no `measure` block — including one you reached by
+   arithmetic over two other figures, which is the case that most often goes
+   wrong — is marked `UNVERIFIED` inline, in the body, immediately after the
+   number. Do not omit the figure and do not soften it; mark it.
+
+   The command must pass the read-only allowlist in
+   `commands/references/sanitization.md` § *Measure-Block Execution Allowlist*:
+   one command whose every pipeline segment leads with `grep`, `wc`, `find`,
+   `ls`, `awk`, `jq`, `stat`, or `git ls-files|log|show`, and no `;`, `&&`,
+   backtick, or `$(…)`. `/aimi:plan` Phase 1.6 **re-runs** every block and
+   escalates a mismatch to the user; a block it has to refuse costs its figure
+   the check, and that figure becomes `UNVERIFIED` too.
+
+   When a figure is corrected after this file is written, record the correction
+   in a `## Verified` section at the end of the file rather than editing the
+   body — Phase 1.6 reads that section with precedence, so the fix survives the
+   file being reused later via `metadata.researchPaths`.
 
 ## Output Contract
 
@@ -97,10 +125,10 @@ Every factual claim in the findings body (not the pointer-block return in the Ou
    mkdir -p .aimi/research
    ```
 
-4. **Write full findings** via the Write tool to:
+4. **A file must exist at** this path when you return:
    `.aimi/research/YYYY-MM-DD-<slug>-<HHmmss>-design-bundle.md`
 
-   where `YYYY-MM-DD` is today's date and `HHmmss` is the current wall-clock time (run `date +%H%M%S` once at write time when no caller path was provided).
+   where `YYYY-MM-DD` is today's date and `HHmmss` is the current wall-clock time (run `date +%H%M%S` once at write time when no caller path was provided). Any tool that leaves the file there — the Write tool, a Bash heredoc, or anything else — satisfies this; if none is available, use `unwritten_findings:` in step 5's pointer block instead.
 
    Include frontmatter:
    ```markdown
@@ -125,9 +153,11 @@ Every factual claim in the findings body (not the pointer-block return in the Ou
    sections:
      - "## <h2 or h3 heading from the file>"
      - "## ..."
+   # unwritten_findings: |
+   #   <complete findings body, verbatim — present only when step 4's file does not exist>
    ```
 
-   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block.
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
 
 6. **Safety escape:** Security findings, data-privacy issues, accessibility blockers, or conflicts between spec versions auto-expand beyond caps — user safety overrides brevity.
 

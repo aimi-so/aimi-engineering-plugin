@@ -20,6 +20,7 @@ set -uo pipefail
 #   - Research Lookup Tests
 #   - Extract Sections Tests
 #   - Measure Command File Tests
+#   - Research Figures Tests
 #   - Research GC Tests
 #   - Interactivity Mode Detection Tests
 #   - resolve-models Tests
@@ -1553,6 +1554,227 @@ RESEOF
   rm -rf "$es_dir"
 }
 
+test_extract_prototype_sections() {
+  echo ""
+  echo "=== Testing extract-prototype-sections subcommand ==="
+
+  local eps_dir
+  eps_dir=$(mktemp -d)
+  mkdir -p "$eps_dir/.aimi"
+
+  # Built to look like what aimi-bundle-prototype-author actually emits: an x-data
+  # root div, a <nav> of view buttons, several <section data-view="..." x-show="...">
+  # blocks with real content, and the Alpine <script>. The fourth section's view name
+  # exercises ordinary punctuation (- _ . and a space) that must keep matching.
+  local proto_file="$eps_dir/.aimi/proto.html"
+  cat > "$proto_file" << 'PROTOEOF'
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Design Decisions Channel Prototype</title></head>
+<body>
+<div x-data="{ active: 'overview' }">
+  <nav>
+    <button @click="active = 'overview'">Overview</button>
+    <button @click="active = 'detail'">Detail</button>
+    <button @click="active = 'settings'">Settings</button>
+    <button @click="active = 'notes'">Notes</button>
+  </nav>
+
+  <section data-view="overview" x-show="active === 'overview'">
+    <h2>Overview</h2>
+    <p>This is the overview view body, with enough content to make this section
+    meaningfully sized relative to the whole fixture file.</p>
+  </section>
+
+  <section data-view="detail" x-show="active === 'detail'">
+    <h2>Detail</h2>
+    <p>This is the detail view body, also padded with enough content that a
+    single-view slice is clearly and measurably smaller than the whole file.</p>
+    <ul>
+      <li>Detail point one</li>
+      <li>Detail point two</li>
+    </ul>
+  </section>
+
+  <section data-view="settings" x-show="active === 'settings'">
+    <h2>Settings</h2>
+    <p>This is the settings view body, with its own padding content so the
+    fixture reads like something the bundle-prototype-author would really emit.</p>
+  </section>
+
+  <section data-view="detail-notes_v1.2 extra" x-show="active === 'notes'">
+    <h2>Detail Notes</h2>
+    <p>This view name exercises ordinary punctuation -- hyphen, underscore, period
+    and a space -- which must all keep matching normally.</p>
+  </section>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {});
+</script>
+</body>
+</html>
+PROTOEOF
+
+  local stdout exit_code stderr_out
+
+  # --- Test 1: single-anchor match emits the WHOLE block, no bleed ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: single anchor exits 0"
+  assert_contains 'data-view="detail"' "$stdout" "extract-prototype-sections: single anchor includes opening tag"
+  assert_contains "Detail point two" "$stdout" "extract-prototype-sections: single anchor includes content through to the closing tag"
+  local detail_close_count
+  detail_close_count=$(printf '%s\n' "$stdout" | grep -c '</section>')
+  assert_eq "1" "$detail_close_count" "extract-prototype-sections: single anchor emits exactly one closing tag (whole block, not truncated or duplicated)"
+  local single_bleed="yes"
+  [[ "$stdout" == *"Overview"* || "$stdout" == *"Settings"* ]] || single_bleed="no"
+  assert_eq "no" "$single_bleed" "extract-prototype-sections: single anchor excludes unrelated views"
+
+  # --- Test 2: multi-anchor match, concatenated in request order ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "$(printf 'settings\noverview')" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: multi-anchor exits 0"
+  assert_contains 'data-view="settings"' "$stdout" "extract-prototype-sections: multi-anchor includes first requested view"
+  assert_contains 'data-view="overview"' "$stdout" "extract-prototype-sections: multi-anchor includes second requested view"
+  local settings_pos overview_pos order_ok="no"
+  settings_pos=$(printf '%s' "$stdout" | grep -n 'data-view="settings"' | head -1 | cut -d: -f1)
+  overview_pos=$(printf '%s' "$stdout" | grep -n 'data-view="overview"' | head -1 | cut -d: -f1)
+  [ -n "$settings_pos" ] && [ -n "$overview_pos" ] && [ "$settings_pos" -lt "$overview_pos" ] && order_ok="yes"
+  assert_eq "yes" "$order_ok" "extract-prototype-sections: multi-anchor preserves request order"
+
+  # --- Test 3: one-view slice is strictly smaller than the whole fixture (wc -c) ---
+  local slice_bytes fixture_bytes smaller_ok="no" nonzero_ok="no"
+  pushd "$eps_dir" >/dev/null
+  "$CLI" extract-prototype-sections "$proto_file" --anchors "detail" > "$eps_dir/.aimi/slice.out" 2>/dev/null
+  exit_code=$?
+  popd >/dev/null
+  slice_bytes=$(wc -c < "$eps_dir/.aimi/slice.out")
+  fixture_bytes=$(wc -c < "$proto_file")
+  rm -f "$eps_dir/.aimi/slice.out"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: single-view slice exits 0"
+  [ "$slice_bytes" -gt "0" ] && nonzero_ok="yes"
+  assert_eq "yes" "$nonzero_ok" "extract-prototype-sections: single-view slice is non-empty"
+  [ "$slice_bytes" -lt "$fixture_bytes" ] && smaller_ok="yes"
+  assert_eq "yes" "$smaller_ok" "extract-prototype-sections: single-view slice (wc -c) is strictly smaller than the whole fixture (wc -c)"
+
+  # --- Test 4: view with no matching section -> skipped, empty stdout, exit 0, warns ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "nonexistent-view" 2>"$eps_dir/.aimi/stderr4.out") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$eps_dir/.aimi/stderr4.out"); rm -f "$eps_dir/.aimi/stderr4.out"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: unmatched view exits 0"
+  assert_eq "" "$stdout" "extract-prototype-sections: unmatched view produces empty stdout"
+  assert_contains "no section matched anchor: nonexistent-view" "$stderr_out" "extract-prototype-sections: unmatched view warns on stderr naming the view"
+
+  # --- Test 5: HTML with no data-view attribute at all -> empty stdout, exit 0 ---
+  # Distinct from Test 4 -- a caller must be able to tell "nothing in this file has
+  # data-view" apart from "this anchor did not match".
+  local plain_file="$eps_dir/.aimi/plain.html"
+  printf '%s\n' '<html><body><p>no anchors here</p></body></html>' > "$plain_file"
+
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$plain_file" --anchors "detail" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: anchor-less file exits 0"
+  assert_eq "" "$stdout" "extract-prototype-sections: anchor-less file produces empty stdout"
+
+  # --- Test 6: missing file -> error on stderr, exit non-zero ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$eps_dir/.aimi/does-not-exist.html" --anchors "detail" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: missing file exits non-zero"
+  assert_contains "not found" "$stderr_out" "extract-prototype-sections: missing file logs error on stderr"
+
+  # --- Test 7: relative traversal path (../x) rejected ---
+  local parent_dir="$(dirname "$eps_dir")"
+  local outside_file="$parent_dir/eps-outside-$$.html"
+  printf '%s\n' '<section data-view="outside"><p>outside</p></section>' > "$outside_file"
+
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "../$(basename "$outside_file")" --anchors "outside" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: relative traversal path rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-prototype-sections: relative traversal path error on stderr"
+  rm -f "$outside_file"
+
+  # --- Test 8: absolute path outside project root rejected ---
+  local abs_outside_file="$parent_dir/eps-abs-outside-$$.html"
+  printf '%s\n' '<section data-view="outside"><p>outside</p></section>' > "$abs_outside_file"
+
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$abs_outside_file" --anchors "outside" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: absolute path outside project root rejected (exit non-zero)"
+  assert_contains "escapes project root" "$stderr_out" "extract-prototype-sections: absolute path outside project root error on stderr"
+  rm -f "$abs_outside_file"
+
+  # --- Test 9: --anchors given with no following value -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$proto_file" --anchors 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: --anchors with no value exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: --anchors with no value prints usage"
+
+  # --- Test 10: --anchors given an empty value -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections "$proto_file" --anchors "" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: --anchors with empty value exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: --anchors with empty value prints usage"
+
+  # --- Test 11: missing <file> argument -> usage error, exit 1 ---
+  pushd "$eps_dir" >/dev/null
+  stderr_out=$("$CLI" extract-prototype-sections --anchors "detail" 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "1" "$exit_code" "extract-prototype-sections: missing file argument exits non-zero"
+  assert_contains "Usage: aimi-cli.sh extract-prototype-sections" "$stderr_out" "extract-prototype-sections: missing file argument prints usage"
+
+  # --- Test 12: ordinary view-name punctuation (- _ . and a space) keeps matching ---
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "detail-notes_v1.2 extra" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: punctuated view name exits 0"
+  assert_contains 'data-view="detail-notes_v1.2 extra"' "$stdout" "extract-prototype-sections: punctuated view name (- _ . and space) matches normally"
+
+  # --- Test 13: anchors with shell metacharacters are rejected and skipped, never
+  # interpolated into the matcher; a valid anchor in the same run still processes ---
+  local metachar_anchors metachar_stderr_file
+  metachar_anchors=$(printf 'overview\n$(evil)\nbad`tick\nbad"quote\nbad\\slash')
+  metachar_stderr_file="$eps_dir/.aimi/stderr13.out"
+
+  pushd "$eps_dir" >/dev/null
+  stdout=$("$CLI" extract-prototype-sections "$proto_file" --anchors "$metachar_anchors" 2>"$metachar_stderr_file") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$metachar_stderr_file"); rm -f "$metachar_stderr_file"
+
+  assert_exit_code "0" "$exit_code" "extract-prototype-sections: run with rejected metachar anchors still exits 0"
+  assert_contains 'data-view="overview"' "$stdout" "extract-prototype-sections: valid anchor still processed alongside rejected ones"
+  local rejected_count
+  rejected_count=$(printf '%s' "$stderr_out" | grep -c "anchor rejected (shell metacharacter)")
+  assert_eq "4" "$rejected_count" "extract-prototype-sections: all four dangerous-metacharacter anchors rejected with a warning"
+  assert_contains '$(evil)' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the \$( anchor"
+  assert_contains 'bad`tick' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the backtick anchor"
+  assert_contains 'bad"quote' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the double-quote anchor"
+  assert_contains 'bad\slash' "$stderr_out" "extract-prototype-sections: rejected-anchor warning names the backslash anchor"
+
+  rm -rf "$eps_dir"
+}
+
 # measure-command-file: the structural size of one markdown file.
 #
 # THE FIXTURE IS THE TEST. Its five top-level fences are chosen so that a
@@ -1694,6 +1916,206 @@ MCFEOF
   assert_contains "Usage:" "$stderr_out" "measure-command-file: no path argument prints usage"
 
   rm -rf "$mcf_dir"
+}
+
+# research-figures: the mechanical floor under a research file's evidence.
+#
+# The detector is asserted in BOTH directions, and that is the point of the
+# six-row table rather than a decoration on it. A detector that only ever
+# fires is not validated: the three clean rows carry their own failure
+# messages naming what a false positive would mean, because a floor that
+# flags a narrative file is a floor nobody will leave switched on.
+#
+# Every row asserts BOTH printed counts and the verdict plan.md computes from
+# them -- the verdict is derived from the verb's OWN output here rather than
+# from the row's expected counts, so it cannot pass tautologically.
+#
+# The year exclusion has a row of its own because it is the one rule that
+# makes the count about FIGURES rather than about digits: a file dated 1998,
+# 2026, 2019 and 1999 carries four four-digit numerals and zero figures.
+#
+# dead_keys is asserted two-sided over a structured subject, and TWICE over
+# the shape that produced the requirement: the defect lived in a MULTI-LINE
+# `python3 -c "` command, whose indexing sits on continuation lines the `$ `
+# prompt line does not carry. A checker that reads the prompt line alone
+# finds nothing to check and reports clean, which is the false negative the
+# multi-line row exists to catch.
+#
+# The fixture is its own mktemp -d with its own .aimi/ inside, pushd'd into --
+# test_measure_command_file's pattern, and the reason is the same: the
+# fixture's own .aimi/ is what gives the CLI a PROJECT_ROOT to accept the
+# fixture path against. Subject paths inside the measure blocks are written
+# RELATIVE for the same reason, which also exercises the PROJECT_ROOT-relative
+# resolution the verb applies to a path it read out of a file.
+test_research_figures() {
+  echo ""
+  echo "=== Testing research-figures subcommand ==="
+
+  local rf_dir
+  rf_dir=$(mktemp -d)
+  mkdir -p "$rf_dir/.aimi"
+
+  { echo '# Big130'; echo; seq 1 130 | tr '\n' ' '; echo; } > "$rf_dir/big130.md"
+  { echo '# Big196'; echo; seq 1 196 | tr '\n' ' '; echo; } > "$rf_dir/big196.md"
+  printf '# Violator\n\nFound 3 callers, 7 sites, 12 refs, 45 lines, 88 bytes, 91 hits, 5 files, 6 dirs, 2 modules, 4 verbs, 9 tests, 11 gaps.\nWritten in 2026 and 1998.\n' > "$rf_dir/violator.md"
+  printf '# Narrative\n\nThe guard exists and the rule is prose. Nothing here is counted.\n' > "$rf_dir/narrative.md"
+  printf '# Years\n\nDated 1998, 2026, 2019 and 1999 - no figures at all.\n' > "$rf_dir/years.md"
+  cat > "$rf_dir/honest.md" << 'RFHONESTEOF'
+# Honest
+
+```measure
+$ grep -c foo bar
+7
+```
+
+The verb answers in 2 places, and the count came back 9.
+
+```measure
+$ wc -l baz
+42 baz
+```
+RFHONESTEOF
+
+  local row rf_name rf_want_blocks rf_want_figs rf_want_verdict
+  local rf_out rf_rc rf_blocks rf_figs rf_verdict
+  for row in "big130 0 130 flag" "big196 0 196 flag" "violator 0 12 flag" \
+             "narrative 0 0 clean" "years 0 0 clean" "honest 2 2 clean"; do
+    # shellcheck disable=SC2086
+    set -- $row
+    rf_name="$1"; rf_want_blocks="$2"; rf_want_figs="$3"; rf_want_verdict="$4"
+
+    pushd "$rf_dir" >/dev/null
+    rf_out=$("$CLI" research-figures "$rf_dir/$rf_name.md" 2>/dev/null) && rf_rc=0 || rf_rc=$?
+    popd >/dev/null
+
+    assert_exit_code "0" "$rf_rc" "research-figures: $rf_name.md is measured, exit 0"
+    rf_blocks=$(printf '%s' "$rf_out" | jq -r '.blocks')
+    rf_figs=$(printf '%s' "$rf_out" | jq -r '.figures_outside')
+    assert_eq "$rf_want_blocks" "$rf_blocks" \
+      "research-figures: $rf_name.md reports $rf_want_blocks measure blocks"
+    assert_eq "$rf_want_figs" "$rf_figs" \
+      "research-figures: $rf_name.md reports $rf_want_figs figures outside them"
+
+    # The cut commands/plan.md applies, computed from the verb's own output.
+    if [ "${rf_blocks:-1}" = 0 ] && [ "${rf_figs:-0}" -ge 10 ]; then
+      rf_verdict=flag
+    else
+      rf_verdict=clean
+    fi
+    assert_eq "$rf_want_verdict" "$rf_verdict" \
+      "research-figures: $rf_name.md gate verdict is $rf_want_verdict (a detector that only fires is not validated)"
+  done
+
+  # A file with nothing dead prints exactly the two counts: dead_keys follows
+  # the omitted-when-empty convention, so every caller written before that
+  # third key reads the same object it always did.
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/honest.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "blocks,figures_outside" "$(printf '%s' "$rf_out" | jq -r '[keys[]] | join(",")')" \
+    "research-figures: a clean file prints exactly blocks and figures_outside"
+
+  # --- dead_keys, two-sided over a structured subject ---
+  printf '{"cases": [{"args": ["a"], "files": {"x": "metadata"}, "stdout": "s"}]}\n' > "$rf_dir/subject.json"
+  cat > "$rf_dir/dead.md" << 'RFDEADEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "import json; d=json.load(open('subject.json')); print(len(d['cases']), sum(1 for x in d['cases'] if x.get('output')))"
+1 0
+```
+RFDEADEOF
+  cat > "$rf_dir/live.md" << 'RFLIVEEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "import json; d=json.load(open('subject.json')); print(len(d['cases']), sum(1 for x in d['cases'] if x.get('files')))"
+1 1
+```
+RFLIVEEOF
+  cat > "$rf_dir/multiline-dead.md" << 'RFMLEOF'
+Uma figura sobre o sujeito.
+
+```measure
+$ python3 -c "
+import json
+d=json.load(open('subject.json'))
+c=d['cases']
+print(len(c), sum(1 for x in c if x.get('output','')))"
+1 0
+```
+RFMLEOF
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/dead.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a name the subject does not carry is reported once"
+  assert_eq "output" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].key')" \
+    "research-figures: dead_keys names the dead key itself"
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].block')" \
+    "research-figures: dead_keys names the block the dead key was read in"
+  assert_contains "subject.json" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].subject')" \
+    "research-figures: dead_keys names the subject it was checked against"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/live.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "0" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a name the subject DOES carry is never reported dead"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/multiline-dead.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.dead_keys | length')" \
+    "research-figures: a MULTI-LINE command's indexing is read too, not just its \$ prompt line"
+  assert_eq "output" "$(printf '%s' "$rf_out" | jq -r '.dead_keys[0].key')" \
+    "research-figures: the multi-line block names the same dead key"
+
+  # A block whose subject is not structured extracts no names against a JSON
+  # subject and is therefore never reported -- the intended degradation.
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/honest.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "0" "$(printf '%s' "$rf_out" | jq -r '(.dead_keys // []) | length')" \
+    "research-figures: a grep over a plain file names no dead key"
+
+  # --- refusals: the same shape every path-taking verb has ---
+  local rf_err
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures "$rf_dir/does-not-exist.md" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: a missing file exits non-zero"
+  assert_contains "File not found" "$rf_err" "research-figures: a missing file says so on stderr"
+
+  local rf_outside
+  rf_outside="$(dirname "$rf_dir")/rf-outside-$$.md"
+  printf '# outside\n' > "$rf_outside"
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures "$rf_outside" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  rm -f "$rf_outside"
+  assert_exit_code "1" "$rf_rc" "research-figures: a path outside the project root is refused"
+  assert_contains "escapes project root" "$rf_err" \
+    "research-figures: the refusal names the confinement rule"
+
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: no path argument exits non-zero"
+  assert_contains "Usage:" "$rf_err" "research-figures: no path argument prints usage"
+
+  pushd "$rf_dir" >/dev/null
+  rf_err=$("$CLI" research-figures --no-such-flag "$rf_dir/narrative.md" 2>&1 >/dev/null) && rf_rc=0 || rf_rc=$?
+  popd >/dev/null
+  assert_exit_code "1" "$rf_rc" "research-figures: an unknown flag exits non-zero"
+  assert_contains "Usage:" "$rf_err" "research-figures: an unknown flag prints usage"
+
+  # The verb is reachable by name, and help says it exists.
+  assert_contains "research-figures" "$("$CLI" help 2>/dev/null)" \
+    "research-figures: the usage text names the verb"
+
+  rm -rf "$rf_dir"
 }
 
 # The archivable predicate and research-gc's referenced-set walk, whose jq left
@@ -4859,6 +5281,168 @@ EOF
   rm -rf "$stg" "${phase_dir%/*}"
 }
 
+# One refusal of the --feature/--phase pair: exits 1, names the reason, and
+# leaves no output file behind. Three assertions per call, always.
+_sm_phase_refusal() {
+  local dir="$1" needle="$2" label="$3"
+  shift 3
+  local stg=".aimi/stg-refuse" out=".aimi/tasks/tc13-refuse-tasks.json"
+  rm -rf "$dir/$stg"
+  rm -f "$dir/$out"
+  mkdir -p "$dir/$stg"
+  _sm_make_story "$dir/$stg/01-a.json" "Probe story"
+
+  local output exit_code
+  output=$(cd "$dir" && "$CLI" story-merge --staging-dir "$stg" --output "$out" "$@" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "$label: exits 1"
+  assert_contains "$needle" "$output" "$label: the error names the reason"
+  if [ -f "$dir/$out" ]; then
+    assert_eq "no output file" "an output file was written" "$label: the refusal wrote nothing"
+  else
+    assert_eq "no output file" "no output file" "$label: the refusal wrote nothing"
+  fi
+  rm -rf "$dir/$stg"
+}
+
+# TC56: --feature and --phase fill the FOUR metadata fields story-merge can
+# derive -- roadmapPath, phase{id,dir}, baseRef, pluginVersion -- while leaving
+# branchName and title exactly as the legacy writer has always written them.
+#
+# The fixture is its own root rather than TEST_DIR because baseRef comes from
+# `git rev-parse HEAD` run in the resolved AIMI_ROOT, and TEST_DIR is a bare
+# mktemp -d with no repository. The omitted-baseRef branch is covered where it
+# is free instead: scripts/tests/test_story_merge.py's non-git tmp_path root.
+#
+# phase 1.1 is what proves `dir` is READ and never re-derived -- a derivation
+# from the id would produce phase-1-1-beta, naming no directory on disk -- and
+# phase 2 carries a hand-authored .branch that must reach neither the document
+# nor stderr, because branchName is not this verb's to compose.
+test_story_merge_derives_phase_metadata() {
+  echo ""
+  echo "=== TC56: story-merge --feature/--phase derives four metadata fields ==="
+
+  local d
+  d=$(mktemp -d)
+  mkdir -p "$d/.aimi/tasks/tc13-feature"
+  (
+    cd "$d" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    echo "fixture" > README.md
+    git add README.md
+    git commit -qm "init"
+  ) >/dev/null 2>&1
+
+  cat > "$d/.aimi/tasks/tc13-feature/roadmap.json" << 'EOF'
+{
+  "roadmapVersion": "2.0",
+  "feature": "tc13-feature",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "phases": [
+    {"id": 1, "name": "Phase 1", "slug": "alpha", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-1-alpha", "branch": null, "status": "pending", "dependsOn": []},
+    {"id": 1.1, "name": "Phase 1.1", "slug": "beta", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-1.1-beta", "branch": null, "status": "pending", "dependsOn": []},
+    {"id": 2, "name": "Phase 2", "slug": "gamma", "goal": "g", "successCriteria": ["s"],
+     "dir": "phase-2-gamma", "branch": "feat/hand-authored-override", "status": "pending",
+     "dependsOn": []},
+    {"id": 3, "name": "Phase 3", "slug": "delta", "goal": "g", "successCriteria": ["s"],
+     "dir": null, "branch": null, "status": "pending", "dependsOn": []}
+  ]
+}
+EOF
+
+  local head version
+  head=$(git -C "$d" rev-parse HEAD)
+  version=$("$CLI" version)
+
+  # --- The four fields, integer phase id ---
+  local out output exit_code
+  out=".aimi/tasks/tc13-int-tasks.json"
+  mkdir -p "$d/.aimi/stg-int"
+  _sm_make_story "$d/.aimi/stg-int/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-int" --output "$out" \
+    --feature tc13-feature --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: --feature/--phase merge exits 0"
+  assert_eq ".aimi/tasks/tc13-feature/roadmap.json" \
+    "$(jq -r '.metadata.roadmapPath' "$d/$out" 2>/dev/null)" \
+    "TC56: roadmapPath is composed from the --feature value"
+  assert_eq '{"id":1,"dir":"phase-1-alpha"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: phase {id,dir} comes from that phase's own roadmap entry"
+  assert_eq "$head" "$(jq -r '.metadata.baseRef' "$d/$out" 2>/dev/null)" \
+    "TC56: baseRef is the full HEAD sha"
+  assert_eq "$version" "$(jq -r '.metadata.pluginVersion' "$d/$out" 2>/dev/null)" \
+    "TC56: pluginVersion is what the running CLI's own version verb prints"
+  # The scope boundary, on the very path that fills the four.
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: branchName is untouched by the derivation"
+  assert_eq "feat: merged tasks" "$(jq -r '.metadata.title' "$d/$out" 2>/dev/null)" \
+    "TC56: title is untouched by the derivation"
+
+  # --- A decimal phase id keeps its dot in BOTH halves ---
+  out=".aimi/tasks/tc13-dec-tasks.json"
+  mkdir -p "$d/.aimi/stg-dec"
+  _sm_make_story "$d/.aimi/stg-dec/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-dec" --output "$out" \
+    --feature tc13-feature --phase 1.1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: decimal phase id merge exits 0"
+  assert_eq '{"id":1.1,"dir":"phase-1.1-beta"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: dir is read verbatim, so phase-1.1-beta is not re-derived as phase-1-1-beta"
+
+  # --- A non-null .branch is read for NOTHING ---
+  out=".aimi/tasks/tc13-branch-tasks.json"
+  mkdir -p "$d/.aimi/stg-branch"
+  _sm_make_story "$d/.aimi/stg-branch/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-branch" --output "$out" \
+    --feature tc13-feature --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: a phase carrying a .branch still merges"
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: the roadmap .branch does not become branchName"
+  assert_eq '{"id":2,"dir":"phase-2-gamma"}' \
+    "$(jq -c '.metadata.phase' "$d/$out" 2>/dev/null)" \
+    "TC56: phase {id,dir} carries no branch key"
+  assert_eq "0" "$(grep -cF 'feat/hand-authored-override' "$d/$out" || true)" \
+    "TC56: the roadmap .branch value reaches neither the document nor stderr"
+
+  # --- GUARDRAIL: neither flag, nothing new. Passes before AND after. ---
+  out=".aimi/tasks/tc13-bare-tasks.json"
+  mkdir -p "$d/.aimi/stg-bare"
+  _sm_make_story "$d/.aimi/stg-bare/01-a.json" "Probe story"
+  output=$(cd "$d" && "$CLI" story-merge --staging-dir ".aimi/stg-bare" --output "$out" 2>&1) \
+    && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC56: a merge with neither flag still exits 0"
+  assert_eq "feat/merged" "$(jq -r '.metadata.branchName' "$d/$out" 2>/dev/null)" \
+    "TC56: no-flag merge still writes branchName feat/merged"
+  local key
+  for key in roadmapPath phase baseRef pluginVersion; do
+    assert_eq "false" "$(jq -r --arg k "$key" '.metadata | has($k)' "$d/$out" 2>/dev/null)" \
+      "TC56: no-flag merge omits metadata.$key"
+  done
+
+  # --- Every bad input is refused by name, before any write ---
+  _sm_phase_refusal "$d" "together" "TC56 (--feature alone)" \
+    --feature tc13-feature
+  _sm_phase_refusal "$d" "together" "TC56 (--phase alone)" \
+    --phase 1
+  _sm_phase_refusal "$d" "numeric phase id" "TC56 (malformed phase id)" \
+    --feature tc13-feature --phase 1.1.1
+  _sm_phase_refusal "$d" "single path component" "TC56 (malformed feature slug)" \
+    --feature "tc13 feature" --phase 1
+  _sm_phase_refusal "$d" "roadmap not found" "TC56 (no roadmap.json)" \
+    --feature tc13-absent --phase 1
+  _sm_phase_refusal "$d" "not found in" "TC56 (phase absent from the roadmap)" \
+    --feature tc13-feature --phase 9
+  _sm_phase_refusal "$d" "has no dir" "TC56 (phase entry with no dir)" \
+    --feature tc13-feature --phase 3
+  _sm_phase_refusal "$d" "full-stack" "TC56 (with --split full-stack)" \
+    --feature tc13-feature --phase 1 --split full-stack
+
+  rm -rf "$d"
+}
+
 # TC9: outline.json sidecar in staging dir is ignored (Phase 3b artifact)
 test_story_merge_outline_sidecar_ignored() {
   echo ""
@@ -7915,11 +8499,17 @@ main() {
   echo ""
   echo "--- Extract Sections Tests ---"
   test_extract_sections
+  test_extract_prototype_sections
 
   # measure-command-file tests — own isolated temp dir, own .aimi/ root
   echo ""
   echo "--- Measure Command File Tests ---"
   test_measure_command_file
+
+  # research-figures tests — own isolated temp dir, own .aimi/ root
+  echo ""
+  echo "--- Research Figures Tests ---"
+  test_research_figures
 
   # Research-gc tests — each creates its own isolated temp dir
   echo ""
@@ -8027,6 +8617,7 @@ main() {
   test_story_merge_rule22_routing
   test_story_merge_full_stack_split
   test_story_merge_phase_aware_split
+  test_story_merge_derives_phase_metadata
   test_story_merge_outline_sidecar_ignored
   test_story_merge_dead_code_positive
   test_story_merge_dead_code_negative
