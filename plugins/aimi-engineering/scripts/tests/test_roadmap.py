@@ -1670,7 +1670,7 @@ def test_the_status_graph_is_the_seven_edges_the_capture_walked():
     so a silently widened or narrowed graph fails here rather than in a phase
     nobody is looking at. --force cases are excluded because they are precisely
     the ones allowed to walk an edge the graph does not hold."""
-    assert len(R.STATUS_TRANSITIONS) == 7
+    assert len(R.STATUS_TRANSITIONS) == 10
     walked = set()
     for label, case in LIFECYCLE.items():
         if case["verb"] != "roadmap-set-status" or label.endswith("-com-force"):
@@ -1697,6 +1697,160 @@ def test_force_overrides_transition_order_and_never_the_handoff_precondition():
     assert forced_precondition["exit"] == 1
     assert "no handoff.md found at" in forced_precondition["stderr"]
     assert forced_precondition["file"]["phases"][0]["status"] == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# cancelled -- a second terminal status, for a phase abandoned rather than
+# finished (D1-D5, D9). Fresh, non-golden: the LIFECYCLE capture predates
+# cancelled and must not gain entries for behavior jq never had.
+# ---------------------------------------------------------------------------
+
+
+def _write_roadmap(tmp_path, phases, name="roadmap.json"):
+    path = tmp_path / name
+    doc = {
+        "roadmapVersion": "2.0", "feature": "cancel-fixture",
+        "createdAt": "2020-01-01T00:00:00Z", "brainstormPath": None,
+        "phases": phases,
+    }
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return str(path)
+
+
+def _read_roadmap(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def test_cancelled_constants_and_unmet_treat_a_cancelled_dependency_as_satisfied():
+    """The two named constants, PHASE_STATUSES widened to six names, and _unmet
+    reading a cancelled dependency as satisfied the same way a completed one
+    already is -- a downstream phase must not wait forever on an abandoned
+    dependency."""
+    assert R.SATISFIED_DEPENDENCY_STATUSES == ("completed", "cancelled")
+    assert R.TERMINAL_PHASE_STATUSES == ("completed", "cancelled")
+    assert R.PHASE_STATUSES == [
+        "pending", "planned", "in_progress", "completed", "verification_failed",
+        "cancelled",
+    ]
+    downstream = _phase(pid=2, status="pending", dependsOn=[1])
+    assert R._unmet(downstream, {"1": "cancelled"}) == []
+    assert R._unmet(downstream, {"1": "completed"}) == []
+    assert R._unmet(downstream, {"1": "pending"}) == [1]
+
+
+def test_cancel_pending_or_planned_without_force_clears_claim_and_satisfies_a_dependent(tmp_path, capsys):
+    """AC1: pending/planned -> cancelled succeeds without --force, writes
+    cancelled and a null claim in the same write, and a downstream phase whose
+    dependsOn names only the cancelled phase reads as satisfied."""
+    for start in ("pending", "planned"):
+        phases = [
+            _phase(pid=1, status=start, claim={
+                "claimedBy": "s", "claimedAt": "2020-01-01T00:00:00Z", "claimedPid": "999999",
+            }),
+            _phase(pid=2, status="pending", dependsOn=[1]),
+        ]
+        path = _write_roadmap(tmp_path, phases, name=start + "-roadmap.json")
+        rc = R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "cancelled"])
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"phase": 1, "from": start, "to": "cancelled"}
+
+        doc = _read_roadmap(path)
+        assert doc["phases"][0]["status"] == "cancelled"
+        assert doc["phases"][0]["claim"] is None, "cancel must clear the claim, " + start
+        status_by_id = R._status_by_id(doc["phases"])
+        assert R._unmet(doc["phases"][1], status_by_id) == []
+
+
+def test_in_progress_and_verification_failed_to_cancelled_need_force_and_clear_the_claim(tmp_path, capsys):
+    """AC2: refused without --force, succeeds with --force, and releases the
+    claim the same way completing a phase already does."""
+    for start in ("in_progress", "verification_failed"):
+        phases = [_phase(pid=1, status=start, claim={
+            "claimedBy": "s", "claimedAt": "2020-01-01T00:00:00Z", "claimedPid": "999999",
+        })]
+        path = _write_roadmap(tmp_path, phases, name=start + "-roadmap.json")
+
+        with pytest.raises(SystemExit) as exc_info:
+            R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "cancelled"])
+        assert exc_info.value.code == 1
+        assert "not allowed without --force" in capsys.readouterr().err
+        assert _read_roadmap(path)["phases"][0]["status"] == start, "refusal must not write"
+
+        rc = R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "cancelled", "--force"])
+        assert rc == 0
+        capsys.readouterr()
+        doc = _read_roadmap(path)
+        assert doc["phases"][0]["status"] == "cancelled"
+        assert doc["phases"][0]["claim"] is None, "forced cancel must clear the claim, " + start
+
+
+def test_completed_to_cancelled_and_every_other_cancelled_departure_are_hard_refusals(tmp_path, capsys):
+    """AC3/AC4: completed -> cancelled has no --force override, the same
+    non-forceable shape as the handoff.md precondition on reaching completed.
+    Every departure from cancelled other than cancelled/pending is refused
+    even with --force -- including verification_failed, which is otherwise
+    reachable from any status without --force."""
+    completed_path = _write_roadmap(tmp_path, [_phase(pid=1, status="completed")], name="completed.json")
+    for force_args in ([], ["--force"]):
+        with pytest.raises(SystemExit) as exc_info:
+            R.op_set_status(
+                ["--roadmap", completed_path, "--phase", "1", "--status", "cancelled"] + force_args
+            )
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "completed to cancelled" in err
+        assert "no --force override" in err
+    assert _read_roadmap(completed_path)["phases"][0]["status"] == "completed"
+
+    for target in ("planned", "in_progress", "completed", "verification_failed"):
+        cancelled_path = _write_roadmap(
+            tmp_path, [_phase(pid=1, status="cancelled")], name="cancelled-to-" + target + ".json"
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            R.op_set_status(
+                ["--roadmap", cancelled_path, "--phase", "1", "--status", target, "--force"]
+            )
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "cancelled to " + target in err
+        assert _read_roadmap(cancelled_path)["phases"][0]["status"] == "cancelled"
+
+
+def test_cancelled_reopen_to_pending_needs_force_and_cancelled_to_cancelled_is_idempotent(tmp_path, capsys):
+    """AC4: cancelled -> pending is refused without --force and succeeds with
+    it; cancelled -> cancelled is an idempotent success."""
+    path = _write_roadmap(tmp_path, [_phase(pid=1, status="cancelled")])
+
+    with pytest.raises(SystemExit) as exc_info:
+        R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "pending"])
+    assert exc_info.value.code == 1
+    assert "not allowed without --force" in capsys.readouterr().err
+    assert _read_roadmap(path)["phases"][0]["status"] == "cancelled"
+
+    rc = R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "pending", "--force"])
+    assert rc == 0
+    capsys.readouterr()
+    assert _read_roadmap(path)["phases"][0]["status"] == "pending"
+
+    rc = R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "cancelled"])
+    assert rc == 0
+    capsys.readouterr()
+    assert _read_roadmap(path)["phases"][0]["status"] == "cancelled"
+
+    rc = R.op_set_status(["--roadmap", path, "--phase", "1", "--status", "cancelled"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"phase": 1, "from": "cancelled", "to": "cancelled"}
+    assert _read_roadmap(path)["phases"][0]["status"] == "cancelled"
+
+
+def test_a_cancelled_phase_is_never_a_claim_candidate():
+    """AC5: cancelled is absent from CLAIMABLE_STATUSES, so neither
+    roadmap-claim's auto-selection pass nor an explicit --phase override can
+    ever select one -- both read this same list."""
+    assert "cancelled" not in R.CLAIMABLE_STATUSES
 
 
 def test_completing_a_phase_releases_its_claim_in_the_same_write():

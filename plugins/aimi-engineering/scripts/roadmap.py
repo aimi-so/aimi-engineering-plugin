@@ -1948,8 +1948,28 @@ GET_ELIGIBLE_STATUSES = ["pending", "planned"]
 # caller who types "Pending" gets a message naming what they typed and what is
 # accepted, instead of an empty answer indistinguishable from "nothing is
 # ready". Kept in one place so the vocabulary cannot drift away from
-# STATUS_TRANSITIONS, which is the graph over these same five names.
-PHASE_STATUSES = ["pending", "planned", "in_progress", "completed", "verification_failed"]
+# STATUS_TRANSITIONS, which is the graph over these same six names.
+PHASE_STATUSES = [
+    "pending",
+    "planned",
+    "in_progress",
+    "completed",
+    "verification_failed",
+    "cancelled",
+]
+
+# A dependency reads as satisfied when it reached either terminal status: a
+# completed phase delivered its creates, a cancelled one never will and never
+# will again (cancelled is terminal -- see TERMINAL_PHASE_STATUSES), so a
+# downstream phase waiting on it would wait forever if cancelled did not count
+# the same way completed already does.
+SATISFIED_DEPENDENCY_STATUSES = ("completed", "cancelled")
+
+# The two statuses nothing leaves except by --force (completed has no exit at
+# all -- see op_set_status). A phase in either releases its claim on arrival,
+# which is why op_set_status's claim-clearing write tests membership here
+# instead of comparing against "completed" alone.
+TERMINAL_PHASE_STATUSES = ("completed", "cancelled")
 
 
 def _tsv(value):
@@ -2149,10 +2169,15 @@ def _depends_on(phase):
 
 
 def _unmet(phase, status_by_id):
-    """The dependency ids that have not reached completed, in declared order."""
+    """The dependency ids not yet satisfied, in declared order.
+
+    Satisfied means SATISFIED_DEPENDENCY_STATUSES -- completed or cancelled --
+    not the literal "completed" alone: a downstream phase must not wait
+    forever on a dependency that was abandoned rather than finished.
+    """
     return [
         dep for dep in _depends_on(phase)
-        if status_by_id.get(_jq_raw(dep)) != "completed"
+        if status_by_id.get(_jq_raw(dep)) not in SATISFIED_DEPENDENCY_STATUSES
     ]
 
 
@@ -2263,7 +2288,8 @@ def rm_sanitize_lines(value, maxlen):
 
 
 # The status graph. verification_failed is reachable from any non-terminal state
-# (execute sets it when creates-verification fails) and is therefore not listed.
+# (execute sets it when creates-verification fails) EXCEPT cancelled and is
+# therefore not listed here -- see op_set_status's narrowed `allowed` check.
 #   pending -> planned            plan expands the phase
 #   pending -> in_progress        execute claims a phase whose planned transition
 #                                 was lost (plan aborted after writing tasks.json
@@ -2274,6 +2300,14 @@ def rm_sanitize_lines(value, maxlen):
 #   in_progress -> in_progress    idempotent resume of a crashed session
 #   verification_failed -> in_progress   re-verify retry
 #   in_progress|verification_failed -> completed
+#   pending|planned -> cancelled  abandon a phase nobody has started yet
+#   cancelled -> cancelled        idempotent re-cancel
+# in_progress|verification_failed -> cancelled need --force (op_set_status's
+# ordinary allowed/force check already requires it, since neither edge is
+# listed here); so does cancelled -> pending, the only reopen. Every other
+# departure from cancelled -- planned, in_progress, completed,
+# verification_failed -- is refused even with --force by op_set_status's own
+# unconditional guard, and completed -> cancelled is refused the same way.
 STATUS_TRANSITIONS = frozenset(
     [
         "pending:planned",
@@ -2283,6 +2317,9 @@ STATUS_TRANSITIONS = frozenset(
         "verification_failed:in_progress",
         "in_progress:completed",
         "verification_failed:completed",
+        "pending:cancelled",
+        "planned:cancelled",
+        "cancelled:cancelled",
     ]
 )
 
@@ -3648,7 +3685,32 @@ def op_set_status(argv):
     if current == "":
         die("Error: roadmap-set-status: phase " + phase_raw + " not found in " + path)
 
-    allowed = new_status == "verification_failed" or (
+    # Two unconditional refusals, neither --force-able, checked before the
+    # ordinary allowed/force check below so a doomed attempt never reaches
+    # that generic message -- which would misleadingly imply --force could
+    # satisfy it when nothing can.
+    if current == "completed" and new_status == "cancelled":
+        die(
+            "Error: roadmap-set-status: phase "
+            + phase_raw
+            + " cannot transition from completed to cancelled -- completed is"
+            " terminal and this transition has no --force override"
+        )
+    if current == "cancelled" and new_status not in ("cancelled", "pending"):
+        die(
+            "Error: roadmap-set-status: phase "
+            + phase_raw
+            + " cannot transition from cancelled to "
+            + new_status
+            + " -- cancelled only re-opens to pending, with --force, and has no"
+            " other --force override"
+        )
+
+    # verification_failed is reachable from any non-terminal state EXCEPT
+    # cancelled -- the refusal above already blocks cancelled -> verification_failed,
+    # and this line is the one the STATUS_TRANSITIONS comment documents, so
+    # both must agree.
+    allowed = (new_status == "verification_failed" and current != "cancelled") or (
         current + ":" + new_status
     ) in STATUS_TRANSITIONS
     if not allowed and not force:
@@ -3698,12 +3760,13 @@ def op_set_status(argv):
                 refusals + ["", VERIFICATION_GATE_NOTE],
             )
 
-    # Completing a phase also releases its claim in the same atomic write -- no
-    # window where status reads completed while the phase still shows claimed.
+    # Reaching a terminal status also releases the claim in the same atomic
+    # write -- no window where status reads completed or cancelled while the
+    # phase still shows claimed.
     for phase in phases:
         if phase.get("id") == phase_id:
             phase["status"] = new_status
-            if new_status == "completed":
+            if new_status in TERMINAL_PHASE_STATUSES:
                 phase["claim"] = None
 
     write_doc_atomically(path, doc)

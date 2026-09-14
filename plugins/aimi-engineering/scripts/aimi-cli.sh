@@ -15312,9 +15312,9 @@ cmd_roadmap_set_status() {
   _roadmap_validate_phase_id "$phase_id" "roadmap-set-status"
 
   case "$new_status" in
-    pending|planned|in_progress|completed|verification_failed) ;;
+    pending|planned|in_progress|completed|verification_failed|cancelled) ;;
     *)
-      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: $new_status" >&2
+      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed|cancelled, got: $new_status" >&2
       exit 1
       ;;
   esac
@@ -17103,17 +17103,32 @@ COMMANDS:
                               Reads no tasks file, so its answer depends on
                               roadmap.json alone and is ordered by numeric id.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
-                              Locked read-modify-write. Enforces the guarded order
-                              pending -> planned -> in_progress -> completed, plus
-                              verification_failed -> completed (retry path); any
-                              status may move to verification_failed. Other
-                              transitions require --force. Transitioning to
+                              Locked read-modify-write. --status accepts
+                              pending|planned|in_progress|completed|
+                              verification_failed|cancelled. Enforces the
+                              guarded order pending -> planned -> in_progress
+                              -> completed, plus verification_failed ->
+                              completed (retry path); any status (except from
+                              cancelled) may move to verification_failed.
+                              pending|planned -> cancelled needs no --force;
+                              in_progress|verification_failed -> cancelled
+                              need --force. completed -> cancelled is refused
+                              even with --force -- completed is terminal and
+                              this transition has no override, the same shape
+                              as the completed handoff.md precondition below.
+                              cancelled -> pending (reopening) is refused
+                              without --force and succeeds with --force;
+                              cancelled -> cancelled is an idempotent success;
+                              every other departure from cancelled is refused
+                              even with --force. Other ordinary transitions
+                              require --force. Transitioning to
                               completed always requires handoff.md to already
                               exist on disk at the phase's dir (write it first
                               with roadmap-write-handoff) -- this precondition
-                              is NOT overridable by --force. A completed
-                              transition also clears the phase's claim in the
-                              same atomic write.
+                              is NOT overridable by --force. Reaching a
+                              terminal status (completed or cancelled) also
+                              clears the phase's claim in the same atomic
+                              write.
     roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]
                               Read a JSON object (stdin or --file) with five
                               optional array-of-string fields -- decisions,

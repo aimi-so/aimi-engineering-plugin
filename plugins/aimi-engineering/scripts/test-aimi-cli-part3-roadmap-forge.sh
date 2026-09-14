@@ -3616,6 +3616,207 @@ test_roadmap_set_status_verification_failed_reachable_and_retryable() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+test_roadmap_set_status_cancel_pending_and_planned_without_force() {
+  echo ""
+  echo "=== roadmap-set-status: pending/planned -> cancelled succeed without --force, clear the claim, and satisfy a dependent ==="
+
+  local feature="rm-cancel-pending"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []},
+    {id: 2, name: "Down", goal: "g", slug: "down", dependsOn: [1]}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  # Claim phase 1 first so cancelling it has a live claim to clear.
+  "$CLI" roadmap-claim --feature "$feature" --session-id sess-cancel --session-pid $$ >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancel pending: succeeds without --force"
+
+  local status_after claim_after
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancel pending: status is now cancelled"
+  claim_after=$(jq -r '.phases[0].claim' "$roadmap_file")
+  assert_eq "null" "$claim_after" "roadmap-set-status cancel pending: claim cleared in the same write"
+
+  local eligible_out unmet_len eligible2
+  eligible_out=$("$CLI" roadmap-eligible --feature "$feature" --statuses pending,planned)
+  unmet_len=$(printf '%s' "$eligible_out" | jq -r '.phases[] | select(.id==2) | .unmet | length')
+  assert_eq "0" "$unmet_len" "roadmap-set-status cancel pending: dependent's unmet list no longer names the cancelled phase"
+  eligible2=$(printf '%s' "$eligible_out" | jq -r '.phases[] | select(.id==2) | .eligible')
+  assert_eq "true" "$eligible2" "roadmap-set-status cancel pending: dependent on a cancelled phase is now eligible"
+
+  "$CLI" roadmap-eligible --feature "$feature" --statuses cancelled >/dev/null 2>&1
+  assert_exit_code "0" "$?" "roadmap-eligible: --statuses cancelled is accepted, not refused as an unknown status"
+
+  rm -rf ".aimi/tasks/$feature"
+
+  local feature2="rm-cancel-planned"
+  rm -rf ".aimi/tasks/$feature2"
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature2" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature2" --phase 1 --status planned >/dev/null
+
+  output=$("$CLI" roadmap-set-status --feature "$feature2" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancel planned: succeeds without --force"
+  status_after=$(jq -r '.phases[0].status' ".aimi/tasks/$feature2/roadmap.json")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancel planned: status is now cancelled"
+
+  rm -rf ".aimi/tasks/$feature2"
+}
+
+test_roadmap_set_status_cancel_in_progress_and_verification_failed_need_force() {
+  echo ""
+  echo "=== roadmap-set-status: in_progress/verification_failed -> cancelled need --force and clear the claim ==="
+
+  local feature="rm-cancel-force"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-claim --feature "$feature" --session-id sess-force --session-pid $$ >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code status_after claim_after
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-set-status cancel in_progress: refused without --force"
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "in_progress" "$status_after" "roadmap-set-status cancel in_progress: status unchanged by the refused attempt"
+
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled --force 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancel in_progress: succeeds with --force"
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancel in_progress --force: status is now cancelled"
+  claim_after=$(jq -r '.phases[0].claim' "$roadmap_file")
+  assert_eq "null" "$claim_after" "roadmap-set-status cancel in_progress --force: claim cleared, same as completing a phase"
+
+  rm -rf ".aimi/tasks/$feature"
+
+  local feature2="rm-cancel-force-vf"
+  rm -rf ".aimi/tasks/$feature2"
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature2" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature2" --phase 1 --status verification_failed >/dev/null
+
+  local roadmap_file2=".aimi/tasks/$feature2/roadmap.json"
+  output=$("$CLI" roadmap-set-status --feature "$feature2" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-set-status cancel verification_failed: refused without --force"
+
+  output=$("$CLI" roadmap-set-status --feature "$feature2" --phase 1 --status cancelled --force 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancel verification_failed: succeeds with --force"
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file2")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancel verification_failed --force: status is now cancelled"
+
+  rm -rf ".aimi/tasks/$feature2"
+}
+
+test_roadmap_set_status_cancel_completed_refused_even_with_force() {
+  echo ""
+  echo "=== roadmap-set-status: completed -> cancelled is refused even with --force -- no override exists ==="
+
+  local feature="rm-cancel-completed"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status planned >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status in_progress >/dev/null
+  echo '{}' | "$CLI" roadmap-write-handoff --feature "$feature" --phase 1 >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status completed >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-set-status cancel completed: refused without --force"
+
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled --force 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-set-status cancel completed: refused even WITH --force -- completed is terminal"
+  assert_contains "completed" "$output" "roadmap-set-status cancel completed --force: error names completed as terminal"
+
+  local status_after
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "completed" "$status_after" "roadmap-set-status cancel completed --force: status unchanged by the refused attempt"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_set_status_cancel_reopen_and_idempotent_and_other_departures_refused() {
+  echo ""
+  echo "=== roadmap-set-status: cancelled -> pending needs --force, cancelled -> cancelled is idempotent, every other departure is refused even with --force ==="
+
+  local feature="rm-cancel-reopen"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code status_after
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status pending 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-set-status cancelled->pending: refused without --force"
+
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status pending --force 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancelled->pending: succeeds with --force"
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "pending" "$status_after" "roadmap-set-status cancelled->pending --force: phase reopened to pending"
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled >/dev/null
+  output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-set-status cancelled->cancelled: idempotent success"
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancelled->cancelled: status remains cancelled"
+
+  local target
+  for target in planned in_progress verification_failed; do
+    output=$("$CLI" roadmap-set-status --feature "$feature" --phase 1 --status "$target" --force 2>&1) && exit_code=0 || exit_code=$?
+    assert_exit_code "1" "$exit_code" "roadmap-set-status cancelled->$target: refused even with --force"
+  done
+  status_after=$(jq -r '.phases[0].status' "$roadmap_file")
+  assert_eq "cancelled" "$status_after" "roadmap-set-status cancelled: status unchanged after every refused --force departure"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_set_status_cancel_never_claimable() {
+  echo ""
+  echo "=== roadmap-set-status: a cancelled phase is never claimable -- skipped by auto-selection, refused by an explicit --phase override ==="
+
+  local feature="rm-cancel-claim"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []},
+    {id: 2, name: "Other", goal: "g", slug: "other", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled >/dev/null
+
+  local eligible_out eligible_ids
+  eligible_out=$("$CLI" roadmap-eligible --feature "$feature")
+  eligible_ids=$(printf '%s' "$eligible_out" | jq -c '.eligible')
+  assert_eq "[2]" "$eligible_ids" "roadmap-eligible: cancelled phase excluded from the default eligible ids"
+
+  local output exit_code claimed_id
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-auto --session-pid $$ 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-claim auto-selection: succeeds by claiming the non-cancelled phase"
+  claimed_id=$(printf '%s' "$output" | jq -r '.id')
+  assert_eq "2" "$claimed_id" "roadmap-claim auto-selection: never selects the cancelled phase"
+
+  output=$("$CLI" roadmap-claim --feature "$feature" --session-id sess-explicit --session-pid $$ --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "3" "$exit_code" "roadmap-claim --phase override on a cancelled phase: refused with exit 3"
+  assert_contains "not claimable" "$output" "roadmap-claim --phase override on a cancelled phase: names it not claimable"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_write_handoff_five_headings_sanitized() {
   echo ""
   echo "=== roadmap-write-handoff: writes exactly five headings in order, content sanitized ==="
@@ -8502,6 +8703,11 @@ main() {
   test_roadmap_set_status_completed_requires_handoff
   test_roadmap_set_status_completed_with_handoff_succeeds
   test_roadmap_set_status_verification_failed_reachable_and_retryable
+  test_roadmap_set_status_cancel_pending_and_planned_without_force
+  test_roadmap_set_status_cancel_in_progress_and_verification_failed_need_force
+  test_roadmap_set_status_cancel_completed_refused_even_with_force
+  test_roadmap_set_status_cancel_reopen_and_idempotent_and_other_departures_refused
+  test_roadmap_set_status_cancel_never_claimable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
 
