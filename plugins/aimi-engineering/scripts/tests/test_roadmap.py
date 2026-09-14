@@ -1307,6 +1307,53 @@ def test_the_first_provider_by_phase_id_wins():
     assert [r[0] for r in rows] == [1, 3]
 
 
+def test_a_cancelled_phase_never_satisfies_a_scoped_needs_check(tmp_path):
+    """Phase 2's dependsOn already lists phase 1, so SATISFIED_DEPENDENCY_STATUSES
+    (story 01) treats the dependency edge itself as satisfied -- cancelled counts
+    the same as completed there. But validate-contracts' scoped delivery gate
+    asks a different question: was the need actually DELIVERED. "cancelled" is
+    not "completed", so the existing `prov_status == "completed"` check already
+    routes this to not-delivered -- no roadmap.py code change, only this test."""
+    roadmap = tmp_path / "roadmap.json"
+    roadmap.write_text(json.dumps({
+        "phases": [
+            {"id": 1, "status": "cancelled", "dependsOn": [],
+             "creates": [R.contract_entry("api/tokens.rb", "d")], "needs": []},
+            {"id": 2, "status": "pending", "dependsOn": [1],
+             "creates": [], "needs": [R.contract_entry("api/tokens.rb", "d")]},
+        ],
+    }), encoding="utf-8")
+
+    result = _run(["validate-contracts", "--roadmap", str(roadmap), "--phase", "2"])
+    assert result.returncode == 1, result.stderr
+    report = json.loads(result.stdout)
+    assert {"phase": 2, "need": "api/tokens.rb", "reason": "not-delivered"} in report["missing"]
+
+
+def test_duplicate_creates_excludes_a_cancelled_phase():
+    """A cancelled phase's creates are abandoned, not delivered, so a live phase
+    may reuse the same identity without tripping this collision check -- and
+    two cancelled phases sharing an identity is not a collision either, since
+    neither will ever deliver it."""
+    live_collision = {"phases": [
+        _phase(1, status="pending", creates=[R.contract_entry("shared.rb")], needs=[]),
+        _phase(2, status="pending", creates=[R.contract_entry("shared.rb")], needs=[]),
+    ]}
+    assert R.duplicate_creates(live_collision) == [{"identity": "shared.rb", "phases": [1, 2]}]
+
+    one_cancelled = {"phases": [
+        _phase(1, status="cancelled", creates=[R.contract_entry("shared.rb")], needs=[]),
+        _phase(2, status="pending", creates=[R.contract_entry("shared.rb")], needs=[]),
+    ]}
+    assert R.duplicate_creates(one_cancelled) == []
+
+    both_cancelled = {"phases": [
+        _phase(1, status="cancelled", creates=[R.contract_entry("shared.rb")], needs=[]),
+        _phase(2, status="cancelled", creates=[R.contract_entry("shared.rb")], needs=[]),
+    ]}
+    assert R.duplicate_creates(both_cancelled) == []
+
+
 # ---------------------------------------------------------------------------
 # roadmap-sweep
 # ---------------------------------------------------------------------------
@@ -1348,6 +1395,42 @@ def test_the_lowest_phase_id_is_the_provider_that_gets_named():
     they sit in the document."""
     assert _sweep("dois-provedores")["deferredNeeds"] == [
         {"phase": 2, "need": "dup.rb", "deferred": 1}
+    ]
+
+
+def test_sweep_excludes_a_cancelled_phases_own_creates_and_needs():
+    """A cancelled phase's own creates never reach orphanCreates and its own
+    needs never reach deferredNeeds -- but needed/providers, the reference sets
+    every OTHER phase's verdict is computed against, stay unfiltered, because
+    the exclusion scopes to a cancelled phase's own reported entries only.
+    Hand-built rather than golden, since the corpus predates "cancelled"."""
+    doc = {"phases": [
+        _phase(1, status="cancelled",
+               creates=[R.contract_entry("orphan-from-cancelled.rb")],
+               needs=[R.contract_entry("consumed-only-by-cancelled.rb")]),
+        _phase(2, status="pending",
+               creates=[R.contract_entry("orphan-from-live.rb")], needs=[]),
+        _phase(3, status="pending",
+               creates=[R.contract_entry("consumed-only-by-cancelled.rb")], needs=[]),
+        _phase(4, status="cancelled", creates=[], needs=[R.contract_entry("some-need.rb")]),
+        _phase(5, status="pending", creates=[R.contract_entry("some-need.rb")], needs=[]),
+        _phase(6, status="pending", creates=[], needs=[R.contract_entry("some-need.rb")]),
+        _phase(7, status="cancelled",
+               creates=[R.contract_entry("cancelled-provider.rb")], needs=[]),
+        _phase(8, status="pending", creates=[], needs=[R.contract_entry("cancelled-provider.rb")]),
+    ]}
+    result = R.sweep(doc)
+
+    # Phase 1's own orphan is dropped; phase 3's create is spared because
+    # "needed" still counts phase 1's need even though phase 1 is cancelled.
+    assert result["orphanCreates"] == [{"phase": 2, "creates": "orphan-from-live.rb"}]
+
+    # Phase 4's own need is dropped; phase 8's need is still reported because
+    # "providers" still counts phase 7's creates even though phase 7 is
+    # cancelled -- a live consumer of a cancelled provider is still deferred.
+    assert result["deferredNeeds"] == [
+        {"phase": 6, "need": "some-need.rb", "deferred": 5},
+        {"phase": 8, "need": "cancelled-provider.rb", "deferred": 7},
     ]
 
 
@@ -2075,6 +2158,54 @@ def test_reconcile_leaves_a_completed_skipped_phase_and_an_all_pending_phase_unc
         written = json.load(handle)
     assert written["phases"][0]["status"] == "completed"
     assert written["phases"][1]["status"] == "planned"
+
+
+def test_reconcile_never_corrects_a_cancelled_phase(tmp_path):
+    """cancelled is terminal and abandoned by choice, not by whatever its tasks
+    file happens to say -- reconcile skips it on the status check alone, before
+    it ever reads the tasks file's ground truth or the handoff precondition.
+    The fixture stacks every condition that would otherwise force a "completed"
+    correction (all stories completed, handoff.md already on disk) precisely so
+    the skip is the only thing that can be leaving it uncorrected."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    feature = "gt-cancelled"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    os.makedirs(os.path.join(feature_dir, "phase-1"), exist_ok=True)
+
+    def _phase_entry(pid, status):
+        return {
+            "id": pid, "name": "P" + str(pid), "goal": "g", "slug": "p" + str(pid),
+            "dir": "phase-" + str(pid), "status": status, "dependsOn": [],
+            "branch": None, "notes": None, "successCriteria": [],
+            "creates": [], "needs": [], "areas": [], "claim": None,
+        }
+
+    roadmap = {
+        "roadmapVersion": "2.0", "feature": feature, "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [_phase_entry(1, "cancelled")],
+    }
+    with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    with open(
+        os.path.join(feature_dir, "phase-1", feature + "-phase-1-tasks.json"),
+        "w", encoding="utf-8",
+    ) as handle:
+        json.dump({"userStories": [{"status": "completed"}]}, handle)
+    with open(os.path.join(feature_dir, "phase-1", "handoff.md"), "w", encoding="utf-8") as handle:
+        handle.write("# handoff\n")
+
+    proc = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "roadmap-reconcile", "--feature", feature],
+        cwd=root, capture_output=True, text=True, timeout=120, env=_fixture_env(base),
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"corrections": [], "blocked": []}
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        written = json.load(handle)
+    assert written["phases"][0]["status"] == "cancelled"
 
 
 def test_reconcile_refuses_to_demote_an_in_progress_phase_but_still_heals_a_pending_one(
@@ -3304,6 +3435,23 @@ def test_the_payload_names_every_phase_not_only_the_blocking_ones(tmp_path):
     assert payload["nonTerminalCount"] == 2
     assert payload["stuckIds"] == "3.1"
     assert payload["usable"] is True
+
+
+def test_a_cancelled_phase_counts_as_terminal_for_archivability(tmp_path):
+    """cancelled is terminal the same as completed -- both drawn from
+    TERMINAL_PHASE_STATUSES -- so nonTerminalCount excludes a cancelled phase
+    exactly as it excludes a completed one, and stuck stays false for it."""
+    doc = json.dumps({"phases": [
+        {"id": 1, "status": "completed"},
+        {"id": 2, "status": "cancelled"},
+        {"id": 3, "status": "pending"},
+    ]})
+    result = _la_op(tmp_path, doc)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout.split("\n")[3])
+    assert [p["terminal"] for p in payload["phases"]] == [True, True, False]
+    assert [p["stuck"] for p in payload["phases"]] == [False, False, False]
+    assert payload["nonTerminalCount"] == 1
 
 
 def test_the_stuck_ids_arrive_pre_joined_so_bash_never_reimplements_tostring(tmp_path):

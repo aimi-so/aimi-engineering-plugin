@@ -2393,6 +2393,33 @@ test_roadmap_amend_phase_rejects_duplicate_creates() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+test_roadmap_amend_phase_cancelled_creates_exempt_from_duplicate_check() {
+  echo ""
+  echo "=== roadmap-amend-phase: reusing a cancelled phase's creates identity is not a collision ==="
+
+  local feature="rm-amend-dup-cancelled"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Old", goal: "g1", slug: "old", dependsOn: [],
+     creates: [{"identity": "forge/base.sh", "description": "the abandoned adapter"}], needs: [], areas: []},
+    {id: 2, name: "New", goal: "g2", slug: "new", dependsOn: [],
+     creates: [], needs: [], areas: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local output exit_code
+  output=$(jq -n '{creates: [{"identity": "forge/base.sh", "description": "reused now that phase 1 is cancelled"}]}' \
+    | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase cancelled-dup: reusing a cancelled sibling's creates identity succeeds"
+  assert_eq "forge/base.sh" "$(jq -r '.phases[] | select(.id == 2) | .creates[0].identity' "$roadmap_file")" \
+    "roadmap-amend-phase cancelled-dup: the amendment was written"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 test_roadmap_amend_phase_handoff_advisory_only() {
   echo ""
   echo "=== roadmap-amend-phase: a completed phase whose handoff.md omits a new identity only warns ==="
@@ -3465,8 +3492,10 @@ test_roadmap_reconcile_divergence() {
     {id: 1, name: "AllDone", goal: "g", slug: "all-done", dependsOn: []},
     {id: 2, name: "OneFailed", goal: "g", slug: "one-failed", dependsOn: []},
     {id: 3, name: "NoFixture", goal: "g", slug: "no-fixture", dependsOn: []},
-    {id: 4, name: "DoneNoHandoff", goal: "g", slug: "no-handoff", dependsOn: []}
+    {id: 4, name: "DoneNoHandoff", goal: "g", slug: "no-handoff", dependsOn: []},
+    {id: 5, name: "Cancelled", goal: "g", slug: "cancelled", dependsOn: []}
   ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 5 --status cancelled >/dev/null
 
   # Fixtures MUST use the real convention <feature>-phase-<id>-tasks.json --
   # the same one phase-overlap, execute.md, plan.md and status.md use. A bare
@@ -3494,32 +3523,48 @@ EOF
 {"userStories":[{"id":"US-001","status":"completed"}]}
 EOF
 
+  # Phase 5 is cancelled, but its own tasks file and handoff.md are exactly
+  # what would earn phase 1 a "completed" correction -- proving reconcile
+  # skips a cancelled phase on the status check alone, before it ever reads
+  # the tasks file's ground truth or the handoff precondition.
+  mkdir -p "$feature_dir/phase-5-cancelled"
+  cat > "$feature_dir/phase-5-cancelled/$feature-phase-5-tasks.json" << 'EOF'
+{"userStories":[{"id":"US-001","status":"completed"}]}
+EOF
+  printf '# handoff\n' > "$feature_dir/phase-5-cancelled/handoff.md"
+
   local output exit_code
   output=$("$CLI" roadmap-reconcile --feature "$feature" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "roadmap-reconcile: exits 0"
 
   local roadmap_file="$feature_dir/roadmap.json"
-  local status1 status2 status3 status4
+  local status1 status2 status3 status4 status5
   status1=$(jq -r '.phases[] | select(.id == 1) | .status' "$roadmap_file")
   status2=$(jq -r '.phases[] | select(.id == 2) | .status' "$roadmap_file")
   status3=$(jq -r '.phases[] | select(.id == 3) | .status' "$roadmap_file")
   status4=$(jq -r '.phases[] | select(.id == 4) | .status' "$roadmap_file")
+  status5=$(jq -r '.phases[] | select(.id == 5) | .status' "$roadmap_file")
   assert_eq "completed" "$status1" "roadmap-reconcile: all-completed userStories + handoff -> phase status completed"
   assert_eq "verification_failed" "$status2" "roadmap-reconcile: any failed userStory -> phase status verification_failed"
   assert_eq "pending" "$status3" "roadmap-reconcile: phase with no tasks file is left untouched"
   assert_eq "pending" "$status4" "roadmap-reconcile: completed correction without handoff.md is NOT applied"
+  assert_eq "cancelled" "$status5" "roadmap-reconcile: a cancelled phase is never corrected, even though its own ground truth reads completed"
 
   local claim1
   claim1=$(jq -r '.phases[] | select(.id == 1) | .claim' "$roadmap_file")
   assert_eq "null" "$claim1" "roadmap-reconcile: completing a phase also clears its claim"
 
-  local corr_count blocked_count blocked_id
+  local corr_count blocked_count blocked_id corr_has_5 blocked_has_5
   corr_count=$(printf '%s' "$output" | jq '.corrections | length')
   assert_eq "2" "$corr_count" "roadmap-reconcile: reports exactly the two corrections made"
   blocked_count=$(printf '%s' "$output" | jq '.blocked | length')
   assert_eq "1" "$blocked_count" "roadmap-reconcile: reports the handoff-blocked correction"
   blocked_id=$(printf '%s' "$output" | jq -r '.blocked[0].id')
   assert_eq "4" "$blocked_id" "roadmap-reconcile: blocked entry names the offending phase"
+  corr_has_5=$(printf '%s' "$output" | jq '.corrections | any(.id == 5)')
+  blocked_has_5=$(printf '%s' "$output" | jq '.blocked | any(.id == 5)')
+  assert_eq "false" "$corr_has_5" "roadmap-reconcile: the cancelled phase never appears in corrections"
+  assert_eq "false" "$blocked_has_5" "roadmap-reconcile: the cancelled phase never appears in blocked either"
 
   rm -rf ".aimi/tasks/$feature"
 }
@@ -4519,6 +4564,49 @@ test_roadmap_sweep_reports_deferred_needs() {
   assert_eq "2" "$deferred_phase" "roadmap-sweep deferred-needs: names the needing phase 2"
   assert_eq "widget_factory" "$deferred_need" "roadmap-sweep deferred-needs: names the need identity"
   assert_eq "1" "$deferred_provider" "roadmap-sweep deferred-needs: deferred tag names the not-yet-completed provider phase 1"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_sweep_excludes_a_cancelled_phases_own_creates_and_needs() {
+  echo ""
+  echo "=== roadmap-sweep: a cancelled phase's own creates/needs are dropped from the report, but still count as reference data for others ==="
+
+  local feature="sweep-cancelled"
+  rm -rf ".aimi/tasks/$feature"
+
+  jq -n '[
+    {id: 1, name: "Abandoned", goal: "g", slug: "abandoned", dependsOn: [],
+     creates: [{"identity": "orphan_from_cancelled", "description": "never delivered"}], needs: []},
+    {id: 2, name: "AlsoCancelled", goal: "g", slug: "also-cancelled", dependsOn: [],
+     creates: [], needs: [{"identity": "still_pending", "description": "needed by a cancelled consumer"}]},
+    {id: 3, name: "Provider", goal: "g", slug: "provider", dependsOn: [],
+     creates: [{"identity": "still_pending", "description": "not yet built"}], needs: []},
+    {id: 4, name: "Live", goal: "g", slug: "live", dependsOn: [],
+     creates: [{"identity": "live_orphan", "description": "unused"}], needs: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  "$CLI" roadmap-set-status --feature "$feature" --phase 1 --status cancelled >/dev/null
+  "$CLI" roadmap-set-status --feature "$feature" --phase 2 --status cancelled >/dev/null
+
+  local output exit_code
+  output=$("$CLI" roadmap-sweep "$feature" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-sweep cancelled: exits 0"
+
+  local orphan_count orphan_ident deferred_count
+  orphan_count=$(printf '%s' "$output" | jq '.orphanCreates | length')
+  orphan_ident=$(printf '%s' "$output" | jq -r '.orphanCreates[0].creates')
+  deferred_count=$(printf '%s' "$output" | jq '.deferredNeeds | length')
+
+  # Phase 1 (cancelled) declares orphan_from_cancelled and nobody needs it --
+  # a live phase in the same shape would be reported, but a cancelled one's
+  # own creates never is.
+  assert_eq "1" "$orphan_count" "roadmap-sweep cancelled: only the live phase's own orphan is reported"
+  assert_eq "live_orphan" "$orphan_ident" "roadmap-sweep cancelled: the reported orphan belongs to the live phase, not the cancelled one"
+  # Phase 2 (cancelled) needs still_pending, whose only provider (phase 3) is
+  # not completed -- a live consumer in the same shape would be deferred, but
+  # a cancelled one's own need never is.
+  assert_eq "0" "$deferred_count" "roadmap-sweep cancelled: the cancelled phase's own need is dropped, not deferred"
 
   rm -rf ".aimi/tasks/$feature"
 }
@@ -5823,10 +5911,10 @@ test_list_archivable_nested_roadmap_completed_unit() {
 
   pushd "$iso_dir" >/dev/null
 
-  echo '[{"id":1,"name":"Phase One","goal":"Do the thing","slug":"alpha"},{"id":2,"name":"Phase Two","goal":"Do more","slug":"beta"}]' > phases.json
+  echo '[{"id":1,"name":"Phase One","goal":"Do the thing","slug":"alpha"},{"id":2,"name":"Phase Two","goal":"Do more","slug":"beta"},{"id":3,"name":"Phase Three","goal":"Abandoned","slug":"gamma"}]' > phases.json
   "$CLI" roadmap-init --feature archfeat --file phases.json > /dev/null
 
-  mkdir -p .aimi/tasks/archfeat/phase-1-alpha .aimi/tasks/archfeat/phase-2-beta
+  mkdir -p .aimi/tasks/archfeat/phase-1-alpha .aimi/tasks/archfeat/phase-2-beta .aimi/tasks/archfeat/phase-3-gamma
   cat > .aimi/tasks/archfeat/phase-1-alpha/archfeat-phase-1-tasks.json << 'EOF'
 {
   "schemaVersion": "3.3",
@@ -5838,6 +5926,15 @@ EOF
 {
   "schemaVersion": "3.3",
   "metadata": {"title": "p2", "type": "feat", "branchName": "feat/archfeat-phase-2", "maxConcurrency": 4},
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "skipped", "dependsOn": [], "notes": ""}]
+}
+EOF
+  # Phase 3 is abandoned rather than finished -- cancelled, never completed --
+  # and carries no handoff.md, since only reaching completed requires one.
+  cat > .aimi/tasks/archfeat/phase-3-gamma/archfeat-phase-3-tasks.json << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "p3", "type": "feat", "branchName": "feat/archfeat-phase-3", "maxConcurrency": 4},
   "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "skipped", "dependsOn": [], "notes": ""}]
 }
 EOF
@@ -5867,6 +5964,8 @@ EOF
 
   "$CLI" roadmap-set-status --feature archfeat --phase 1 --status completed --force > /dev/null
   "$CLI" roadmap-set-status --feature archfeat --phase 2 --status completed --force > /dev/null
+  # cancelled needs neither --force nor a handoff.md to leave pending.
+  "$CLI" roadmap-set-status --feature archfeat --phase 3 --status cancelled > /dev/null
 
   local output_after
   output_after=$("$CLI" list-archivable 2>/dev/null)
@@ -5877,9 +5976,10 @@ EOF
 
   local count_after
   count_after=$(printf '%s' "$output_after" | jq 'length')
-  assert_eq "2" "$count_after" "list-archivable: both completed-roadmap phase files reported together"
+  assert_eq "3" "$count_after" "list-archivable: completed and cancelled phase files all reported together -- cancelled counts as terminal"
   assert_contains "archfeat-phase-1-tasks.json" "$output_after" "list-archivable: includes phase 1 file"
   assert_contains "archfeat-phase-2-tasks.json" "$output_after" "list-archivable: includes phase 2 file"
+  assert_contains "archfeat-phase-3-tasks.json" "$output_after" "list-archivable: includes the cancelled phase 3 file"
 
   rm -rf "$iso_dir"
 }
@@ -8565,6 +8665,7 @@ main() {
   test_roadmap_amend_phase_identity_equality_not_substring
   test_roadmap_amend_phase_reuses_init_gates
   test_roadmap_amend_phase_rejects_duplicate_creates
+  test_roadmap_amend_phase_cancelled_creates_exempt_from_duplicate_check
   test_roadmap_amend_phase_handoff_advisory_only
   test_roadmap_amend_phase_judges_only_the_lists_it_writes
   test_roadmap_amend_phase_concurrent_writes_stay_atomic
@@ -8662,6 +8763,7 @@ main() {
   test_validate_contracts_duplicate_creates_agent_mode_warns
   test_roadmap_sweep_reports_orphan_creates
   test_roadmap_sweep_reports_deferred_needs
+  test_roadmap_sweep_excludes_a_cancelled_phases_own_creates_and_needs
   test_validate_contracts_rejects_suspicious_contract_strings
   test_validate_contracts_pre_2_0_precedes_missing_phase
 

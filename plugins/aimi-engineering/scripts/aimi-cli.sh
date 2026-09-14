@@ -13139,12 +13139,14 @@ _archivable_file_is_terminal() {
 # feature's roadmap.json (read through roadmap.py's own list-archivable-phases
 # op, which owns roadmap.json's document logic; NOT through a roadmap-lifecycle
 # subcommand, whose wrapper wants a feature slug where this walks paths) marks
-# every phase completed -- rather than piecemeal as each phase happens to
-# finish. "completed" is the only terminal phase status (see the roadmap
-# status enum in cmd_roadmap_set_status); there is no "deferred" status. A
-# phase stuck in verification_failed therefore excludes its feature from the
-# result same as any other non-completed status, but is never a *silent*
-# dead end: it's called out on stderr each time, naming the feature and the
+# every phase terminal -- rather than piecemeal as each phase happens to
+# finish. "completed" and "cancelled" are the two terminal phase statuses
+# (see the roadmap status enum in cmd_roadmap_set_status, and its "cancelled"
+# bullet for why an abandoned phase counts the same as a finished one here);
+# there is no "deferred" status. A phase stuck in verification_failed
+# therefore excludes its feature from the result same as any other
+# non-terminal status, but is never a *silent* dead end: it's called out on
+# stderr each time, naming the feature and the
 # blocked phase ids, so the block stays discoverable instead of an
 # unexplained permanent absence from the list. A feature folder with no
 # roadmap.json (or a malformed one) falls back to the flat per-file terminal

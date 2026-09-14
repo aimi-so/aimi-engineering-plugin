@@ -1535,9 +1535,17 @@ def contract_sanitize_hits(doc):
 
 
 def duplicate_creates(doc):
-    """Identities declared by more than one phase, whatever their status."""
+    """Identities declared by more than one phase, excluding a cancelled phase.
+
+    A cancelled phase's creates are abandoned, not delivered, so a live phase
+    may reuse the same identity without tripping this collision check -- and
+    two cancelled phases sharing an identity is not a collision either, since
+    neither will ever deliver it.
+    """
     seen = {}
     for phase in doc.get("phases") or []:
+        if phase.get("status") == "cancelled":
+            continue
         for entry in contract_entries(phase, "creates"):
             seen.setdefault(entry["identity"], []).append(phase.get("id"))
     return [
@@ -1703,10 +1711,14 @@ def sweep(doc):
     stored = doc.get("phases") or []
     phases = sweep_clean_phases(stored)
 
+    # needed/providers are reference sets every phase's verdict is computed
+    # against, so they stay unfiltered -- the cancelled-phase exclusion below
+    # scopes to a cancelled phase's OWN reported creates/needs entries only.
     needed = {entry["identity"] for p in phases for entry in p["needs"]}
     orphans = [
         {"phase": p.get("id"), "creates": identity}
         for p in phases
+        if p.get("status") != "cancelled"
         for identity in [entry["identity"] for entry in p["creates"]]
         if identity not in needed
     ]
@@ -1718,6 +1730,8 @@ def sweep(doc):
     ]
     deferred = []
     for phase in phases:
+        if phase.get("status") == "cancelled":
+            continue
         for entry in phase["needs"]:
             identity = entry["identity"]
             # Lowest phase id wins, so which provider a need is attributed to is
@@ -2875,7 +2889,7 @@ def op_amend_write(argv):
         {
             (p.get("id"), ident)
             for p in doc.get("phases") or []
-            if p.get("id") != phase_id
+            if p.get("id") != phase_id and p.get("status") != "cancelled"
             for ident in _identities(p, "creates")
             if ident in set(added)
         },
@@ -3433,7 +3447,7 @@ def op_list_archivable_phases(argv):
                     {
                         "id": _index(entry, "id", path),
                         "status": status,
-                        "terminal": status == "completed",
+                        "terminal": status in TERMINAL_PHASE_STATUSES,
                         "stuck": status == "verification_failed",
                     }
                 )
@@ -3971,6 +3985,11 @@ def op_reconcile(argv):
         key = _jq_raw(phase.get("id"))
         directory = _tsv(phase.get("dir"))
         status = _tsv(phase.get("status"))
+        if status == "cancelled":
+            # Cancelled is terminal and abandoned by choice, not by the state
+            # its tasks file happens to be in -- reconcile never corrects it in
+            # either direction, whatever ground_truth would say.
+            continue
         # Phase tasks files follow <feature>-phase-<id>-tasks.json, the same
         # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
         # status.md use. Reading a bare tasks.json here made every lookup miss,
