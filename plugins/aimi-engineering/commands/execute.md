@@ -976,7 +976,7 @@ CLAIM_EXIT=$?
 
 `roadmap-claim` is a single atomic, flock-guarded check-and-set (mirrors the atomic-write pattern already documented for `story-merge`). It auto-releases any claim whose recorded PID fails a liveness probe, then:
 
-- **No `--phase` (auto mode):** claims the lowest-numeric-id phase that is `pending`/`planned`, unclaimed, and whose `dependsOn` phases are all `completed`. If the top candidate loses a claim race to a concurrent session, the CLI falls through internally to the next eligible phase and returns that one — this step contains no retry loop of its own, it consumes whatever phase the single call reports back as claimed.
+- **No `--phase` (auto mode):** claims the lowest-numeric-id phase that is `pending`/`planned`, unclaimed, and whose `dependsOn` phases are all `completed` or `cancelled`. If the top candidate loses a claim race to a concurrent session, the CLI falls through internally to the next eligible phase and returns that one — this step contains no retry loop of its own, it consumes whatever phase the single call reports back as claimed.
 - **With `--phase <N>` (explicit override):** claims phase `N` only if it is eligible. If phase `N` is ineligible, the call never falls through to a different phase.
 - **Self-reclaim:** if this exact session already owns an unreleased claim on a phase still in `pending`/`planned`/`in_progress` (matching `--phase N` when an override was given, or any such phase in auto mode), the call returns that same phase again instead of erroring — this is what makes re-running `/aimi:execute` on an already-claimed phase idempotent (see Resuming Execution).
 
