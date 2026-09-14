@@ -16992,7 +16992,20 @@ COMMANDS:
                               missing id/name/goal, a dangling dependsOn reference,
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
-                              and length-capped per commands/references/sanitization.md.
+                              and length-capped: name 200, goal 2000, slug 100,
+                              notes 5000, each successCriteria entry 2000, each
+                              areas entry 500, branch 200, each creates/needs
+                              description 500 -- full rules at
+                              commands/references/sanitization.md. A field the
+                              sanitizer actually rewrote or truncated is reported,
+                              never echoed: one stderr warning line per changed
+                              field/entry (phase, field name, list index when
+                              present, the change kind(s) -- rewritten and/or
+                              truncated -- and before/after character counts,
+                              never the field's own value), and the result JSON's
+                              sanitized[] array carries the same per-field records
+                              ({phase, field, index, changes[], before, after}),
+                              empty when nothing changed.
                               A creates/needs entry is {identity, description};
                               an entry that is not that object, or that carries
                               any other key, is rejected naming the key. Also
@@ -17035,8 +17048,17 @@ COMMANDS:
                               only -- it does not move a worktree or git branch an
                               in_progress phase has already created.
                               Values pass roadmap-init's own gates: the same
-                              sanitizer and caps, the same creates/needs identity
-                              guard, and the same branch pattern.
+                              sanitizer and caps (goal 2000, each successCriteria
+                              entry 2000, each areas entry 500, branch 200, each
+                              creates/needs description 500), the same
+                              creates/needs identity guard, and the same branch
+                              pattern. A field the sanitizer actually rewrote or
+                              truncated is reported the same way roadmap-init
+                              reports it -- one stderr warning line per changed
+                              field/entry, never the field's own value, and the
+                              result JSON's sanitized[] array (phase is this
+                              call's own --phase on every entry, since one call
+                              amends exactly one phase).
                               Dropping or renaming a creates identity a later
                               phase cites in needs is REFUSED by default; the error
                               names every downstream phase and identity and prints
@@ -17052,7 +17074,8 @@ COMMANDS:
                               creates identity another phase declares. Advisory
                               only (exit 0): a completed phase whose handoff.md
                               omits a newly introduced identity.
-                              Prints {roadmap, phase, amended[], retargeted[]}.
+                              Prints {roadmap, phase, amended[], retargeted[],
+                              sanitized[]}.
     normalize-contracts --feature <slug>
                               Migrate a roadmap's stored creates/needs entries from
                               the 1.0 form -- one string, "identity (description)" --

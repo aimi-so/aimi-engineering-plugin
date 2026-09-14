@@ -56,7 +56,7 @@ import time
 # rule for the story titles it puts into a dropped-dependency warning, and a
 # story title is not a roadmap concern. It lives in sanitize.py, which holds that
 # one rule and nothing else, and both files import it from there.
-from sanitize import rm_sanitize
+from sanitize import rm_sanitize, rm_sanitize_report
 
 # THE TWO RULERS, NOW THAT THE TWO HALVES ARE TWO FIELDS.
 #
@@ -817,25 +817,142 @@ def sanitize_contract_entry(entry):
     )
 
 
+# ---------------------------------------------------------------------------
+# Sanitize reporting (D10/D11) -- what changed, never what it was
+# ---------------------------------------------------------------------------
+#
+# A flat report entry is {"field", "index", "changes", "before", "after"} --
+# everything except "phase", which is not knowable at sanitize time (op_amend_
+# validate has no phase id yet) and is filled in by the *-write op once the
+# lock is held and the phase's own id is in hand. An entry is emitted only
+# when rm_sanitize_report actually reports a change: a no-op field contributes
+# nothing, which is what keeps `sanitized` empty for a call that changed
+# nothing rather than full of zero-change rows.
+#
+# D11 (never echo removed/matched text): these entries and the stderr line
+# built from them carry only field name, phase id, list index and character
+# counts -- never the field's own value, before or after sanitization.
+
+
+def _sanitize_field_report(value, maxlen, field, index=None):
+    """rm_sanitize_report wrapped in the flat report-entry shape.
+
+    Returns (sanitized_value, entry-or-None) so a caller can store the first
+    element unconditionally and append the second only when it is not None.
+    """
+    sanitized_value, changes = rm_sanitize_report(value, maxlen)
+    if not changes:
+        return sanitized_value, None
+    entry = {
+        "field": field,
+        "index": index,
+        "changes": changes,
+        "before": len(value),
+        "after": len(sanitized_value),
+    }
+    return sanitized_value, entry
+
+
+def _contract_description_report(entry, list_name, index):
+    """The report half of a creates/needs entry, computed via a SEPARATE
+    rm_sanitize_report call alongside sanitize_contract_entry -- never by
+    changing that function's own signature or re-deriving its regexes.
+    Identity is never reported: nothing sanitizes it, so it never changes."""
+    description = entry.get("description") or ""
+    sanitized_value, changes = rm_sanitize_report(description, CONTRACT_MAXLEN)
+    if not changes:
+        return None
+    return {
+        "field": list_name + ".description",
+        "index": index,
+        "changes": changes,
+        "before": len(description),
+        "after": len(sanitized_value),
+    }
+
+
 def init_sanitize(phases):
     """Sanitize free text and compute dir. Contract identities are not free text
-    and are the one thing here that passes through untouched."""
+    and are the one thing here that passes through untouched.
+
+    Return type is unchanged -- a plain list of phase dicts -- because
+    test_an_integral_float_id_is_stored_the_way_jq_rendered_it and
+    test_an_entry_reaches_disk_as_exactly_two_keys call this directly and
+    index into the result. Each phase's own per-field sanitize report rides
+    along as a `_sanitizeReport` companion key, the same convention
+    op_init_validate's own `_idLiteral` already uses -- op_init_write pops
+    both back off before anything reaches disk.
+    """
     out = []
     for phase in phases:
         p = dict(phase)
-        p["name"] = rm_sanitize(p.get("name"), 200)
-        p["goal"] = rm_sanitize(p.get("goal"), 2000)
-        p["slug"] = rm_sanitize(p.get("slug") if p.get("slug") is not None else "", 100)
-        p["notes"] = rm_sanitize(p["notes"], 5000) if p.get("notes") is not None else None
-        p["successCriteria"] = [rm_sanitize(s, 2000) for s in (p.get("successCriteria") or [])]
-        p["creates"] = [sanitize_contract_entry(e) for e in (p.get("creates") or [])]
-        p["needs"] = [sanitize_contract_entry(e) for e in (p.get("needs") or [])]
-        p["areas"] = [rm_sanitize(s, 500) for s in (p.get("areas") or [])]
+        report = []
+
+        p["name"], entry = _sanitize_field_report(p.get("name"), 200, "name")
+        if entry:
+            report.append(entry)
+
+        p["goal"], entry = _sanitize_field_report(p.get("goal"), 2000, "goal")
+        if entry:
+            report.append(entry)
+
+        slug_input = p.get("slug") if p.get("slug") is not None else ""
+        p["slug"], entry = _sanitize_field_report(slug_input, 100, "slug")
+        if entry:
+            report.append(entry)
+
+        if p.get("notes") is not None:
+            p["notes"], entry = _sanitize_field_report(p["notes"], 5000, "notes")
+            if entry:
+                report.append(entry)
+        else:
+            p["notes"] = None
+
+        new_sc = []
+        for idx, s in enumerate(p.get("successCriteria") or [], 1):
+            sanitized, entry = _sanitize_field_report(s, 2000, "successCriteria", idx)
+            new_sc.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["successCriteria"] = new_sc
+
+        new_creates = []
+        for idx, e in enumerate(p.get("creates") or [], 1):
+            new_creates.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "creates", idx)
+            if entry:
+                report.append(entry)
+        p["creates"] = new_creates
+
+        new_needs = []
+        for idx, e in enumerate(p.get("needs") or [], 1):
+            new_needs.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "needs", idx)
+            if entry:
+                report.append(entry)
+        p["needs"] = new_needs
+
+        new_areas = []
+        for idx, s in enumerate(p.get("areas") or [], 1):
+            sanitized, entry = _sanitize_field_report(s, 500, "areas", idx)
+            new_areas.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["areas"] = new_areas
+
         p["dependsOn"] = p.get("dependsOn") or []
-        p["branch"] = rm_sanitize(p["branch"], 200) if p.get("branch") is not None else None
+
+        if p.get("branch") is not None:
+            p["branch"], entry = _sanitize_field_report(p["branch"], 200, "branch")
+            if entry:
+                report.append(entry)
+        else:
+            p["branch"] = None
+
         p["dir"] = "phase-" + _num(p.get("id")) + ("-" + p["slug"] if len(p["slug"]) > 0 else "")
         p["status"] = "pending"
         p["claim"] = None
+        p["_sanitizeReport"] = report
         out.append(p)
     return out
 
@@ -940,21 +1057,59 @@ def amend_type_errors(payload):
 
 
 def amend_sanitize(payload):
-    """The same sanitizer and the same caps roadmap-init applies to a fresh phase."""
+    """The same sanitizer and the same caps roadmap-init applies to a fresh
+    phase. Unlike init_sanitize, this is the one caller free to change its own
+    return shape -- nothing calls it directly in a test, only its one caller,
+    op_amend_validate, which is rewritten in the same change -- so it returns
+    (sanitized_payload, report_list) rather than a companion dict key. Report
+    entries carry no "phase" key here: op_amend_validate has no phase id to
+    give them, and op_amend_write fills one in once the lock is held."""
     p = dict(payload)
+    report = []
     if "goal" in p:
-        p["goal"] = rm_sanitize(p["goal"], 2000)
+        p["goal"], entry = _sanitize_field_report(p["goal"], 2000, "goal")
+        if entry:
+            report.append(entry)
     if "successCriteria" in p:
-        p["successCriteria"] = [rm_sanitize(s, 2000) for s in p["successCriteria"]]
+        new_sc = []
+        for idx, s in enumerate(p["successCriteria"], 1):
+            sanitized, entry = _sanitize_field_report(s, 2000, "successCriteria", idx)
+            new_sc.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["successCriteria"] = new_sc
     if "creates" in p:
-        p["creates"] = [sanitize_contract_entry(e) for e in p["creates"]]
+        new_creates = []
+        for idx, e in enumerate(p["creates"], 1):
+            new_creates.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "creates", idx)
+            if entry:
+                report.append(entry)
+        p["creates"] = new_creates
     if "needs" in p:
-        p["needs"] = [sanitize_contract_entry(e) for e in p["needs"]]
+        new_needs = []
+        for idx, e in enumerate(p["needs"], 1):
+            new_needs.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "needs", idx)
+            if entry:
+                report.append(entry)
+        p["needs"] = new_needs
     if "areas" in p:
-        p["areas"] = [rm_sanitize(s, 500) for s in p["areas"]]
+        new_areas = []
+        for idx, s in enumerate(p["areas"], 1):
+            sanitized, entry = _sanitize_field_report(s, 500, "areas", idx)
+            new_areas.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["areas"] = new_areas
     if "branch" in p:
-        p["branch"] = None if p["branch"] is None else rm_sanitize(p["branch"], 200)
-    return p
+        if p["branch"] is None:
+            p["branch"] = None
+        else:
+            p["branch"], entry = _sanitize_field_report(p["branch"], 200, "branch")
+            if entry:
+                report.append(entry)
+    return p, report
 
 
 def amend_orphan_rows(stored, amended, doc, authorized):
@@ -2511,6 +2666,26 @@ def op_init_validate(argv):
     return 0
 
 
+def _print_sanitize_warnings(verb, entries):
+    """One stderr line per accumulated sanitize-report entry, shared by
+    op_init_write and op_amend_write. Called only once every other check in
+    the caller has already passed -- a refused call reports nothing, because
+    nothing was written.
+
+    D11: naming phase, field, list index (when present) and the change
+    kind(s) with before/after character counts -- never the field's own
+    value, before or after sanitization.
+    """
+    for e in entries:
+        where = "phase " + _num(e["phase"]) + ": " if e.get("phase") is not None else ""
+        index_part = " entry #" + str(e["index"]) if e.get("index") is not None else ""
+        sys.stderr.write(
+            "Warning: " + verb + ": " + where + 'field "' + e["field"] + '"' + index_part
+            + " " + ", ".join(e["changes"]) + " (" + str(e["before"]) + " -> " + str(e["after"])
+            + " chars)\n"
+        )
+
+
 def op_init_write(argv):
     """The locked read-modify-write. stdin is init-validate's sanitized phases."""
     path = _flag(argv, "--roadmap")
@@ -2539,6 +2714,11 @@ def op_init_write(argv):
     # so it never reaches `merged` below or the document on disk, whether or
     # not this call ends up needing it for a collision check.
     new_id_literals = [p.pop("_idLiteral", None) for p in new_phases]
+    # init_sanitize's own companion key, popped the same way and for the same
+    # reason -- it must never reach `merged` or the document on disk. Kept
+    # aligned by position with new_phases so it can be zipped with it below,
+    # once it is known which of new_phases this call actually writes.
+    new_sanitize_reports = [p.pop("_sanitizeReport", None) or [] for p in new_phases]
 
     if os.path.exists(path):
         if not sync_mode:
@@ -2587,7 +2767,15 @@ def op_init_write(argv):
             )
 
         # Anti-clobber: a phase this roadmap already holds is never revisited.
-        filtered_new = [p for p in new_phases if p.get("id") not in existing_ids]
+        # filtered_pairs applies the identical filter to (phase, sanitize
+        # report) pairs, built from one zipped comprehension so filtered_new
+        # and the reports below can never drift out of alignment with it.
+        filtered_pairs = [
+            (p, r)
+            for p, r in zip(new_phases, new_sanitize_reports)
+            if p.get("id") not in existing_ids
+        ]
+        filtered_new = [p for p, _ in filtered_pairs]
 
         # Allowed ids are existing-file ids unioned with this payload's own, so a
         # --sync phase may depend on one an earlier call materialized AND on a
@@ -2644,6 +2832,10 @@ def op_init_write(argv):
         doc = {k: v for k, v in existing.items() if k != "phases"}
         doc["phases"] = merged
         added_count = len(filtered_new)
+        # Report only what this call actually writes -- a phase --sync
+        # silently left alone (anti-clobber, above) reports nothing, the same
+        # way it adds nothing to added_count.
+        sanitize_pairs = filtered_pairs
     else:
         allowed = [p.get("id") for p in new_phases]
         dangling = dangling_errors(new_phases, allowed)
@@ -2674,10 +2866,25 @@ def op_init_write(argv):
             "phases": merged,
         }
         added_count = len(merged)
+        # A fresh roadmap.json writes every submitted phase, so every one of
+        # them is reportable.
+        sanitize_pairs = list(zip(new_phases, new_sanitize_reports))
+
+    # Flattened and tagged with each phase's own id only now, once it is
+    # known which phases this call actually writes -- a --sync call that
+    # anti-clobbered a phase reports nothing for it, the same as added_count.
+    sanitized = [
+        {"phase": p.get("id"), **entry} for p, report in sanitize_pairs for entry in report
+    ]
 
     write_doc_atomically(path, doc)
+    # Only once every other check has already passed and the write has
+    # landed: a refused call reports nothing, because nothing was written.
+    _print_sanitize_warnings("roadmap-init", sanitized)
     json.dump(
-        {"roadmap": path, "added": added_count, "phases": len(merged)}, sys.stdout, indent=2
+        {"roadmap": path, "added": added_count, "phases": len(merged), "sanitized": sanitized},
+        sys.stdout,
+        indent=2,
     )
     sys.stdout.write("\n")
     return 0
@@ -2745,10 +2952,18 @@ def op_amend_validate(argv):
     if type_errors:
         _die_list("Error: roadmap-amend-phase: invalid amendment value(s):", type_errors)
 
-    sanitized = amend_sanitize(payload)
+    sanitized, report = amend_sanitize(payload)
     branch = sanitized.get("branch")
     if "branch" in sanitized and branch is not None and not BRANCH_REGEX.fullmatch(branch):
         die('Error: roadmap-amend-phase: branch "' + branch + '" contains invalid characters')
+
+    # Attached after the branch-pattern check, which judges `sanitized` on its
+    # own amendable keys -- report entries are not one. op_amend_write pops
+    # this key back off before `sanitized` is used to build the merged phase,
+    # the same convention op_init_write's own `_idLiteral`/`_sanitizeReport`
+    # pop already uses, so it never reaches `stored`/`doc`. No phase id is
+    # attached yet: this op never receives --phase.
+    sanitized["_sanitizeReport"] = report
 
     json.dump(sanitized, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -2768,6 +2983,11 @@ def op_amend_write(argv):
     pairs = json.loads(retargets_raw)
 
     patch = jq_numbers(json.load(sys.stdin))
+    # amend-validate's own companion key -- popped here, before `patch` is
+    # used to build the merged phase below, so it can never leak into
+    # `stored`/`doc`. Tagged with this call's own --phase once every check
+    # below has passed (see the accumulation right before the write).
+    sanitize_report = patch.pop("_sanitizeReport", None) or []
     doc = read_doc(path, "roadmap-amend-phase")
 
     stored = next((p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None)
@@ -2940,6 +3160,11 @@ def op_amend_write(argv):
             ]
     write_doc_atomically(path, doc)
 
+    # Tagged with this call's own --phase only now that the write has landed --
+    # a refused amendment reports nothing, because nothing was written.
+    sanitized = [{"phase": phase_id, **entry} for entry in sanitize_report]
+    _print_sanitize_warnings("roadmap-amend-phase", sanitized)
+
     # Advisory only, exit status stays 0: correcting an already-completed phase's
     # prose creates is precisely the repair this verb exists for, so no status
     # value gates the amend in either direction.
@@ -2971,6 +3196,7 @@ def op_amend_write(argv):
             # field noticed them, because neither amended creates or needs.
             "amended": sorted(k for k in patch if k in AMENDABLE_KEYS),
             "retargeted": retargeted,
+            "sanitized": sanitized,
         },
         sys.stdout,
         indent=2,
