@@ -46,3 +46,31 @@ def rm_sanitize(value, maxlen):
     s = re.sub(r"you are now", "", s, flags=re.I)
     s = re.sub(r"((?:^|\s)[^a-zA-Z0-9]*)system\s*:", r"\1", s, flags=re.I)
     return s[:maxlen] if len(s) > maxlen else s
+
+
+def rm_sanitize_report(value, maxlen):
+    """Classify what rm_sanitize(value, maxlen) did, without a second copy of
+    its regexes -- by calling rm_sanitize itself twice: once unclamped (at
+    len(value)) to see whether the formatting/content rules touched anything,
+    once at maxlen to produce the actual stored value.
+
+    Returns (sanitized_value, changes). sanitized_value is exactly what a
+    caller's own `rm_sanitize(value, maxlen)` call would have returned --
+    this function computes nothing a caller could use in its place. changes
+    is a list of zero or more of "rewritten"/"truncated", always in that
+    order when both fire:
+      "rewritten"  -- rm_sanitize(value, len(value)) != value
+      "truncated"  -- len(rm_sanitize(value, len(value))) > maxlen
+    Neither fires when the value passes through unchanged. A None value
+    reports unchanged -- rm_sanitize(None, maxlen) is already None, and
+    len(None) would raise before either rule could be judged.
+    """
+    if value is None:
+        return None, []
+    unclamped = rm_sanitize(value, len(value))
+    changes = []
+    if unclamped != value:
+        changes.append("rewritten")
+    if len(unclamped) > maxlen:
+        changes.append("truncated")
+    return rm_sanitize(value, maxlen), changes

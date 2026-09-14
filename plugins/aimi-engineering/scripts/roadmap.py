@@ -44,6 +44,7 @@ pins its total, over a hundred of those assertions drive these verbs as black
 boxes through the CLI, and a faithful port does not move a single one of them.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -56,7 +57,7 @@ import time
 # rule for the story titles it puts into a dropped-dependency warning, and a
 # story title is not a roadmap concern. It lives in sanitize.py, which holds that
 # one rule and nothing else, and both files import it from there.
-from sanitize import rm_sanitize
+from sanitize import rm_sanitize, rm_sanitize_report
 
 # THE TWO RULERS, NOW THAT THE TWO HALVES ARE TWO FIELDS.
 #
@@ -692,6 +693,15 @@ def normalize_contracts(doc):
 # ---------------------------------------------------------------------------
 
 DIR_REGEX = re.compile(r"^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$")
+
+
+def _compute_phase_dir(phase_id, slug):
+    """phase-<id>[-<slug>] -- the one formula a phase's directory name is ever
+    computed by. init_sanitize uses this for a freshly created phase;
+    roadmap-amend-phase's rename logic (op_amend_write) uses it again for an
+    existing one, so the two can never compute two different answers for the
+    same (id, slug) pair."""
+    return "phase-" + _num(phase_id) + ("-" + slug if slug else "")
 # The terminal story statuses: the one rule that answers "has this story
 # finished?", and therefore "does this phase still have work?".
 #
@@ -817,25 +827,142 @@ def sanitize_contract_entry(entry):
     )
 
 
+# ---------------------------------------------------------------------------
+# Sanitize reporting (D10/D11) -- what changed, never what it was
+# ---------------------------------------------------------------------------
+#
+# A flat report entry is {"field", "index", "changes", "before", "after"} --
+# everything except "phase", which is not knowable at sanitize time (op_amend_
+# validate has no phase id yet) and is filled in by the *-write op once the
+# lock is held and the phase's own id is in hand. An entry is emitted only
+# when rm_sanitize_report actually reports a change: a no-op field contributes
+# nothing, which is what keeps `sanitized` empty for a call that changed
+# nothing rather than full of zero-change rows.
+#
+# D11 (never echo removed/matched text): these entries and the stderr line
+# built from them carry only field name, phase id, list index and character
+# counts -- never the field's own value, before or after sanitization.
+
+
+def _sanitize_field_report(value, maxlen, field, index=None):
+    """rm_sanitize_report wrapped in the flat report-entry shape.
+
+    Returns (sanitized_value, entry-or-None) so a caller can store the first
+    element unconditionally and append the second only when it is not None.
+    """
+    sanitized_value, changes = rm_sanitize_report(value, maxlen)
+    if not changes:
+        return sanitized_value, None
+    entry = {
+        "field": field,
+        "index": index,
+        "changes": changes,
+        "before": len(value),
+        "after": len(sanitized_value),
+    }
+    return sanitized_value, entry
+
+
+def _contract_description_report(entry, list_name, index):
+    """The report half of a creates/needs entry, computed via a SEPARATE
+    rm_sanitize_report call alongside sanitize_contract_entry -- never by
+    changing that function's own signature or re-deriving its regexes.
+    Identity is never reported: nothing sanitizes it, so it never changes."""
+    description = entry.get("description") or ""
+    sanitized_value, changes = rm_sanitize_report(description, CONTRACT_MAXLEN)
+    if not changes:
+        return None
+    return {
+        "field": list_name + ".description",
+        "index": index,
+        "changes": changes,
+        "before": len(description),
+        "after": len(sanitized_value),
+    }
+
+
 def init_sanitize(phases):
     """Sanitize free text and compute dir. Contract identities are not free text
-    and are the one thing here that passes through untouched."""
+    and are the one thing here that passes through untouched.
+
+    Return type is unchanged -- a plain list of phase dicts -- because
+    test_an_integral_float_id_is_stored_the_way_jq_rendered_it and
+    test_an_entry_reaches_disk_as_exactly_two_keys call this directly and
+    index into the result. Each phase's own per-field sanitize report rides
+    along as a `_sanitizeReport` companion key, the same convention
+    op_init_validate's own `_idLiteral` already uses -- op_init_write pops
+    both back off before anything reaches disk.
+    """
     out = []
     for phase in phases:
         p = dict(phase)
-        p["name"] = rm_sanitize(p.get("name"), 200)
-        p["goal"] = rm_sanitize(p.get("goal"), 2000)
-        p["slug"] = rm_sanitize(p.get("slug") if p.get("slug") is not None else "", 100)
-        p["notes"] = rm_sanitize(p["notes"], 5000) if p.get("notes") is not None else None
-        p["successCriteria"] = [rm_sanitize(s, 2000) for s in (p.get("successCriteria") or [])]
-        p["creates"] = [sanitize_contract_entry(e) for e in (p.get("creates") or [])]
-        p["needs"] = [sanitize_contract_entry(e) for e in (p.get("needs") or [])]
-        p["areas"] = [rm_sanitize(s, 500) for s in (p.get("areas") or [])]
+        report = []
+
+        p["name"], entry = _sanitize_field_report(p.get("name"), 200, "name")
+        if entry:
+            report.append(entry)
+
+        p["goal"], entry = _sanitize_field_report(p.get("goal"), 2000, "goal")
+        if entry:
+            report.append(entry)
+
+        slug_input = p.get("slug") if p.get("slug") is not None else ""
+        p["slug"], entry = _sanitize_field_report(slug_input, 100, "slug")
+        if entry:
+            report.append(entry)
+
+        if p.get("notes") is not None:
+            p["notes"], entry = _sanitize_field_report(p["notes"], 5000, "notes")
+            if entry:
+                report.append(entry)
+        else:
+            p["notes"] = None
+
+        new_sc = []
+        for idx, s in enumerate(p.get("successCriteria") or [], 1):
+            sanitized, entry = _sanitize_field_report(s, 2000, "successCriteria", idx)
+            new_sc.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["successCriteria"] = new_sc
+
+        new_creates = []
+        for idx, e in enumerate(p.get("creates") or [], 1):
+            new_creates.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "creates", idx)
+            if entry:
+                report.append(entry)
+        p["creates"] = new_creates
+
+        new_needs = []
+        for idx, e in enumerate(p.get("needs") or [], 1):
+            new_needs.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "needs", idx)
+            if entry:
+                report.append(entry)
+        p["needs"] = new_needs
+
+        new_areas = []
+        for idx, s in enumerate(p.get("areas") or [], 1):
+            sanitized, entry = _sanitize_field_report(s, 500, "areas", idx)
+            new_areas.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["areas"] = new_areas
+
         p["dependsOn"] = p.get("dependsOn") or []
-        p["branch"] = rm_sanitize(p["branch"], 200) if p.get("branch") is not None else None
-        p["dir"] = "phase-" + _num(p.get("id")) + ("-" + p["slug"] if len(p["slug"]) > 0 else "")
+
+        if p.get("branch") is not None:
+            p["branch"], entry = _sanitize_field_report(p["branch"], 200, "branch")
+            if entry:
+                report.append(entry)
+        else:
+            p["branch"] = None
+
+        p["dir"] = _compute_phase_dir(p.get("id"), p["slug"])
         p["status"] = "pending"
         p["claim"] = None
+        p["_sanitizeReport"] = report
         out.append(p)
     return out
 
@@ -871,16 +998,30 @@ def dangling_errors(phases_to_check, allowed_ids):
 # roadmap-amend-phase
 # ---------------------------------------------------------------------------
 #
-# The amendable set is exactly six keys, and the discriminator is "contract
-# field with no other writer". branch IS amendable for precisely that reason --
-# roadmap-init sets it at creation and --sync never revisits it, which is why a
-# decimal phase's null branch could not be filled in. status and claim are NOT,
-# on the opposite ground: roadmap-set-status owns status and roadmap-claim owns
-# claim, and a second writer would duplicate those guarantees rather than reuse
-# them.
-AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branch"]
+# The amendable set's discriminator is "contract field with no other writer".
+# branch IS amendable for precisely that reason -- roadmap-init sets it at
+# creation and --sync never revisits it, which is why a decimal phase's null
+# branch could not be filled in. status and claim are NOT, on the opposite
+# ground: roadmap-set-status owns status and roadmap-claim owns claim, and a
+# second writer would duplicate those guarantees rather than reuse them.
+#
+# name and slug joined this list once a rename had somewhere safe to go: they
+# are phase IDENTITY -- dir is derived from them, and a phase's own tasks file
+# cites its dir back -- so amending either is gated by the D14 guard in
+# op_amend_write (pending/planned, unclaimed, every own story still pending)
+# the other five fields never needed, and can move a directory and rewrite a
+# tasks file's metadata where the other five never touch the filesystem at
+# all. Appended AFTER branch, not inserted alphabetically: the six-key prefix
+# this list used to be is still a byte-for-byte prefix of it, which is what
+# keeps every existing "amendable fields are: ..." substring assertion true
+# without being rewritten for this story.
+AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branch", "name", "slug"]
 
-_PHASE_IDENTITY_KEYS = ["id", "dir", "slug", "name", "dependsOn"]
+# What is left once name and slug moved out: identity with no amend path of
+# ANY kind, not even a guarded one. dir is a special case of that rather than a
+# member of it -- see amend_key_errors, which gives it its own message pointing
+# at slug instead of folding it into this branch's generic one.
+_PHASE_IDENTITY_KEYS = ["id", "dir", "dependsOn"]
 
 
 def _identities(phase, key):
@@ -897,6 +1038,8 @@ def amend_key_errors(payload):
             why = " -- phase status is owned by roadmap-set-status"
         elif key == "claim":
             why = " -- phase claims are owned by roadmap-claim / roadmap-release-claim"
+        elif key == "dir":
+            why = " -- it is derived from id and slug; amend slug to change it"
         elif key in _PHASE_IDENTITY_KEYS:
             why = " -- it is phase identity, written once by roadmap-init"
         else:
@@ -909,6 +1052,10 @@ def amend_type_errors(payload):
     errors = []
     if "goal" in payload and (not isinstance(payload["goal"], str) or len(payload["goal"]) == 0):
         errors.append("  goal must be a non-empty string")
+    if "name" in payload and (not isinstance(payload["name"], str) or len(payload["name"]) == 0):
+        errors.append("  name must be a non-empty string")
+    if "slug" in payload and not isinstance(payload["slug"], str):
+        errors.append("  slug must be a string")
     if "branch" in payload and payload["branch"] is not None and not isinstance(
         payload["branch"], str
     ):
@@ -940,21 +1087,67 @@ def amend_type_errors(payload):
 
 
 def amend_sanitize(payload):
-    """The same sanitizer and the same caps roadmap-init applies to a fresh phase."""
+    """The same sanitizer and the same caps roadmap-init applies to a fresh
+    phase. Unlike init_sanitize, this is the one caller free to change its own
+    return shape -- nothing calls it directly in a test, only its one caller,
+    op_amend_validate, which is rewritten in the same change -- so it returns
+    (sanitized_payload, report_list) rather than a companion dict key. Report
+    entries carry no "phase" key here: op_amend_validate has no phase id to
+    give them, and op_amend_write fills one in once the lock is held."""
     p = dict(payload)
+    report = []
+    if "name" in p:
+        p["name"], entry = _sanitize_field_report(p["name"], 200, "name")
+        if entry:
+            report.append(entry)
+    if "slug" in p:
+        p["slug"], entry = _sanitize_field_report(p["slug"], 100, "slug")
+        if entry:
+            report.append(entry)
     if "goal" in p:
-        p["goal"] = rm_sanitize(p["goal"], 2000)
+        p["goal"], entry = _sanitize_field_report(p["goal"], 2000, "goal")
+        if entry:
+            report.append(entry)
     if "successCriteria" in p:
-        p["successCriteria"] = [rm_sanitize(s, 2000) for s in p["successCriteria"]]
+        new_sc = []
+        for idx, s in enumerate(p["successCriteria"], 1):
+            sanitized, entry = _sanitize_field_report(s, 2000, "successCriteria", idx)
+            new_sc.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["successCriteria"] = new_sc
     if "creates" in p:
-        p["creates"] = [sanitize_contract_entry(e) for e in p["creates"]]
+        new_creates = []
+        for idx, e in enumerate(p["creates"], 1):
+            new_creates.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "creates", idx)
+            if entry:
+                report.append(entry)
+        p["creates"] = new_creates
     if "needs" in p:
-        p["needs"] = [sanitize_contract_entry(e) for e in p["needs"]]
+        new_needs = []
+        for idx, e in enumerate(p["needs"], 1):
+            new_needs.append(sanitize_contract_entry(e))
+            entry = _contract_description_report(e, "needs", idx)
+            if entry:
+                report.append(entry)
+        p["needs"] = new_needs
     if "areas" in p:
-        p["areas"] = [rm_sanitize(s, 500) for s in p["areas"]]
+        new_areas = []
+        for idx, s in enumerate(p["areas"], 1):
+            sanitized, entry = _sanitize_field_report(s, 500, "areas", idx)
+            new_areas.append(sanitized)
+            if entry:
+                report.append(entry)
+        p["areas"] = new_areas
     if "branch" in p:
-        p["branch"] = None if p["branch"] is None else rm_sanitize(p["branch"], 200)
-    return p
+        if p["branch"] is None:
+            p["branch"] = None
+        else:
+            p["branch"], entry = _sanitize_field_report(p["branch"], 200, "branch")
+            if entry:
+                report.append(entry)
+    return p, report
 
 
 def amend_orphan_rows(stored, amended, doc, authorized):
@@ -977,6 +1170,103 @@ def amend_orphan_rows(stored, amended, doc, authorized):
         if ident in orphaned
     }
     return sorted(rows, key=lambda t: (jq_sort_key(t[0]), t[1]))
+
+
+# ---------------------------------------------------------------------------
+# D14 -- the rename guard: name/slug may move a directory, so they may only be
+# amended before that directory means anything to a session in flight.
+# ---------------------------------------------------------------------------
+
+
+def amend_identity_guard_errors(stored, roadmap_path, doc):
+    """Three independent refusal reasons for amending name/slug, checked
+    against `stored` -- the phase as it is BEFORE this amendment. status and
+    claim are never amendable keys (amend_key_errors refuses both by name), so
+    `stored` and the merged `amended` phase can never disagree about either,
+    and this can run before the merge even happens.
+
+    Renaming touches the filesystem (a directory move) and another document (a
+    tasks file's own metadata) in ways no other amendable field does, so it is
+    the one amendment gated on the phase being safely unstarted rather than
+    merely on its own value being well-formed.
+    """
+    errors = []
+    status = stored.get("status")
+    if status not in ("pending", "planned"):
+        errors.append("  phase status is " + json.dumps(status) + ", not pending or planned")
+    if stored.get("claim") is not None:
+        errors.append("  phase is claimed")
+    tasks_path = _phase_tasks_path(roadmap_path, doc, stored)
+    if tasks_path is not None:
+        tasks = _read_tasks(tasks_path)
+        if tasks is not None:
+            stories = tasks.get("userStories")
+            if isinstance(stories, dict):
+                stories = list(stories.values())
+            if isinstance(stories, list) and any(
+                isinstance(s, dict) and s.get("status") != "pending" for s in stories
+            ):
+                errors.append("  phase tasks file has a story whose status is not pending")
+    return errors
+
+
+def _id_slug(phase_id):
+    """The dot-slugified phase id a branchName's own phase segment composes
+    with -- 5.5 becomes "5-5", the same substitution commands/plan.md's
+    branchName rule applies (a decimal phase reads "-phase-5-5-", never
+    "-phase-5.5-", because "." is not a legal git branch-name character)."""
+    return _num(phase_id).replace(".", "-")
+
+
+def _rewrite_phase_tasks_metadata(tasks_path, phase_id, new_dir, old_slug, new_slug):
+    """Locked read-modify-write of one phase's OWN tasks file: rewrite
+    metadata.phase.dir to new_dir, and rewrite metadata.branchName's phase
+    segment from old_slug to new_slug when the old one is actually present.
+
+    Locked the way story_merge.py's write_atomically is -- fcntl.flock on the
+    tasks file's own <path>.lock, a syscall rather than a shelled-out `flock`
+    binary -- because this IS the same lock a tasks.json verb takes via
+    aimi-cli.sh's bash `_lock`, and this call runs outside that bash lock (the
+    lock op_amend_write's caller holds is roadmap.json's own).
+
+    Returns the tasks file's ORIGINAL parsed document, so a roadmap.json write
+    that fails after this call can hand it back to _restore_phase_tasks_metadata
+    and leave the tasks file exactly as this call found it.
+    """
+    lock_fd = os.open(tasks_path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        with open(tasks_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        # Two independent parses of the same text, not one parse plus a copy --
+        # so mutating `tasks_doc` below can never reach a nested dict `original`
+        # still holds a reference to.
+        original = json.loads(text)
+        tasks_doc = json.loads(text)
+        metadata = tasks_doc.setdefault("metadata", {})
+        phase_meta = metadata.get("phase")
+        if isinstance(phase_meta, dict):
+            phase_meta["dir"] = new_dir
+        branch_name = metadata.get("branchName")
+        if isinstance(branch_name, str) and old_slug:
+            old_token = "-phase-" + _id_slug(phase_id) + "-" + old_slug
+            new_token = "-phase-" + _id_slug(phase_id) + "-" + new_slug
+            metadata["branchName"] = branch_name.replace(old_token, new_token)
+        write_doc_atomically(tasks_path, tasks_doc)
+        return original
+    finally:
+        os.close(lock_fd)
+
+
+def _restore_phase_tasks_metadata(tasks_path, original_doc):
+    """The rollback half of _rewrite_phase_tasks_metadata: put the exact
+    document that call read back, under the same lock discipline."""
+    lock_fd = os.open(tasks_path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        write_doc_atomically(tasks_path, original_doc)
+    finally:
+        os.close(lock_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -1535,9 +1825,17 @@ def contract_sanitize_hits(doc):
 
 
 def duplicate_creates(doc):
-    """Identities declared by more than one phase, whatever their status."""
+    """Identities declared by more than one phase, excluding a cancelled phase.
+
+    A cancelled phase's creates are abandoned, not delivered, so a live phase
+    may reuse the same identity without tripping this collision check -- and
+    two cancelled phases sharing an identity is not a collision either, since
+    neither will ever deliver it.
+    """
     seen = {}
     for phase in doc.get("phases") or []:
+        if phase.get("status") == "cancelled":
+            continue
         for entry in contract_entries(phase, "creates"):
             seen.setdefault(entry["identity"], []).append(phase.get("id"))
     return [
@@ -1703,10 +2001,14 @@ def sweep(doc):
     stored = doc.get("phases") or []
     phases = sweep_clean_phases(stored)
 
+    # needed/providers are reference sets every phase's verdict is computed
+    # against, so they stay unfiltered -- the cancelled-phase exclusion below
+    # scopes to a cancelled phase's OWN reported creates/needs entries only.
     needed = {entry["identity"] for p in phases for entry in p["needs"]}
     orphans = [
         {"phase": p.get("id"), "creates": identity}
         for p in phases
+        if p.get("status") != "cancelled"
         for identity in [entry["identity"] for entry in p["creates"]]
         if identity not in needed
     ]
@@ -1718,6 +2020,8 @@ def sweep(doc):
     ]
     deferred = []
     for phase in phases:
+        if phase.get("status") == "cancelled":
+            continue
         for entry in phase["needs"]:
             identity = entry["identity"]
             # Lowest phase id wins, so which provider a need is attributed to is
@@ -1948,8 +2252,28 @@ GET_ELIGIBLE_STATUSES = ["pending", "planned"]
 # caller who types "Pending" gets a message naming what they typed and what is
 # accepted, instead of an empty answer indistinguishable from "nothing is
 # ready". Kept in one place so the vocabulary cannot drift away from
-# STATUS_TRANSITIONS, which is the graph over these same five names.
-PHASE_STATUSES = ["pending", "planned", "in_progress", "completed", "verification_failed"]
+# STATUS_TRANSITIONS, which is the graph over these same six names.
+PHASE_STATUSES = [
+    "pending",
+    "planned",
+    "in_progress",
+    "completed",
+    "verification_failed",
+    "cancelled",
+]
+
+# A dependency reads as satisfied when it reached either terminal status: a
+# completed phase delivered its creates, a cancelled one never will and never
+# will again (cancelled is terminal -- see TERMINAL_PHASE_STATUSES), so a
+# downstream phase waiting on it would wait forever if cancelled did not count
+# the same way completed already does.
+SATISFIED_DEPENDENCY_STATUSES = ("completed", "cancelled")
+
+# The two statuses nothing leaves except by --force (completed has no exit at
+# all -- see op_set_status). A phase in either releases its claim on arrival,
+# which is why op_set_status's claim-clearing write tests membership here
+# instead of comparing against "completed" alone.
+TERMINAL_PHASE_STATUSES = ("completed", "cancelled")
 
 
 def _tsv(value):
@@ -2149,10 +2473,15 @@ def _depends_on(phase):
 
 
 def _unmet(phase, status_by_id):
-    """The dependency ids that have not reached completed, in declared order."""
+    """The dependency ids not yet satisfied, in declared order.
+
+    Satisfied means SATISFIED_DEPENDENCY_STATUSES -- completed or cancelled --
+    not the literal "completed" alone: a downstream phase must not wait
+    forever on a dependency that was abandoned rather than finished.
+    """
     return [
         dep for dep in _depends_on(phase)
-        if status_by_id.get(_jq_raw(dep)) != "completed"
+        if status_by_id.get(_jq_raw(dep)) not in SATISFIED_DEPENDENCY_STATUSES
     ]
 
 
@@ -2263,7 +2592,8 @@ def rm_sanitize_lines(value, maxlen):
 
 
 # The status graph. verification_failed is reachable from any non-terminal state
-# (execute sets it when creates-verification fails) and is therefore not listed.
+# (execute sets it when creates-verification fails) EXCEPT cancelled and is
+# therefore not listed here -- see op_set_status's narrowed `allowed` check.
 #   pending -> planned            plan expands the phase
 #   pending -> in_progress        execute claims a phase whose planned transition
 #                                 was lost (plan aborted after writing tasks.json
@@ -2274,6 +2604,14 @@ def rm_sanitize_lines(value, maxlen):
 #   in_progress -> in_progress    idempotent resume of a crashed session
 #   verification_failed -> in_progress   re-verify retry
 #   in_progress|verification_failed -> completed
+#   pending|planned -> cancelled  abandon a phase nobody has started yet
+#   cancelled -> cancelled        idempotent re-cancel
+# in_progress|verification_failed -> cancelled need --force (op_set_status's
+# ordinary allowed/force check already requires it, since neither edge is
+# listed here); so does cancelled -> pending, the only reopen. Every other
+# departure from cancelled -- planned, in_progress, completed,
+# verification_failed -- is refused even with --force by op_set_status's own
+# unconditional guard, and completed -> cancelled is refused the same way.
 STATUS_TRANSITIONS = frozenset(
     [
         "pending:planned",
@@ -2283,6 +2621,9 @@ STATUS_TRANSITIONS = frozenset(
         "verification_failed:in_progress",
         "in_progress:completed",
         "verification_failed:completed",
+        "pending:cancelled",
+        "planned:cancelled",
+        "cancelled:cancelled",
     ]
 )
 
@@ -2460,6 +2801,26 @@ def op_init_validate(argv):
     return 0
 
 
+def _print_sanitize_warnings(verb, entries):
+    """One stderr line per accumulated sanitize-report entry, shared by
+    op_init_write and op_amend_write. Called only once every other check in
+    the caller has already passed -- a refused call reports nothing, because
+    nothing was written.
+
+    D11: naming phase, field, list index (when present) and the change
+    kind(s) with before/after character counts -- never the field's own
+    value, before or after sanitization.
+    """
+    for e in entries:
+        where = "phase " + _num(e["phase"]) + ": " if e.get("phase") is not None else ""
+        index_part = " entry #" + str(e["index"]) if e.get("index") is not None else ""
+        sys.stderr.write(
+            "Warning: " + verb + ": " + where + 'field "' + e["field"] + '"' + index_part
+            + " " + ", ".join(e["changes"]) + " (" + str(e["before"]) + " -> " + str(e["after"])
+            + " chars)\n"
+        )
+
+
 def op_init_write(argv):
     """The locked read-modify-write. stdin is init-validate's sanitized phases."""
     path = _flag(argv, "--roadmap")
@@ -2488,6 +2849,11 @@ def op_init_write(argv):
     # so it never reaches `merged` below or the document on disk, whether or
     # not this call ends up needing it for a collision check.
     new_id_literals = [p.pop("_idLiteral", None) for p in new_phases]
+    # init_sanitize's own companion key, popped the same way and for the same
+    # reason -- it must never reach `merged` or the document on disk. Kept
+    # aligned by position with new_phases so it can be zipped with it below,
+    # once it is known which of new_phases this call actually writes.
+    new_sanitize_reports = [p.pop("_sanitizeReport", None) or [] for p in new_phases]
 
     if os.path.exists(path):
         if not sync_mode:
@@ -2536,7 +2902,15 @@ def op_init_write(argv):
             )
 
         # Anti-clobber: a phase this roadmap already holds is never revisited.
-        filtered_new = [p for p in new_phases if p.get("id") not in existing_ids]
+        # filtered_pairs applies the identical filter to (phase, sanitize
+        # report) pairs, built from one zipped comprehension so filtered_new
+        # and the reports below can never drift out of alignment with it.
+        filtered_pairs = [
+            (p, r)
+            for p, r in zip(new_phases, new_sanitize_reports)
+            if p.get("id") not in existing_ids
+        ]
+        filtered_new = [p for p, _ in filtered_pairs]
 
         # Allowed ids are existing-file ids unioned with this payload's own, so a
         # --sync phase may depend on one an earlier call materialized AND on a
@@ -2593,6 +2967,10 @@ def op_init_write(argv):
         doc = {k: v for k, v in existing.items() if k != "phases"}
         doc["phases"] = merged
         added_count = len(filtered_new)
+        # Report only what this call actually writes -- a phase --sync
+        # silently left alone (anti-clobber, above) reports nothing, the same
+        # way it adds nothing to added_count.
+        sanitize_pairs = filtered_pairs
     else:
         allowed = [p.get("id") for p in new_phases]
         dangling = dangling_errors(new_phases, allowed)
@@ -2623,10 +3001,25 @@ def op_init_write(argv):
             "phases": merged,
         }
         added_count = len(merged)
+        # A fresh roadmap.json writes every submitted phase, so every one of
+        # them is reportable.
+        sanitize_pairs = list(zip(new_phases, new_sanitize_reports))
+
+    # Flattened and tagged with each phase's own id only now, once it is
+    # known which phases this call actually writes -- a --sync call that
+    # anti-clobbered a phase reports nothing for it, the same as added_count.
+    sanitized = [
+        {"phase": p.get("id"), **entry} for p, report in sanitize_pairs for entry in report
+    ]
 
     write_doc_atomically(path, doc)
+    # Only once every other check has already passed and the write has
+    # landed: a refused call reports nothing, because nothing was written.
+    _print_sanitize_warnings("roadmap-init", sanitized)
     json.dump(
-        {"roadmap": path, "added": added_count, "phases": len(merged)}, sys.stdout, indent=2
+        {"roadmap": path, "added": added_count, "phases": len(merged), "sanitized": sanitized},
+        sys.stdout,
+        indent=2,
     )
     sys.stdout.write("\n")
     return 0
@@ -2677,6 +3070,10 @@ def op_amend_validate(argv):
         payload["goal"] = _flag(argv, "--goal")
     if "--branch" in argv:
         payload["branch"] = _flag(argv, "--branch")
+    if "--name" in argv:
+        payload["name"] = _flag(argv, "--name")
+    if "--slug" in argv:
+        payload["slug"] = _flag(argv, "--slug")
 
     key_errors = amend_key_errors(payload)
     if key_errors:
@@ -2694,10 +3091,18 @@ def op_amend_validate(argv):
     if type_errors:
         _die_list("Error: roadmap-amend-phase: invalid amendment value(s):", type_errors)
 
-    sanitized = amend_sanitize(payload)
+    sanitized, report = amend_sanitize(payload)
     branch = sanitized.get("branch")
     if "branch" in sanitized and branch is not None and not BRANCH_REGEX.fullmatch(branch):
         die('Error: roadmap-amend-phase: branch "' + branch + '" contains invalid characters')
+
+    # Attached after the branch-pattern check, which judges `sanitized` on its
+    # own amendable keys -- report entries are not one. op_amend_write pops
+    # this key back off before `sanitized` is used to build the merged phase,
+    # the same convention op_init_write's own `_idLiteral`/`_sanitizeReport`
+    # pop already uses, so it never reaches `stored`/`doc`. No phase id is
+    # attached yet: this op never receives --phase.
+    sanitized["_sanitizeReport"] = report
 
     json.dump(sanitized, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
@@ -2717,6 +3122,11 @@ def op_amend_write(argv):
     pairs = json.loads(retargets_raw)
 
     patch = jq_numbers(json.load(sys.stdin))
+    # amend-validate's own companion key -- popped here, before `patch` is
+    # used to build the merged phase below, so it can never leak into
+    # `stored`/`doc`. Tagged with this call's own --phase once every check
+    # below has passed (see the accumulation right before the write).
+    sanitize_report = patch.pop("_sanitizeReport", None) or []
     doc = read_doc(path, "roadmap-amend-phase")
 
     stored = next((p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None)
@@ -2750,11 +3160,70 @@ def op_amend_write(argv):
         )
 
     # Shallow merge: every key the stored phase already had keeps its position
-    # and value -- id, dir, slug, name, dependsOn, status and claim included --
-    # and only the keys the payload carries are replaced, each wholesale.
+    # and value -- id, dir, dependsOn, status and claim included -- and only
+    # the keys the payload carries are replaced, each wholesale. name and slug
+    # ARE in the payload's own keys when this is a rename; dir is never a
+    # patch key (amend_key_errors refuses it by name), so it survives this
+    # merge unchanged and is overwritten explicitly below, only once the
+    # rename has passed every guard.
     amended = dict(stored)
     for key, value in patch.items():
         amended[key] = value
+
+    # --- D14: name/slug may only be amended on a safely unstarted phase -----
+    # Checked here, against `stored`, before anything else this call might
+    # refuse on -- a renamed-and-then-refused-for-an-unrelated-reason amendment
+    # would still have to prove the rename itself was safe, so proving it first
+    # costs nothing and reads as what it is: the more fundamental guard.
+    move = None
+    new_dir = None
+    old_dir = stored.get("dir")
+    new_path = old_path = None
+    if "name" in patch or "slug" in patch:
+        guard_errors = amend_identity_guard_errors(stored, path, doc)
+        if guard_errors:
+            _die_list(
+                "Error: roadmap-amend-phase: phase "
+                + _num(phase_id)
+                + " cannot have its name/slug amended -- it is not safe to rename:",
+                guard_errors,
+            )
+
+        new_slug = amended.get("slug") or ""
+        new_dir = _compute_phase_dir(phase_id, new_slug)
+        if not DIR_REGEX.fullmatch(new_dir):
+            die(
+                'Error: roadmap-amend-phase: computed dir "'
+                + new_dir
+                + '" fails required pattern'
+            )
+
+        feature_dir = os.path.dirname(path)
+        new_path = os.path.join(feature_dir, new_dir)
+        old_path = os.path.join(feature_dir, old_dir) if old_dir else None
+
+        # Both collision checks are skipped when the computed dir did not
+        # actually change (a name-only amend, or a slug amend that resolves
+        # to the same string): new_path == old_path in that case, and it is
+        # the phase's own current directory, never a collision with itself.
+        if new_dir != old_dir:
+            sibling_dirs = {
+                p.get("dir") for p in doc.get("phases") or [] if p.get("id") != phase_id
+            }
+            if new_dir in sibling_dirs:
+                die(
+                    'Error: roadmap-amend-phase: computed dir "'
+                    + new_dir
+                    + '" collides with another phase\'s directory'
+                )
+            if os.path.exists(new_path):
+                die(
+                    'Error: roadmap-amend-phase: "'
+                    + new_path
+                    + '" already exists on disk'
+                )
+
+        amended["dir"] = new_dir
 
     # Judge ONLY the lists this call actually writes. Handing over the merged
     # phase would re-judge a list the amendment never touched, turning every
@@ -2838,7 +3307,7 @@ def op_amend_write(argv):
         {
             (p.get("id"), ident)
             for p in doc.get("phases") or []
-            if p.get("id") != phase_id
+            if p.get("id") != phase_id and p.get("status") != "cancelled"
             for ident in _identities(p, "creates")
             if ident in set(added)
         },
@@ -2887,7 +3356,42 @@ def op_amend_write(argv):
             phase["needs"] = [
                 retarget_map.get(e["identity"], e) for e in contract_entries(phase, "needs")
             ]
-    write_doc_atomically(path, doc)
+
+    # --- Move the phase directory and rewrite its own tasks file's metadata,
+    # STILL before roadmap.json is written, so a write failure below can put
+    # both back exactly where this call found them. Every refusal above already
+    # happened before this point, so nothing here is reachable by a call this
+    # verb is going to reject. ---
+    tasks_backup = None
+    if new_dir is not None and new_dir != old_dir:
+        if old_path and os.path.isdir(old_path):
+            os.rename(old_path, new_path)
+            move = {"from": old_dir, "to": new_dir}
+        # The tasks file lives at the NEW location now that the directory (if
+        # any) has already moved -- _phase_tasks_path reads `amended["dir"]`,
+        # already set to new_dir above.
+        new_tasks_path = _phase_tasks_path(path, doc, amended)
+        if new_tasks_path and os.path.isfile(new_tasks_path):
+            original_tasks_doc = _rewrite_phase_tasks_metadata(
+                new_tasks_path, phase_id, new_dir, stored.get("slug") or "", amended.get("slug") or ""
+            )
+            tasks_backup = (new_tasks_path, original_tasks_doc)
+
+    try:
+        write_doc_atomically(path, doc)
+    except Exception:
+        # Put both back exactly as this call found them, in reverse order,
+        # before letting the write's own exception propagate.
+        if tasks_backup is not None:
+            _restore_phase_tasks_metadata(*tasks_backup)
+        if move is not None:
+            os.rename(new_path, old_path)
+        raise
+
+    # Tagged with this call's own --phase only now that the write has landed --
+    # a refused amendment reports nothing, because nothing was written.
+    sanitized = [{"phase": phase_id, **entry} for entry in sanitize_report]
+    _print_sanitize_warnings("roadmap-amend-phase", sanitized)
 
     # Advisory only, exit status stays 0: correcting an already-completed phase's
     # prose creates is precisely the repair this verb exists for, so no status
@@ -2920,6 +3424,8 @@ def op_amend_write(argv):
             # field noticed them, because neither amended creates or needs.
             "amended": sorted(k for k in patch if k in AMENDABLE_KEYS),
             "retargeted": retargeted,
+            "sanitized": sanitized,
+            "move": move,
         },
         sys.stdout,
         indent=2,
@@ -3396,7 +3902,7 @@ def op_list_archivable_phases(argv):
                     {
                         "id": _index(entry, "id", path),
                         "status": status,
-                        "terminal": status == "completed",
+                        "terminal": status in TERMINAL_PHASE_STATUSES,
                         "stuck": status == "verification_failed",
                     }
                 )
@@ -3648,7 +4154,32 @@ def op_set_status(argv):
     if current == "":
         die("Error: roadmap-set-status: phase " + phase_raw + " not found in " + path)
 
-    allowed = new_status == "verification_failed" or (
+    # Two unconditional refusals, neither --force-able, checked before the
+    # ordinary allowed/force check below so a doomed attempt never reaches
+    # that generic message -- which would misleadingly imply --force could
+    # satisfy it when nothing can.
+    if current == "completed" and new_status == "cancelled":
+        die(
+            "Error: roadmap-set-status: phase "
+            + phase_raw
+            + " cannot transition from completed to cancelled -- completed is"
+            " terminal and this transition has no --force override"
+        )
+    if current == "cancelled" and new_status not in ("cancelled", "pending"):
+        die(
+            "Error: roadmap-set-status: phase "
+            + phase_raw
+            + " cannot transition from cancelled to "
+            + new_status
+            + " -- cancelled only re-opens to pending, with --force, and has no"
+            " other --force override"
+        )
+
+    # verification_failed is reachable from any non-terminal state EXCEPT
+    # cancelled -- the refusal above already blocks cancelled -> verification_failed,
+    # and this line is the one the STATUS_TRANSITIONS comment documents, so
+    # both must agree.
+    allowed = (new_status == "verification_failed" and current != "cancelled") or (
         current + ":" + new_status
     ) in STATUS_TRANSITIONS
     if not allowed and not force:
@@ -3698,12 +4229,13 @@ def op_set_status(argv):
                 refusals + ["", VERIFICATION_GATE_NOTE],
             )
 
-    # Completing a phase also releases its claim in the same atomic write -- no
-    # window where status reads completed while the phase still shows claimed.
+    # Reaching a terminal status also releases the claim in the same atomic
+    # write -- no window where status reads completed or cancelled while the
+    # phase still shows claimed.
     for phase in phases:
         if phase.get("id") == phase_id:
             phase["status"] = new_status
-            if new_status == "completed":
+            if new_status in TERMINAL_PHASE_STATUSES:
                 phase["claim"] = None
 
     write_doc_atomically(path, doc)
@@ -3908,6 +4440,11 @@ def op_reconcile(argv):
         key = _jq_raw(phase.get("id"))
         directory = _tsv(phase.get("dir"))
         status = _tsv(phase.get("status"))
+        if status == "cancelled":
+            # Cancelled is terminal and abandoned by choice, not by the state
+            # its tasks file happens to be in -- reconcile never corrects it in
+            # either direction, whatever ground_truth would say.
+            continue
         # Phase tasks files follow <feature>-phase-<id>-tasks.json, the same
         # convention phase-overlap, execute.md Step 1.7, plan.md Phase 3e and
         # status.md use. Reading a bare tasks.json here made every lookup miss,

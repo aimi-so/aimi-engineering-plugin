@@ -2324,6 +2324,72 @@ cmd_mark_skipped() {
   printf '{"id":"%s","status":"skipped"}\n' "$story_id"
 }
 
+# Withdraw a pending, dependency-free story from a plan and record why.
+# Flags: --reason <text> (required by tasks.py, not here -- see below)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
+#
+# Deliberately NOT modelled on the mark-* wrapper shape above it: those four
+# (and update-field) call validate_story_exists in bash, BEFORE the lock. This
+# one does not -- every refusal (not found, not pending, has dependents, last
+# story in the file, missing/empty --reason) is decided inside tasks.py's
+# op_remove_story, in the single crossing, so a story that stops being
+# removable between resolution and the lock is judged against what the
+# document says under the lock rather than against a stale bash-side read.
+# The only bash-level check left is the Usage line below, which is a CLI-shape
+# check (an argument is missing) and not one of those document-dependent
+# preconditions.
+cmd_remove_story() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--reason" ]; then
+      i=$((i + 1))
+      reason="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh remove-story <story-id> --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason is treated the same as an absent one -- the same rule
+  # cmd_mark_complete applies to --evidence -- so tasks.py sees no flag at all
+  # rather than an empty string, and refuses either shape identically.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. No pre-lock validate_story_exists -- see
+  # the comment above this wrapper.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" remove-story \
+        --tasks-file "$tasks_file" --story-id "$story_id" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -13139,12 +13205,14 @@ _archivable_file_is_terminal() {
 # feature's roadmap.json (read through roadmap.py's own list-archivable-phases
 # op, which owns roadmap.json's document logic; NOT through a roadmap-lifecycle
 # subcommand, whose wrapper wants a feature slug where this walks paths) marks
-# every phase completed -- rather than piecemeal as each phase happens to
-# finish. "completed" is the only terminal phase status (see the roadmap
-# status enum in cmd_roadmap_set_status); there is no "deferred" status. A
-# phase stuck in verification_failed therefore excludes its feature from the
-# result same as any other non-completed status, but is never a *silent*
-# dead end: it's called out on stderr each time, naming the feature and the
+# every phase terminal -- rather than piecemeal as each phase happens to
+# finish. "completed" and "cancelled" are the two terminal phase statuses
+# (see the roadmap status enum in cmd_roadmap_set_status, and its "cancelled"
+# bullet for why an abandoned phase counts the same as a finished one here);
+# there is no "deferred" status. A phase stuck in verification_failed
+# therefore excludes its feature from the result same as any other
+# non-terminal status, but is never a *silent* dead end: it's called out on
+# stderr each time, naming the feature and the
 # blocked phase ids, so the block stays discoverable instead of an
 # unexplained permanent absence from the list. A feature folder with no
 # roadmap.json (or a malformed one) falls back to the flat per-file terminal
@@ -15120,8 +15188,8 @@ cmd_roadmap_init() {
 # truthful.
 #
 cmd_roadmap_amend_phase() {
-  local feature="" phase_id="" file="" goal_flag="" branch_flag=""
-  local have_goal=false have_branch=false
+  local feature="" phase_id="" file="" goal_flag="" branch_flag="" name_flag="" slug_flag=""
+  local have_goal=false have_branch=false have_name=false have_slug=false
   local retarget_pairs='[]'
   local pair pair_old pair_new
 
@@ -15132,6 +15200,8 @@ cmd_roadmap_amend_phase() {
       --file) shift; file="${1:-}" ;;
       --goal) shift; goal_flag="${1:-}"; have_goal=true ;;
       --branch) shift; branch_flag="${1:-}"; have_branch=true ;;
+      --name) shift; name_flag="${1:-}"; have_name=true ;;
+      --slug) shift; slug_flag="${1:-}"; have_slug=true ;;
       --retarget-needs)
         shift
         pair="${1:-}"
@@ -15173,7 +15243,7 @@ cmd_roadmap_amend_phase() {
       exit 1
     fi
     payload=$(cat "$file")
-  elif [ "$have_goal" != true ] && [ "$have_branch" != true ]; then
+  elif [ "$have_goal" != true ] && [ "$have_branch" != true ] && [ "$have_name" != true ] && [ "$have_slug" != true ]; then
     payload=$(cat)
   fi
 
@@ -15185,12 +15255,14 @@ cmd_roadmap_amend_phase() {
   # Same split, and for the same reason, as roadmap-init: a refusal must not
   # take the lock and must not touch the file.
   check_python3
-  local goal_args=() branch_args=()
+  local goal_args=() branch_args=() name_args=() slug_args=()
   [ "$have_goal" = true ] && goal_args=(--goal "$goal_flag")
   [ "$have_branch" = true ] && branch_args=(--branch "$branch_flag")
+  [ "$have_name" = true ] && name_args=(--name "$name_flag")
+  [ "$have_slug" = true ] && slug_args=(--slug "$slug_flag")
   local sanitized
   sanitized=$(printf '%s' "$payload" | python3 "$(_aimi_roadmap_py)" amend-validate \
-    "${goal_args[@]}" "${branch_args[@]}") || exit $?
+    "${goal_args[@]}" "${branch_args[@]}" "${name_args[@]}" "${slug_args[@]}") || exit $?
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-amend-phase" "$feature")
@@ -15312,9 +15384,9 @@ cmd_roadmap_set_status() {
   _roadmap_validate_phase_id "$phase_id" "roadmap-set-status"
 
   case "$new_status" in
-    pending|planned|in_progress|completed|verification_failed) ;;
+    pending|planned|in_progress|completed|verification_failed|cancelled) ;;
     *)
-      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed, got: $new_status" >&2
+      echo "Error: roadmap-set-status: --status must be one of pending|planned|in_progress|completed|verification_failed|cancelled, got: $new_status" >&2
       exit 1
       ;;
   esac
@@ -16217,6 +16289,12 @@ COMMANDS:
                               Mark story as failed (returns {id, status, notes} JSON)
     mark-skipped <id> [--tasks-file <path>]
                               Mark story as skipped (returns {id, status} JSON)
+    remove-story <id> --reason <text> [--tasks-file <path>]
+                              Withdraw a pending, dependency-free story and record why
+                              (returns {id, removed, remaining} JSON). Refuses (writes
+                              nothing) when the id is not found, the story is not
+                              pending, another story depends on it, it is the only
+                              story left in the file, or --reason is missing/empty.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -16990,7 +17068,20 @@ COMMANDS:
                               missing id/name/goal, a dangling dependsOn reference,
                               or a computed dir that fails ^phase-[0-9]+(\.[0-9]+)?
                               (-[a-z0-9][a-z0-9-]*)?$. Free-text fields are sanitized
-                              and length-capped per commands/references/sanitization.md.
+                              and length-capped: name 200, goal 2000, slug 100,
+                              notes 5000, each successCriteria entry 2000, each
+                              areas entry 500, branch 200, each creates/needs
+                              description 500 -- full rules at
+                              commands/references/sanitization.md. A field the
+                              sanitizer actually rewrote or truncated is reported,
+                              never echoed: one stderr warning line per changed
+                              field/entry (phase, field name, list index when
+                              present, the change kind(s) -- rewritten and/or
+                              truncated -- and before/after character counts,
+                              never the field's own value), and the result JSON's
+                              sanitized[] array carries the same per-field records
+                              ({phase, field, index, changes[], before, after}),
+                              empty when nothing changed.
                               A creates/needs entry is {identity, description};
                               an entry that is not that object, or that carries
                               any other key, is rejected naming the key. Also
@@ -17006,35 +17097,73 @@ COMMANDS:
                               and rationale: commands/references/scope-contexts.md
                               section "Creates/Needs Contracts".
     roadmap-amend-phase --feature <slug> --phase <id> [--goal <text>] [--branch <name>]
-                              [--file <path>] [--retarget-needs "<old>=<new>"]...
+                              [--name <text>] [--slug <slug>] [--file <path>]
+                              [--retarget-needs "<old>=<new>"]...
                               Correct an EXISTING phase's contract in place --
                               the one writer for a phase roadmap-init already
                               created, since --sync leaves an existing phase
                               byte-for-byte alone. Locked read-modify-write with
                               the same mktemp-then-mv atomic swap.
-                              Amendable fields are exactly six: goal,
-                              successCriteria, creates, needs, areas, branch.
-                              They arrive as scalar flags (--goal/--branch) or as
+                              Amendable fields: goal, successCriteria, creates,
+                              needs, areas, branch, name, slug. They arrive as
+                              scalar flags (--goal/--branch/--name/--slug) or as
                               a JSON object on stdin or --file; stdin is read only
-                              when neither scalar flag is given. Merge is partial
+                              when no scalar flag is given. Merge is partial
                               by key presence -- a key present replaces that field
                               wholesale, a key absent leaves the stored value
                               byte-for-byte unchanged. Every other phase, the
                               document metadata, and this phase's own id, dir,
-                              slug, name, dependsOn, status and claim are
-                              untouched.
+                              dependsOn, status and claim are untouched directly
+                              -- dir is instead RECOMPUTED from id and the
+                              (possibly amended) slug whenever name or slug is
+                              amended, using the exact phase-<id>[-<slug>]
+                              formula roadmap-init itself uses.
                               branch is amendable because nothing else writes it
                               for an existing phase (that is why a decimal phase's
                               null branch could not be filled). status and claim
                               are NOT: roadmap-set-status and roadmap-claim /
                               roadmap-release-claim already own them, and both keys
-                              are rejected by name pointing at their owner.
+                              are rejected by name pointing at their owner. dir is
+                              also refused, with its own message naming slug as
+                              the way to change it, since it is never itself a
+                              patch key -- id and dependsOn keep the generic
+                              "phase identity, written once by roadmap-init"
+                              message.
                               Caveat: amending branch rewrites the roadmap field
                               only -- it does not move a worktree or git branch an
                               in_progress phase has already created.
+                              Amending name or slug is additionally gated: the
+                              phase's own status must be pending or planned, its
+                              claim must be null, and every story in its own
+                              phase tasks file (when one exists) must still be
+                              pending -- refused by name, before roadmap.json or
+                              any file on disk is touched, when any one of the
+                              three does not hold. When it does, and slug changes
+                              the computed dir, the same locked call moves
+                              <feature_dir>/<old_dir> to <feature_dir>/<new_dir>
+                              on disk (refusing first on a DIR_REGEX failure or a
+                              collision with another phase's dir or an existing
+                              path), rewrites that phase's own tasks file's
+                              metadata.phase.dir to match, and rewrites
+                              metadata.branchName's own "-phase-<idSlug>-<slug>"
+                              segment when it carried the old slug -- a phase
+                              with no tasks file on disk yet still moves cleanly,
+                              with no tasks-file rewrite attempted. A roadmap.json
+                              write that then fails moves the directory back and
+                              restores the tasks file's metadata to their exact
+                              pre-amend values before the call exits non-zero.
                               Values pass roadmap-init's own gates: the same
-                              sanitizer and caps, the same creates/needs identity
-                              guard, and the same branch pattern.
+                              sanitizer and caps (name 200, goal 2000, slug 100,
+                              each successCriteria entry 2000, each areas entry
+                              500, branch 200, each creates/needs description 500),
+                              the same creates/needs identity guard, and the
+                              same branch pattern. A field the sanitizer
+                              actually rewrote or truncated is reported the same
+                              way roadmap-init reports it -- one stderr warning
+                              line per changed field/entry, never the field's own
+                              value, and the result JSON's sanitized[] array
+                              (phase is this call's own --phase on every entry,
+                              since one call amends exactly one phase).
                               Dropping or renaming a creates identity a later
                               phase cites in needs is REFUSED by default; the error
                               names every downstream phase and identity and prints
@@ -17050,7 +17179,9 @@ COMMANDS:
                               creates identity another phase declares. Advisory
                               only (exit 0): a completed phase whose handoff.md
                               omits a newly introduced identity.
-                              Prints {roadmap, phase, amended[], retargeted[]}.
+                              Prints {roadmap, phase, amended[], retargeted[],
+                              sanitized[], move}, where move is {from, to} when a
+                              directory was moved and null otherwise.
     normalize-contracts --feature <slug>
                               Migrate a roadmap's stored creates/needs entries from
                               the 1.0 form -- one string, "identity (description)" --
@@ -17103,17 +17234,32 @@ COMMANDS:
                               Reads no tasks file, so its answer depends on
                               roadmap.json alone and is ordered by numeric id.
     roadmap-set-status --feature <slug> --phase <id> --status <status> [--force]
-                              Locked read-modify-write. Enforces the guarded order
-                              pending -> planned -> in_progress -> completed, plus
-                              verification_failed -> completed (retry path); any
-                              status may move to verification_failed. Other
-                              transitions require --force. Transitioning to
+                              Locked read-modify-write. --status accepts
+                              pending|planned|in_progress|completed|
+                              verification_failed|cancelled. Enforces the
+                              guarded order pending -> planned -> in_progress
+                              -> completed, plus verification_failed ->
+                              completed (retry path); any status (except from
+                              cancelled) may move to verification_failed.
+                              pending|planned -> cancelled needs no --force;
+                              in_progress|verification_failed -> cancelled
+                              need --force. completed -> cancelled is refused
+                              even with --force -- completed is terminal and
+                              this transition has no override, the same shape
+                              as the completed handoff.md precondition below.
+                              cancelled -> pending (reopening) is refused
+                              without --force and succeeds with --force;
+                              cancelled -> cancelled is an idempotent success;
+                              every other departure from cancelled is refused
+                              even with --force. Other ordinary transitions
+                              require --force. Transitioning to
                               completed always requires handoff.md to already
                               exist on disk at the phase's dir (write it first
                               with roadmap-write-handoff) -- this precondition
-                              is NOT overridable by --force. A completed
-                              transition also clears the phase's claim in the
-                              same atomic write.
+                              is NOT overridable by --force. Reaching a
+                              terminal status (completed or cancelled) also
+                              clears the phase's claim in the same atomic
+                              write.
     roadmap-write-handoff --feature <slug> --phase <id> [--file <path>]
                               Read a JSON object (stdin or --file) with five
                               optional array-of-string fields -- decisions,
@@ -17446,6 +17592,7 @@ main() {
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
+    remove-story)      shift; cmd_remove_story "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;

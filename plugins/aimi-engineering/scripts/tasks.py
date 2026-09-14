@@ -144,6 +144,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # jq's number rendering and jq's cross-type ordering, both already solved for
 # roadmap.json and neither of them roadmap-specific. Importing beats a second
@@ -166,6 +167,14 @@ from roadmap import TERMINAL_STORY_STATUSES, _json_type, ground_truth, jq_number
 # returns a dict and omits any story a cycle or a dangling dependency never
 # reaches. This import is the writer; that one stays the checker.
 from story_merge import compute_waves
+
+# The one prose sanitizer roadmap.py and story_merge.py already import -- see
+# sanitize.py's own docstring for why it is a module of its own rather than a
+# copy in whichever file reached for it first. op_remove_story (below) is the
+# first WRITER of metadata.decisions anywhere in this file -- every existing
+# entry is written command-side, at plan time -- so it needs the identical
+# rule rather than a third copy of it.
+from sanitize import rm_sanitize
 
 # THE default, in the one place it is now written.
 #
@@ -4315,6 +4324,120 @@ def op_cascade_skip(argv):
     return 0
 
 
+def op_remove_story(argv):
+    """remove-story: withdraw a pending, dependency-free story and record why.
+
+    The one deliberate exception to the mark-* wrapper shape it is otherwise
+    modelled on: every mark-* verb has aimi-cli.sh call validate_story_exists
+    BEFORE the lock, but this op decides every refusal itself, inside the
+    single crossing -- not-found, not-pending, has-dependents, last-story,
+    missing/empty --reason, in that fixed order. A caller targeting a
+    nonexistent id must see "not found" rather than a later-stage message,
+    which is why the order matters and is not incidental.
+
+    metadata.decisions has no other Python writer anywhere in this file --
+    every existing entry is written command-side, at plan time. This is the
+    first, and its shape is authored fresh from the schema documented in the
+    top-level CLAUDE.md's Tasks File Schema section, not ported from a jq
+    program that no longer exists.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    reason = _flag(argv, "--reason")
+    if not path or story_id is None:
+        die(
+            "Usage: tasks.py remove-story --tasks-file <path> --story-id <id> "
+            "--reason <text>"
+        )
+    docs = read_docs(path, "remove-story")
+
+    # The first document (in stream order) that carries the id, mirroring how
+    # op_validate_story_exists answers "found" across the whole stream. A
+    # tasks file is one document in practice; this is well-defined either way.
+    target_doc = None
+    story = None
+    for doc in docs:
+        matches = stories_with_id(doc, story_id)
+        if matches:
+            target_doc = doc
+            story = matches[0]
+            break
+    if target_doc is None:
+        die("Error: remove-story: story " + story_id + " not found in " + path)
+
+    status = jq_index(story, "status", STORY)
+    if status != "pending":
+        die(
+            "Error: remove-story: story " + story_id + " is not pending "
+            "(status: " + jq_tostring(status) + ")"
+        )
+
+    # _depends_on_any is the same predicate cascade_skip's closure uses --
+    # reused rather than restated, including how it walks a malformed
+    # dependsOn the same way jq_iterate does everywhere else in this file.
+    dependents = sorted(
+        jq_index(other, "id", STORY)
+        for other in _stories(target_doc)
+        if jq_index(other, "id", STORY) != story_id and _depends_on_any(other, [story_id])
+    )
+    if dependents:
+        die(
+            "Error: remove-story: story " + story_id + " has dependents: "
+            + ", ".join(dependents)
+        )
+
+    if len(_stories(target_doc)) == 1:
+        # Same jq_alternative(jq_index(...), None) shape op_set_execution_mode
+        # already uses to read metadata.phase's presence.
+        phase = jq_alternative(
+            jq_index(jq_index(target_doc, "metadata"), "phase", ".metadata"), None
+        )
+        if phase is not None:
+            die(
+                "Error: remove-story: story " + story_id + " is the only story "
+                "in " + path + " -- cancel the phase with roadmap-set-status "
+                "--status cancelled instead"
+            )
+        die(
+            "Error: remove-story: story " + story_id + " is the only story "
+            "in " + path + " -- use archive-task instead"
+        )
+
+    if not reason or not reason.strip():
+        die("Error: remove-story: --reason is required")
+
+    remaining = [s for s in _stories(target_doc) if jq_index(s, "id", STORY) != story_id]
+    target_doc["userStories"] = remaining
+
+    metadata = target_doc.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        target_doc["metadata"] = metadata
+    decisions = metadata.get("decisions")
+    if not isinstance(decisions, list):
+        decisions = []
+        metadata["decisions"] = decisions
+
+    sanitized_reason = rm_sanitize(reason, 2000)
+    title = jq_index(story, "title", STORY)
+    sanitized_title = rm_sanitize(title, 2000) if isinstance(title, str) else title
+    decisions.append(
+        {
+            "anchor": "removeStory:" + story_id,
+            "source": "removeStory",
+            "text": sanitized_title,
+            "resolution": (
+                "removed: " + sanitized_reason + " ("
+                + time.strftime("%Y-%m-%d", time.gmtime()) + ")"
+            ),
+        }
+    )
+
+    write_docs_atomically(path, docs)
+    _emit({"id": story_id, "removed": True, "remaining": len(remaining)})
+    return 0
+
+
 def op_reset_orphaned(argv):
     """One selection, used for both the write and the report.
 
@@ -6938,6 +7061,7 @@ _OPS = {
     "normalize-verification": _normalize_op("normalize-verification", normalize_verification),
     "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
     "cascade-skip": op_cascade_skip,
+    "remove-story": op_remove_story,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),
