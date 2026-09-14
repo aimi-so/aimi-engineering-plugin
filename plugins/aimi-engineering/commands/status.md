@@ -222,7 +222,7 @@ $AIMI_CLI find-tasks-all
 For each phase, in the order returned by `roadmap-get` (numeric):
 
 1. **ID and name:** `Phase [id]: [name]`
-2. **Status:** printed verbatim from `phase.status` — one of `pending`, `planned`, `in_progress`, `verification_failed`, `completed`.
+2. **Status:** printed verbatim from `phase.status` — one of `pending`, `planned`, `in_progress`, `verification_failed`, `completed`, `cancelled`.
 3. **Claim holder** (only when `phase.claim` is non-null): `Claimed by: [claim.claimedBy]`, followed by an `(alive)` or `(stale)` marker. Determine liveness with a signal-zero probe on `claim.claimedPid` — this mirrors the CLI's own stale-claim check and never mutates `roadmap.json`:
    ```bash
    kill -0 [claim.claimedPid] 2>/dev/null && echo alive || echo stale
@@ -237,7 +237,7 @@ For each phase, in the order returned by `roadmap-get` (numeric):
      ```
      Show progress as `[completed]/[total]` from the returned counts.
    - If it does NOT appear, the phase is **outline only** — show the literal marker `outline only` instead of a done/total figure.
-5. **Blockers** (only when `phase.status` is not `completed` and `phase.dependsOn` is non-empty): from the phases array already fetched, list every id in `phase.dependsOn` whose corresponding phase has `status != "completed"`, as `Blocked by: Phase [id] ([name], [status])`. Omit this line entirely when every dependency is `completed` (or `dependsOn` is empty).
+5. **Blockers** (only when `phase.status` is neither `completed` nor `cancelled`, and `phase.dependsOn` is non-empty): from the phases array already fetched, list every id in `phase.dependsOn` whose corresponding phase has a `status` that is neither `completed` nor `cancelled`, as `Blocked by: Phase [id] ([name], [status])` — a cancelled dependency satisfies `dependsOn` the same as a completed one, so it is never listed here. Omit this line entirely when every dependency is `completed` or `cancelled` (or `dependsOn` is empty).
 
 ### Sample Output
 
