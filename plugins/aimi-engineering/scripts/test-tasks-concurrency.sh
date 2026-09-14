@@ -803,6 +803,59 @@ race_update_notes_first() { "$CLI" update-field US-001 notes first-writer; }
 race_update_notes_second() { "$CLI" update-field US-001 notes second-writer; }
 
 # ============================================================================
+# remove-story: precondition read under the lock
+# ============================================================================
+
+# remove-story decides its has-dependents refusal inside the same single
+# crossing every other check runs in (see tasks.py's op_remove_story), so a
+# dependsOn edge that lands on the target story while remove-story waits for
+# the lock must still be seen -- not a document read before the mutation
+# landed. Modelled on the gate-pass/gate-fail races above: the mutation adds
+# exactly what remove-story must refuse to have missed.
+test_remove_story_refuses_a_dependent_added_under_it() {
+  echo ""
+  echo "=== remove-story: a dependent added while in flight is not missed ==="
+
+  local dir="$TEST_DIR/remove-story-race"
+  local tasks_file
+  tasks_file=$(build_small_fixture "$dir" <<'EOF'
+{
+  "schemaVersion": "3.2",
+  "metadata": {"title": "ref: remove-story race", "type": "ref", "branchName": "ref/remove-story-race", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-001", "title": "Target", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""},
+    {"id": "US-002", "title": "Sibling", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  )
+
+  cd "$dir" || return
+
+  # US-002 grows a dependsOn edge onto US-001 while remove-story US-001 waits
+  # for the lock -- the document remove-story must refuse against is this one,
+  # not the one it would have read had it not blocked.
+  run_against_a_held_lock "$tasks_file" \
+    '(.userStories[] | select(.id == "US-002")) |= . + {dependsOn: ["US-001"]}' \
+    remove-story US-001 --reason "race test"
+
+  assert_eq "1" "$HELD_LOCK_MARKED" \
+    "remove-story race: the dependent edge landed while remove-story was in flight"
+  assert_exit_code "1" "$HELD_LOCK_RC" \
+    "remove-story race: refuses rather than removing a story now depended on"
+
+  local remaining
+  remaining=$(jq '.userStories | length' "$tasks_file")
+  assert_eq "2" "$remaining" \
+    "remove-story race: both stories are still on disk"
+
+  local echoed
+  echoed=$(cat "$HELD_LOCK_OUT")
+  assert_contains "US-002" "$echoed" \
+    "remove-story race: and names the dependent the mutation created"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -840,6 +893,10 @@ main() {
   echo "--- mark-complete / update-field Tests ---"
   test_two_mark_completes_both_land
   test_two_update_fields_leave_one_winner
+
+  echo ""
+  echo "--- remove-story Tests ---"
+  test_remove_story_refuses_a_dependent_added_under_it
 
   echo ""
   echo "================================================"

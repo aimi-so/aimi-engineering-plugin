@@ -2324,6 +2324,72 @@ cmd_mark_skipped() {
   printf '{"id":"%s","status":"skipped"}\n' "$story_id"
 }
 
+# Withdraw a pending, dependency-free story from a plan and record why.
+# Flags: --reason <text> (required by tasks.py, not here -- see below)
+#        --tasks-file <path> (optional; falls back to get_tasks_file)
+#
+# Deliberately NOT modelled on the mark-* wrapper shape above it: those four
+# (and update-field) call validate_story_exists in bash, BEFORE the lock. This
+# one does not -- every refusal (not found, not pending, has dependents, last
+# story in the file, missing/empty --reason) is decided inside tasks.py's
+# op_remove_story, in the single crossing, so a story that stops being
+# removable between resolution and the lock is judged against what the
+# document says under the lock rather than against a stale bash-side read.
+# The only bash-level check left is the Usage line below, which is a CLI-shape
+# check (an argument is missing) and not one of those document-dependent
+# preconditions.
+cmd_remove_story() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--reason" ]; then
+      i=$((i + 1))
+      reason="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh remove-story <story-id> --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason is treated the same as an absent one -- the same rule
+  # cmd_mark_complete applies to --evidence -- so tasks.py sees no flag at all
+  # rather than an empty string, and refuses either shape identically.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. No pre-lock validate_story_exists -- see
+  # the comment above this wrapper.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" remove-story \
+        --tasks-file "$tasks_file" --story-id "$story_id" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -16223,6 +16289,12 @@ COMMANDS:
                               Mark story as failed (returns {id, status, notes} JSON)
     mark-skipped <id> [--tasks-file <path>]
                               Mark story as skipped (returns {id, status} JSON)
+    remove-story <id> --reason <text> [--tasks-file <path>]
+                              Withdraw a pending, dependency-free story and record why
+                              (returns {id, removed, remaining} JSON). Refuses (writes
+                              nothing) when the id is not found, the story is not
+                              pending, another story depends on it, it is the only
+                              story left in the file, or --reason is missing/empty.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -17520,6 +17592,7 @@ main() {
     gate-pass)         shift; cmd_gate_pass "$@" ;;
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
+    remove-story)      shift; cmd_remove_story "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;

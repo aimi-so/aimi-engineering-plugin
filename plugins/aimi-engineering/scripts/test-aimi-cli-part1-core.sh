@@ -903,6 +903,144 @@ test_mark_skipped() {
   assert_eq "skipped" "$last" "last-result state set to skipped"
 }
 
+# remove-story never touches $AIMI_DIR/current-tasks or the shared $TASKS_FILE
+# fixture -- every call below is against its own --tasks-file, so this test can
+# run anywhere in the lifecycle sequence without disturbing the tests around it.
+test_remove_story() {
+  echo ""
+  echo "=== Testing remove-story ==="
+
+  local rc err_out
+
+  # --- success: removes a pending, dependency-free story and records why ---
+  local file_a="$TASKS_DIR/9999-99-89-remove-story-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-001", "title": "Root", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "wave": 1, "notes": ""},
+    {"id": "US-002", "title": "Leaf", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "pending", "dependsOn": [], "wave": 1, "notes": ""}
+  ]
+}
+EOF
+
+  local output
+  output=$("$CLI" remove-story US-002 --reason 'scope cut for issue 157' --tasks-file "$file_a")
+  assert_eq '{"id":"US-002","removed":true,"remaining":1}' \
+    "$(printf '%s' "$output" | jq -c '{id, removed, remaining}')" \
+    "remove-story: success payload names id/removed/remaining"
+
+  assert_eq "1" "$(jq '.userStories | length' "$file_a")" \
+    "remove-story: the story is gone from userStories on disk"
+  assert_eq "US-001" "$(jq -r '.userStories[0].id' "$file_a")" \
+    "remove-story: the surviving story is the one that was not removed"
+
+  assert_eq "removeStory:US-002" "$(jq -r '.metadata.decisions[0].anchor' "$file_a")" \
+    "remove-story: decision anchor names the removed story"
+  assert_eq "removeStory" "$(jq -r '.metadata.decisions[0].source' "$file_a")" \
+    "remove-story: decision source is removeStory"
+  assert_eq "Leaf" "$(jq -r '.metadata.decisions[0].text' "$file_a")" \
+    "remove-story: decision text is the removed story's own title"
+  assert_contains "removed: scope cut for issue 157 (" \
+    "$(jq -r '.metadata.decisions[0].resolution' "$file_a")" \
+    "remove-story: decision resolution embeds the reason and a date stamp"
+
+  # Validators stay green after a dependency-free removal.
+  "$CLI" validate-deps --tasks-file "$file_a" > /dev/null 2>&1 && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "remove-story: validate-deps still passes after removal"
+  assert_eq "true" "$("$CLI" validate-ids --tasks-file "$file_a" | jq -r '.valid')" \
+    "remove-story: validate-ids still passes after removal"
+  assert_eq "true" "$("$CLI" validate-waves --tasks-file "$file_a" | jq -r '.valid')" \
+    "remove-story: validate-waves still passes after removal"
+
+  # --- refusal: unknown id, file byte-for-byte unchanged ---
+  local before_a
+  before_a=$(cat "$file_a")
+  err_out=$("$CLI" remove-story US-999 --reason x --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: unknown id exits non-zero"
+  assert_contains "US-999" "$err_out" "remove-story: unknown id names the id in stderr"
+  assert_contains "not found" "$err_out" "remove-story: unknown id says it was not found"
+  assert_eq "$before_a" "$(cat "$file_a")" "remove-story: unknown id leaves the file byte-for-byte unchanged"
+
+  # --- refusals against a second fixture: not-pending, has-dependents,
+  #     missing --reason, empty --reason ---
+  local file_b="$TASKS_DIR/9999-99-89-remove-story-b-tasks.json"
+  cat > "$file_b" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-001", "title": "Root", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""},
+    {"id": "US-002", "title": "Dependent one", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "pending", "dependsOn": ["US-001"], "notes": ""},
+    {"id": "US-003", "title": "Dependent two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 3, "status": "pending", "dependsOn": ["US-001"], "notes": ""},
+    {"id": "US-004", "title": "Running", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 4, "status": "in_progress", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  local before_b
+  before_b=$(cat "$file_b")
+
+  err_out=$("$CLI" remove-story US-001 --reason x --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: a story with dependents exits non-zero"
+  assert_contains "US-002" "$err_out" "remove-story: dependents refusal names the first dependent"
+  assert_contains "US-003" "$err_out" "remove-story: dependents refusal names every dependent, not just the first"
+  assert_eq "$before_b" "$(cat "$file_b")" "remove-story: dependents refusal leaves the file unchanged"
+
+  err_out=$("$CLI" remove-story US-004 --reason x --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: a non-pending story exits non-zero"
+  assert_contains "in_progress" "$err_out" "remove-story: not-pending refusal names the actual status"
+  assert_eq "$before_b" "$(cat "$file_b")" "remove-story: not-pending refusal leaves the file unchanged"
+
+  err_out=$("$CLI" remove-story US-002 --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: missing --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "remove-story: missing --reason names the required flag"
+  assert_eq "$before_b" "$(cat "$file_b")" "remove-story: missing --reason leaves the file unchanged"
+
+  err_out=$("$CLI" remove-story US-002 --reason "" --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: empty --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "remove-story: empty --reason also names the required flag"
+  assert_eq "$before_b" "$(cat "$file_b")" "remove-story: empty --reason leaves the file unchanged"
+
+  # --- refusal: the only story left in a flat file points at archive-task ---
+  local file_c="$TASKS_DIR/9999-99-89-remove-story-c-tasks.json"
+  cat > "$file_c" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-001", "title": "Only", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  err_out=$("$CLI" remove-story US-001 --reason x --tasks-file "$file_c" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: the only story left in a flat file exits non-zero"
+  assert_contains "archive-task" "$err_out" "remove-story: last-story refusal on a flat file points at archive-task"
+  assert_eq "1" "$(jq '.userStories | length' "$file_c")" \
+    "remove-story: last-story refusal leaves the file unchanged"
+
+  # --- refusal: the only story left in a phase-scoped file points at
+  #     roadmap-set-status --status cancelled instead ---
+  local file_d="$TASKS_DIR/9999-99-89-remove-story-d-tasks.json"
+  cat > "$file_d" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2, "phase": {"id": 1, "dir": "phase-1"}},
+  "userStories": [
+    {"id": "US-001", "title": "Only", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  err_out=$("$CLI" remove-story US-001 --reason x --tasks-file "$file_d" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "remove-story: the only story left in a phase-scoped file exits non-zero"
+  assert_contains "roadmap-set-status" "$err_out" \
+    "remove-story: last-story refusal on a phase-scoped file points at roadmap-set-status"
+  assert_contains "--status cancelled" "$err_out" \
+    "remove-story: and names the cancelled status to set"
+
+  rm -f "$file_a" "$file_b" "$file_c" "$file_d"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -11178,6 +11316,7 @@ main() {
   test_mark_failed
   test_cascade_skip
   test_mark_skipped
+  test_remove_story
   test_validate_deps_circular
   test_validate_deps
   test_status
