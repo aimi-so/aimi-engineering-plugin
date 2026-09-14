@@ -2317,12 +2317,34 @@ test_roadmap_amend_phase_rejects_unamendable_keys() {
   assert_contains "roadmap-claim / roadmap-release-claim" "$output" \
     "roadmap-amend-phase keys: claim redirects to its owning verbs"
 
+  # id and dependsOn keep the generic phase-identity message: no writer of
+  # any kind exists for either. dir draws its own message below, since slug
+  # IS its writer now (through the D14-guarded rename path). name and slug
+  # are asserted separately too -- US-005 moved both out of this refusal
+  # entirely and into AMENDABLE_KEYS.
   local identity_key
-  for identity_key in id dir slug name dependsOn; do
+  for identity_key in id dependsOn; do
     output=$(jq -n --arg k "$identity_key" '{($k): "x"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
     assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: $identity_key key exits 1"
-    assert_contains "\"$identity_key\" is not amendable" "$output" "roadmap-amend-phase keys: $identity_key is rejected by name"
+    assert_contains "\"$identity_key\" is not amendable -- it is phase identity, written once by roadmap-init" "$output" \
+      "roadmap-amend-phase keys: $identity_key is rejected by name"
   done
+
+  output=$(jq -n '{dir: "x"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: dir key exits 1"
+  assert_contains "\"dir\" is not amendable -- it is derived from id and slug; amend slug to change it" "$output" \
+    "roadmap-amend-phase keys: dir names slug as the way to change it, not the generic phase-identity message"
+
+  # name and slug are no longer refused as amend keys at all -- accepted here
+  # (phase 2 is pending, unclaimed, no tasks file: the D14 guard passes clean).
+  output=$(jq -n '{name: "New Name"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase keys: name key is accepted, no longer refused"
+  output=$(jq -n '{slug: "new-slug"}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase keys: slug key is accepted, no longer refused"
+  # Restore phase 2's slug so the byte-for-byte comparison below (over the
+  # unrelated refusals that follow) is not itself judging this rename.
+  "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 --slug "override" >/dev/null
+  before=$(cat "$roadmap_file")
 
   output=$(jq -n '{}' | "$CLI" roadmap-amend-phase --feature "$feature" --phase 2 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "roadmap-amend-phase keys: empty amendment exits 1"
@@ -2791,6 +2813,196 @@ test_roadmap_amend_phase_concurrent_writes_stay_atomic() {
   assert_eq '["goal-from-writer-1","goal-from-writer-2","goal-from-writer-3","goal-from-writer-4","goal-from-writer-5","goal-from-writer-6"]' \
     "$(jq -c '[.phases[].goal]' "$roadmap_file")" \
     "roadmap-amend-phase concurrency: no update was lost to a stale read"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+# ============================================================================
+# roadmap-amend-phase --name/--slug rename (US-005)
+# ============================================================================
+
+# Materializes one phase, its own on-disk directory (as /aimi:plan --phase
+# would leave it) and, unless $4 is "no-tasks-file", that phase's own tasks
+# file with a story of status $5 (default: pending). $1 feature, $2 numeric
+# id, $3 slug.
+_roadmap_rename_fixture() {
+  local feature="$1" id="$2" slug="$3" tasks_mode="${4:-with-tasks-file}" story_status="${5:-pending}"
+  rm -rf ".aimi/tasks/$feature"
+  jq -n --argjson id "$id" --arg slug "$slug" \
+    '[{id: $id, name: "Phase", goal: "g", slug: $slug, dependsOn: []}]' \
+    | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local dir="phase-${id}-${slug}"
+  local phase_dir=".aimi/tasks/$feature/$dir"
+  mkdir -p "$phase_dir"
+  if [ "$tasks_mode" != "no-tasks-file" ]; then
+    local id_slug="${id//./-}"
+    jq -n --argjson id "$id" --arg dir "$dir" --arg status "$story_status" \
+      --arg branch "feat/${feature}-phase-${id_slug}-${slug}" \
+      '{schemaVersion: "3.3",
+        metadata: {title: "feat: phase", type: "feat", branchName: $branch,
+                    createdAt: "2026-09-14", planPath: null,
+                    roadmapPath: ("nope"), phase: {id: $id, dir: $dir}},
+        userStories: [{id: "US-001", title: "x", status: $status}]}' \
+      > "$phase_dir/${feature}-phase-${id}-tasks.json"
+  fi
+}
+
+test_roadmap_amend_phase_renames_moves_dir_and_tasks_metadata() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: moves the phase directory and rewrites its own tasks file's metadata ==="
+
+  local feature="rm-rename-int"
+  _roadmap_rename_fixture "$feature" 1 "old-slug"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --name "Renamed" --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase rename: integer id rename exits 0"
+  assert_eq '{"from":"phase-1-old-slug","to":"phase-1-new-slug"}' "$(printf '%s' "$output" | jq -c '.move')" \
+    "roadmap-amend-phase rename: move key reports {from, to}"
+
+  assert_eq "phase-1-new-slug" "$(jq -r '.phases[0].dir' "$roadmap_file")" \
+    "roadmap-amend-phase rename: roadmap.json's own dir field updated"
+  assert_eq "Renamed" "$(jq -r '.phases[0].name' "$roadmap_file")" \
+    "roadmap-amend-phase rename: name amended alongside slug"
+
+  if [ -d ".aimi/tasks/$feature/phase-1-old-slug" ]; then
+    echo -e "${RED}✗${NC} roadmap-amend-phase rename: old directory must no longer exist"
+    ((TESTS_FAILED++))
+  else
+    echo -e "${GREEN}✓${NC} roadmap-amend-phase rename: old directory no longer exists"
+    ((TESTS_PASSED++))
+  fi
+
+  local new_tasks_file=".aimi/tasks/$feature/phase-1-new-slug/${feature}-phase-1-tasks.json"
+  assert_eq "phase-1-new-slug" "$(jq -r '.metadata.phase.dir' "$new_tasks_file")" \
+    "roadmap-amend-phase rename: tasks file's own metadata.phase.dir rewritten"
+  assert_eq "feat/${feature}-phase-1-new-slug" "$(jq -r '.metadata.branchName' "$new_tasks_file")" \
+    "roadmap-amend-phase rename: tasks file's metadata.branchName phase segment rewritten"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_renames_decimal_id() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: moves the phase directory for a decimal phase id ==="
+
+  local feature="rm-rename-dec"
+  _roadmap_rename_fixture "$feature" 2.1 "old-slug"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 2.1 --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase rename: decimal id rename exits 0"
+  assert_eq '{"from":"phase-2.1-old-slug","to":"phase-2.1-new-slug"}' "$(printf '%s' "$output" | jq -c '.move')" \
+    "roadmap-amend-phase rename: decimal id move key reports {from, to}"
+  assert_eq "phase-2.1-new-slug" "$(jq -r '.phases[0].dir' "$roadmap_file")" \
+    "roadmap-amend-phase rename: decimal id roadmap.json dir field updated"
+
+  local new_tasks_file=".aimi/tasks/$feature/phase-2.1-new-slug/${feature}-phase-2.1-tasks.json"
+  assert_eq "feat/${feature}-phase-2-1-new-slug" "$(jq -r '.metadata.branchName' "$new_tasks_file")" \
+    "roadmap-amend-phase rename: decimal id branchName uses the dot-slugified id segment"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rename_with_no_tasks_file() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: a directory with no tasks file yet still moves cleanly ==="
+
+  local feature="rm-rename-notasks"
+  _roadmap_rename_fixture "$feature" 1 "old-slug" "no-tasks-file"
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-amend-phase rename: no-tasks-file rename exits 0"
+  assert_eq '{"from":"phase-1-old-slug","to":"phase-1-new-slug"}' "$(printf '%s' "$output" | jq -c '.move')" \
+    "roadmap-amend-phase rename: no-tasks-file move key still reports {from, to}"
+
+  if [ -d ".aimi/tasks/$feature/phase-1-new-slug" ]; then
+    echo -e "${GREEN}✓${NC} roadmap-amend-phase rename: new directory exists"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} roadmap-amend-phase rename: new directory must exist"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rename_refuses_started_story() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: refused when the phase's own tasks file has a started story ==="
+
+  local feature="rm-rename-started"
+  _roadmap_rename_fixture "$feature" 1 "old-slug" "with-tasks-file" "in_progress"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  local before; before=$(cat "$roadmap_file")
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase rename: started-story rename refused"
+  assert_contains "not safe to rename" "$output" "roadmap-amend-phase rename: refusal names the rename as unsafe"
+  assert_contains "story" "$output" "roadmap-amend-phase rename: refusal names the started story"
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase rename: refusal left roadmap.json byte-for-byte unchanged"
+
+  if [ -d ".aimi/tasks/$feature/phase-1-old-slug" ]; then
+    echo -e "${GREEN}✓${NC} roadmap-amend-phase rename: old directory untouched by the refusal"
+    ((TESTS_PASSED++))
+  else
+    echo -e "${RED}✗${NC} roadmap-amend-phase rename: old directory must survive a refused rename"
+    ((TESTS_FAILED++))
+  fi
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rename_refuses_claimed_or_in_progress() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: refused on a claimed phase or a phase past planned ==="
+
+  local feature="rm-rename-guard"
+  _roadmap_rename_fixture "$feature" 1 "old-slug" "no-tasks-file"
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+
+  jq '.phases[0].status = "in_progress"' "$roadmap_file" > "$roadmap_file.tmp" && mv "$roadmap_file.tmp" "$roadmap_file"
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase rename: in_progress phase refused"
+  assert_contains "not pending or planned" "$output" "roadmap-amend-phase rename: refusal names the status condition"
+
+  jq '.phases[0].status = "pending" | .phases[0].claim = {"claimedBy":"s","claimedAt":"now","claimedPid":999999999}' "$roadmap_file" \
+    > "$roadmap_file.tmp" && mv "$roadmap_file.tmp" "$roadmap_file"
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --slug "new-slug" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase rename: claimed phase refused"
+  assert_contains "phase is claimed" "$output" "roadmap-amend-phase rename: refusal names the claim condition"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
+test_roadmap_amend_phase_rename_refuses_dir_collision() {
+  echo ""
+  echo "=== roadmap-amend-phase --slug: refuses a computed dir that collides with another phase's stored dir ==="
+
+  local feature="rm-rename-collide"
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[
+    {id: 1, name: "A", goal: "g", slug: "a", dependsOn: []},
+    {id: 2, name: "B", goal: "g", slug: "b", dependsOn: []}
+  ]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap_file=".aimi/tasks/$feature/roadmap.json"
+  # No formula-derived dir can equal another phase's own id-prefixed dir (ids
+  # are unique) -- forced the way a hand-edited roadmap.json could produce one.
+  jq '.phases[1].dir = "phase-1-x"' "$roadmap_file" > "$roadmap_file.tmp" && mv "$roadmap_file.tmp" "$roadmap_file"
+  local before; before=$(cat "$roadmap_file")
+
+  local output exit_code
+  output=$("$CLI" roadmap-amend-phase --feature "$feature" --phase 1 --slug "x" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-amend-phase rename: dir collision refused"
+  assert_contains "collides with another phase" "$output" "roadmap-amend-phase rename: refusal names the collision"
+  assert_eq "$before" "$(cat "$roadmap_file")" "roadmap-amend-phase rename: dir collision refusal left roadmap.json byte-for-byte unchanged"
 
   rm -rf ".aimi/tasks/$feature"
 }
@@ -8851,6 +9063,12 @@ main() {
   test_roadmap_amend_phase_handoff_advisory_only
   test_roadmap_amend_phase_judges_only_the_lists_it_writes
   test_roadmap_amend_phase_concurrent_writes_stay_atomic
+  test_roadmap_amend_phase_renames_moves_dir_and_tasks_metadata
+  test_roadmap_amend_phase_renames_decimal_id
+  test_roadmap_amend_phase_rename_with_no_tasks_file
+  test_roadmap_amend_phase_rename_refuses_started_story
+  test_roadmap_amend_phase_rename_refuses_claimed_or_in_progress
+  test_roadmap_amend_phase_rename_refuses_dir_collision
   test_roadmap_decimal_sort
   test_roadmap_eligible_verdict_for_every_phase
   test_roadmap_eligible_zero_eligible_exits_zero

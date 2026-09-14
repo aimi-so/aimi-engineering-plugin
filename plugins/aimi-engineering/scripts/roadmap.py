@@ -44,6 +44,7 @@ pins its total, over a hundred of those assertions drive these verbs as black
 boxes through the CLI, and a faithful port does not move a single one of them.
 """
 
+import fcntl
 import json
 import os
 import re
@@ -692,6 +693,15 @@ def normalize_contracts(doc):
 # ---------------------------------------------------------------------------
 
 DIR_REGEX = re.compile(r"^phase-[0-9]+(\.[0-9]+)?(-[a-z0-9][a-z0-9-]*)?$")
+
+
+def _compute_phase_dir(phase_id, slug):
+    """phase-<id>[-<slug>] -- the one formula a phase's directory name is ever
+    computed by. init_sanitize uses this for a freshly created phase;
+    roadmap-amend-phase's rename logic (op_amend_write) uses it again for an
+    existing one, so the two can never compute two different answers for the
+    same (id, slug) pair."""
+    return "phase-" + _num(phase_id) + ("-" + slug if slug else "")
 # The terminal story statuses: the one rule that answers "has this story
 # finished?", and therefore "does this phase still have work?".
 #
@@ -949,7 +959,7 @@ def init_sanitize(phases):
         else:
             p["branch"] = None
 
-        p["dir"] = "phase-" + _num(p.get("id")) + ("-" + p["slug"] if len(p["slug"]) > 0 else "")
+        p["dir"] = _compute_phase_dir(p.get("id"), p["slug"])
         p["status"] = "pending"
         p["claim"] = None
         p["_sanitizeReport"] = report
@@ -988,16 +998,30 @@ def dangling_errors(phases_to_check, allowed_ids):
 # roadmap-amend-phase
 # ---------------------------------------------------------------------------
 #
-# The amendable set is exactly six keys, and the discriminator is "contract
-# field with no other writer". branch IS amendable for precisely that reason --
-# roadmap-init sets it at creation and --sync never revisits it, which is why a
-# decimal phase's null branch could not be filled in. status and claim are NOT,
-# on the opposite ground: roadmap-set-status owns status and roadmap-claim owns
-# claim, and a second writer would duplicate those guarantees rather than reuse
-# them.
-AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branch"]
+# The amendable set's discriminator is "contract field with no other writer".
+# branch IS amendable for precisely that reason -- roadmap-init sets it at
+# creation and --sync never revisits it, which is why a decimal phase's null
+# branch could not be filled in. status and claim are NOT, on the opposite
+# ground: roadmap-set-status owns status and roadmap-claim owns claim, and a
+# second writer would duplicate those guarantees rather than reuse them.
+#
+# name and slug joined this list once a rename had somewhere safe to go: they
+# are phase IDENTITY -- dir is derived from them, and a phase's own tasks file
+# cites its dir back -- so amending either is gated by the D14 guard in
+# op_amend_write (pending/planned, unclaimed, every own story still pending)
+# the other five fields never needed, and can move a directory and rewrite a
+# tasks file's metadata where the other five never touch the filesystem at
+# all. Appended AFTER branch, not inserted alphabetically: the six-key prefix
+# this list used to be is still a byte-for-byte prefix of it, which is what
+# keeps every existing "amendable fields are: ..." substring assertion true
+# without being rewritten for this story.
+AMENDABLE_KEYS = ["goal", "successCriteria", "creates", "needs", "areas", "branch", "name", "slug"]
 
-_PHASE_IDENTITY_KEYS = ["id", "dir", "slug", "name", "dependsOn"]
+# What is left once name and slug moved out: identity with no amend path of
+# ANY kind, not even a guarded one. dir is a special case of that rather than a
+# member of it -- see amend_key_errors, which gives it its own message pointing
+# at slug instead of folding it into this branch's generic one.
+_PHASE_IDENTITY_KEYS = ["id", "dir", "dependsOn"]
 
 
 def _identities(phase, key):
@@ -1014,6 +1038,8 @@ def amend_key_errors(payload):
             why = " -- phase status is owned by roadmap-set-status"
         elif key == "claim":
             why = " -- phase claims are owned by roadmap-claim / roadmap-release-claim"
+        elif key == "dir":
+            why = " -- it is derived from id and slug; amend slug to change it"
         elif key in _PHASE_IDENTITY_KEYS:
             why = " -- it is phase identity, written once by roadmap-init"
         else:
@@ -1026,6 +1052,10 @@ def amend_type_errors(payload):
     errors = []
     if "goal" in payload and (not isinstance(payload["goal"], str) or len(payload["goal"]) == 0):
         errors.append("  goal must be a non-empty string")
+    if "name" in payload and (not isinstance(payload["name"], str) or len(payload["name"]) == 0):
+        errors.append("  name must be a non-empty string")
+    if "slug" in payload and not isinstance(payload["slug"], str):
+        errors.append("  slug must be a string")
     if "branch" in payload and payload["branch"] is not None and not isinstance(
         payload["branch"], str
     ):
@@ -1066,6 +1096,14 @@ def amend_sanitize(payload):
     give them, and op_amend_write fills one in once the lock is held."""
     p = dict(payload)
     report = []
+    if "name" in p:
+        p["name"], entry = _sanitize_field_report(p["name"], 200, "name")
+        if entry:
+            report.append(entry)
+    if "slug" in p:
+        p["slug"], entry = _sanitize_field_report(p["slug"], 100, "slug")
+        if entry:
+            report.append(entry)
     if "goal" in p:
         p["goal"], entry = _sanitize_field_report(p["goal"], 2000, "goal")
         if entry:
@@ -1132,6 +1170,103 @@ def amend_orphan_rows(stored, amended, doc, authorized):
         if ident in orphaned
     }
     return sorted(rows, key=lambda t: (jq_sort_key(t[0]), t[1]))
+
+
+# ---------------------------------------------------------------------------
+# D14 -- the rename guard: name/slug may move a directory, so they may only be
+# amended before that directory means anything to a session in flight.
+# ---------------------------------------------------------------------------
+
+
+def amend_identity_guard_errors(stored, roadmap_path, doc):
+    """Three independent refusal reasons for amending name/slug, checked
+    against `stored` -- the phase as it is BEFORE this amendment. status and
+    claim are never amendable keys (amend_key_errors refuses both by name), so
+    `stored` and the merged `amended` phase can never disagree about either,
+    and this can run before the merge even happens.
+
+    Renaming touches the filesystem (a directory move) and another document (a
+    tasks file's own metadata) in ways no other amendable field does, so it is
+    the one amendment gated on the phase being safely unstarted rather than
+    merely on its own value being well-formed.
+    """
+    errors = []
+    status = stored.get("status")
+    if status not in ("pending", "planned"):
+        errors.append("  phase status is " + json.dumps(status) + ", not pending or planned")
+    if stored.get("claim") is not None:
+        errors.append("  phase is claimed")
+    tasks_path = _phase_tasks_path(roadmap_path, doc, stored)
+    if tasks_path is not None:
+        tasks = _read_tasks(tasks_path)
+        if tasks is not None:
+            stories = tasks.get("userStories")
+            if isinstance(stories, dict):
+                stories = list(stories.values())
+            if isinstance(stories, list) and any(
+                isinstance(s, dict) and s.get("status") != "pending" for s in stories
+            ):
+                errors.append("  phase tasks file has a story whose status is not pending")
+    return errors
+
+
+def _id_slug(phase_id):
+    """The dot-slugified phase id a branchName's own phase segment composes
+    with -- 5.5 becomes "5-5", the same substitution commands/plan.md's
+    branchName rule applies (a decimal phase reads "-phase-5-5-", never
+    "-phase-5.5-", because "." is not a legal git branch-name character)."""
+    return _num(phase_id).replace(".", "-")
+
+
+def _rewrite_phase_tasks_metadata(tasks_path, phase_id, new_dir, old_slug, new_slug):
+    """Locked read-modify-write of one phase's OWN tasks file: rewrite
+    metadata.phase.dir to new_dir, and rewrite metadata.branchName's phase
+    segment from old_slug to new_slug when the old one is actually present.
+
+    Locked the way story_merge.py's write_atomically is -- fcntl.flock on the
+    tasks file's own <path>.lock, a syscall rather than a shelled-out `flock`
+    binary -- because this IS the same lock a tasks.json verb takes via
+    aimi-cli.sh's bash `_lock`, and this call runs outside that bash lock (the
+    lock op_amend_write's caller holds is roadmap.json's own).
+
+    Returns the tasks file's ORIGINAL parsed document, so a roadmap.json write
+    that fails after this call can hand it back to _restore_phase_tasks_metadata
+    and leave the tasks file exactly as this call found it.
+    """
+    lock_fd = os.open(tasks_path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        with open(tasks_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+        # Two independent parses of the same text, not one parse plus a copy --
+        # so mutating `tasks_doc` below can never reach a nested dict `original`
+        # still holds a reference to.
+        original = json.loads(text)
+        tasks_doc = json.loads(text)
+        metadata = tasks_doc.setdefault("metadata", {})
+        phase_meta = metadata.get("phase")
+        if isinstance(phase_meta, dict):
+            phase_meta["dir"] = new_dir
+        branch_name = metadata.get("branchName")
+        if isinstance(branch_name, str) and old_slug:
+            old_token = "-phase-" + _id_slug(phase_id) + "-" + old_slug
+            new_token = "-phase-" + _id_slug(phase_id) + "-" + new_slug
+            metadata["branchName"] = branch_name.replace(old_token, new_token)
+        write_doc_atomically(tasks_path, tasks_doc)
+        return original
+    finally:
+        os.close(lock_fd)
+
+
+def _restore_phase_tasks_metadata(tasks_path, original_doc):
+    """The rollback half of _rewrite_phase_tasks_metadata: put the exact
+    document that call read back, under the same lock discipline."""
+    lock_fd = os.open(tasks_path + ".lock", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        write_doc_atomically(tasks_path, original_doc)
+    finally:
+        os.close(lock_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -2935,6 +3070,10 @@ def op_amend_validate(argv):
         payload["goal"] = _flag(argv, "--goal")
     if "--branch" in argv:
         payload["branch"] = _flag(argv, "--branch")
+    if "--name" in argv:
+        payload["name"] = _flag(argv, "--name")
+    if "--slug" in argv:
+        payload["slug"] = _flag(argv, "--slug")
 
     key_errors = amend_key_errors(payload)
     if key_errors:
@@ -3021,11 +3160,70 @@ def op_amend_write(argv):
         )
 
     # Shallow merge: every key the stored phase already had keeps its position
-    # and value -- id, dir, slug, name, dependsOn, status and claim included --
-    # and only the keys the payload carries are replaced, each wholesale.
+    # and value -- id, dir, dependsOn, status and claim included -- and only
+    # the keys the payload carries are replaced, each wholesale. name and slug
+    # ARE in the payload's own keys when this is a rename; dir is never a
+    # patch key (amend_key_errors refuses it by name), so it survives this
+    # merge unchanged and is overwritten explicitly below, only once the
+    # rename has passed every guard.
     amended = dict(stored)
     for key, value in patch.items():
         amended[key] = value
+
+    # --- D14: name/slug may only be amended on a safely unstarted phase -----
+    # Checked here, against `stored`, before anything else this call might
+    # refuse on -- a renamed-and-then-refused-for-an-unrelated-reason amendment
+    # would still have to prove the rename itself was safe, so proving it first
+    # costs nothing and reads as what it is: the more fundamental guard.
+    move = None
+    new_dir = None
+    old_dir = stored.get("dir")
+    new_path = old_path = None
+    if "name" in patch or "slug" in patch:
+        guard_errors = amend_identity_guard_errors(stored, path, doc)
+        if guard_errors:
+            _die_list(
+                "Error: roadmap-amend-phase: phase "
+                + _num(phase_id)
+                + " cannot have its name/slug amended -- it is not safe to rename:",
+                guard_errors,
+            )
+
+        new_slug = amended.get("slug") or ""
+        new_dir = _compute_phase_dir(phase_id, new_slug)
+        if not DIR_REGEX.fullmatch(new_dir):
+            die(
+                'Error: roadmap-amend-phase: computed dir "'
+                + new_dir
+                + '" fails required pattern'
+            )
+
+        feature_dir = os.path.dirname(path)
+        new_path = os.path.join(feature_dir, new_dir)
+        old_path = os.path.join(feature_dir, old_dir) if old_dir else None
+
+        # Both collision checks are skipped when the computed dir did not
+        # actually change (a name-only amend, or a slug amend that resolves
+        # to the same string): new_path == old_path in that case, and it is
+        # the phase's own current directory, never a collision with itself.
+        if new_dir != old_dir:
+            sibling_dirs = {
+                p.get("dir") for p in doc.get("phases") or [] if p.get("id") != phase_id
+            }
+            if new_dir in sibling_dirs:
+                die(
+                    'Error: roadmap-amend-phase: computed dir "'
+                    + new_dir
+                    + '" collides with another phase\'s directory'
+                )
+            if os.path.exists(new_path):
+                die(
+                    'Error: roadmap-amend-phase: "'
+                    + new_path
+                    + '" already exists on disk'
+                )
+
+        amended["dir"] = new_dir
 
     # Judge ONLY the lists this call actually writes. Handing over the merged
     # phase would re-judge a list the amendment never touched, turning every
@@ -3158,7 +3356,37 @@ def op_amend_write(argv):
             phase["needs"] = [
                 retarget_map.get(e["identity"], e) for e in contract_entries(phase, "needs")
             ]
-    write_doc_atomically(path, doc)
+
+    # --- Move the phase directory and rewrite its own tasks file's metadata,
+    # STILL before roadmap.json is written, so a write failure below can put
+    # both back exactly where this call found them. Every refusal above already
+    # happened before this point, so nothing here is reachable by a call this
+    # verb is going to reject. ---
+    tasks_backup = None
+    if new_dir is not None and new_dir != old_dir:
+        if old_path and os.path.isdir(old_path):
+            os.rename(old_path, new_path)
+            move = {"from": old_dir, "to": new_dir}
+        # The tasks file lives at the NEW location now that the directory (if
+        # any) has already moved -- _phase_tasks_path reads `amended["dir"]`,
+        # already set to new_dir above.
+        new_tasks_path = _phase_tasks_path(path, doc, amended)
+        if new_tasks_path and os.path.isfile(new_tasks_path):
+            original_tasks_doc = _rewrite_phase_tasks_metadata(
+                new_tasks_path, phase_id, new_dir, stored.get("slug") or "", amended.get("slug") or ""
+            )
+            tasks_backup = (new_tasks_path, original_tasks_doc)
+
+    try:
+        write_doc_atomically(path, doc)
+    except Exception:
+        # Put both back exactly as this call found them, in reverse order,
+        # before letting the write's own exception propagate.
+        if tasks_backup is not None:
+            _restore_phase_tasks_metadata(*tasks_backup)
+        if move is not None:
+            os.rename(new_path, old_path)
+        raise
 
     # Tagged with this call's own --phase only now that the write has landed --
     # a refused amendment reports nothing, because nothing was written.
@@ -3197,6 +3425,7 @@ def op_amend_write(argv):
             "amended": sorted(k for k in patch if k in AMENDABLE_KEYS),
             "retargeted": retargeted,
             "sanitized": sanitized,
+            "move": move,
         },
         sys.stdout,
         indent=2,

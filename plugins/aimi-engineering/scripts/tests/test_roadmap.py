@@ -829,7 +829,317 @@ def test_unamendable_keys_are_redirected_to_their_owner_by_name():
     assert R.amend_key_errors({"id": 1}) == [
         '  "id" is not amendable -- it is phase identity, written once by roadmap-init'
     ]
+    assert R.amend_key_errors({"dependsOn": []}) == [
+        '  "dependsOn" is not amendable -- it is phase identity, written once by roadmap-init'
+    ]
+    # dir draws its own message pointing at slug rather than the generic
+    # phase-identity one -- it is the one _PHASE_IDENTITY_KEYS member with a
+    # writer of its own (slug, via the D14-guarded rename path).
+    assert R.amend_key_errors({"dir": "x"}) == [
+        '  "dir" is not amendable -- it is derived from id and slug; amend slug to change it'
+    ]
+    # name and slug moved OUT of _PHASE_IDENTITY_KEYS and INTO AMENDABLE_KEYS:
+    # no longer refused at all.
+    assert R.amend_key_errors({"name": "New Name"}) == []
+    assert R.amend_key_errors({"slug": "new-slug"}) == []
     assert R.amend_key_errors({"goal": "g", "creates": []}) == []
+
+
+# ---------------------------------------------------------------------------
+# roadmap-amend-phase: renaming a phase's identity (name/slug) -- US-005
+# ---------------------------------------------------------------------------
+
+
+def test_compute_phase_dir_matches_init_sanitizes_own_formula():
+    """The ONE formula a phase directory is ever computed by -- init_sanitize
+    and the amend-phase rename path must never be able to diverge."""
+    assert R._compute_phase_dir(2, "") == "phase-2"
+    assert R._compute_phase_dir(2, "auth-refactor") == "phase-2-auth-refactor"
+    assert R._compute_phase_dir(2.1, "beta") == "phase-2.1-beta"
+    sanitized = R.init_sanitize(
+        [{"id": 2.1, "name": "N", "goal": "g", "slug": "beta", "dependsOn": []}]
+    )
+    assert sanitized[0]["dir"] == R._compute_phase_dir(2.1, "beta")
+
+
+def test_id_slug_dot_slugifies_a_decimal_id():
+    assert R._id_slug(5) == "5"
+    assert R._id_slug(5.5) == "5-5"
+
+
+def test_amend_identity_guard_errors_status_and_claim(tmp_path):
+    """Two of the three D14 conditions, each independently sufficient -- and a
+    pending/planned, unclaimed phase with no tasks file passes clean."""
+    doc = {"feature": "f", "phases": []}
+    roadmap_path = str(tmp_path / "roadmap.json")
+
+    in_progress = {"id": 1, "status": "in_progress", "claim": None, "dir": "phase-1"}
+    assert R.amend_identity_guard_errors(in_progress, roadmap_path, doc) == [
+        '  phase status is "in_progress", not pending or planned'
+    ]
+
+    claimed = {"id": 1, "status": "planned", "claim": {"claimedBy": "s"}, "dir": "phase-1"}
+    assert R.amend_identity_guard_errors(claimed, roadmap_path, doc) == ["  phase is claimed"]
+
+    clean = {"id": 1, "status": "pending", "claim": None, "dir": "phase-1"}
+    assert R.amend_identity_guard_errors(clean, roadmap_path, doc) == []
+
+
+def test_amend_identity_guard_reads_the_phase_own_tasks_file(tmp_path):
+    """The third D14 condition: a started story in the phase's own tasks file
+    refuses; a tasks file holding only pending stories, or no tasks file at
+    all, does not."""
+    feature_dir = tmp_path / "f"
+    (feature_dir / "phase-1").mkdir(parents=True)
+    roadmap_path = str(feature_dir / "roadmap.json")
+    doc = {"feature": "f", "phases": []}
+    phase = {"id": 1, "status": "planned", "claim": None, "dir": "phase-1"}
+
+    # No tasks file at all: nothing to refuse on -- AC5's "not yet expanded"
+    # case, at the unit level.
+    assert R.amend_identity_guard_errors(phase, roadmap_path, doc) == []
+
+    tasks_path = feature_dir / "phase-1" / "f-phase-1-tasks.json"
+    tasks_path.write_text(json.dumps({"userStories": [{"status": "pending"}]}), encoding="utf-8")
+    assert R.amend_identity_guard_errors(phase, roadmap_path, doc) == []
+
+    tasks_path.write_text(
+        json.dumps({"userStories": [{"status": "pending"}, {"status": "in_progress"}]}),
+        encoding="utf-8",
+    )
+    assert R.amend_identity_guard_errors(phase, roadmap_path, doc) == [
+        "  phase tasks file has a story whose status is not pending"
+    ]
+
+
+AMEND_CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
+
+
+def _amend_rename_fixture(tmp_path, feature, phase_id, slug, with_tasks_file=True, story_status="pending"):
+    """A fresh roadmap with one phase, its own on-disk directory, and
+    (optionally) its own phase tasks file -- built through the real CLI on a
+    throwaway root, the same shape as test_reconcile_leaves_a_completed_...
+    Returns (root, env, feature_dir)."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    env = _fixture_env(base)
+
+    payload = json.dumps([{"id": phase_id, "name": "Phase", "goal": "g", "slug": slug, "dependsOn": []}])
+    proc = subprocess.run(
+        ["bash", AMEND_CLI, "roadmap-init", "--feature", feature],
+        input=payload, cwd=root, capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    dir_name = R._compute_phase_dir(phase_id, slug)
+    phase_dir = os.path.join(feature_dir, dir_name)
+    os.makedirs(phase_dir, exist_ok=True)
+
+    if with_tasks_file:
+        id_slug = R._id_slug(phase_id)
+        branch = "feat/" + feature + "-phase-" + id_slug + "-" + slug
+        tasks_doc = {
+            "schemaVersion": "3.3",
+            "metadata": {
+                "title": "feat: phase", "type": "feat", "branchName": branch,
+                "createdAt": "2026-09-14", "planPath": None,
+                "roadmapPath": ".aimi/tasks/" + feature + "/roadmap.json",
+                "phase": {"id": phase_id, "dir": dir_name},
+            },
+            "userStories": [{"id": "US-001", "title": "x", "status": story_status}],
+        }
+        tasks_path = os.path.join(phase_dir, feature + "-phase-" + R._num(phase_id) + "-tasks.json")
+        with open(tasks_path, "w", encoding="utf-8") as handle:
+            json.dump(tasks_doc, handle)
+
+    return root, env, feature_dir
+
+
+def _run_amend_cli(root, env, feature, phase_id, *flags):
+    proc = subprocess.run(
+        ["bash", AMEND_CLI, "roadmap-amend-phase", "--feature", feature, "--phase", str(phase_id)]
+        + list(flags),
+        cwd=root, capture_output=True, text=True, timeout=120, env=env,
+    )
+    return proc
+
+
+def test_amend_rename_moves_directory_and_rewrites_tasks_metadata_integer_id(tmp_path):
+    root, env, feature_dir = _amend_rename_fixture(tmp_path, "rn-int", 1, "old-slug")
+    proc = _run_amend_cli(root, env, "rn-int", 1, "--slug", "new-slug")
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["move"] == {"from": "phase-1-old-slug", "to": "phase-1-new-slug"}
+
+    with open(os.path.join(feature_dir, "roadmap.json"), encoding="utf-8") as handle:
+        roadmap = json.load(handle)
+    assert roadmap["phases"][0]["dir"] == "phase-1-new-slug"
+    assert not os.path.isdir(os.path.join(feature_dir, "phase-1-old-slug"))
+
+    tasks_path = os.path.join(feature_dir, "phase-1-new-slug", "rn-int-phase-1-tasks.json")
+    with open(tasks_path, encoding="utf-8") as handle:
+        tasks = json.load(handle)
+    assert tasks["metadata"]["phase"]["dir"] == "phase-1-new-slug"
+    assert tasks["metadata"]["branchName"] == "feat/rn-int-phase-1-new-slug"
+
+
+def test_amend_rename_moves_directory_for_a_decimal_id(tmp_path):
+    root, env, feature_dir = _amend_rename_fixture(tmp_path, "rn-dec", 2.1, "old-slug")
+    proc = _run_amend_cli(root, env, "rn-dec", 2.1, "--slug", "new-slug")
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["move"] == {"from": "phase-2.1-old-slug", "to": "phase-2.1-new-slug"}
+
+    tasks_path = os.path.join(feature_dir, "phase-2.1-new-slug", "rn-dec-phase-2.1-tasks.json")
+    with open(tasks_path, encoding="utf-8") as handle:
+        tasks = json.load(handle)
+    assert tasks["metadata"]["phase"]["dir"] == "phase-2.1-new-slug"
+    # id_slug replaces "." with "-": "-phase-2-1-old-slug" -> "-phase-2-1-new-slug".
+    assert tasks["metadata"]["branchName"] == "feat/rn-dec-phase-2-1-new-slug"
+
+
+def test_amend_rename_with_no_tasks_file_still_moves_directory(tmp_path):
+    root, env, feature_dir = _amend_rename_fixture(
+        tmp_path, "rn-notasks", 1, "old-slug", with_tasks_file=False
+    )
+    proc = _run_amend_cli(root, env, "rn-notasks", 1, "--slug", "new-slug")
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["move"] == {"from": "phase-1-old-slug", "to": "phase-1-new-slug"}
+    assert os.path.isdir(os.path.join(feature_dir, "phase-1-new-slug"))
+    assert not os.path.isdir(os.path.join(feature_dir, "phase-1-old-slug"))
+
+
+def test_amend_rename_refuses_a_started_story(tmp_path):
+    root, env, feature_dir = _amend_rename_fixture(
+        tmp_path, "rn-started", 1, "old-slug", story_status="in_progress"
+    )
+    roadmap_path = os.path.join(feature_dir, "roadmap.json")
+    with open(roadmap_path, encoding="utf-8") as handle:
+        before = handle.read()
+
+    proc = _run_amend_cli(root, env, "rn-started", 1, "--slug", "new-slug")
+    assert proc.returncode == 1
+    assert "not safe to rename" in proc.stderr
+    assert "story" in proc.stderr
+
+    with open(roadmap_path, encoding="utf-8") as handle:
+        after = handle.read()
+    assert before == after
+    assert os.path.isdir(os.path.join(feature_dir, "phase-1-old-slug"))
+
+
+def test_amend_rename_refuses_dir_collision(tmp_path):
+    """No formula-derived dir can ever equal another phase's own id-prefixed
+    dir (ids are unique), so the collision is forced the way a hand-edited
+    roadmap.json could produce one: another phase's stored dir set directly,
+    independent of its own id/slug."""
+    base = os.path.realpath(str(tmp_path))
+    root = os.path.join(base, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    env = _fixture_env(base)
+    feature = "rn-collide"
+    payload = json.dumps([
+        {"id": 1, "name": "A", "goal": "g", "slug": "a", "dependsOn": []},
+        {"id": 2, "name": "B", "goal": "g", "slug": "b", "dependsOn": []},
+    ])
+    proc = subprocess.run(
+        ["bash", AMEND_CLI, "roadmap-init", "--feature", feature],
+        input=payload, cwd=root, capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    roadmap_path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
+    with open(roadmap_path, encoding="utf-8") as handle:
+        roadmap = json.load(handle)
+    roadmap["phases"][1]["dir"] = "phase-1-x"
+    with open(roadmap_path, "w", encoding="utf-8") as handle:
+        json.dump(roadmap, handle)
+    with open(roadmap_path, encoding="utf-8") as handle:
+        before = handle.read()
+
+    result = _run_amend_cli(root, env, feature, 1, "--slug", "x")
+    assert result.returncode == 1
+    assert "collides with another phase" in result.stderr
+
+    with open(roadmap_path, encoding="utf-8") as handle:
+        after = handle.read()
+    assert before == after
+
+
+def test_amend_rename_rolls_back_directory_and_tasks_metadata_on_write_failure(
+    monkeypatch, capsys, tmp_path
+):
+    """Reproduced by monkeypatching roadmap.write_doc_atomically to raise on
+    its SECOND call -- the first call, inside _rewrite_phase_tasks_metadata,
+    must succeed so there is a real tasks-file rewrite for the rollback to
+    undo. Drives op_amend_validate then op_amend_write directly, the same
+    two-crossing shape cmd_roadmap_amend_phase uses, bypassing the bash lock
+    entirely (there is nothing here concurrency-shaped to protect)."""
+    feature_dir = tmp_path / "f"
+    phase_dir = feature_dir / "phase-1-old-slug"
+    phase_dir.mkdir(parents=True)
+    roadmap_path = str(feature_dir / "roadmap.json")
+    tasks_path = phase_dir / "f-phase-1-tasks.json"
+
+    doc = {
+        "roadmapVersion": "2.0", "feature": "f", "createdAt": "2020-01-01T00:00:00Z",
+        "brainstormPath": None,
+        "phases": [{
+            "id": 1, "name": "Old Name", "goal": "g", "slug": "old-slug",
+            "dir": "phase-1-old-slug", "status": "planned", "dependsOn": [],
+            "branch": None, "notes": None, "successCriteria": [],
+            "creates": [], "needs": [], "areas": [], "claim": None,
+        }],
+    }
+    R.write_doc_atomically(roadmap_path, doc)
+
+    original_tasks_doc = {
+        "metadata": {
+            "branchName": "feat/f-phase-1-old-slug",
+            "phase": {"id": 1, "dir": "phase-1-old-slug"},
+        },
+        "userStories": [{"id": "US-001", "status": "pending"}],
+    }
+    R.write_doc_atomically(str(tasks_path), original_tasks_doc)
+    original_tasks_text = tasks_path.read_text(encoding="utf-8")
+
+    real_write = R.write_doc_atomically
+    calls = {"n": 0}
+
+    def flaky_write(path, written_doc):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full (simulated)")
+        return real_write(path, written_doc)
+
+    monkeypatch.setattr(R, "write_doc_atomically", flaky_write)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"slug": "new-slug"})))
+    assert R.op_amend_validate([]) == 0
+    validated = capsys.readouterr().out
+    monkeypatch.setattr("sys.stdin", io.StringIO(validated))
+
+    with pytest.raises(OSError):
+        R.op_amend_write([
+            "--roadmap", roadmap_path, "--feature", "f", "--phase", "1", "--retargets", "[]",
+        ])
+
+    # The directory is back where it started...
+    assert phase_dir.is_dir()
+    assert not (feature_dir / "phase-1-new-slug").exists()
+    # ...and the tasks file's metadata is restored to exactly what it held
+    # before this call -- byte-for-byte, since both this fixture's write and
+    # the rollback's own write go through the identical write_doc_atomically
+    # serialization.
+    assert tasks_path.read_text(encoding="utf-8") == original_tasks_text
+    # roadmap.json itself was never actually replaced -- the raise happens
+    # inside write_doc_atomically before any os.replace -- so it stays
+    # byte-for-byte the fixture's own original write too.
+    with open(roadmap_path, encoding="utf-8") as handle:
+        assert json.load(handle) == doc
 
 
 def test_the_v1_string_filter_is_gone_and_stays_gone():

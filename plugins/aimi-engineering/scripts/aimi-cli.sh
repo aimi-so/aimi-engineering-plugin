@@ -15122,8 +15122,8 @@ cmd_roadmap_init() {
 # truthful.
 #
 cmd_roadmap_amend_phase() {
-  local feature="" phase_id="" file="" goal_flag="" branch_flag=""
-  local have_goal=false have_branch=false
+  local feature="" phase_id="" file="" goal_flag="" branch_flag="" name_flag="" slug_flag=""
+  local have_goal=false have_branch=false have_name=false have_slug=false
   local retarget_pairs='[]'
   local pair pair_old pair_new
 
@@ -15134,6 +15134,8 @@ cmd_roadmap_amend_phase() {
       --file) shift; file="${1:-}" ;;
       --goal) shift; goal_flag="${1:-}"; have_goal=true ;;
       --branch) shift; branch_flag="${1:-}"; have_branch=true ;;
+      --name) shift; name_flag="${1:-}"; have_name=true ;;
+      --slug) shift; slug_flag="${1:-}"; have_slug=true ;;
       --retarget-needs)
         shift
         pair="${1:-}"
@@ -15175,7 +15177,7 @@ cmd_roadmap_amend_phase() {
       exit 1
     fi
     payload=$(cat "$file")
-  elif [ "$have_goal" != true ] && [ "$have_branch" != true ]; then
+  elif [ "$have_goal" != true ] && [ "$have_branch" != true ] && [ "$have_name" != true ] && [ "$have_slug" != true ]; then
     payload=$(cat)
   fi
 
@@ -15187,12 +15189,14 @@ cmd_roadmap_amend_phase() {
   # Same split, and for the same reason, as roadmap-init: a refusal must not
   # take the lock and must not touch the file.
   check_python3
-  local goal_args=() branch_args=()
+  local goal_args=() branch_args=() name_args=() slug_args=()
   [ "$have_goal" = true ] && goal_args=(--goal "$goal_flag")
   [ "$have_branch" = true ] && branch_args=(--branch "$branch_flag")
+  [ "$have_name" = true ] && name_args=(--name "$name_flag")
+  [ "$have_slug" = true ] && slug_args=(--slug "$slug_flag")
   local sanitized
   sanitized=$(printf '%s' "$payload" | python3 "$(_aimi_roadmap_py)" amend-validate \
-    "${goal_args[@]}" "${branch_args[@]}") || exit $?
+    "${goal_args[@]}" "${branch_args[@]}" "${name_args[@]}" "${slug_args[@]}") || exit $?
 
   local roadmap_path
   roadmap_path=$(_roadmap_require "roadmap-amend-phase" "$feature")
@@ -17021,44 +17025,73 @@ COMMANDS:
                               and rationale: commands/references/scope-contexts.md
                               section "Creates/Needs Contracts".
     roadmap-amend-phase --feature <slug> --phase <id> [--goal <text>] [--branch <name>]
-                              [--file <path>] [--retarget-needs "<old>=<new>"]...
+                              [--name <text>] [--slug <slug>] [--file <path>]
+                              [--retarget-needs "<old>=<new>"]...
                               Correct an EXISTING phase's contract in place --
                               the one writer for a phase roadmap-init already
                               created, since --sync leaves an existing phase
                               byte-for-byte alone. Locked read-modify-write with
                               the same mktemp-then-mv atomic swap.
-                              Amendable fields are exactly six: goal,
-                              successCriteria, creates, needs, areas, branch.
-                              They arrive as scalar flags (--goal/--branch) or as
+                              Amendable fields: goal, successCriteria, creates,
+                              needs, areas, branch, name, slug. They arrive as
+                              scalar flags (--goal/--branch/--name/--slug) or as
                               a JSON object on stdin or --file; stdin is read only
-                              when neither scalar flag is given. Merge is partial
+                              when no scalar flag is given. Merge is partial
                               by key presence -- a key present replaces that field
                               wholesale, a key absent leaves the stored value
                               byte-for-byte unchanged. Every other phase, the
                               document metadata, and this phase's own id, dir,
-                              slug, name, dependsOn, status and claim are
-                              untouched.
+                              dependsOn, status and claim are untouched directly
+                              -- dir is instead RECOMPUTED from id and the
+                              (possibly amended) slug whenever name or slug is
+                              amended, using the exact phase-<id>[-<slug>]
+                              formula roadmap-init itself uses.
                               branch is amendable because nothing else writes it
                               for an existing phase (that is why a decimal phase's
                               null branch could not be filled). status and claim
                               are NOT: roadmap-set-status and roadmap-claim /
                               roadmap-release-claim already own them, and both keys
-                              are rejected by name pointing at their owner.
+                              are rejected by name pointing at their owner. dir is
+                              also refused, with its own message naming slug as
+                              the way to change it, since it is never itself a
+                              patch key -- id and dependsOn keep the generic
+                              "phase identity, written once by roadmap-init"
+                              message.
                               Caveat: amending branch rewrites the roadmap field
                               only -- it does not move a worktree or git branch an
                               in_progress phase has already created.
+                              Amending name or slug is additionally gated: the
+                              phase's own status must be pending or planned, its
+                              claim must be null, and every story in its own
+                              phase tasks file (when one exists) must still be
+                              pending -- refused by name, before roadmap.json or
+                              any file on disk is touched, when any one of the
+                              three does not hold. When it does, and slug changes
+                              the computed dir, the same locked call moves
+                              <feature_dir>/<old_dir> to <feature_dir>/<new_dir>
+                              on disk (refusing first on a DIR_REGEX failure or a
+                              collision with another phase's dir or an existing
+                              path), rewrites that phase's own tasks file's
+                              metadata.phase.dir to match, and rewrites
+                              metadata.branchName's own "-phase-<idSlug>-<slug>"
+                              segment when it carried the old slug -- a phase
+                              with no tasks file on disk yet still moves cleanly,
+                              with no tasks-file rewrite attempted. A roadmap.json
+                              write that then fails moves the directory back and
+                              restores the tasks file's metadata to their exact
+                              pre-amend values before the call exits non-zero.
                               Values pass roadmap-init's own gates: the same
-                              sanitizer and caps (goal 2000, each successCriteria
-                              entry 2000, each areas entry 500, branch 200, each
-                              creates/needs description 500), the same
-                              creates/needs identity guard, and the same branch
-                              pattern. A field the sanitizer actually rewrote or
-                              truncated is reported the same way roadmap-init
-                              reports it -- one stderr warning line per changed
-                              field/entry, never the field's own value, and the
-                              result JSON's sanitized[] array (phase is this
-                              call's own --phase on every entry, since one call
-                              amends exactly one phase).
+                              sanitizer and caps (name 200, goal 2000, slug 100,
+                              each successCriteria entry 2000, each areas entry
+                              500, branch 200, each creates/needs description 500),
+                              the same creates/needs identity guard, and the
+                              same branch pattern. A field the sanitizer
+                              actually rewrote or truncated is reported the same
+                              way roadmap-init reports it -- one stderr warning
+                              line per changed field/entry, never the field's own
+                              value, and the result JSON's sanitized[] array
+                              (phase is this call's own --phase on every entry,
+                              since one call amends exactly one phase).
                               Dropping or renaming a creates identity a later
                               phase cites in needs is REFUSED by default; the error
                               names every downstream phase and identity and prints
@@ -17075,7 +17108,8 @@ COMMANDS:
                               only (exit 0): a completed phase whose handoff.md
                               omits a newly introduced identity.
                               Prints {roadmap, phase, amended[], retargeted[],
-                              sanitized[]}.
+                              sanitized[], move}, where move is {from, to} when a
+                              directory was moved and null otherwise.
     normalize-contracts --feature <slug>
                               Migrate a roadmap's stored creates/needs entries from
                               the 1.0 form -- one string, "identity (description)" --
