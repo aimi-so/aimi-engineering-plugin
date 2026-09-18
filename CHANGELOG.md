@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.141.0] - 2026-09-18
+
+### Added
+- A `## Artifact Language Rule` section in `commands/references/user-communication.md`: an artifact under `.aimi/` is a plugin-owned artifact and is written in English, a file the target project owns follows the project's own language, and text addressed to a person follows the person's language. Names the tokens that are contracts and stay untranslated regardless of language — `handoff.md`'s five section headings, the research agents' `## Verified` heading, the roadmap artifact identity, the verification-evidence line, JSON keys, status tokens, and derived slugs/directories/branches — each pointing at the reader that matches it literally. States that English is stated rather than resolved from config or inferred, that a multi-repo layout takes one language for the whole layout, and that migrating an already-written artifact retroactively is out of scope.
+- The rule anchored at every site that actually composes a plugin-owned artifact: the two sites that author `tasks.json` prose (`aimi-story-expander.md` states it inline, since that agent may not open a reference file at runtime; `plan.md`'s Phase 4 title bullet cites it), brainstorm's document write and phase-cut proposal, plan's inline phase-cut fallback, execute's handoff write, the Output Contract of five reusable research agents, and the foundation-architect proposal writer. Every locked heading each of those writers emits — including the foundation architect's own nine section headings, which stay English even where the CLAUDE.md/AGENTS.md prose drafted under two of them follows the target project's language — is marked as a never-translated string beside its citation.
+- Brainstorm's Foundation topic gains a fifth sub-topic, asking a greenfield project which language its own files are written in, in the same 3-4-option, Other-escape-hatch shape as its stack/runtime and architecture siblings. The answer lands as a line inside `## CLAUDE.md Draft` rather than a new section, governs only files the project itself owns, and never touches the English of a `.aimi/` artifact.
+- `test-artifact-language.sh`, a standalone suite that derives its writer candidate set from the tree rather than a hand-written list — the union of `command_block_files()`'s corpus filtered by two predicate arms, a `.aimi/<root>/` path literal or a frontmatter `allowed-tools`/`tools` line naming `Write` — and fails, naming the file, when a candidate carries neither the artifact-language anchor (a citation of `user-communication.md`, or a heading stating `## Artifact Language Rule` verbatim) nor a reasoned exemption in the new `artifact-language-baseline.txt`, which ratchets in both directions the same way `command-size-baseline.txt` already does for byte budgets.
+
+### Changed
+- Closed what the new suite found against the existing tree: anchored `deepen.md`, `references/visual-variants.md`, `skills/task-planner/SKILL.md`, `skills/aimi-learnings/SKILL.md`, and `aimi-bundle-prototype-author.md` (the last with a quoted-content carve-out, since its output is a faithful rendering of spec text rather than the plugin's own authored prose); exempted nine files that only read a `.aimi/` path as context, edit the target project's own source, or are dead documentation.
+
 ## [1.139.0] - 2026-09-14
 
 ### Added
