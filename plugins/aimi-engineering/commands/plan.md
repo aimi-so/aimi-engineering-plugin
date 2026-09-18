@@ -831,6 +831,8 @@ Set the `scopeContextClassificationVerdict` working-memory variable to the same 
 
 **Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact **identity** appearing in more than one proposed phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide), promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
 
+`name`, `goal`, and `successCriteria` are persisted into `roadmap.json`, a plugin-owned artifact, the same as when `commands/brainstorm.md` authors them — per the artifact-language rule (`commands/references/user-communication.md`), author them in English here too; a reader who lands in this fallback never opens `brainstorm.md` to learn that.
+
 **Step 3 — Compact interactive gate.**
 
 *Non-interactive fast path.* When `INTERACTIVE_MODE=agent` or `--non-interactive` was passed:

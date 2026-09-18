@@ -109,7 +109,13 @@ $ grep -c '^## ' commands/plan.md
    body — Phase 1.6 reads that section with precedence, so the fix survives the
    file being reused later via `metadata.researchPaths`.
 
+   `## Verified` is a locked token, never translated: `plan.md`'s `## Verified`
+   precedence pass scans every file in `allResearchPaths`, this one included,
+   with `grep -c '^## Verified'` — a translated heading counts zero silently.
+
 ## Output Contract
+
+No artifact-language anchor applies to this file's body: the Spec-Passthrough Rule above copies `BusinessSpec`/`DesignSpec` content verbatim, and "quoted content keeps its own language" (`commands/references/user-communication.md`) already governs that content — an English mandate here would contradict the passthrough it depends on. Only the `## Verified` heading above is locked, because plan.md's precedence pass matches it by literal string regardless of this file's content language.
 
 1. **Caller-specified path takes precedence:** If the caller's prompt includes an explicit `outputPath`, write to that exact path and skip slug/timestamp derivation.
 

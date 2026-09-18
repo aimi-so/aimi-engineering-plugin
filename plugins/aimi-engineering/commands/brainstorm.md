@@ -958,6 +958,8 @@ For each identified scope context, draft one phase entry in an in-memory `phases
 }
 ```
 
+`name`, `goal`, and `successCriteria` are persisted into `roadmap.json`, a plugin-owned artifact — per the artifact-language rule (`commands/references/user-communication.md`), author them in English.
+
 - `id` — plain number, 1-based in cut order. Kept as a plain number (never a zero-padded string) so a later insertion can use a decimal value (e.g. `2.1`) without renumbering every phase — see `outline:07` for where that matters.
 - `name` — short phase name.
 - `slug` — derived from `name` via the five-step algorithm in `commands/references/topic-slug.md`.
@@ -1324,6 +1326,8 @@ mkdir -p .aimi/brainstorms
 ```
 
 ### Write Document
+
+This document is a plugin-owned artifact under `.aimi/brainstorms/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
 
 Use the design document template:
 

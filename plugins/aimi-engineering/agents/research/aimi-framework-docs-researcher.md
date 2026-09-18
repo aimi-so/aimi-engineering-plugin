@@ -105,6 +105,8 @@ Default to `standard` when unspecified. Soft ceiling — finish a nearly-complet
 
 ## Output Contract
 
+This research file is a plugin-owned artifact under `.aimi/research/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
+
 Before returning results to the caller, persist full findings to a research file.
 
 1. **Caller-specified path takes precedence:** If the caller's prompt includes an explicit `outputPath` (e.g., `outputPath: .aimi/research/2026-04-15-my-feature-143022-framework-docs.md`), write to that exact path and skip slug/timestamp derivation below.
@@ -240,5 +242,10 @@ $ grep -c '^## ' commands/plan.md
    in a `## Verified` section at the end of the file rather than editing the
    body — Phase 1.6 reads that section with precedence, so the fix survives the
    file being reused later via `metadata.researchPaths`.
+
+   `## Verified` is a locked token, never translated: `plan.md` counts this
+   exact heading with `grep -c '^## Verified'`, and a translated heading
+   counts zero silently, re-importing a figure the correction above already
+   retired.
 
 Remember: You are the bridge between complex documentation and practical implementation. Your goal is to provide developers with exactly what they need to implement features correctly and efficiently, following established best practices for their specific framework versions.
