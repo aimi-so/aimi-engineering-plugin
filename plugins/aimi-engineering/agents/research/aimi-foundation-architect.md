@@ -185,7 +185,7 @@ This proposal document is a plugin-owned artifact — per the artifact-language 
    - `## Module Template` — a worked example of one feature/use-case module following the proposed layout.
    - `## Naming Conventions` — file, type, and function naming rules for this repository.
    - `## Lint and Format Config` — the specific linter/formatter and starter config for the resolved stack.
-   - `## CLAUDE.md Draft` — a ready-to-save draft capturing the above as project conventions.
+   - `## CLAUDE.md Draft` — a ready-to-save draft capturing the above as project conventions, plus one further line stating the project's own prose language as a Decision/Rationale pair — default **English** when nothing in `featureDescription`, `researchSummary`, or `resolvedDecisions` names another language. Per the artifact-language rule (`commands/references/user-communication.md`), that line governs only files the project owns; every artifact under `.aimi/` stays English regardless of it, and the choice is always a stated default, never a question.
    - `## AGENTS.md Draft` — a ready-to-save draft for spawned-agent-facing conventions, distinct from CLAUDE.md's human-facing scope.
    - `## Open Questions` — reserved for genuine unknowns only (see Reviewable-Defaults Framing).
 3. Do not write to any path other than `outputPath`. No sidecars, no temp files.

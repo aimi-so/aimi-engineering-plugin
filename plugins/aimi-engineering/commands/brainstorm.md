@@ -454,7 +454,7 @@ Determine whether the target repository is greenfield using the "Structural Sign
 
 Brainstorm does **not** spawn any dedicated foundation-synthesis agent to perform this detection or to act on it — that stays exclusive to `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate. When this phase detects greenfield structural signals, brainstorm captures the user's stack, architecture, folder-convention, and lint/format decisions through its own batched-question machinery instead (Phase 2's Foundation category, below).
 
-If the repository is greenfield-relevant, Phase 2 generates additional questions targeting the Foundation category (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) alongside the standard topic categories. These Foundation questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
+If the repository is greenfield-relevant, Phase 2 generates additional questions targeting the Foundation category (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language) alongside the standard topic categories. These Foundation questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
 
 When structural signals do not classify the repository as greenfield, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories (plus any UI categories from Phase 1.7) with no mention of Foundation.
 
@@ -511,7 +511,7 @@ N. What should make this interface memorable?
 
 #### Foundation Questions (When Greenfield Structural Signals Detected in Phase 1.8)
 
-When Phase 1.8 detected greenfield structural signals, include Foundation-category questions in the batch alongside standard topic questions. These follow the same format rules. Foundation spans up to four sub-topics — ask one question per sub-topic that is still relevant, but treat Foundation as a single topic category for coverage-tracking purposes (see Adaptive Rounds below), not four separate categories.
+When Phase 1.8 detected greenfield structural signals, include Foundation-category questions in the batch alongside standard topic questions. These follow the same format rules. Foundation spans up to five sub-topics — ask one question per sub-topic that is still relevant, but treat Foundation as a single topic category for coverage-tracking purposes (see Adaptive Rounds below), not five separate categories.
 
 **Example stack/runtime question:**
 
@@ -550,6 +550,16 @@ N. What lint and format tooling should the project use?
    A. ESLint + Prettier — widely adopted, strong defaults
    B. Biome — single fast tool, less config
    C. None yet — decide later
+   D. Other: [please specify]
+```
+
+**Example language question:**
+
+```
+N. What language should this project's own files be written in?
+   A. English
+   B. Portuguese
+   C. Spanish
    D. Other: [please specify]
 ```
 
@@ -855,7 +865,7 @@ After each response, assess which topic categories remain unaddressed:
 | Approach | At least one approach preference expressed by user via selection or free-form response |
 | Aesthetic Direction | User expresses an aesthetic preference, tone, or visual direction |
 | Differentiation | User identifies a memorable or distinguishing visual aspect |
-| Foundation | User expresses a stack/runtime, architecture, folder-convention, or lint/tooling preference |
+| Foundation | User expresses a stack/runtime, architecture, folder-convention, lint/tooling, or language preference |
 
 - **If all key topics covered (7 standard, plus 2 when UI features detected, plus 1 when Foundation detected in Phase 1.8)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
@@ -1079,7 +1089,7 @@ Loop until the user selects **Approve** and the coverage check passes with zero 
 
 Before Approve can be accepted, verify that every accumulated session decision or requirement is covered by the current `phases` array.
 
-**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory. **Foundation answers are EXEMPT** from this set and from the orphan hard-block below: stack, architecture, folder-convention, and lint/format decisions captured when Phase 1.8 detected greenfield structural signals describe the repository itself, not a slice of feature work, so they never belong in any phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields — Foundation answers are therefore never checked for orphans in this step.
+**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory. **Foundation answers are EXEMPT** from this set and from the orphan hard-block below: stack, architecture, folder-convention, lint/format, and language decisions captured when Phase 1.8 detected greenfield structural signals describe the repository itself, not a slice of feature work, so they never belong in any phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields — Foundation answers are therefore never checked for orphans in this step.
 
 For each item in the session requirements set, check whether it is referenced — verbatim or as a clear restatement — in some phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields, across the **whole current `phases` array**. An item with no match in any phase is an **orphan**.
 
@@ -1192,7 +1202,7 @@ This is a **gate**, not a roadmap phase. It produces at most one artifact under 
 The gate fires only when **both** of the following hold:
 
 1. **Phase 1.8 (Greenfield Foundation Detection) marked the session greenfield-relevant.** If Structural Signals did not classify the repository as greenfield, this condition is false.
-2. **Phase 2 gathered answers for both load-bearing Foundation sub-topics.** "Answered" means the user (or agent-mode auto-pick) actually selected an option — including an "Other: ..." free-text pick — and this condition requires answers for **at least** the two sub-topics Step 5's validation gate hard-checks: **folder/convention structure** (Step 5 check 3 requires a real multi-line folder tree) and **lint/format tooling** (check 4 requires a concrete tool or config filename). Answers to stack/runtime and architecture pattern contribute to the synthesis when present but do not substitute for the two required ones. Merely being eligible for the category is not enough; if Adaptive Rounds never reached those Foundation questions this session, this condition is false.
+2. **Phase 2 gathered answers for both load-bearing Foundation sub-topics.** "Answered" means the user (or agent-mode auto-pick) actually selected an option — including an "Other: ..." free-text pick — and this condition requires answers for **at least** the two sub-topics Step 5's validation gate hard-checks: **folder/convention structure** (Step 5 check 3 requires a real multi-line folder tree) and **lint/format tooling** (check 4 requires a concrete tool or config filename). Answers to stack/runtime, architecture pattern, and language contribute to the synthesis when present but do not substitute for the two required ones. Merely being eligible for the category is not enough; if Adaptive Rounds never reached those Foundation questions this session, this condition is false.
    - **Why these two are mandatory:** Step 5's gate cannot pass without concrete content for them, so firing with fewer answers would force the synthesis to either fail routinely or fabricate folder/lint decisions the user never made — and a fabricated `## Folder Layout`/`## Lint and Format Config` becomes real files and acceptance criteria via `aimi-story-expander`'s `foundationEntry` handling. Partial Foundation answers are not lost: they remain in the brainstorm document's `## Key Decisions`, which `/aimi:plan` loads as context, and `/aimi:plan`'s `aimi-foundation-architect` — the prescriptive owner of defaults — proposes the rest.
 
 If either condition is false, skip this entire phase silently: no log line, no artifact, no picker prompt. Proceed straight to Phase 4 exactly as if this phase did not exist.
@@ -1249,11 +1259,11 @@ Compose the sanitized Foundation answers into exactly these four `##` sections, 
 
 These headings are verbatim matches (case and punctuation) of 4 of the 9 `## Output Contract` sections defined in `agents/research/aimi-foundation-architect.md`, so `aimi-story-expander.md`'s `foundationEntry` special case (~L145) can consume either authoring path's artifact interchangeably. Do not add a `## Stack`, `## Layering`, `## Module Template`, `## Naming Conventions`, or `## Open Questions` section here — those five belong to the architect agent's own nine-section contract and have no consumer on this path.
 
-Draft each section from the sanitized answers to the four Foundation sub-topics (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) gathered in Phase 2:
+Draft each section from the sanitized answers to the Foundation sub-topics gathered in Phase 2 (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language):
 
 - **`## Folder Layout`** — a concrete, real directory tree reflecting the chosen folder/convention structure — not a description of one.
 - **`## Lint and Format Config`** — the specific linter/formatter the user picked (or its "Other" free-text equivalent), naming a real tool or config filename.
-- **`## CLAUDE.md Draft`** — human-facing project conventions: the chosen stack, architecture pattern, and folder/convention structure, stated as decisions the way `aimi-foundation-architect.md`'s own `## CLAUDE.md Draft` section does.
+- **`## CLAUDE.md Draft`** — human-facing project conventions: the chosen stack, architecture pattern, and folder/convention structure, stated as decisions the way `aimi-foundation-architect.md`'s own `## CLAUDE.md Draft` section does. When the language sub-topic was answered, add one further line naming the project's own prose language as a decision. Per the artifact-language rule (`commands/references/user-communication.md`), that line governs only files the project owns — its own `CLAUDE.md`/`AGENTS.md`, `README`, `CHANGELOG`, source comments, and product copy — and every artifact under `.aimi/` stays English regardless of it.
 - **`## AGENTS.md Draft`** — the same conventions restated for a spawned-agent audience, distinct from CLAUDE.md's human-facing scope, exactly as `aimi-foundation-architect.md`'s Output Contract distinguishes the two.
 
 For the architectural reasoning behind `## CLAUDE.md Draft` and `## Folder Layout`, cite `agents/research/aimi-foundation-architect.md`'s `## Decision Rules` subsections — **Layering**, **Module Boundaries**, **Naming** — by reference (e.g., "per Layering: dependencies point inward") to keep this authoring path aligned with the architect agent's. Do not restate those rules' text here. This step never spawns `aimi-foundation-architect` or any other sub-agent — the synthesis is inline reasoning by `/aimi:brainstorm` itself, using only the sanitized Foundation answers already in hand.
@@ -1414,7 +1424,7 @@ phases:
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
 
-When Phase 1.8 detected greenfield structural signals and Foundation questions were answered, add at least one further bullet per answered sub-topic (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) here, naming the user's choice and the rationale — this lightweight trace lives in the document body itself and is distinct from the full synthesized foundation proposal artifact written separately.
+When Phase 1.8 detected greenfield structural signals and Foundation questions were answered, add at least one further bullet per answered sub-topic (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language) here, naming the user's choice and the rationale — this lightweight trace lives in the document body itself and is distinct from the full synthesized foundation proposal artifact written separately.
 
 When UI features were detected in Phase 1.7, include this section:
 
