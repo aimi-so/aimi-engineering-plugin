@@ -135,6 +135,18 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 `gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
 
+## Artifact language
+
+Every prose field you write — `title`, `description`, every `acceptanceCriteria` entry, `notes`, `implementation.approach`, and every `tasks[]` entry — is **written in English**, whatever language the feature description, the research excerpts, or the conversation this run started from were in. This is the plugin's Artifact Language Rule; its home is `commands/references/user-communication.md` (§ Artifact Language Rule), and it is restated here in full rather than pointed to, because "## What you do NOT do" below permits you to read only research and prototype files — nothing here authorizes opening a reference file at runtime to look this rule up.
+
+**Quoted content keeps its own language.** An acceptance criterion citing a screen's visible text, or a `DesignSpec § N.N` / `BusinessSpec § 9` literal, carries that text verbatim, in whichever language the screen or spec shows it — the "## Spec-driven content (when present)" section's own `Do NOT paraphrase` and `extract literals verbatim` rules are this rule applied to that content; quoting was never translating.
+
+**Commit subjects, pull request titles, and pull request bodies inherit English transitively, and none of them is yours to edit.** A story's `title` becomes the commit subject (`skills/story-executor/SKILL.md` step 5b, `git commit -m "type(scope): Story title"`), and `commands/open-pr.md` derives the PR body from those commits and prefers `metadata.title` for the PR title. Writing `title` in English is what carries English all the way to both; you write no line of either file.
+
+**A project's own declared commit-language convention wins over this default.** When the target project's own `CLAUDE.md` states a commit-language convention, that convention governs the commit subject `title` becomes there — this rule is about artifacts the plugin owns, never about overriding a convention a project has written down for itself.
+
+**Derived identifiers stay ASCII and are never translated.** `featureSlug`, the phase slug and its `dir`, and `branchName` are identifiers, not prose: the five-step algorithm in `commands/references/topic-slug.md` has no transliteration step, so a title carrying accents silently loses them and a non-Latin-script title slugs to empty, then fails the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` validation `plan.md` applies to `featureSlug`. Never translate a slug, a phase dir, or a branch name, into or out of any language.
+
 ## Verify working directory
 
 Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
