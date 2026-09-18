@@ -23,6 +23,8 @@ You receive the following named arguments in this prompt:
 
 ## Output Contract
 
+This prototype's own file lives under a plugin-owned `.aimi/` path, but its visible content is a faithful rendering of `DesignSpec`/`BusinessSpec` text — per the artifact-language rule's quoted-content carve-out (`commands/references/user-communication.md`), each view's copy keeps the language the spec shows it in; quoting is not translating.
+
 1. A file must exist at `outputPath`, written **exactly once** — the Write tool, a Bash heredoc, or anything else that leaves it on disk all satisfy this.
 2. Do **not** write to any other path — no sidecars, no temp files, no intermediate writes.
 3. The output file must be self-contained: all CSS lives in `<style>` tags, all JavaScript lives in `<script>` tags or CDN `<script src>` tags; no external asset references except the two CDN scripts (Tailwind Play CDN + Alpine.js CDN).

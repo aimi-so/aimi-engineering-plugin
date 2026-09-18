@@ -2,7 +2,7 @@
 
 Shared reference for the wording, tone, and density of text a plugin command sends directly to the person running it — completion reports, chat explanations, and `AskUserQuestion` prompts. Apply the rules in this file wherever a command emits text meant for a human reader, not another agent.
 
-**Consumed by:** `brainstorm.md`, `execute.md`, `open-pr.md`, `plan.md`, `references/interactivity.md`, and `references/publish-confirmation.md` — the command files that currently cite this reference. That list is a separate statement from what this file governs: any command with an `AskUserQuestion` call site or a completion-report block, whether or not it is named above.
+**Consumed by:** `brainstorm.md`, `deepen.md`, `execute.md`, `open-pr.md`, `plan.md`, `references/interactivity.md`, `references/publish-confirmation.md`, and `references/visual-variants.md` — the command files that currently cite this reference. That list is a separate statement from what this file governs: any command with an `AskUserQuestion` call site or a completion-report block, whether or not it is named above.
 
 ## Scope
 

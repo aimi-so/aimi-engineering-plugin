@@ -165,6 +165,8 @@ Record the resolved path as `research_path_for_story[story.id]` for use in Step 
 
 ## Step 4: Enrich Stories
 
+Every field this step writes into a story — `acceptanceCriteria`, `notes`, `implementation.approach`, `implementation.verify` — is a plugin-owned artifact under `.aimi/tasks/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
+
 For each pending story, **Read** the full research file at `research_path_for_story[story.id]` (resolved in Step 3d) using the Read tool. Use both the returned agent summary and the full file content for richer enrichment. When no research path was recorded for a story (all attempts failed), enrich from story text alone and note the missing research in the story's `notes`.
 
 For each pending story, using the research results:

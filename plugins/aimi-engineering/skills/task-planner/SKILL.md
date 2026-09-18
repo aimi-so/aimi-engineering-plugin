@@ -18,6 +18,8 @@ Take a feature description through research, spec analysis, and story decomposit
 
 ## Output Format
 
+Every `tasks.json` field this skill writes is a plugin-owned artifact under `.aimi/tasks/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
+
 **Filename convention:**
 - Full-stack, PROJECT axis (2 or more distinct story `project` values — multi-repo): one file per project, `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json`
 - Full-stack, SIDE axis (fewer than 2 distinct `project` values — single-repo/monorepo): `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`

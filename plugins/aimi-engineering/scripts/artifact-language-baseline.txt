@@ -1,0 +1,65 @@
+# artifact-language-baseline.txt — declarations and exemptions for
+# test-artifact-language.sh.
+#
+# Format, tab-separated, one of four kinds per line:
+#
+#   anchor-ref		<path>			# <reason (optional)>
+#   anchor-section	<heading text>		# <reason (optional)>
+#   non-artifact-root	<root>			# <reason (REQUIRED)>
+#   exempt		<path>			# <reason (REQUIRED)>
+#
+# `path` for `exempt` follows the same two-root relpath rule every other
+# baseline here uses: bare and relative to commands/ (`status.md`,
+# `design/craft.md`), or `skills/`- or `agents/`-prefixed and relative to
+# the plugin directory (`agents/review/aimi-code-simplicity-reviewer.md`).
+#
+# The reason field is REQUIRED for `non-artifact-root` and `exempt` — the
+# suite fails loudly on either kind carrying none, the same rule
+# command-blocks-baseline.txt states for its own per-line reason. It is the
+# suite's own promise that someone looked, made per-line instead of
+# per-section for the same reason that file gives: a paragraph above a list
+# is free to describe the list and then stop being true of an entry
+# appended to the bottom of it later.
+#
+# anchor-ref/anchor-section are declared ONCE, here, and cross-checked
+# against the rule's own home by the suite itself: it fails when the
+# declared path does not resolve to an existing file, and fails when that
+# file does not itself carry a heading matching the declared section text.
+# Renaming or moving the rule therefore breaks in this one visible place
+# instead of silently un-anchoring every writer at once. A caller pointed at
+# a throwaway fixture overrides both with --anchor-ref/--anchor-section and
+# the suite skips this cross-check entirely, since a fixture has no rule
+# home to check against.
+anchor-ref	commands/references/user-communication.md	# the artifact-language rule's home file
+anchor-section	Artifact Language Rule	# the heading Form S must restate verbatim, at any level
+
+# --- non-artifact roots -----------------------------------------------------
+#
+# A `.aimi/<root>/` path literal whose root is declared here is excluded
+# from predicate arm (a) — citing it does not make a file a candidate. The
+# default polarity is IN SCOPE: a `.aimi/` root that is not named below
+# makes every file citing it a candidate, so a new artifact directory is
+# caught rather than silently walked past.
+non-artifact-root	state	# machine state, written only through worktree-manager.sh's flock-protected mktemp-then-move; hooks/guard-runtime-state.py blocks the Write and Edit tools there unconditionally
+non-artifact-root	design	# an input bundle (a Claude Design handoff) the plugin reads and never writes
+non-artifact-root	archive	# archive-task moves completed task files here; nothing authors a document under this root
+non-artifact-root	plans	# named in the corpus only as read context (a reviewer checking a plan file is not deleted), never written to
+
+# --- exemptions --------------------------------------------------------------
+#
+# Every file below is a candidate (it matches predicate arm (a) or (b)) but
+# reads rather than authors a plugin-owned artifact, or authors into the
+# target PROJECT's own source rather than into `.aimi/`. Each reason states
+# which. This baseline is a ratchet in both directions: an entry naming a
+# file that no longer matches the predicate, or that now carries the anchor,
+# fails as stale — the same rule command-size-baseline.txt applies to its
+# byte budgets.
+exempt	agents/review/aimi-code-simplicity-reviewer.md	# names .aimi/plans/, .aimi/solutions/ and .aimi/brainstorms/ only to say never to flag them for removal; authors nothing under any of the three
+exempt	design/craft.md	# reads .aimi/brainstorms/ as context for a design critique; authors no artifact under .aimi/
+exempt	design/shape.md	# reads .aimi/brainstorms/ as context for a design shaping pass; authors no artifact under .aimi/
+exempt	design/polish.md	# declares Write/Edit to polish the target project's own source; never a plugin-owned .aimi/ artifact
+exempt	review.md	# reads .aimi/brainstorms/ as context for a code review; authors no artifact under .aimi/
+exempt	status.md	# every .aimi/tasks/ match is prose forbidding a glob of that path, never a write to it
+exempt	learnings.md	# thin wrapper; the actual writer of the friction/learnings state under ~/.aimi/learnings/ is skills/aimi-learnings/SKILL.md
+exempt	next.md	# declares Write/Edit to advance the target project's own source; never a plugin-owned .aimi/ artifact
+exempt	skills/brainstorm/SKILL.md	# deprecated per its own header ("no longer loaded by brainstorm.md... retained for reference only"); never executed
