@@ -350,8 +350,8 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 6. **Report result:**
    - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller runs `$AIMI_CLI set-verification [STORY_ID] failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller runs `$AIMI_CLI set-verification [STORY_ID] skipped --reason "agent-browser not installed"`.
 
 </headed_mode_visual>
 
@@ -376,8 +376,8 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 6. **Report result:**
    - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller can set `verification.status` to `failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller can set `verification.status` to `skipped`.
+   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller runs `$AIMI_CLI set-verification [STORY_ID] failed`. Do NOT fail the story — proceed to commit.
+   - If agent-browser was not installed: note "visual verification skipped" so the caller runs `$AIMI_CLI set-verification [STORY_ID] skipped --reason "agent-browser not installed"`.
 
 </headless_mode_visual>
 

@@ -3377,7 +3377,7 @@ while true:
                                 # the two split servers — see Split Container Dev Server
                                 # Bootstrap). mark-complete already ran above; this never
                                 # blocks it, never blocks the wave, and never retries.
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server running for [PHASE_BRANCH]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
                                 SKIP_VISUAL=true
                         else:
@@ -3390,7 +3390,7 @@ while true:
                                 # No dev server ever resolved a port for this group (see Container
                                 # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
                                 # already ran above; this never blocks it or the wave loop.
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server resolved for project group [group_key]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                                 SKIP_VISUAL=true
                             else:
@@ -3430,10 +3430,10 @@ while true:
                             )
 
                             if visual matches expectations:
-                                $AIMI_CLI update-field [full_story.id] verification.status passed
+                                $AIMI_CLI set-verification [full_story.id] passed --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification passed."
                             else:
-                                $AIMI_CLI update-field [full_story.id] verification.status failed
+                                $AIMI_CLI set-verification [full_story.id] failed --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
 
                             # Report attribution lines as advisory (do NOT toggle verification.status)
@@ -3460,9 +3460,9 @@ while true:
                                 )
 
                                 if visual matches expectations:
-                                    $AIMI_CLI update-field [full_story.id] verification.status passed
+                                    $AIMI_CLI set-verification [full_story.id] passed --tasks-file [WAVE_TASKS_FILE]
                                 else:
-                                    $AIMI_CLI update-field [full_story.id] verification.status failed
+                                    $AIMI_CLI set-verification [full_story.id] failed --tasks-file [WAVE_TASKS_FILE]
                                     Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
 
                                 if ATTRIBUTION.has_errors:
@@ -3471,7 +3471,7 @@ while true:
 
                                 agent-browser close
                             else:
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "agent-browser not installed" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — agent-browser not installed."
 
                 # Non-visual stories: the verdict now comes from the verify evidence
