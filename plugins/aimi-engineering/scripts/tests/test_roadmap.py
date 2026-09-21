@@ -4383,9 +4383,14 @@ def test_the_pending_partition_is_tasks_pys_and_is_not_recomputed_here(tmp_path)
     roadmap_path = os.path.join(root, ".aimi", "tasks", feature, "roadmap.json")
     with open(roadmap_path, encoding="utf-8") as handle:
         doc = json.load(handle)
-    tasks_path, lines = R._completed_gate_refusals(roadmap_path, doc, 1)
-    assert [line.strip().split(":", 1)[0] for line in lines] == ["US-001", "US-006"]
-    assert tasks_path.endswith(feature + "-phase-1-tasks.json")
+    lines = R._completed_gate_refusals(roadmap_path, doc, 1)
+    # No more single tasks_path to hand back beside the lines (a split phase has
+    # none to name) -- each line now carries its own member path instead, so the
+    # story id is read off the front and the path off the parenthesized middle.
+    assert [line.strip().split(" (", 1)[0] for line in lines] == ["US-001", "US-006"]
+    for line in lines:
+        assert (feature + "-phase-1-tasks.json): verification.status is still the"
+                ' literal "pending"') in line
 
 
 # ---------------------------------------------------------------------------
@@ -4514,3 +4519,144 @@ def test_an_unhashable_story_id_is_compared_rather_than_hashed():
                             "verification": {"status": "pending"}}]}
     assert T.verification_report(doc)["pending"] == [["US-001"]]
     assert R._completed_story_ids(doc) == [["US-001"]]
+
+
+# ---------------------------------------------------------------------------
+# The completed gate judges every member of a SPLIT phase, and says audibly
+# when it cannot read one (US-006). Before this, the gate opened only
+# _phase_tasks_path's single derived name -- the un-split case -- so a split
+# phase's own sibling files were never reached and an unjudged verification
+# hid in a file the gate never opened at all.
+# ---------------------------------------------------------------------------
+
+
+def test_completed_gate_split_side_axis_pending_completed_story_refuses_naming_member(tmp_path):
+    """A legacy frontend/backend pair with no metadata.splitGroup marker at
+    all -- the shape _phase_tasks_path alone could never see, since the
+    phase's own <feature>-phase-1-tasks.json never exists for a split phase.
+    The refusal must name the BACKEND member's own path, never the phase's
+    absent main file _phase_tasks_path would otherwise report."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+    phase_dir = os.path.join(root, ".aimi", "tasks", feature, "phase-1")
+    fe_path = os.path.join(phase_dir, feature + "-frontend-tasks.json")
+    be_path = os.path.join(phase_dir, feature + "-backend-tasks.json")
+    with open(fe_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [_story("US-001", "passed")]}, handle)
+    with open(be_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [_story("US-002", "pending")]}, handle)
+
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1, proc.stdout
+    assert "US-002" in proc.stderr
+    assert be_path in proc.stderr
+    assert (feature + "-phase-1-tasks.json") not in proc.stderr, (
+        "the phase's own absent main file must never be the name reported"
+    )
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_completed_gate_split_project_axis_unreadable_member_and_real_finding(tmp_path):
+    """A marked PROJECT-axis group, three members: one unparseable, one with a
+    real completed-and-pending finding. The real finding still refuses (naming
+    its own member), and the unreadable member draws exactly one could-not-
+    judge advisory rather than being treated as either clean or a refusal."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+    phase_dir = os.path.join(root, ".aimi", "tasks", feature, "phase-1")
+    web_name = feature + "-phase-1-web-tasks.json"
+    api_name = feature + "-phase-1-api-tasks.json"
+    jobs_name = feature + "-phase-1-jobs-tasks.json"
+    web_path = os.path.join(phase_dir, web_name)
+    api_path = os.path.join(phase_dir, api_name)
+    jobs_path = os.path.join(phase_dir, jobs_name)
+
+    web_doc = {
+        "metadata": {"splitGroup": {"project": "web", "index": 1, "total": 3,
+                                     "siblings": [api_name, jobs_name]}},
+        "userStories": [_story("US-101", "pending")],
+    }
+    with open(web_path, "w", encoding="utf-8") as handle:
+        json.dump(web_doc, handle)
+    with open(api_path, "w", encoding="utf-8") as handle:
+        handle.write("{ not json")
+    jobs_doc = {
+        "metadata": {"splitGroup": {"project": "jobs", "index": 3, "total": 3,
+                                     "siblings": [web_name, api_name]}},
+        "userStories": [_story("US-103", "passed")],
+    }
+    with open(jobs_path, "w", encoding="utf-8") as handle:
+        json.dump(jobs_doc, handle)
+
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1, proc.stdout
+    assert "US-101" in proc.stderr
+    assert "US-103" not in proc.stderr
+    assert proc.stderr.count("could not judge") == 1, proc.stderr
+    assert api_path in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_completed_gate_split_all_members_clean_closes(tmp_path):
+    """A split phase (legacy pair, no marker) whose every resolved member is
+    clean transitions with exit 0 and no could-not-judge advisory at all."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+    phase_dir = os.path.join(root, ".aimi", "tasks", feature, "phase-1")
+    fe_path = os.path.join(phase_dir, feature + "-frontend-tasks.json")
+    be_path = os.path.join(phase_dir, feature + "-backend-tasks.json")
+    with open(fe_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [_story("US-001", "passed")]}, handle)
+    with open(be_path, "w", encoding="utf-8") as handle:
+        json.dump({"userStories": [_story("US-002", "skipped")]}, handle)
+
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert "could not judge" not in proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_completed_gate_no_tasks_file_closes_with_could_not_judge_line(tmp_path):
+    """No main file and no split candidate in the phase directory at all --
+    the shape every phase had before this gate existed. It still closes, and
+    it now says so audibly instead of passing in silence: exactly one
+    could-not-judge advisory naming the phase, never a silent pass."""
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False)
+
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr.count("could not judge") == 1, proc.stderr
+    assert (feature + "-phase-1-tasks.json") in proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_completed_gate_traversal_shaped_sibling_is_inert(tmp_path):
+    """A marked anchor's declared sibling shaped as a path traversal resolves
+    by os.path.join(anchor_dir, os.path.basename(sibling)) -- mirroring
+    cmd_split_detect's own basename-only sibling resolution -- so it resolves
+    to a path that does not exist inside the anchor's own directory,
+    contributes no member, and is silently dropped rather than escaping the
+    phase directory or crashing the resolver."""
+    root = os.path.join(str(tmp_path), "proj")
+    feature = "gate"
+    feature_dir = os.path.join(root, ".aimi", "tasks", feature)
+    phase_dir = os.path.join(feature_dir, "phase-1")
+    os.makedirs(phase_dir, exist_ok=True)
+
+    anchor_path = os.path.join(phase_dir, feature + "-phase-1-web-tasks.json")
+    anchor_doc = {
+        "metadata": {"splitGroup": {"project": "web", "index": 1, "total": 2,
+                                     "siblings": ["../../etc/passwd"]}},
+        "userStories": [],
+    }
+    with open(anchor_path, "w", encoding="utf-8") as handle:
+        json.dump(anchor_doc, handle)
+
+    roadmap_path = os.path.join(feature_dir, "roadmap.json")
+    doc = {"roadmapVersion": "2.0", "feature": feature, "phases": [dict(_GATE_PHASE)]}
+    phase = dict(_GATE_PHASE)
+
+    members = R._completed_gate_resolve_members(roadmap_path, doc, phase)
+    assert members == [anchor_path]
+    resolved_sibling = os.path.join(phase_dir, "passwd")
+    assert not os.path.isfile(resolved_sibling)
+    assert resolved_sibling not in members
+    escaped = os.path.realpath(os.path.join(phase_dir, "../../etc/passwd"))
+    assert escaped not in members
