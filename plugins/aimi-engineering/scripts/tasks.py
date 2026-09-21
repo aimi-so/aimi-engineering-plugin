@@ -3351,6 +3351,37 @@ def _report_discriminating(verification, vtype):
     return count
 
 
+def _evidence_exit(verification, vtype):
+    """The verify exit code at `.verification.evidence.exit`, or `None` when
+    nothing usable was recorded there -- the same three-way shape
+    `_report_discriminating` above already uses for `.evidence.discriminating`,
+    reused here rather than re-derived, over the sibling field `op_judge_
+    verification` actually judges.
+
+    `None` covers every shape that is not a real exit code: a non-object
+    `verification`, an `evidence` that is not an object, an absent `exit` key
+    (including the story that recorded only `preExit`), and a value that is
+    not a plain integer. The caller reads `None` as "no usable exit" and
+    falls through to a skipped verdict; this function only answers whether an
+    integer WAS recorded, never what to do about its absence.
+
+    THE BOOL TEST COMES FIRST AND IS NOT OPTIONAL, for the identical reason
+    `_report_discriminating`'s docstring gives: Python's `isinstance(True,
+    int)` is `True`, so `{"evidence": {"exit": true}}` would otherwise read as
+    the passing code 0 on the strength of a boolean nobody meant as an exit
+    status. A float or a string is rejected the same way, in a milder form.
+    """
+    if vtype != "object":
+        return None
+    evidence = jq_index(verification, "evidence", STORY + ".verification")
+    if jq_type(evidence) != "object":
+        return None
+    exit_code = jq_index(evidence, "exit", STORY + ".verification.evidence")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return exit_code
+
+
 def verification_report(doc):
     """One document read answering the three questions ten separate jq
     programs used to open the tasks file for: which stories carry a visual
@@ -4621,6 +4652,134 @@ def op_set_verification(argv):
     for doc in docs:
         for payload in field_payload(doc, story_id, "verification"):
             _emit(payload)
+    return 0
+
+
+# skipReason text for judge-verification's "no usable exit" outcome. Two
+# literal strings, not one templated by a boolean, because the two name
+# different facts: the first says a check was declared and ran somewhere the
+# executor's own evidence never reached this document, the second says no
+# check was ever declared at all. Module-level constants so op_judge_
+# verification and its own pytest coverage read the identical text rather
+# than one recomputing what the other already asserts.
+JUDGE_VERIFICATION_NO_EVIDENCE_REASON = (
+    "implementation.verify was declared but the executor recorded no verify evidence"
+)
+JUDGE_VERIFICATION_NO_VERIFY_REASON = "no implementation.verify was declared, so no check ran"
+
+
+def _judge_verification_verdict(story):
+    """Decide judge-verification's outcome for one story.
+
+    Returns `(None, reason)` when nothing should be written, and `(status,
+    reason)` when a verdict should be written -- `status` is one of "passed",
+    "failed" or "skipped", and `reason` is the skipReason text for "skipped"
+    and `None` for "passed"/"failed" (write_verification_verdict ignores
+    `reason` for every other status, so `None` here is never rendered).
+
+    Checked in this order, each assuming the ones before it already passed:
+
+      1. `verification` is not an object at all -- nothing to judge.
+      2. `verification.strategy` is "visual" -- judged by execute.md's own
+         visual writers (outline:04), never by this op.
+      3. `verification.status` is not the literal "pending" -- already
+         judged, by this op or by set-verification, and a second verdict
+         here would overwrite a real one with a stale re-derivation.
+      4. Otherwise: `.verification.evidence.exit` decides. A usable integer
+         gives "passed" (0) or "failed" (anything else); no usable integer
+         gives "skipped", with the reason picked by whether
+         `story.implementation.verify` is a non-empty string -- the same
+         evidence-shape test `_evidence_exit` already applies to the exit
+         code, but the story's OWN implementation.verify, not its evidence,
+         decides which skipReason applies.
+    """
+    verification = jq_index(story, "verification", STORY)
+    vtype = jq_type(verification)
+    if vtype != "object":
+        return None, "no verification object declared"
+    if jq_equal(jq_index(verification, "strategy", STORY + ".verification"), "visual"):
+        return None, (
+            "verification.strategy is visual -- judged by execute.md's own visual writers"
+        )
+    status = _report_status(verification)
+    if status != "pending":
+        return None, "verification.status is already " + jq_quoted(status) + ", not pending"
+    exit_code = _evidence_exit(verification, vtype)
+    if exit_code is not None:
+        return ("passed" if exit_code == 0 else "failed"), None
+    implementation = jq_index(story, "implementation", STORY)
+    verify_cmd = jq_index(implementation, "verify", STORY + ".implementation")
+    if isinstance(verify_cmd, str) and verify_cmd:
+        reason = JUDGE_VERIFICATION_NO_EVIDENCE_REASON
+    else:
+        reason = JUDGE_VERIFICATION_NO_VERIFY_REASON
+    return "skipped", reason
+
+
+def op_judge_verification(argv):
+    """judge-verification: derive a verdict from the verify evidence
+    mark-complete already persisted, instead of stamping "passed" blind.
+
+    Replaces execute.md's old blanket rewrite (`elif ... status == "pending":
+    update-field ... verification.status passed`), which recorded a passing
+    verdict whether or not the story's own check ever ran. This op writes a
+    verdict only when there is honest evidence to derive one from -- see
+    `_judge_verification_verdict` for the four-way decision.
+
+    Every writing case goes through write_verification_verdict, the SAME
+    mutation point op_set_verification above uses, so an evidence-derived
+    verdict and an operator-typed one can never disagree about how a verdict
+    lands on disk -- only about how it is derived.
+
+    cmd_judge_verification already ran validate_story_exists before the lock
+    (cmd_update_field's own shape, not op_set_verification's), so a missing
+    id is bash's refusal and this op never dies on "not found" -- it reports
+    a `judged: false` no-op instead, the same as every other reason nothing
+    was written. The one case that reaches this without a prior bash check is
+    the race where the story is removed between that check and this crossing;
+    treating it as an ordinary no-op rather than a die() is deliberate,
+    because the alternative is a second document read outside the lock.
+
+    Mirrors op_set_verification's "every match, not the first" semantics for
+    a duplicated id: each matching slot is judged independently, only the
+    slots that get a real verdict are written, and one result object is
+    emitted per match -- so a duplicate id where one copy is already judged
+    and the other is still pending reports one `judged: true` and one
+    `judged: false` line rather than picking one arbitrarily.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    if not path or story_id is None:
+        die("Usage: tasks.py judge-verification --tasks-file <path> --story-id <id>")
+
+    docs = read_docs(path, "judge-verification")
+    matches = []
+    for doc in docs:
+        container, selected = _selected_slots(doc, story_id)
+        for key in selected:
+            matches.append((container, key))
+
+    if not matches:
+        _emit({"id": story_id, "judged": False, "reason": "story " + story_id + " not found"})
+        return 0
+
+    results = []
+    changed = False
+    for container, key in matches:
+        status, reason = _judge_verification_verdict(container[key])
+        if status is None:
+            results.append({"id": story_id, "judged": False, "reason": reason})
+            continue
+        container[key] = write_verification_verdict(container[key], status, reason)
+        changed = True
+        results.append(
+            {"id": story_id, "judged": True, "verification": container[key]["verification"]}
+        )
+
+    if changed:
+        write_docs_atomically(path, docs)
+    for result in results:
+        _emit(result)
     return 0
 
 
@@ -7249,6 +7408,7 @@ _OPS = {
     "cascade-skip": op_cascade_skip,
     "remove-story": op_remove_story,
     "set-verification": op_set_verification,
+    "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),

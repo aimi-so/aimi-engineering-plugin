@@ -3474,9 +3474,15 @@ while true:
                                 $AIMI_CLI update-field [full_story.id] verification.status skipped
                                 Report: "[full_story.id] visual verification skipped — agent-browser not installed."
 
-                # Non-visual stories: keep existing behavior
+                # Non-visual stories: the verdict now comes from the verify evidence
+                # mark-complete already persisted above (see VERIFY_EVIDENCE_JSON) —
+                # a blanket rewrite to "passed" here claimed success whether or not
+                # this story's own check ever ran, which is exactly the dishonesty
+                # judge-verification exists to close. It is a safe no-op (writes
+                # nothing, reports why) for a story already judged, so the pending
+                # check below is an optimization, not a correctness requirement.
                 elif full_story.verification and full_story.verification.status == "pending":
-                    $AIMI_CLI update-field [full_story.id] verification.status passed
+                    $AIMI_CLI judge-verification [full_story.id] --tasks-file [WAVE_TASKS_FILE]
 
                 Report: "[full_story.id] merged successfully."
 

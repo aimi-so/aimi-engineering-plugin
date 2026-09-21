@@ -4556,6 +4556,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_update_field",
         "cmd_remove_story",
         "cmd_set_verification",
+        "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
@@ -5076,6 +5077,180 @@ def test_set_verification_refuses_a_story_whose_verification_is_not_an_object(tm
         )
     assert raised.value.code == 1
     assert "no verification object" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# judge-verification -- a verdict derived from the story's own recorded
+# evidence, never a blanket rewrite. Every case below is one row of the
+# CriticalQ1 mapping in _judge_verification_verdict's own docstring.
+# ---------------------------------------------------------------------------
+
+
+def _jv_story(story_id, verification=_SV_DEFAULT, implementation=None):
+    story = _sv_story(story_id, verification=verification)
+    if implementation is not None:
+        story["implementation"] = implementation
+    return story
+
+
+def test_judge_verification_evidence_exit_zero_writes_passed(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": 0}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "passed"
+    assert "skipReason" not in out["verification"]
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "passed"
+
+
+def test_judge_verification_evidence_exit_nonzero_writes_failed(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": 1}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "failed"
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "failed"
+
+
+def test_judge_verification_evidence_exit_as_json_boolean_is_never_read_as_zero(tmp_path, capsys):
+    # A boolean exit is not a usable integer -- isinstance(True, int) is True
+    # in Python, so the bool check has to run FIRST or this would wrongly
+    # write "passed". No implementation.verify declared -> the no-check
+    # skipReason, proving it fell all the way through to "no usable exit"
+    # rather than reading True as 0.
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": True}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_evidence_with_only_preexit_is_no_usable_exit(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"preExit": 0}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_no_evidence_with_verify_declared_names_the_declared_reason(
+    tmp_path, capsys
+):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", implementation={"verify": "pytest -q"})],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_EVIDENCE_REASON
+
+
+def test_judge_verification_no_evidence_with_no_verify_names_the_undeclared_reason(
+    tmp_path, capsys
+):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900")])
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_leaves_an_already_judged_story_byte_for_byte_unchanged(
+    tmp_path, capsys
+):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification("passed"))],
+    )
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "passed" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_leaves_a_visual_story_unchanged(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(strategy="visual"))],
+    )
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "visual" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_leaves_a_story_with_no_verification_object_unchanged(
+    tmp_path, capsys
+):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900", verification=None)])
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "no verification object" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_reports_rather_than_dies_on_an_unknown_id(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-999"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"id": "US-999", "judged": False, "reason": "story US-999 not found"}
+    assert open(path, encoding="utf-8").read() == before
 
 
 # ---------------------------------------------------------------------------
@@ -5659,6 +5834,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "cascade-skip",
         "remove-story",
         "set-verification",
+        "judge-verification",
         "reset-orphaned",
         "archive-task",
         "gate-pass",

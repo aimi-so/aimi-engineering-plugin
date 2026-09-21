@@ -13059,6 +13059,51 @@ cmd_gate_fail() {
   [ "$rc" -eq 0 ] || exit "$rc"
 }
 
+# Derive a verification verdict from the verify evidence mark-complete
+# already persisted, rather than stamping "passed" blind -- the verb
+# execute.md's non-visual branch calls instead of the old blanket
+# update-field rewrite. Mirrors cmd_update_field's shape (validate_story_id,
+# --tasks-file resolution plus validate_path_in_project, pre-lock
+# validate_story_exists, check_python3), not cmd_set_verification's -- the
+# story's own evidence decides the verdict here, so nothing about it is
+# document-dependent in the way set-verification's status/reason are.
+# Usage: judge-verification <story-id> [--tasks-file <path>]
+cmd_judge_verification() {
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh judge-verification <story-id> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # One crossing, inside the lock. op_judge_verification decides everything
+  # document-dependent -- visual strategy, already-judged status, no
+  # verification object, and the evidence-derived verdict itself -- and
+  # reports why it wrote nothing rather than writing something dishonest.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" judge-verification \
+        --tasks-file "$tasks_file" --story-id "$story_id"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Update a nested field on a story
 # Usage: update-field US-NNN field.path value [--tasks-file <path>]
 # field.path is a dotted chain of identifier segments, e.g. "verification.status"
@@ -16409,6 +16454,14 @@ COMMANDS:
                               constrained to their documented value sets (pending/passed/
                               failed/skipped, and test/visual/api); prefer set-verification
                               over this for recording a verification verdict.
+    judge-verification <id> [--tasks-file <path>]
+                              Derive a verification verdict from the story's own recorded
+                              verify evidence (returns {id, judged, verification|reason}
+                              JSON) -- passed on evidence.exit 0, failed on a non-zero
+                              integer exit, skipped with a skipReason otherwise. Writes
+                              nothing, and reports why, for a story whose verification.
+                              status is not pending, whose strategy is visual, or that
+                              carries no verification object at all.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
@@ -17671,6 +17724,7 @@ main() {
     update-field)      shift; cmd_update_field "$@" ;;
     remove-story)      shift; cmd_remove_story "$@" ;;
     set-verification)  shift; cmd_set_verification "$@" ;;
+    judge-verification) shift; cmd_judge_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
