@@ -294,7 +294,6 @@ Each story receives a `verification` field that tells the executor how to confir
 | `test` | Run automated tests | Backend logic, server actions, utility functions, data transformations, business rules — any story where correctness can be asserted programmatically |
 | `visual` | Manual browser inspection | UI components, layout changes, styling, animations, responsive behavior — any story where the output is visual |
 | `api` | Hit endpoint and check response | API routes, REST endpoints, GraphQL resolvers — any story that exposes an HTTP interface |
-| `typecheck` | Run `tsc --noEmit` | Schema changes, type definitions, refactors that only affect types — stories with no runtime behavior to test |
 
 **IMPORTANT: `verification` MUST be an object — never a bare string like `"passed"` or `"pending"`.** The executor's visual-follow detection depends on `verification.strategy` being accessible as an object property.
 
@@ -308,7 +307,7 @@ Required object format examples:
 1. If the story touches an API endpoint → `api`
 2. If the story modifies UI components or pages → `visual`
 3. If the story contains backend logic or services → `test`
-4. If none of the above match → `typecheck`
+4. If none of the above match (type-only: schema changes, type definitions, refactors with no runtime behavior) → `test`, with the type/syntax check command (e.g. `tsc --noEmit`) as `implementation.verify`
 
 ### Combining Strategies
 
@@ -484,5 +483,5 @@ Before finalizing stories, verify:
 - [ ] Backend/logic stories use `test` verification
 - [ ] UI stories use `visual` verification
 - [ ] API endpoint stories use `api` verification
-- [ ] Type-only stories use `typecheck` verification
+- [ ] Type-only stories use `test` verification, with the type/syntax check command in `implementation.verify`
 - [ ] Combined strategies list primary strategy first

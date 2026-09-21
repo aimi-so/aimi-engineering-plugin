@@ -1699,6 +1699,77 @@ def test_a_tasks_entry_may_name_the_shell_operator_it_describes(tmp_path):
     assert json.loads(proc.stdout) == {"valid": True, "errors": []}
 
 
+def _one_verification_doc(verification):
+    """`_one_task_doc`'s sibling: a minimal valid document whose single story
+    carries one `verification` value instead of one `tasks[]` entry."""
+    return {
+        "schemaVersion": "3.3",
+        "metadata": {
+            "title": "ref: p", "type": "ref", "branchName": "ref/p",
+            "createdAt": "2020-01-01", "planPath": None,
+        },
+        "userStories": [{
+            "id": "US-001",
+            "title": "Story US-001",
+            "description": "As an author, I want US-001.",
+            "acceptanceCriteria": ["Typecheck passes"],
+            "status": "pending",
+            "priority": 1,
+            "dependsOn": [],
+            "wave": 1,
+            "verification": verification,
+        }],
+    }
+
+
+def test_validate_stories_refuses_a_verification_strategy_or_status_outside_the_documented_value_set():
+    """AC1/AC2: an unknown strategy or status is refused by name, quoting the
+    value found; a known pair passes; the legacy `skipped` shape with no
+    `skipReason` at all stays valid, because that presence check belongs to
+    set-verification (a later story), never to this read-only validator."""
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "vizual", "status": "pending"})
+    ) == {
+        "valid": False,
+        "errors": ["US-001: verification.strategy \"vizual\" is not one of: test, visual, api"],
+    }
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "test", "status": "done"})
+    ) == {
+        "valid": False,
+        "errors": ["US-001: verification.status \"done\" is not one of: pending, passed, failed, skipped"],
+    }
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "visual", "status": "passed"})
+    ) == {"valid": True, "errors": []}
+    # The legacy on-disk shape: status: "skipped" with no skipReason key at
+    # all. This phase's own research measured zero skipped-with-reason
+    # stories on disk today, and AC2 says validate-stories must not be the
+    # verb that starts requiring one.
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "api", "status": "skipped"})
+    ) == {"valid": True, "errors": []}
+
+
+def test_normalize_verification_then_validate_stories_refuses_a_migrated_bare_string():
+    """AC4: commands/plan.md (~3553) runs normalize-verification immediately
+    before validate-stories -- Phase 4.5's own ordering -- so this proves the
+    CHAIN rather than the two calls in isolation. `_verification_migrated`
+    turns a bare `"passed"` into `{"strategy": "passed", "status": "pending",
+    "url": None, "expect": None}`, and "passed" is a member of
+    VERIFICATION_STATUSES but not of VERIFICATION_STRATEGIES, so the migrated
+    document is refused on the strategy field specifically."""
+    doc = _one_verification_doc("passed")
+    T.normalize_verification(doc)
+    assert doc["userStories"][0]["verification"] == {
+        "strategy": "passed", "status": "pending", "url": None, "expect": None,
+    }
+    assert T.validate_stories(doc) == {
+        "valid": False,
+        "errors": ["US-001: verification.strategy \"passed\" is not one of: test, visual, api"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # validate-tasks: fifteen rules, and the scaffolding that did not survive
 # ---------------------------------------------------------------------------

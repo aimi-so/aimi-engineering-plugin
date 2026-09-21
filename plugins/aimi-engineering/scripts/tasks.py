@@ -332,6 +332,23 @@ def jq_tostring(value):
     return json.dumps(jq_numbers(value), separators=(",", ":"), ensure_ascii=False)
 
 
+def jq_quoted(value):
+    """`tostring`'s own JSON-encode branch, applied unconditionally.
+
+    jq_tostring above deliberately leaves a STRING unquoted, because every
+    existing caller interpolates the result inline next to prose that already
+    marks where it sits (an id before a colon, a skill name inside brackets).
+    validate-stories' verification.strategy/status refusal is the first
+    caller that needs the opposite: the found value has to stand out as a
+    literal inside a sentence that also names the allowed set, so a string
+    renders through its own JSON quotes here -- `"vizual"`, not `vizual` --
+    rather than dropping them the way interpolation does. Anything that is
+    not a string already renders identically to jq_tostring, because this
+    IS jq_tostring's own non-string branch, reused rather than duplicated.
+    """
+    return json.dumps(jq_numbers(value), separators=(",", ":"), ensure_ascii=False)
+
+
 def jq_raw(value):
     """One line of `jq -r` output, which is NOT jq_tostring.
 
@@ -1039,6 +1056,15 @@ VALID_PROJECT = "^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$"
 PATH_COMPONENT = ("\\.\\.", "/", "[\\$`;|&]")
 GATE_KEYS = ("type", "status", "prompt")
 
+# The ONLY place either tuple is written as a literal. A later verb that needs
+# the documented value set (set-verification, judge-verification, the
+# completed gate) imports these two rather than restating them -- the same
+# discipline GATE_KEYS above already keeps. See
+# plugins/aimi-engineering/skills/task-planner/references/task-format-v3.md's
+# Verification Object table for the schema-level statement of the same set.
+VERIFICATION_STRATEGIES = ("test", "visual", "api")
+VERIFICATION_STATUSES = ("pending", "passed", "failed", "skipped")
+
 
 def _verdict(errors):
     """`if length == 0 then {valid: true, errors: []} else {valid: false, errors: .}`.
@@ -1249,6 +1275,31 @@ def _story_errors(story):
             story_id + ": verification must be an object {strategy, status, url, expect}; "
             "found bare string — run normalize-verification to fix"
         )
+    elif jq_type(verification) == "object":
+        # Guarding on the object type first is load-bearing, not defensive
+        # style: jq_index raises MalformedTasks on a non-null, non-dict value,
+        # so a hand-edited verification that is e.g. a number or array must
+        # never reach jq_index(verification, "strategy", ...) below -- that
+        # would abort the whole run instead of reporting a per-story error,
+        # same as the .implementation guard a few rules above this one.
+        owner = STORY + ".verification"
+        strategy = jq_index(verification, "strategy", owner)
+        if strategy is not None and strategy not in VERIFICATION_STRATEGIES:
+            errors.append(
+                story_id + ": verification.strategy " + jq_quoted(strategy)
+                + " is not one of: " + ", ".join(VERIFICATION_STRATEGIES)
+            )
+        status = jq_index(verification, "status", owner)
+        if status is not None and status not in VERIFICATION_STATUSES:
+            errors.append(
+                story_id + ": verification.status " + jq_quoted(status)
+                + " is not one of: " + ", ".join(VERIFICATION_STATUSES)
+            )
+        # No skipReason presence check here on purpose: a legacy
+        # status: "skipped" with no skipReason key at all is the on-disk
+        # shape this phase's own research found, and it stays valid at this
+        # verb. Requiring the field belongs to set-verification, which WRITES
+        # it, never to this read-only validator.
     if not jq_has(story, "status", STORY):
         errors.append(
             story_id + ": missing required field: status — run normalize-status to fix"

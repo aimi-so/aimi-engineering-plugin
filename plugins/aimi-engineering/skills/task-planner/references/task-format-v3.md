@@ -157,9 +157,10 @@ Optional object describing how to verify the story after execution. Verification
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `strategy` | string | Yes | — | One of: `test`, `visual`, `api`. Determines how verification is performed. |
-| `status` | string | Yes | `"pending"` | One of: `pending`, `passed`, `failed`. Tracks the outcome of verification. |
+| `status` | string | Yes | `"pending"` | One of: `pending`, `passed`, `failed`, `skipped`. Tracks the outcome of verification. |
 | `url` | string | No | — | URL to hit for `api` strategy, or screenshot/page URL for `visual` strategy. |
 | `expect` | string | No | — | Expected result description (e.g., `"200 OK with token"`, `"login button visible"`). |
+| `skipReason` | string | No | — | Reason the verification was skipped. Present only alongside `status: "skipped"`; written by the `set-verification`/`judge-verification` verbs, never by the planner. A legacy `skipped` with no `skipReason` is valid -- absence means no reason was recorded. |
 
 **Verification status is a separate concern from story status.** A story can be `completed` while its verification is `failed` -- this signals the implementation was attempted and finished but the result did not pass verification. The story status is not automatically changed.
 
@@ -669,7 +670,7 @@ Before processing, validate:
 15. Each story's `project` (if present) must be a relative path with no `..` components and must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 16. Each story's `wave` (if present) must be a positive integer
 17. Each story's `implementation` (if present) must be an object with required fields: `files` (string[]), `approach` (string), `verify` (string)
-18. Each story's `verification` (if present) must be an object with required `strategy` (one of: `test`, `visual`, `api`) and `status` (one of: `pending`, `passed`, `failed`); optional fields: `url` (string), `expect` (string)
+18. Each story's `verification` (if present) must be an object with required `strategy` (one of: `test`, `visual`, `api`) and `status` (one of: `pending`, `passed`, `failed`, `skipped`); optional fields: `url` (string), `expect` (string), `skipReason` (string, present only alongside `status: "skipped"`)
 19. Each story's `gate` (if present) must be an object with required `type` (one of: `verify`, `decision`, `action`), `status` (one of: `pending`, `passed`, `failed`), and `prompt` (string); optional field: `options` (string[])
 20. Gate blocking rules: `decision` gates must have `status: "passed"` before the story can start; `action` gates must have `status: "passed"` before dependent stories can start; `verify` gates are non-blocking
 21. `metadata.frontendOnly` (if present) must be a boolean
