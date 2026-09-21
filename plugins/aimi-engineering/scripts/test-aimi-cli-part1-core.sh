@@ -1041,6 +1041,100 @@ EOF
   rm -f "$file_a" "$file_b" "$file_c" "$file_d"
 }
 
+test_set_verification() {
+  echo ""
+  echo "=== Testing set-verification ==="
+
+  local rc err_out
+
+  local file_a="$TASKS_DIR/9999-99-88-set-verification-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": "", "verification": {"strategy": "test", "status": "pending", "url": null, "expect": null}}
+  ]
+}
+EOF
+
+  # --- refusal: skipped with no --reason exits non-zero and writes nothing ---
+  local before_a
+  before_a=$(cat "$file_a")
+  err_out=$("$CLI" set-verification US-900 skipped --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: skipped with no --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "set-verification: skipped with no --reason names the required flag"
+  assert_eq "$before_a" "$(cat "$file_a")" "set-verification: skipped with no --reason leaves the file unchanged"
+
+  # --- success: skipped WITH --reason writes status+skipReason and echoes both back ---
+  local output
+  output=$("$CLI" set-verification US-900 skipped --reason 'agent-browser not installed' --tasks-file "$file_a")
+  # Key order is NOT sorted here on purpose: write_verification_verdict keeps
+  # status/strategy/url/expect exactly where they already sat (an existing
+  # key keeps its position, matching jq's own `.k = v`) and appends
+  # skipReason at the end as a genuinely new key -- so the natural order this
+  # asserts against IS the contract, not an artifact of jq -S.
+  assert_eq '{"id":"US-900","verification":{"strategy":"test","status":"skipped","url":null,"expect":null,"skipReason":"agent-browser not installed"}}' \
+    "$(printf '%s' "$output" | jq -c '.')" \
+    "set-verification: skipped success echoes {id, verification} carrying the reason"
+  assert_eq "skipped" "$(jq -r '.userStories[0].verification.status' "$file_a")" \
+    "set-verification: on disk, status is skipped"
+  assert_eq "agent-browser not installed" "$(jq -r '.userStories[0].verification.skipReason' "$file_a")" \
+    "set-verification: on disk, skipReason carries the reason"
+
+  # --- success: a later passed (no --reason) drops the now-stale skipReason ---
+  output=$("$CLI" set-verification US-900 passed --tasks-file "$file_a")
+  assert_eq "passed" "$(jq -r '.userStories[0].verification.status' "$file_a")" \
+    "set-verification: passed after skipped updates status"
+  local post_verification
+  post_verification=$(jq -c '.userStories[0].verification' "$file_a")
+  assert_eq "false" "$(printf '%s' "$post_verification" | jq 'has("skipReason")')" \
+    "set-verification: passed after skipped removes the stale skipReason key entirely"
+
+  # --- refusal: pending exits non-zero naming the allowed values ---
+  err_out=$("$CLI" set-verification US-900 pending --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: pending exits non-zero"
+  assert_contains "passed" "$err_out" "set-verification: pending refusal names passed as allowed"
+  assert_contains "failed" "$err_out" "set-verification: pending refusal names failed as allowed"
+  assert_contains "skipped" "$err_out" "set-verification: pending refusal names skipped as allowed"
+
+  # --- refusal: an unknown status exits non-zero naming the allowed values ---
+  err_out=$("$CLI" set-verification US-900 bogus-status --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: an unknown status exits non-zero"
+  assert_contains "passed" "$err_out" "set-verification: unknown-status refusal names the allowed values"
+
+  # --- refusal: passed with --reason exits non-zero (reason only for skipped) ---
+  local before_reason_guard
+  before_reason_guard=$(cat "$file_a")
+  err_out=$("$CLI" set-verification US-900 passed --reason 'why' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: passed with --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "set-verification: passed-with-reason refusal names --reason"
+  assert_eq "$before_reason_guard" "$(cat "$file_a")" "set-verification: passed-with-reason refusal leaves the file unchanged"
+
+  # --- refusal: unknown id ---
+  err_out=$("$CLI" set-verification US-999 passed --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: unknown id exits non-zero"
+  assert_contains "US-999" "$err_out" "set-verification: unknown id names the id in stderr"
+  assert_contains "not found" "$err_out" "set-verification: unknown id says it was not found"
+
+  # --- refusal: a story with no verification object at all ---
+  local file_b="$TASKS_DIR/9999-99-88-set-verification-b-tasks.json"
+  cat > "$file_b" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-901", "title": "No verification", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  err_out=$("$CLI" set-verification US-901 passed --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: a story with no verification object exits non-zero"
+  assert_contains "no verification object" "$err_out" "set-verification: names the missing verification object"
+
+  rm -f "$file_a" "$file_b"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -6120,17 +6214,23 @@ test_tasks_file_flag_honored_by_update_field() {
   echo ""
   echo "=== Testing update-field honors --tasks-file, and a value starting with -- passes through unaltered ==="
 
+  # notes rather than verification.status: the latter now carries a value-set
+  # guard of its own (see test_update_field_verification_value_guard), and
+  # "--not-a-flag" is not one of the documented statuses. notes has no such
+  # guard, so it stays the field this test's actual subject -- --tasks-file
+  # honoring and unaltered pass-through of a value starting with -- -- can
+  # exercise without tripping on an unrelated one.
   local second_file="$TASKS_DIR/9999-99-81-tasks-file-flag-uf.json"
   _write_tasks_file_flag_fixture "$second_file"
   local pre_pointer
   pre_pointer=$(jq -S '.' "$TASKS_FILE")
 
   local output exit_code=0
-  output=$("$CLI" update-field US-900 verification.status "--not-a-flag" --tasks-file "$second_file") || exit_code=$?
+  output=$("$CLI" update-field US-900 notes "--not-a-flag" --tasks-file "$second_file") || exit_code=$?
   assert_exit_code "0" "$exit_code" "update-field --tasks-file: exits 0"
-  assert_eq '{"id":"US-900","verification":{"status":"--not-a-flag"}}' "$(printf '%s' "$output" | jq -Sc '.')" \
+  assert_eq '{"id":"US-900","notes":"--not-a-flag"}' "$(printf '%s' "$output" | jq -Sc '.')" \
     "update-field --tasks-file: echoes back the named file's story, value unaltered despite starting with --"
-  assert_eq "--not-a-flag" "$(jq -r '.userStories[] | select(.id == "US-900") | .verification.status' "$second_file")" \
+  assert_eq "--not-a-flag" "$(jq -r '.userStories[] | select(.id == "US-900") | .notes' "$second_file")" \
     "update-field --tasks-file: on disk, the named file's story carries the literal value"
 
   local post_pointer
@@ -11262,6 +11362,41 @@ test_update_field_refuses_non_identifier_path() {
     "update-field: path containing a space is refused by name on stderr"
 }
 
+test_update_field_verification_value_guard() {
+  echo ""
+  echo "=== Testing update-field: verification.status/.strategy are constrained to their documented value sets ==="
+
+  reset_fixture
+
+  local stderr_output exit_code
+
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 verification.status bogus-status 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: verification.status outside the allowed set exits 1"
+  assert_stderr_contains "not one of" "$stderr_output" \
+    "update-field: verification.status refusal names the documented value set"
+
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 verification.strategy bogus-strategy 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: verification.strategy outside the allowed set exits 1"
+  assert_stderr_contains "not one of" "$stderr_output" \
+    "update-field: verification.strategy refusal names the documented value set"
+
+  # The legitimate values on both leaves still succeed exactly as before --
+  # the guard narrows what is accepted, it does not touch what already worked.
+  local output exit_code2=0
+  output=$("$CLI" update-field US-001 verification.status passed) || exit_code2=$?
+  assert_exit_code "0" "$exit_code2" "update-field: verification.status passed still succeeds"
+  assert_eq "passed" "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.status' "$TASKS_FILE")" \
+    "update-field: verification.status passed lands on disk"
+
+  local exit_code3=0
+  output=$("$CLI" update-field US-001 verification.strategy visual) || exit_code3=$?
+  assert_exit_code "0" "$exit_code3" "update-field: verification.strategy visual still succeeds"
+  assert_eq "visual" "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$TASKS_FILE")" \
+    "update-field: verification.strategy visual lands on disk"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -11317,6 +11452,7 @@ main() {
   test_cascade_skip
   test_mark_skipped
   test_remove_story
+  test_set_verification
   test_validate_deps_circular
   test_validate_deps
   test_status
@@ -11621,6 +11757,7 @@ main() {
   test_update_field_nested_path
   test_update_field_single_segment
   test_update_field_refuses_non_identifier_path
+  test_update_field_verification_value_guard
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""

@@ -2390,6 +2390,68 @@ cmd_remove_story() {
   printf '%s\n' "$out"
 }
 
+# Record an explicit verification verdict -- the one writer of
+# verification.status a caller should reach for instead of a raw update-field
+# write, because it demands --reason for a skipped verdict and refuses it for
+# passed/failed, in one locked crossing.
+# Usage: set-verification <id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]
+cmd_set_verification() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--reason" ]; then
+      i=$((i + 1))
+      reason="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+  local status="${positional[1]:-}"
+
+  if [ -z "$story_id" ] || [ -z "$status" ]; then
+    echo "Usage: aimi-cli.sh set-verification <story-id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]" >&2
+    echo "  --reason is required when <status> is skipped, and refused for passed/failed." >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason is treated the same as an absent one -- the same rule
+  # cmd_remove_story applies to its own --reason -- so tasks.py sees no flag
+  # at all rather than an empty string, and refuses either shape identically.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. Deliberately no bash-side check of $status
+  # against passed/failed/skipped and no pre-lock validate_story_exists --
+  # both are document-dependent refusals op_set_verification owns, the same
+  # exception cmd_remove_story's own comment documents; a bash-side status
+  # literal here would be the second list the cross-story contract forbids.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" set-verification \
+        --tasks-file "$tasks_file" --story-id "$story_id" --status "$status" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -16295,6 +16357,17 @@ COMMANDS:
                               nothing) when the id is not found, the story is not
                               pending, another story depends on it, it is the only
                               story left in the file, or --reason is missing/empty.
+    set-verification <id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]
+                              Record an explicit verification verdict in one locked
+                              crossing (returns {id, verification} JSON). --reason is
+                              required when the status is skipped and refused for
+                              passed/failed. Refuses (writes nothing) on status pending
+                              or any value outside passed/failed/skipped, a --reason
+                              that does not match the status, an id not found, or a
+                              story whose verification field is absent or not an
+                              object. A skipped write replaces any stale skipReason
+                              left by an earlier verdict; passed/failed removes it.
+                              Prefer this over update-field for a verification verdict.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -16332,6 +16405,10 @@ COMMANDS:
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
+                              verification.status and verification.strategy are further
+                              constrained to their documented value sets (pending/passed/
+                              failed/skipped, and test/visual/api); prefer set-verification
+                              over this for recording a verification verdict.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
@@ -17593,6 +17670,7 @@ main() {
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
     remove-story)      shift; cmd_remove_story "$@" ;;
+    set-verification)  shift; cmd_set_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;

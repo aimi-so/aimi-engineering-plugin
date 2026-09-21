@@ -1065,6 +1065,20 @@ GATE_KEYS = ("type", "status", "prompt")
 VERIFICATION_STRATEGIES = ("test", "visual", "api")
 VERIFICATION_STATUSES = ("pending", "passed", "failed", "skipped")
 
+# set-verification's own cap on --reason, applied through rm_sanitize the same
+# way remove-story caps its own --reason at 2000 -- picked and documented here
+# rather than left as a bare literal at the call site. 500 is generous for a
+# one-line explanation ("agent-browser not installed") while still bounding
+# what a skipped verdict can carry into the document.
+VERIFICATION_SKIP_REASON_MAXLEN = 500
+
+# set-verification never writes "pending" -- recording a verdict is the
+# opposite of "nobody looked yet" -- so its own allowed set is this tuple
+# minus "pending", DERIVED rather than re-literalled: the cross-story contract
+# is one home for the value set, and a second tuple typed out by hand would be
+# the second list that contract forbids.
+_SET_VERIFICATION_STATUSES = tuple(s for s in VERIFICATION_STATUSES if s != "pending")
+
 
 def _verdict(errors):
     """`if length == 0 then {valid: true, errors: []} else {valid: false, errors: .}`.
@@ -3097,6 +3111,38 @@ def field_payload(doc, story_id, top):
     ]
 
 
+def write_verification_verdict(story, status, reason):
+    """The ONE mutation point a verification verdict is ever written through.
+
+    `op_set_verification` below calls this directly, and outline:03's
+    `judge-verification` is documented to call it too, so an evidence-derived
+    verdict and an operator-typed one share exactly one path rather than two
+    that could drift apart -- the same reasoning that keeps VERIFICATION_
+    STRATEGIES/STATUSES to one definition instead of a second list per caller.
+
+    Copies the story's existing verification object, sets `status`, and --
+    for `status == "skipped"` only -- sets `skipReason` to the reason,
+    sanitized through `rm_sanitize` at `VERIFICATION_SKIP_REASON_MAXLEN`.
+    `rm_sanitize` already collapses \\r\\n/\\r/\\n to a space, so this does not
+    hand-roll a second collapse. Every OTHER status pops any stale
+    `skipReason` key instead: a passed/failed verdict recorded after an
+    earlier skip must not leave that reason sitting beside the new one.
+
+    Returns a new story dict -- never mutates `story` in place, the same
+    discipline `jq_setpath` already keeps -- so a caller still holding the
+    old object sees the old verification untouched.
+    """
+    verification = dict(story.get("verification") or {})
+    verification["status"] = status
+    if status == "skipped":
+        verification["skipReason"] = rm_sanitize(reason, VERIFICATION_SKIP_REASON_MAXLEN)
+    else:
+        verification.pop("skipReason", None)
+    updated = dict(story)
+    updated["verification"] = verification
+    return updated
+
+
 def _status_defaulted(story):
     """`.status //= "pending"` on one story.
 
@@ -4272,6 +4318,23 @@ def op_update_field(argv):
             "Usage: tasks.py update-field --tasks-file <path> --story-id <id> "
             "--field-path <a.b> --value <text>"
         )
+    # The value-set guard on the two verification leaves -- exact string
+    # equality on the WHOLE dotted path, checked before any document is read,
+    # so `verification` alone (the golden update-field-sobrescreve-objeto
+    # case, which replaces the whole object with the string "manual") is
+    # untouched and update-field stays a general nested writer everywhere
+    # else. Reads VERIFICATION_STATUSES/STRATEGIES rather than a second
+    # literal list, per the cross-story contract.
+    if field_path == "verification.status" and value not in VERIFICATION_STATUSES:
+        die(
+            "Error: update-field: verification.status " + jq_quoted(value)
+            + " is not one of: " + ", ".join(VERIFICATION_STATUSES)
+        )
+    if field_path == "verification.strategy" and value not in VERIFICATION_STRATEGIES:
+        die(
+            "Error: update-field: verification.strategy " + jq_quoted(value)
+            + " is not one of: " + ", ".join(VERIFICATION_STRATEGIES)
+        )
     segments = field_path.split(".")
     docs = read_docs(path, "update-field")
     for doc in docs:
@@ -4486,6 +4549,78 @@ def op_remove_story(argv):
 
     write_docs_atomically(path, docs)
     _emit({"id": story_id, "removed": True, "remaining": len(remaining)})
+    return 0
+
+
+def op_set_verification(argv):
+    """set-verification: record an explicit verification verdict, never a raw
+    update-field write.
+
+    Modeled on op_remove_story rather than on _mark_op: every refusal is
+    decided here, inside the single crossing, in this fixed order -- status
+    outside the allowed set (which excludes "pending" -- recording a verdict
+    is the opposite of "nobody looked yet"), a --reason mismatched to the
+    status (missing for skipped, present for passed/failed), not found, and
+    "no verification object to update" for a story whose own verification
+    field is absent or not an object. The first two need no document at all
+    and are checked before read_docs; the last two do, and are checked after.
+
+    Mirrors op_update_field's own shape for a multi-document stream and a
+    duplicated id: _selected_slots is walked over EVERY doc, so every
+    matching story is updated (mark_stories/assign_field's "every match, not
+    the first" semantics), "not found" fires only when no doc has the id at
+    all, and the verification-object check runs over every match BEFORE any
+    write, so a duplicate id where only one copy lacks a verification object
+    still refuses and writes nothing rather than partially updating the
+    other.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    status = _flag(argv, "--status")
+    reason = _flag(argv, "--reason")
+    if not path or story_id is None or not status:
+        die(
+            "Usage: tasks.py set-verification --tasks-file <path> --story-id <id> "
+            "--status <passed|failed|skipped> [--reason <text>]"
+        )
+    if status not in _SET_VERIFICATION_STATUSES:
+        die(
+            "Error: set-verification: status " + jq_quoted(status)
+            + " is not one of: " + ", ".join(_SET_VERIFICATION_STATUSES)
+        )
+    if status == "skipped":
+        if not reason or not reason.strip():
+            die("Error: set-verification: --reason is required when status is skipped")
+    elif reason:
+        die(
+            "Error: set-verification: --reason is only accepted when status is "
+            "skipped (status: " + status + ")"
+        )
+
+    docs = read_docs(path, "set-verification")
+    matches = []
+    for doc in docs:
+        container, selected = _selected_slots(doc, story_id)
+        for key in selected:
+            matches.append((container, key))
+    if not matches:
+        die("Error: set-verification: story " + story_id + " not found in " + path)
+
+    for container, key in matches:
+        verification = jq_index(container[key], "verification", STORY)
+        if not isinstance(verification, dict):
+            die(
+                "Error: set-verification: story " + story_id + " has no verification "
+                "object to update"
+            )
+
+    for container, key in matches:
+        container[key] = write_verification_verdict(container[key], status, reason)
+
+    write_docs_atomically(path, docs)
+    for doc in docs:
+        for payload in field_payload(doc, story_id, "verification"):
+            _emit(payload)
     return 0
 
 
@@ -7113,6 +7248,7 @@ _OPS = {
     "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
     "cascade-skip": op_cascade_skip,
     "remove-story": op_remove_story,
+    "set-verification": op_set_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),

@@ -4555,6 +4555,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_mark_skipped",
         "cmd_update_field",
         "cmd_remove_story",
+        "cmd_set_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
@@ -4880,6 +4881,201 @@ def test_remove_story_refuses_a_whitespace_only_reason(tmp_path, capsys):
         )
     assert raised.value.code == 1
     assert "--reason" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# set-verification -- an explicit verdict, never a raw update-field write
+# ---------------------------------------------------------------------------
+#
+# Every refusal (status outside the allowed set, a --reason mismatched to the
+# status, not found, no verification object to update) is decided inside
+# op_set_verification itself, in that fixed order -- see its own docstring.
+
+
+_SV_DEFAULT = object()  # sentinel: "use the default verification object"
+
+
+def _sv_verification(status="pending", **extra):
+    verification = {"strategy": "test", "status": status, "url": None, "expect": None}
+    verification.update(extra)
+    return verification
+
+
+def _sv_story(story_id, verification=_SV_DEFAULT):
+    """A remove-story-style story stub, with `verification` set.
+
+    `verification=_SV_DEFAULT` (the common case) gets the four-key pending
+    object; `verification=None` gets NO verification key at all -- the
+    "absent" half of AC2's "absent or not a JSON object"; any other value
+    (a string, for instance) is stored as-is -- the "not an object" half.
+    """
+    story = _rs_story(story_id)
+    if verification is _SV_DEFAULT:
+        story["verification"] = _sv_verification()
+    elif verification is not None:
+        story["verification"] = verification
+    return story
+
+
+def test_set_verification_skipped_writes_status_and_reason_and_echoes_them_back(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    rc = T.op_set_verification(
+        [
+            "set-verification", "--tasks-file", path, "--story-id", "US-900",
+            "--status", "skipped", "--reason", "agent-browser not installed",
+        ]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {
+        "id": "US-900",
+        "verification": {
+            "strategy": "test", "status": "skipped",
+            "skipReason": "agent-browser not installed", "url": None, "expect": None,
+        },
+    }
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "skipped"
+    assert saved["skipReason"] == "agent-browser not installed"
+
+
+def test_set_verification_refuses_skipped_with_no_reason_and_writes_nothing(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "skipped"]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "--reason" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_whitespace_only_reason(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "skipped", "--reason", "   ",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_set_verification_passed_after_skipped_drops_the_stale_reason(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_sv_story("US-900", verification=_sv_verification("skipped", skipReason="old reason"))],
+    )
+    rc = T.op_set_verification(
+        ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "passed"]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "passed"
+    assert "skipReason" not in saved
+
+
+def test_set_verification_refuses_pending_naming_the_allowed_values(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "pending"]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "passed" in err and "failed" in err and "skipped" in err
+
+
+def test_set_verification_refuses_an_unknown_status_naming_the_allowed_values(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "bogus-status",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "passed" in err and "failed" in err and "skipped" in err
+
+
+def test_set_verification_refuses_a_reason_alongside_passed(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed", "--reason", "why",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "--reason" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_reason_alongside_failed(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "failed", "--reason", "why",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_set_verification_refuses_an_unknown_id(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-999",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "US-999" in err
+    assert "not found" in err
+
+
+def test_set_verification_refuses_a_story_with_no_verification_object(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900", verification=None)])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "no verification object" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_story_whose_verification_is_not_an_object(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900", verification="manual")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "no verification object" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -5462,6 +5658,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "normalize-waves",
         "cascade-skip",
         "remove-story",
+        "set-verification",
         "reset-orphaned",
         "archive-task",
         "gate-pass",
