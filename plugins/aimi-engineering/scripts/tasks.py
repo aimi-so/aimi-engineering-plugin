@@ -3407,11 +3407,12 @@ def verification_report(doc):
     `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
     above), and how the old `type != "object"` malformed scan partitions into
     the shapes normalize-verification actually repairs and the shapes it does
-    not -- plus three questions no jq program ever asked: which stories
+    not -- plus four questions no jq program ever asked: which stories
     declared a verification nobody has looked at yet, which FINISHED stories
-    left evidence that their verification discriminated anything at all, and
+    left evidence that their verification discriminated anything at all,
     which FINISHED stories short-circuited their own verdict with a skip --
-    and why.
+    and why -- and how the whole declared-and-finished population's verdicts
+    are distributed across the value set.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
@@ -3490,6 +3491,24 @@ def verification_report(doc):
     Those two numbers are what make this the first pipeline metric that MOVES
     when verification actually improves.
 
+    `verdicts` is the sixth key, and it is a DISTRIBUTION rather than a
+    partition of ids: one count per `VERIFICATION_STATUSES` literal, plus
+    `other`, over exactly the population `pending` above already reads from
+    -- a completed story (the same `is_completed` local the `skipped` and
+    `discriminating` scopes already share) whose verification is an object.
+    Where `pending` answers "how many are still unjudged" and `skipped`
+    answers "which ones were short-circuited and why", `verdicts` answers the
+    whole question at once: how many completed-and-declared stories landed on
+    each of the judged states. A completed story whose `verification.status`
+    is a non-string, or a string outside `VERIFICATION_STATUSES`, still counts
+    -- under `other` -- rather than being silently dropped or aborting the
+    report; a document a future change adds a fifth status literal to degrades
+    to a visible `other` count instead of a `KeyError`. A completed story with
+    no verification object at all (the `unrecorded` case above) never reaches
+    this count either, the identical object-only boundary `pending` draws for
+    the identical reason: a distribution over declarations nobody made would
+    answer a question nobody asked.
+
     AND THE NUMBER STILL READS HIGH -- a ceiling on what was verified, never a
     measurement of it. The count originates in `verify-probe`'s
     `discriminates`, and `probe_verify` carries only assignments and `cd` into
@@ -3521,6 +3540,10 @@ def verification_report(doc):
     checked = []
     blind = []
     unrecorded = []
+    # One count per VERIFICATION_STATUSES literal, plus the catch-all `other`
+    # -- see verdicts' own docstring paragraph above for its scope.
+    verdicts = {status: 0 for status in VERIFICATION_STATUSES}
+    verdicts["other"] = 0
     for story in _stories(doc):
         story_id = jq_index(story, "id", STORY)
         verification = jq_index(story, "verification", STORY)
@@ -3535,6 +3558,11 @@ def verification_report(doc):
                 pending.append(story_id)
             if jq_equal(status, "skipped") and is_completed:
                 skipped.append({"id": story_id, "reason": _report_skip_reason(verification)})
+            if is_completed:
+                if status in VERIFICATION_STATUSES:
+                    verdicts[status] += 1
+                else:
+                    verdicts["other"] += 1
             strategy = jq_index(verification, "strategy", STORY + ".verification")
             if jq_equal(strategy, "visual"):
                 visual.append(
@@ -3570,6 +3598,7 @@ def verification_report(doc):
             "unrecorded": unrecorded,
             "fraction": len(checked) / denominator if denominator else None,
         },
+        "verdicts": verdicts,
     }
 
 

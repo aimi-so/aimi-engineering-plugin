@@ -4666,6 +4666,22 @@ fi
 SKIPPED_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.skipped // [] | length' 2>/dev/null)
 SKIPPED_VERIF_LINES=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.skipped // [] | map("  " + .id + " — " + (.reason // "no reason recorded")) | join("\n")' 2>/dev/null)
 printf 'skipped-verification: count=%s\n' "${SKIPPED_VERIF_COUNT:-0}"
+# `verdicts` is read off the SAME captured payload too, for the identical
+# one-read-cannot-disagree-with-itself reason the two comments above give.
+# Each `// 0` carries the same meaning every other default on this payload
+# carries — a CLI predating this key answers {visual, pending, malformed,
+# discriminating, skipped} with no `verdicts` key at all, and each of its
+# five counts must report zero rather than abort a completion report over
+# an additive section.
+VERDICT_PASSED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.passed // 0' 2>/dev/null)
+VERDICT_FAILED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.failed // 0' 2>/dev/null)
+VERDICT_SKIPPED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.skipped // 0' 2>/dev/null)
+VERDICT_PENDING=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.pending // 0' 2>/dev/null)
+VERDICT_OTHER=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.other // 0' 2>/dev/null)
+# Unconditional, like `verification-evidence:` above and for the identical
+# reason — see that printf's own comment.
+printf 'verdicts: passed=%s failed=%s skipped=%s pending=%s other=%s\n' \
+  "${VERDICT_PASSED:-0}" "${VERDICT_FAILED:-0}" "${VERDICT_SKIPPED:-0}" "${VERDICT_PENDING:-0}" "${VERDICT_OTHER:-0}"
 ```
 
 In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
@@ -4740,6 +4756,7 @@ Append, on **every** run — never omitted, never conditional on the numbers bei
 ## Verification Evidence
 
 discriminating=[EVIDENCE_CHECKED] completed=[EVIDENCE_COMPLETED]
+verdicts: passed=[VERDICT_PASSED] failed=[VERDICT_FAILED] skipped=[VERDICT_SKIPPED] pending=[VERDICT_PENDING] other=[VERDICT_OTHER]
 
 [EVIDENCE_CHECKED] of [EVIDENCE_COMPLETED] completed stor(y|ies) recorded a
 verify that discriminated — at least one assertion that behaved differently
@@ -4754,6 +4771,8 @@ evidence that anything was actually verified.
 ```
 
 **This section deliberately does NOT take `## Pending Verification`'s omit-at-zero rule, and a later edit must not tidy the two into consistency.** They look like neighbours and they are opposites. Zero pending verifications is genuinely nothing to report — nobody declared a check that nobody judged, so the section has no subject. Zero *discriminating* verifications is the single loudest thing this report can say: it means the phase closed with no evidence that anything was checked, and that is exactly the run a silent report makes indistinguishable from a flawless one. "33/33 completed, 0 unmet" is equally compatible with both, which is the defect this section exists to remove; a line that only prints when the number is good would rebuild it. The absence has to be as visible as the presence, so the numbers print whatever they are.
+
+**The `verdicts:` line beside it is deliberately kept OUT of `handoff.md`'s `## Deviations` array and out of the locked-token list two bullets above it (Write Handoff, `verification-evidence:`/`verification-skipped:`), and a later edit must not "complete the set" by adding it there — and not for the reason it first looks like.** Write Handoff already makes its own dedicated `verification-report` call at that point in the flow (the one that reads `.skipped` for the `verification-skipped:` line) and that same response already carries `.verdicts` too, at no extra cost — so "it would take a second, possibly-disagreeing call" is not why this stays out; that call already exists. The real reason is what a handoff exists to preserve. `verification-evidence:`'s `m`/`n` counts THIS RUN's own contribution, computed from Step 4's own per-run accumulator — a fact no later read of the tasks file can recover, because nothing in the document records which run completed which story, so the handoff is the only place that fact survives at all. `verdicts` carries no such unrecoverable fact: it is a pure function of the finished tasks file, answerable by re-running `verification-report` for as long as that file exists — forever, for a completed phase. The one piece of the distribution worth writing down permanently — WHY a story was short-circuited — is already itemized, one line per story, in `verification-skipped:` above; the rest is a summary a later reader can always ask for again, never information that would otherwise be gone.
 
 Append, on **every** run, immediately after `## Verification Evidence` above — the **Finalize Step** (Step 4, after Post-Loop Cleanup) always leaves `FINALIZE_STATUS` set, so there is always something to say:
 ```

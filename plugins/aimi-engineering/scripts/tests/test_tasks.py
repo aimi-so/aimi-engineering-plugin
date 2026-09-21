@@ -5446,7 +5446,8 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
     The assertion below is WHOLE-DICT on purpose, and it is the only one in
     this file that is: it pins the report's top-level SHAPE, so a new key is
     a deliberate edit here rather than something a key-scoped sibling would
-    let through unnoticed. The `discriminating` entry arrived that way."""
+    let through unnoticed. The `discriminating` and `verdicts` entries both
+    arrived that way."""
     doc = {
         "userStories": [
             {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
@@ -5472,6 +5473,9 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
             "unrecorded": [],
             "fraction": None,
         },
+        # not completed, so this declared-and-unjudged story enters neither
+        # its own bucket nor `other` -- every literal reads zero.
+        "verdicts": {"pending": 0, "passed": 0, "failed": 0, "skipped": 0, "other": 0},
     }
 
 
@@ -5774,6 +5778,85 @@ def test_verification_report_excludes_a_skipped_verification_that_is_not_complet
             ]
         }
         assert T.verification_report(doc)["skipped"] == [], status
+
+
+def test_verification_report_verdicts_counts_one_of_each_in_set_status():
+    """The sixth key, `verdicts`: one count per `VERIFICATION_STATUSES`
+    literal, plus `other`, over completed stories that declared a
+    verification object -- the identical scope `pending` already reads
+    from. One completed story per literal (including "pending" itself,
+    which a story CAN carry as a completed, unjudged declaration) lands
+    each in its own bucket, and `other` stays at zero when nothing
+    out-of-set was ever seen.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "pending"}},
+            {"id": "US-002", "status": "completed", "verification": {"status": "passed"}},
+            {"id": "US-003", "status": "completed", "verification": {"status": "failed"}},
+            {"id": "US-004", "status": "completed", "verification": {"status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 1,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 1,
+        "other": 0,
+    }
+
+
+def test_verification_report_verdicts_routes_out_of_set_status_to_other():
+    """A completed story whose `verification.status` is a value outside
+    `VERIFICATION_STATUSES` -- a stray string, or a non-string shape --
+    counts under `other` rather than being silently dropped or crashing
+    the report; a document a future change adds a fifth status literal to
+    degrades to a visible `other` count instead of a `KeyError`.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "invalid"}},
+            {"id": "US-002", "status": "completed", "verification": {"status": 1}},
+            {"id": "US-003", "status": "completed", "verification": {}},
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "other": 3,
+    }
+
+
+def test_verification_report_verdicts_excludes_a_completed_story_with_no_verification_object():
+    """A completed story with no `verification` object at all (absent, null,
+    or a bare string awaiting `normalize-verification`) never enters
+    `verdicts` -- neither its own status bucket nor `other` -- the same
+    object-only boundary `pending` draws two paragraphs up: a distribution
+    over declarations nobody made would answer a question nobody asked.
+    A story that is NOT completed is excluded the same way, whatever its
+    own `verification.status` happens to read.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed"},
+            {"id": "US-002", "status": "completed", "verification": None},
+            {"id": "US-003", "status": "completed", "verification": "manual"},
+            {
+                "id": "US-004",
+                "status": "in_progress",
+                "verification": {"status": "passed"},
+            },
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "other": 0,
+    }
 
 
 # ---------------------------------------------------------------------------
