@@ -49,7 +49,7 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	411389
+execute.md	415450
 plan.md	379875
 brainstorm.md	129659
 open-pr.md	84576

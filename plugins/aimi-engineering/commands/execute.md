@@ -4155,10 +4155,11 @@ Only reached when `verify-creates` exited 0 and returned neither a `missing` nor
 - **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap, **plus exactly one line carrying this phase's verification-evidence fraction**, spelled the way Step 5 prints it: `verification-evidence: discriminating=<n> completed=<m>`. That line is present on **every** run — full, partial or zero — for the same reason Step 5's own `## Verification Evidence` section is unconditional, and `handoff.md` is where it matters most: the handoff is the durable per-phase record a later phase reads, and a record that only mentions evidence when there was some cannot tell a checked phase from an unchecked one. One line, never a table, and never omitted at zero. So this array is no longer empty when no gap file exists — it holds that one line alone.
   - **It rides in `deviations` rather than in a key of its own because a sixth key would be silently dropped.** `roadmap.py`'s `HANDOFF_FIELDS` is a fixed five — `decisions`, `artifacts`, `deviations`, `deferred`, `contracts` — and a payload carrying a sixth writes successfully while the number simply never reaches `handoff.md`. Widening that tuple is `roadmap.py`'s change to make, not this command's.
   - **The two counts come from the payloads this run already has, not from a second CLI call.** Sum the per-story `VERIFY_EVIDENCE_JSON` values Step 4 read off each worker's `result_json`: `m` is the number of this phase's stories marked complete this run, and `n` is how many of them carried a `verify` object whose `discriminating` is 1 or more (an empty `VERIFY_EVIDENCE_JSON` counts toward `m` only — it is unrecorded evidence, not a recorded zero). This step runs **before** Step 5 captures `COMPLETION_VERIF_REPORT`, and it deliberately does not open a `verification-report` call of its own to fetch a number already in hand. The consequence is worth knowing when the two lines differ: the handoff counts what THIS run completed, Step 5's section counts every completed story in the file, so a resumed phase legitimately reports a smaller `m` here than the report prints below.
+  - **One `verification-skipped: <id> — <reason or "no reason recorded">` line per this phase's own skipped verification** — every entry of `verification-report --tasks-file "$PHASE_TASKS_PATH"`'s `.skipped` array, read via a **dedicated call made at this point in the flow**, scoped to every COMPLETED story in this phase's own tasks file whose `verification.status` is literally `skipped` (`verification_report`'s own `skipped` key already carries exactly that scope). This is the one divergence from the `verification-evidence:` line immediately above, and it runs the opposite way on purpose: Step 4 accumulated `VERIFY_EVIDENCE_JSON`'s `{exit, preExit, segments, discriminating}` per completed story and nothing about skip status or reason, so there is no run-scoped accumulator here for this call to be a redundant second read of — it is the FIRST read of this data, not a second one, and the reason a fresh `verification-report` call is warranted here where the evidence line's own comment warns against exactly that. Its scope is `verification_report`'s own completed-story definition (every completed story in this phase's tasks file), not Step 4's THIS-RUN accumulation, since no incremental per-run tracking of skip status exists to restrict it to — a resumed phase's handoff can legitimately report a skip an EARLIER run of this same phase recorded, which the `m`/`n` evidence counts above never can. Present only when at least one such story exists: zero skipped means zero lines, never an empty placeholder — unlike the evidence fraction, which always prints its one line whatever the numbers are.
 - **Deferred Items** — one bullet per this phase's own story left in `skipped` status, if any. Empty array if none.
 - **Contracts Delivered** — one bullet per `creates` entry restating the identity now available to dependent phases (`"<identity> — contract fulfilled, available to phases depending on [PHASE_ID]"`), mirroring Artifacts Created's identities but phrased for downstream `needs` resolution.
 
-**Six tokens in this payload are locked tokens, never translated, regardless of the English mandate above — because something downstream greps for the literal string.** The five heading labels above (`Decisions Made`, `Artifacts Created`, `Deviations`, `Deferred Items`, `Contracts Delivered`) are hard-locked in `scripts/roadmap.py`'s `HANDOFF_FIELDS`/`HANDOFF_SECTIONS` tuples (`scripts/roadmap.py:2055-2064`), and `roadmap-write-handoff` refuses the entire write when one breaks (`scripts/roadmap.py:3589-3597`). The artifact identity copied verbatim into `## Artifacts Created` is the sixth: `handoff_lists_artifact`'s fixed-substring lookup (`scripts/roadmap.py:3048`) is what `validate-contracts` uses to resolve a downstream phase's `needs`, so translating that identity makes the contract report not-delivered and blocks the dependent phase. A seventh, the `verification-evidence: discriminating=<n> completed=<m>` line two bullets above, is a locked LINE sitting inside this otherwise-prose `deviations` array — the surrounding bullets are free prose, only that one line is not.
+**Eight tokens in this payload are locked tokens, never translated, regardless of the English mandate above — because something downstream greps for the literal string.** The five heading labels above (`Decisions Made`, `Artifacts Created`, `Deviations`, `Deferred Items`, `Contracts Delivered`) are hard-locked in `scripts/roadmap.py`'s `HANDOFF_FIELDS`/`HANDOFF_SECTIONS` tuples (`scripts/roadmap.py:2055-2064`), and `roadmap-write-handoff` refuses the entire write when one breaks (`scripts/roadmap.py:3589-3597`). The artifact identity copied verbatim into `## Artifacts Created` is the sixth: `handoff_lists_artifact`'s fixed-substring lookup (`scripts/roadmap.py:3048`) is what `validate-contracts` uses to resolve a downstream phase's `needs`, so translating that identity makes the contract report not-delivered and blocks the dependent phase. A seventh, the `verification-evidence: discriminating=<n> completed=<m>` line two bullets above, is a locked LINE sitting inside this otherwise-prose `deviations` array — the surrounding bullets are free prose, only that one line is not. An eighth, the `verification-skipped: <id> — <reason or "no reason recorded">` line the bullet immediately above describes, is a second locked line inside that same array, for the identical reason: a skip an operator or a later phase greps for by this exact prefix must find it spelled the same way every time.
 
 Write via the guard-protected CLI call only — **never** a direct Write or Edit tool call on `handoff.md`'s path (`guard-runtime-state.py` blocks that and points back at this verb):
 
@@ -4656,6 +4657,15 @@ printf 'verification-evidence: discriminating=%s completed=%s\n' "${EVIDENCE_CHE
 if [ "${EVIDENCE_CHECKED:-0}" -eq 0 ] && [ "${EVIDENCE_COMPLETED:-0}" -gt 0 ]; then
   printf 'verification-evidence: closed unchecked — %s completed stor(y|ies), not one of them carrying a discriminating assertion\n' "${EVIDENCE_COMPLETED:-0}"
 fi
+# `skipped` is read off the SAME captured payload too, for the identical
+# one-read-cannot-disagree-with-itself reason the discriminating comment
+# above gives. `// []` carries the same meaning `.pending // []` carries —
+# a CLI predating this key answers {visual, pending, malformed,
+# discriminating} with no `skipped` key at all, and it must report zero
+# rather than abort a completion report over an additive section.
+SKIPPED_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.skipped // [] | length' 2>/dev/null)
+SKIPPED_VERIF_LINES=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.skipped // [] | map("  " + .id + " — " + (.reason // "no reason recorded")) | join("\n")' 2>/dev/null)
+printf 'skipped-verification: count=%s\n' "${SKIPPED_VERIF_COUNT:-0}"
 ```
 
 In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
@@ -4706,6 +4716,24 @@ that closes with its checks unlooked-at and says nothing about it.
 ```
 
 If `PENDING_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `pending` partition reads as zero), omit the `## Pending Verification` section entirely.
+
+If `SKIPPED_VERIF_COUNT` > 0, append:
+```
+## Skipped Verification
+
+[SKIPPED_VERIF_COUNT] completed stor(y|ies) recorded a verification that was
+short-circuited rather than judged — not passed, not failed, deliberately
+`skipped`:
+
+[SKIPPED_VERIF_LINES]
+
+Each line is the story id and the reason recorded for skipping it, or the
+literal "no reason recorded" for a legacy skip that predates this field.
+Nothing here blocks the branch or the PR; it is named so a skip is never
+silent about why it happened.
+```
+
+If `SKIPPED_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `skipped` key reads as zero), omit the `## Skipped Verification` section entirely — the identical omit-at-zero rule `## Pending Verification` takes immediately above, and for the identical reason: both report a POSITIVE fact (a story did something worth naming), so zero of either is genuinely nothing to report, no story declared-and-unjudged, no story short-circuited its own verdict. This is deliberately the SAME rule `## Verification Evidence` immediately below refuses to take — see the reasoned paragraph beside that section for why zero *discriminating* evidence is the one silence this report must never allow, unlike zero pending or zero skipped, which are both silences this report is glad to have nothing to say about.
 
 Append, on **every** run — never omitted, never conditional on the numbers being good:
 ```

@@ -3314,6 +3314,24 @@ def _report_status(verification):
     return status if isinstance(status, str) else None
 
 
+def _report_skip_reason(verification):
+    """The `reason` a skipped verification reports through verification-report
+    -- `.verification.skipReason` when it is a non-empty STRING, `None` for
+    every other shape (absent, null, empty, or any non-string).
+
+    Collapses like `_report_status` immediately above, not like `_report_url`:
+    a legacy skip written before `skipReason` existed (the specFlow:Gap2/
+    Gap3-era shape) carries no such key at all, and `None` is the honest
+    answer for that story. "no reason recorded" is completion-report and
+    handoff-line WORDING, chosen by the reader that renders this value --
+    inventing that string, or any other, at THIS layer would fabricate
+    evidence for a run that recorded none, which is the exact defect this
+    report exists to refuse.
+    """
+    reason = jq_index(verification, "skipReason", STORY + ".verification")
+    return reason if isinstance(reason, str) and reason else None
+
+
 def _report_discriminating(verification, vtype):
     """The count at `.verification.evidence.discriminating` -- how many of a
     story's verify segments behaved differently before its work than after --
@@ -3389,9 +3407,11 @@ def verification_report(doc):
     `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
     above), and how the old `type != "object"` malformed scan partitions into
     the shapes normalize-verification actually repairs and the shapes it does
-    not -- plus two questions no jq program ever asked: which stories declared
-    a verification nobody has looked at yet, and which FINISHED stories left
-    evidence that their verification discriminated anything at all.
+    not -- plus three questions no jq program ever asked: which stories
+    declared a verification nobody has looked at yet, which FINISHED stories
+    left evidence that their verification discriminated anything at all, and
+    which FINISHED stories short-circuited their own verdict with a skip --
+    and why.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
@@ -3436,6 +3456,29 @@ def verification_report(doc):
     `type == "object"` arm below, because a completed story with NO
     verification is precisely the case `unrecorded` exists to name.
 
+    `skipped` is the fifth key, and unlike the four above it is not a
+    partition of anything -- it is a flat list of `{id, reason}`, one entry
+    per COMPLETED story whose `verification.status` is the literal
+    "skipped". Its scope is the identical completed-only boundary
+    `discriminating` draws two paragraphs up, and for the identical reason:
+    a verification judges work that was DONE, and a story `cascade-skip`
+    marked `status: "skipped"` (never touching `verification`) has no
+    verdict to report here. The read that decides membership is computed
+    once, in a single `is_completed` local the loop below shares with the
+    `discriminating` partition immediately after it, rather than asked
+    twice of the same field. specFlow:Gap3 and CriticalQ1 are why this key
+    exists at all: the operator chose "skipped, with a reason" over the
+    silent blanket-pass a completion report used to give a story nobody
+    actually verified, and `skipped` is what lets the completion report and
+    the phase handoff say WHY a verdict was short-circuited instead of
+    staying quiet about it. `reason` is `_report_skip_reason`'s answer, and
+    it is `None` -- never a fallback string this layer invents -- for a
+    legacy skip that predates `skipReason` (the specFlow:Gap2/Gap3-era
+    shape written before this field existed): the same honest-null
+    discipline `_report_discriminating`'s own docstring states for its
+    `None`, because fabricating a reason here would be exactly the
+    fabricated evidence this whole report exists to refuse.
+
     `unrecorded` and `blind` are different answers and conflating them would
     be worse than the silence this key replaces. `blind` says we looked and
     found nothing that discriminated; `unrecorded` says nothing was ever
@@ -3472,6 +3515,7 @@ def verification_report(doc):
     """
     visual = []
     pending = []
+    skipped = []
     repairable = []
     unrepairable = []
     checked = []
@@ -3481,10 +3525,16 @@ def verification_report(doc):
         story_id = jq_index(story, "id", STORY)
         verification = jq_index(story, "verification", STORY)
         vtype = jq_type(verification)
+        # Read once, shared by the `skipped` membership test below and by
+        # the `discriminating` partition a few lines down -- the same field
+        # asked twice is the drift this hoist exists to close.
+        is_completed = jq_equal(jq_index(story, "status", STORY), "completed")
         if vtype == "object":
             status = _report_status(verification)
             if jq_equal(status, "pending"):
                 pending.append(story_id)
+            if jq_equal(status, "skipped") and is_completed:
+                skipped.append({"id": story_id, "reason": _report_skip_reason(verification)})
             strategy = jq_index(verification, "strategy", STORY + ".verification")
             if jq_equal(strategy, "visual"):
                 visual.append(
@@ -3500,7 +3550,7 @@ def verification_report(doc):
         # Outside the arm above on purpose: a completed story whose
         # verification is absent or null never reaches it, and that story is
         # exactly what `unrecorded` is for.
-        if jq_equal(jq_index(story, "status", STORY), "completed"):
+        if is_completed:
             count = _report_discriminating(verification, vtype)
             if count is None:
                 unrecorded.append(story_id)
@@ -3512,6 +3562,7 @@ def verification_report(doc):
     return {
         "visual": visual,
         "pending": pending,
+        "skipped": skipped,
         "malformed": {"repairable": repairable, "unrepairable": unrepairable},
         "discriminating": {
             "checked": checked,

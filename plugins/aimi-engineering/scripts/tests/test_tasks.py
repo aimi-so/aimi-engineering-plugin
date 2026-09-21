@@ -5458,6 +5458,10 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         # non-visual, but its verification WAS declared and nobody looked at
         # it -- the pending partition is scoped by status, never by strategy.
         "pending": ["US-001"],
+        # this story carries no top-level `status` of its own, so it is not
+        # completed and `skipped` (which is completed-scoped, the same as
+        # `discriminating` below) never enters it either.
+        "skipped": [],
         "malformed": {"repairable": [], "unrepairable": []},
         # this story carries no `status` of its own, so it is not completed
         # and enters none of the three lists -- and with an empty denominator
@@ -5675,6 +5679,101 @@ def test_verification_report_partitions_completed_stories_by_discriminating_evid
     # honest zeros has a fraction of zero
     assert report_for(...)["fraction"] is None
     assert report_for({"discriminating": 0})["fraction"] == 0
+
+
+def test_verification_report_partitions_completed_skipped_verifications_with_reason():
+    """The fifth key, `skipped`: a flat `{id, reason}` list, one entry per
+    COMPLETED story whose `verification.status` is the literal "skipped" --
+    US-005's own scope, the same completed-only boundary `discriminating`
+    draws two paragraphs up in the docstring, for the identical reason (a
+    verification judges work that was DONE).
+
+    `reason` is `.verification.skipReason` verbatim when it is a non-empty
+    string, and a story recording one must report it byte for byte -- this
+    is the field the completion report and the phase handoff exist to
+    surface, so a reader collapsing or rewriting it here would defeat the
+    story before it starts.
+    """
+    doc = {
+        "userStories": [
+            {
+                "id": "US-001",
+                "status": "completed",
+                "verification": {"status": "skipped", "skipReason": "no visual harness in CI"},
+            },
+            {
+                "id": "US-002",
+                "status": "completed",
+                "verification": {"status": "passed"},
+            },
+            {
+                "id": "US-003",
+                "status": "completed",
+                "verification": {"status": "skipped", "skipReason": "agent-browser not installed"},
+            },
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["skipped"] == [
+        {"id": "US-001", "reason": "no visual harness in CI"},
+        {"id": "US-003", "reason": "agent-browser not installed"},
+    ]
+
+
+def test_verification_report_reports_a_legacy_skip_with_no_reason_as_null():
+    """A completed story carrying `verification.status: "skipped"` with no
+    `skipReason` field at all -- the legacy shape specFlow:Gap2/Gap3 name,
+    written before this field existed -- reports `reason: null`, never an
+    invented string. `None` is `_report_skip_reason`'s honest answer for
+    every non-string shape (absent, null, empty), the same discipline
+    `_report_discriminating` already applies to its own `None`: fabricating
+    a reason for a run that recorded none would be worse than the silence
+    this key replaces.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["skipped"] == [{"id": "US-001", "reason": None}]
+
+    # every other non-string skipReason shape collapses to the same null,
+    # not just a wholly absent key
+    for skip_reason in (None, "", 0, False, [], {}):
+        doc = {
+            "userStories": [
+                {
+                    "id": "US-001",
+                    "status": "completed",
+                    "verification": {"status": "skipped", "skipReason": skip_reason},
+                }
+            ]
+        }
+        assert T.verification_report(doc)["skipped"] == [
+            {"id": "US-001", "reason": None}
+        ], skip_reason
+
+
+def test_verification_report_excludes_a_skipped_verification_that_is_not_completed():
+    """A story whose `verification.status` is the literal "skipped" but whose
+    own top-level `status` is NOT "completed" (`in_progress`, `pending`, or
+    any other value) is excluded from `skipped` entirely -- the same
+    completed-only scope `discriminating` draws, applied to this key. A
+    verification judges work that was DONE; a story mid-flight or not yet
+    started has no verdict to short-circuit yet, whatever its own
+    `verification.status` happens to read.
+    """
+    for status in ("in_progress", "pending", "failed"):
+        doc = {
+            "userStories": [
+                {
+                    "id": "US-001",
+                    "status": status,
+                    "verification": {"status": "skipped", "skipReason": "not yet run"},
+                },
+            ]
+        }
+        assert T.verification_report(doc)["skipped"] == [], status
 
 
 # ---------------------------------------------------------------------------
