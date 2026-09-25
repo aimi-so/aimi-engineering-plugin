@@ -74,7 +74,7 @@ Translate prototype DOM structure to the project's stack idiom (React/Vue/native
 ### Match-visual-output rule
 
 Match the visual output of the prototype — colors, spacing, layout, typography — but do NOT mirror prototype internal structure when it conflicts with the project's component conventions.
-When `DesignSpec § 6` (Mapeamento para `@/components/ui`) maps a desired component to an existing project component, use the existing component and do not create a duplicate.
+When `DesignSpec § 6` (see `commands/references/spec-section-contract.md`) maps a desired component to an existing project component, use the existing component and do not create a duplicate — the mapped path is read from the project's own component-library alias or import convention, never assumed.
 
 ### designTokens passthrough rule
 

@@ -211,6 +211,7 @@ Whether accepted or skipped, this gate runs to completion before Step 0.7 Post-P
 
 2. **When `view_source` is `"none"`:** Emit exactly:
    `bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6`
+   This is `cmd_bundle_prototype_status`'s own hardcoded fallback probe order (DesignSpec § 4, then BusinessSpec § 5, then § 6) for placeholder-prototype generation — distinct from `BusinessSpec § 2` (Screens), the canonical screen-list section `commands/references/spec-section-contract.md` documents for story decomposition.
    Then proceed without generation. Do not set `bundleGeneratedPrototypePath`. Skip the remaining sub-steps.
 
 3. **When `needs_generation` is `true`:** Create the output directory and spawn the author agent:

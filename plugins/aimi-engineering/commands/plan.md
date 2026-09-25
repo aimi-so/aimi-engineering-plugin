@@ -214,6 +214,8 @@ STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
    bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6
    ```
 
+   This is `cmd_bundle_prototype_status`'s own hardcoded fallback probe order (DesignSpec § 4, then BusinessSpec § 5, then § 6) for placeholder-prototype generation — distinct from `BusinessSpec § 2` (Screens), the canonical screen-list section `commands/references/spec-section-contract.md` documents for story decomposition.
+
    Proceed to the prototypes[] merge below without generation.
 
 3. **When `needs_generation` is `false` (sidecar matches, `view_source` is not `'none'`):** skip generation entirely. The sidecar at `.aimi/brainstorms/prototypes/<topicSlug>-bundle-sidecar.json` already matches all current hashes — reuse the existing file at `output_path`. Push `output_path` into `resolvedPrototypePaths` and proceed.
@@ -2708,14 +2710,15 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     path to populate new fields (or document why mocks are intentionally unchanged).'
     Otherwise: append 'Verify no mock data files require updates'.
   - Spec-driven decomposition (when businessSpecContent non-null):
-    Drive screen decomposition from BusinessSpec § 2 (one story per screen listed).
+    Drive screen decomposition from BusinessSpec § 2 (one story per screen
+    listed; canonical map: commands/references/spec-section-contract.md).
     Seed acceptanceCriteria verbatim from BusinessSpec § 9 matching entries;
     preserve rule IDs (RN-01, RN-02, ...) exactly as written.
     One story per entity in BusinessSpec § 4 (non-trivial entities).
     One story per endpoint group in BusinessSpec § 5.1 and § 5.3.
     One story per persona/permission tier in BusinessSpec § 7.
   - Spec-driven component stories (when designSpecContent non-null):
-    One story per entry in DesignSpec § 2.2 (NOVOS components); include prop
+    One story per entry in DesignSpec § 2.2 (new components); include prop
     type signature verbatim as acceptance criterion.
   - Prototype-region citations for visual-layout AC (when prototypePaths non-empty
     AND verification.strategy == 'visual'): every visual-layout AC must include
@@ -3495,7 +3498,7 @@ Specific obligations:
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
 - [ ] `metadata.designTokens` (if set) is a flat object whose top-level keys match the token categories enumerated in `DesignSpec § 1`
-- [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
+- [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` (canonical map: `commands/references/spec-section-contract.md`) cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
 - [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths and no `cd <project> &&` prefix, per the "verify working directory" rule in the Story JSON shape block above — the executor has already entered the project

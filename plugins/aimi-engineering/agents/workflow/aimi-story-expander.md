@@ -302,7 +302,7 @@ Note: `story-merge` runs Rule 22 (cross-story mock-sync routing) after merge —
 
 When `businessSpecContent` is non-null and the outline entry corresponds to a screen/entity/endpoint/persona that the spec describes:
 
-- Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Critérios de aceite). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.
+- Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Acceptance Criteria). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.
 - Cite the spec line in AC anchors: `(BusinessSpec § N[.N] L<line>)`.
 
 When `designSpecContent` is non-null and the story includes UI work:

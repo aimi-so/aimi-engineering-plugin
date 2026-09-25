@@ -50,8 +50,8 @@
 # backs.
 
 execute.md	418407
-plan.md	379875
-brainstorm.md	136186
+plan.md	380336
+brainstorm.md	136519
 open-pr.md	84576
 references/forge-contract.md	45757
 references/container-execution.md	34388
@@ -60,12 +60,12 @@ next.md	22176
 references/cli-path-resolution.md	37540
 review.md	22577
 references/scope-contexts.md	20743
-deepen.md	18317
+deepen.md	18696
 
-skills/story-executor/SKILL.md	61023
+skills/story-executor/SKILL.md	61151
 skills/task-planner/SKILL.md	23241
 
 agents/research/aimi-foundation-architect.md	22980
-agents/workflow/aimi-story-expander.md	44058
+agents/workflow/aimi-story-expander.md	44057
 agents/research/aimi-learnings-researcher.md	16486
-agents/research/aimi-design-bundle-researcher.md	16436
+agents/research/aimi-design-bundle-researcher.md	16604

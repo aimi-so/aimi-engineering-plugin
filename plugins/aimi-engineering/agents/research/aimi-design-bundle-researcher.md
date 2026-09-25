@@ -45,18 +45,21 @@ Process artifacts in this exact order. Later sources only fill gaps that earlier
 
 ## Spec-Passthrough Rule
 
-When a `BusinessSpec` section maps directly to an output section, copy content **verbatim**:
+See `commands/references/spec-section-contract.md` for the canonical section map this table follows.
 
-| BusinessSpec section | Output section |
+When a `BusinessSpec` or `DesignSpec` section maps directly to an output section, copy content **verbatim**:
+
+| Spec section | Output section |
 |----------------------|----------------|
-| `§ 3` | Business Rules |
-| `§ 4` | Data Model |
-| `§ 5` | Endpoints |
-| `§ 9` | Acceptance Criteria |
+| `BusinessSpec § 3` | Business Rules |
+| `BusinessSpec § 4` | Data Model |
+| `BusinessSpec § 5` | Endpoints |
+| `BusinessSpec § 9` | Acceptance Criteria |
+| `DesignSpec § 1` | Design Tokens |
+| `DesignSpec § 2` / `§ 2.2` | Component Inventory |
+| `DesignSpec § 4` | Reference Maps |
 
 Preserve all rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do **not** paraphrase, summarize, or merge rules. Do not reorder items within a passed-through section.
-
-The same rule applies to `DesignSpec` sections that map directly to output sections (e.g., component inventory, design tokens, screen specs).
 
 ## Chat-Fallback Annotation
 
@@ -230,7 +233,7 @@ Emit all 16 sections in this exact order. Omit a section only if no source artif
      1. Read the full prototype HTML markup as text. Identify every distinct UI region,
         named component (class names, id attributes, data-* attributes, aria-label values),
         and interactive element present in the markup.
-     2. Read DesignSpec.md § 2 (Componentes) and § 3 (Telas) in full.
+     2. Read DesignSpec.md § 2 (Component Inventory) and § 4 (Reference Maps) in full.
      3. For each prototype region or component, perform a semantic match against DesignSpec.md:
         determine whether the spec describes, names, or specifies that region/component at
         a level of detail sufficient for implementation.
