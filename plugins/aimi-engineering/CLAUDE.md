@@ -89,6 +89,18 @@ aimi-engineering-plugin/
 
 Standalone like `test-command-blocks.sh` and `test-command-size.sh`: absent from `test-aimi-cli.sh`'s `PARTS` array, contributing nothing to its `EXPECTED_ASSERTIONS`.
 
+## Spec Section Contract Ratchet
+
+`commands/references/spec-section-contract.md` states, once, the section-number contract several commands, agents and one script already depend on when they parse a Claude Design handoff bundle's `BusinessSpec.md`/`DesignSpec.md` — one row per `BusinessSpec § N[.N]`/`DesignSpec § N[.N]` number a current reader relies on. Stating it once does not reach a citation added after the fact, so `scripts/test-spec-section-contract.sh` derives the citation set from the tree on every run and refuses to be green while any derived citation is neither enumerated in the contract nor a reasoned exemption — see root `CLAUDE.md` § Testing for when to run it.
+
+**The candidate set is the union of `command_block_files()`'s corpus, never a hand-written list.** For every file under `commands/`, `agents/` and `skills/*/SKILL.md`, the suite greps the file's FULL TEXT — never only its bash blocks, since a citation lives in ordinary prose — for `(BusinessSpec|DesignSpec) § [0-9]+(\.[0-9]+)?`, and takes one candidate per distinct (file, citation) pair. `spec-section-contract.md` excludes itself from its own corpus, by file identity rather than by a hardcoded relpath string, the same self-reference exclusion its own "Re-measuring This Contract" section applies when it re-derives the citation set it is required to cover.
+
+**A citation is covered by a literal substring match against the contract file, never a structural table-row parse** — the same fidelity `spec-section-contract.md`'s own re-measurement command uses, and the same fidelity `test-artifact-language.sh`'s Form R matching uses. This is a known, accepted limitation shared with that sibling ratchet's own string-literal matching: a citation that happens to appear in the contract's explanatory prose, rather than its table, reads as covered. It also means a bare citation is covered by a longer one that contains it as a prefix — `DesignSpec § 2` is a substring of a table row citing `DesignSpec § 2.2` — which is intentional: the contract's table documents `§ 2.2` as the numbered subsection a bare `§ 2` citation names.
+
+**`spec-section-contract-baseline.txt` carries two kinds of tab-separated line** — `contract-path` (declared once, naming the file every citation is checked against) and `exempt` (a `<relpath>#<citation>` pair the corpus scan derives but the contract genuinely should not enumerate). `exempt` REQUIRES a `#`-prefixed one-line reason, the same per-line-reason shape `command-blocks-baseline.txt` and `artifact-language-baseline.txt` already use — and the same file is a ratchet in **both** directions, the rule `command-size-baseline.txt` states for its own byte budgets: an `exempt` entry naming a (file, citation) pair whose citation string no longer appears in that file, or that the contract now enumerates, fails as stale.
+
+Standalone like `test-command-blocks.sh`, `test-command-size.sh` and `test-artifact-language.sh`: absent from `test-aimi-cli.sh`'s `PARTS` array, contributing nothing to its `EXPECTED_ASSERTIONS`.
+
 ## Output Files
 
 All task execution files go in `.aimi/tasks/`:
