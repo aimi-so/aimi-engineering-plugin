@@ -301,7 +301,7 @@ check_structural_coverage() {
   local total refs corpus skills strays agents
 
   total="$(find "$COMMANDS_DIR" -name '*.md' | wc -l | tr -d ' ')"
-  assert_eq "31" "$total" \
+  assert_eq "32" "$total" \
     "commands/**/*.md sweep matches \`find plugins/aimi-engineering/commands -name '*.md' | wc -l\`"
 
   refs="$(find "$COMMANDS_DIR" -name '*.md' | grep -c '/references/' || true)"
