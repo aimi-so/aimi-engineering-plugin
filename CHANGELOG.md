@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.143.0] - 2026-09-25
+
+### Added
+- `commands/references/spec-section-contract.md`, the single explicit table of every `BusinessSpec §`/`DesignSpec §` section number currently cited across `commands/`, `agents/` and `skills/`, naming which files read each section and what a consumer may rely on there — so a new citation has one place to check instead of re-deriving the numbering from scratch. Names `BusinessSpec § 2` as the canonical section for the screen/view list and flags the other, incorrect citation still live in `brainstorm.md`'s and `plan.md`'s bundle-prototype-generation skip message, without editing those two call sites itself. States the bundle layout rule (README marker, `project/BusinessSpec.md` and `project/DesignSpec.md` paths) `detect-design-bundle` and `bundle-prototype-status` already agree on. `test-command-size.sh`'s `check_structural_coverage` tracked file count moves from 31 to 32 to match.
+- `detect-design-bundle` recognises a bundle this plugin itself generated, not only one produced by Claude Design: a new `AIMI_GENERATED_MARKER` beside the existing `HANDOFF_MARKER`, either qualifying a directory as a bundle, with the returned JSON naming which one matched in a new `source` field (`"claude-design"` | `"aimi-generated"`). A second, narrow scan pass over `<root>/.aimi/design-bundles/*/` finds a plugin-generated bundle nested there when `--root` points at the project root, without relaxing the existing `.aimi/` noise-directory exclusion for any other subdirectory. Five new tests cover the source field, the standalone marker, the nested-directory reach, the continued exclusion elsewhere under `.aimi/`, and the updated help text (`EXPECTED_ASSERTIONS` 5318 → 5331).
+- `aimi-design-handoff`, a new skill that interviews the operator and writes a `BusinessSpec.md`/`DesignSpec.md` bundle at `.aimi/design-bundles/<slug>/`, numbered per the spec section contract and marked with the plugin's own generated-bundle marker rather than the Claude Design one — for a UI feature with no existing bundle to hand off. It resolves every section number and the marker's literal text at run time against their single source of truth instead of restating either, and never assumes an icon library, component path, or design-system mapping on the operator's behalf; those are asked for directly or recorded as open questions in the generated spec.
+- `/aimi:brainstorm` Step 0.7 offers to generate that bundle inline, before Post-Processing runs, when no design bundle was detected and the feature description matches `ui-signals.md`'s Keyword Signals. Accepting reads and follows the new skill, then re-runs `detect-design-bundle --root` against the generated path so the existing bundle-aware branches downstream see it within the same invocation instead of staying permanently dead. Agent mode logs and skips the offer rather than prompting.
+- `test-spec-section-contract.sh`, a standalone ratchet modeled on `test-artifact-language.sh`: it derives every `BusinessSpec §`/`DesignSpec §` citation from the `commands`/`agents`/`skills` corpus on each run and refuses to be green while a citation is neither enumerated in the contract nor covered by a reasoned exemption in the new `spec-section-contract-baseline.txt`. Both `CLAUDE.md` files document when to run it, alongside the other standalone suites.
+
+### Changed
+- Stale and Portuguese-language spec-section citations across `aimi-design-bundle-researcher.md`, `aimi-story-expander.md`, `brainstorm.md`, `deepen.md`, `plan.md` and `story-executor/SKILL.md` are swept onto the shared contract, each now citing the one table instead of restating its own copy of the numbering [US-006].
+
+### Fixed
+- `/aimi:brainstorm`'s `bundleDetected` derivation now tests the bundle payload's real shape — non-empty and not the literal string `null` — instead of a `"detected":true` substring the CLI's JSON never actually contains, so bundle detection is recognised correctly rather than silently failing every time.
+
 ## [1.142.0] - 2026-09-21
 
 ### Added
