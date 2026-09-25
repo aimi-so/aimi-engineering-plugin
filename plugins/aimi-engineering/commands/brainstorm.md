@@ -108,7 +108,7 @@ fi
 
 Derive working-memory values from the result:
 
-- `bundleDetected` — `true` if `BUNDLE_RESULT` is non-empty and contains `"detected":true`; otherwise `false`.
+- `bundleDetected` — `true` if `BUNDLE_RESULT` is non-empty and is not the literal string `null`; otherwise `false`.
 - `bundlePayload` — the full JSON string from `BUNDLE_RESULT` when `bundleDetected=true`; empty string otherwise.
 - `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; the value of `BUNDLE_ARG` if set and detection succeeded; empty string otherwise.
 
