@@ -4422,11 +4422,15 @@ def op_validate_tasks(argv):
 #     grep -rhoE 'metadata\.[a-zA-Z]+' \
 #         plugins/aimi-engineering/skills/story-executor/ | sort -u
 #
-# On 3 September 2026, over SKILL.md and both files under references/, that
-# printed exactly three -- metadata.designBundle (2 occurrences),
-# metadata.designTokens (1) and metadata.prototypePaths (9). Re-run it rather
-# than trusting this comment; a key that gains a reader has to gain a line here
-# in the same commit, or the reader silently gets null.
+# On 28 September 2026, over SKILL.md and both files under references/, that
+# printed five distinct matches -- metadata.designBundle (2 occurrences),
+# metadata.designTokens (1), metadata.prototypePaths (10) and
+# metadata.prototypeDropped (3), plus one metadata.baseRef that names a
+# DIFFERENT document's field entirely (step 1.5's own prose about a verify
+# resolving baseRef from the full tasks file it reads directly, never from
+# this payload) and is excluded from the tuple below for that reason. Re-run
+# it rather than trusting this comment; a key that gains a reader has to gain
+# a line here in the same commit, or the reader silently gets null.
 #
 # The story-executor skill is the whole consumer list, and that is measured too:
 # commands/execute.md and commands/next.md read metadata from the tasks FILE
@@ -4436,7 +4440,7 @@ def op_validate_tasks(argv):
 # writes -- one object per resolved question, each carrying the question's own
 # prose -- and nothing in the executor has ever read it, so it travelled in
 # every spawn of every story for nothing.
-STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths")
+STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths", "prototypeDropped")
 
 
 def projected_metadata(metadata):

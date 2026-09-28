@@ -2769,9 +2769,8 @@ def test_prototypedropped_acquired_no_consumer():
     tuple is the cleanup loop that MOVES and DELETES the paths it names.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
     )
-    assert "prototypeDropped" not in T.STORY_CONTEXT_METADATA_KEYS
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
     assert "prototypeDropped" not in cleanup
@@ -3852,7 +3851,7 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     this rule. Re-run the grep the comment records when a reader is added.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 

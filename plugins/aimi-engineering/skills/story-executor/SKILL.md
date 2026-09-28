@@ -60,8 +60,8 @@ Fires only when the story context includes `metadata.designBundle`. The worker r
 
 Read and apply in this order — earlier entries are more authoritative:
 
-1. `designBundle.businessSpec` (if non-null) — authoritative requirements; all business rules and acceptance criteria here override assumptions.
-2. `designBundle.designSpec` (if non-null) — authoritative design; tokens, components, screens, and a11y rules defined here override prototype visuals.
+1. `designContext.specSections["BusinessSpec § N"]` for the sections `designBundle.businessSpec` (if non-null) cites — authoritative requirements; all business rules and acceptance criteria here override assumptions. Use the matching entry directly; read the full file at `designBundle.businessSpec` only for a section absent from `specSections` (evicted by the spec content cap, or the file missing — see `dropped[]`).
+2. `designContext.specSections["DesignSpec § N"]` for the sections `designBundle.designSpec` (if non-null) cites — authoritative design; tokens, components, screens, and a11y rules defined here override prototype visuals. Same fallback: read the full file only for a section `specSections` does not carry.
 3. `designBundle.chats[]` — context only; use for intent and rationale, do NOT let chat content override specs.
 4. `prototypePaths[]` — pixel reference only; match the visual output, translate idiomatically to the project stack.
 5. Project's existing components per `DesignSpec § 6` mapping — reuse before creating.
@@ -79,6 +79,10 @@ When `DesignSpec § 6` (see `commands/references/spec-section-contract.md`) maps
 ### designTokens passthrough rule
 
 When `metadata.designTokens` is present, use those token values directly — do NOT re-parse `DesignSpec § 1` or extract values from prototype CSS.
+
+### specSections passthrough rule
+
+When the matching label (`"BusinessSpec § N"` / `"DesignSpec § N"`) is present in `designContext.specSections`, use that content directly — do NOT re-read the full spec file at `designBundle.businessSpec`/`designBundle.designSpec` for a section already sliced there. This is a lazy-loading optimisation, the same one `/aimi:plan` already applies to its own section-scoped research excerpts — never a hard information cap: a section absent from `specSections` (evicted by the spec content cap, or its file missing or outside the project root — see `dropped[]`) stays readable on demand from the full file at the `designBundle` path.
 
 ### Rule-ID citation rule
 
@@ -313,9 +317,9 @@ $AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 
 Parse the returned JSON for five top-level fields:
 - `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
-- `metadata` — session metadata. This file reads exactly three of its keys: `designBundle`, `designTokens` and `prototypePaths`. `prototypeAnchor` is NOT one of them — it is `story.implementation.prototypeAnchor`, and every step below reads it from there.
+- `metadata` — session metadata. This file reads exactly four of its keys: `designBundle`, `designTokens`, `prototypePaths` and `prototypeDropped`. `prototypeAnchor` is NOT one of them — it is `story.implementation.prototypeAnchor`, and every step below reads it from there. `prototypeDropped` is a RECORD, not a path to act on: it names a prototype the plan declared but never sent (see `<prototype_context>` below) — read it to learn the prototype is gone, never to open, move, delete or resolve the path it names.
 - `skills` — array of required skill blocks; treat each `.content` as additional project conventions
-- `designContext` — contains `.decisions` (design intent) and `.bundleGuidance` (may cite spec file paths)
+- `designContext` — contains `.decisions` (design intent), `.bundleGuidance` (may cite spec file paths), and `.specSections` (this story's spec content, pre-sliced by label — see the Design Bundle Fidelity Guidance's spec-aware read order)
 - `dropped` — array of `{kind, name, path, section, reason, bytes, deferred}` for everything the payload declared but did not carry. `kind` is `"skill"` (the 100KB skills cap excluded it — `name` set, `deferred:false`), `"specSection"` (the spec content cap evicted it — `path`/`section` set, `deferred:true` because the bundle path stays reachable via `designContext.bundleGuidance` as a Read-tool fallback), or `"specFile"` (a designBundle spec path missing on disk or escaping the project root — `path` set, `deferred:false`). Every entry carries all seven keys, `null` for whichever identity field its kind does not use. `[]` when nothing was dropped, so the key is always present and always safe to read. Any non-empty entry, of any kind, means something the story declared is NOT fully in this payload — say so in the completion report rather than proceeding as if it had been read.
 
 Use all five keys for subsequent steps. If the command fails, report failure immediately and stop.
@@ -393,6 +397,7 @@ Visual verification is **advisory** — failures do NOT block the story commit.
 
 When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file yourself using the Read tool.
 
+- Before reading, check `metadata.prototypeDropped` for an entry whose `path` matches a prototype this story's acceptance criteria depend on. If one is found, log `prototype <path> dropped — <reason>` and say so in the completion report. `prototypeDropped` is a record only — never open, move, delete or resolve the path it names; a live prototype is read only from `metadata.prototypePaths[]` below.
 - For each path in `metadata.prototypePaths[]` (and `story.implementation.prototypeAnchor` if set), resolve the absolute path as `$AIMI_ROOT/<path>` and read it.
 - If a prototype file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue.
 - `.html` files are pixel-reference prototypes; `.json` files are design-token sidecars.
@@ -421,12 +426,13 @@ All file operations MUST stay within the project boundary: PROJECT_PATH when set
 
 0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID --tasks-file $TASKS_FILE_PATH` and parse the returned JSON. Extract:
     - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
-    - `metadata` — session metadata; the keys this flow reads are `designBundle`, `designTokens` and `prototypePaths` (`prototypeAnchor` is not among them — it lives at `story.implementation.prototypeAnchor`)
+    - `metadata` — session metadata; the keys this flow reads are `designBundle`, `designTokens`, `prototypePaths` and `prototypeDropped` (`prototypeAnchor` is not among them — it lives at `story.implementation.prototypeAnchor`; `prototypeDropped` is a record naming a prototype never sent — see step 0b)
     - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
-    - `designContext` — read `.decisions` as design intent for any UI-touching work; if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code
+    - `designContext` — read `.decisions` as design intent for any UI-touching work; use `.specSections` directly for a section already sliced there (this story's spec content, pre-sliced by label); if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec) for a section absent from `.specSections`, use the Read tool to load those files before authoring implementation code
     - `dropped` — `[]` when nothing was excluded; a non-empty entry names a skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`). Report any non-empty entry, of any kind, rather than proceeding as if it had been read.
     If this command fails, report failure immediately and stop.
 0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
+    - First, check `metadata.prototypeDropped` for an entry naming a prototype this story's AC depend on; if found, log `prototype <path> dropped — <reason>` and report it — never open, move, delete or resolve that path, it is a record only
     - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
     - If a file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue
 0c. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence).
@@ -584,11 +590,11 @@ $AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
 
 **`SCRATCH_PREFIX` arrives already composed: EVERY file you write into the scratchpad directory is named `[SCRATCH_PREFIX]-<whatever>`.** A mandatory prefix you are handed — never an invitation to choose a name you judge unique, which is the thing that failed. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names that already collided in that shared directory; they are non-examples, not a denylist to improvise around. It leads with the PLAN's identity and ends with your story id because the measured collision was plan-against-plan — an earlier plan's leftover file for a story carrying the same `US-NNN` — so a story-id-only prefix would have separated nothing. Check the path before running a script you think you wrote. The `verify-probe` artifact is outside this rule: it lands beside the tasks file under a name the verb chooses and announces, and you read that path rather than composing one.
 
-Parse `{story, metadata, skills, designContext, dropped}` from the returned JSON. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions; a non-empty `dropped[]` names a declared skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`) — report any of the three in the completion report. Read `designContext.decisions` as design intent for UI-touching work. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
+Parse `{story, metadata, skills, designContext, dropped}` from the returned JSON — `metadata`'s four keys are `designBundle`/`designTokens`/`prototypePaths`/`prototypeDropped` (the last a record only, never opened/moved/deleted/resolved), and `designContext` adds `.specSections` (this story's spec content, pre-sliced by label) alongside `.decisions`/`.bundleGuidance`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions; a non-empty `dropped[]` names a declared skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance` or directly via `designContext.specSections`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`) — report any of the three in the completion report. Read `designContext.decisions` as design intent for UI-touching work, preferring an already-sliced `designContext.specSections` entry over re-reading its file. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec) for a section absent from `specSections`, use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
 </task_pointer>
 
 <prototype_context>
-When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
+Before reading, check `metadata.prototypeDropped` for an entry naming a prototype this story's AC depend on — if found, log `prototype <path> dropped — <reason>`, report it, and never open/move/delete/resolve that path (it is a record only). When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
 </prototype_context>
 
 <tools>
