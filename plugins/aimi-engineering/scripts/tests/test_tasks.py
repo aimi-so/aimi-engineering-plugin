@@ -2988,13 +2988,149 @@ def test_the_three_pieces_of_scaffolding_are_gone_from_the_shell():
 
     source = _source()
     assert len(re.findall(r"^def validate_tasks_metadata\(", source, re.M)) == 1
-    # ONE scanner for both specs, where bash had the awk program twice.
+    # ONE scanner for both specs, where bash had the awk program twice. US-001
+    # gave it a second legitimate caller (spec_sections), so the count moved
+    # from 2 to 3 -- one def plus two call sites (spec_contains, spec_sections)
+    # -- and this assertion is updated deliberately in the same diff rather
+    # than left to break silently.
     assert len(re.findall(r"^def subsection_body\(", source, re.M)) == 1
-    assert source.count("subsection_body(") == 2, "one def plus the single call site"
+    assert source.count("subsection_body(") == 3, "one def plus two callers (spec_contains, spec_sections)"
 
     wrapper = dict(_wrappers())["cmd_validate_tasks"]
     assert wrapper.count(_TASKS_CROSSING) == 1
     assert "_lock" not in wrapper and "jq " not in wrapper
+
+
+def test_subsection_body_matches_a_numbered_heading_with_a_trailing_period():
+    """The `## <n>. <title>` shape skills/aimi-design-handoff/references/
+    spec-output-shape.md documents as the ONLY heading format that skill
+    writes was unreadable before this widening: the pre-existing regex
+    required a space or end-of-line directly after the section number, and a
+    literal '.' satisfied neither. Proven both ways -- the new period form
+    matches, and the pre-existing period-less form and the pre-existing
+    digit-dot-as-wildcard behaviour (ds-secao-ponto-curinga-sozinha) are
+    unaffected, since the added group sits strictly after the existing
+    literal match.
+    """
+    period = b"## 2. Screens\nPeriod-heading body.\n"
+    assert T.subsection_body(period, b"2", normalize=False) == b"Period-heading body."
+
+    periodless = b"## 5.3 Portfolio\nO resumo carrega portfolio.\n"
+    assert T.subsection_body(periodless, b"5.3", normalize=False) == b"O resumo carrega portfolio."
+
+    wildcard = b"## 5X3 Portfolio\nWildcard body.\n"
+    assert T.subsection_body(wildcard, b"5.3", normalize=False) == b"Wildcard body."
+
+
+def test_spec_sections_binds_to_the_first_document_only(tmp_path):
+    """A two-document stream carries a different designBundle in each
+    document; only the first is ever consulted -- the same story/metadata
+    scope op_get_story_context already uses for `story`/`metadata` -- never
+    bundle_guidance()'s own whole-stream fold, which its own docstring calls
+    "faithful rather than sensible" for prose nobody parses.
+    """
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "First.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nFirst document content.\n")
+    # The second document names a spec file that does not exist. If it were
+    # consulted at all, spec_sections would contribute nothing for it -- so
+    # the meaningful assertion is that the FIRST document's real content is
+    # what comes back, not merely that nothing broke.
+    doc_a = {"metadata": {"designBundle": {"businessSpec": "specs/First.md"}}}
+    doc_b = {"metadata": {"designBundle": {"businessSpec": "specs/Second.md"}}}
+    pairs = T.spec_sections([doc_a, doc_b], root)
+    assert pairs == [("BusinessSpec § 1", "First document content.")]
+
+
+def test_spec_sections_degrades_silently_on_a_missing_or_escaping_spec_path(tmp_path):
+    """No exception and no entry -- for a spec path absent on disk and for one
+    that escapes --project-root via '../' traversal. get-story-context is a
+    no-lock, always-must-succeed read, so a bad spec path in metadata must
+    never abort the whole payload, and confined_spec_path()'s soft
+    (path, inside) return is what makes that possible.
+    """
+    root = os.path.realpath(str(tmp_path / "proj"))
+    os.makedirs(os.path.join(root, "specs"))
+    parent = os.path.dirname(root)
+    os.makedirs(os.path.join(parent, "outside"), exist_ok=True)
+    with open(os.path.join(parent, "outside", "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\n\nShould never be read.\n")
+
+    missing = {"metadata": {"designBundle": {"businessSpec": "specs/DoesNotExist.md"}}}
+    assert T.spec_sections([missing], root) == []
+
+    traversal = {"metadata": {"designBundle": {"designSpec": "../outside/Secret.md"}}}
+    assert T.spec_sections([traversal], root) == []
+
+
+def test_spec_sections_returns_pairs_in_contract_table_order(tmp_path):
+    """Every contract section for both specs, present in a fixture carrying
+    all 17. The order is the declared priority interleave spec_sections()'s
+    own docstring names -- BusinessSpec and DesignSpec alternating position by
+    position, each spec's own slots still in ITS OWN contract-table order --
+    asserted against the exact expected label sequence, never merely a count,
+    since a wrong order returns the right count. Plain table order (every
+    BusinessSpec row, then every DesignSpec row) is deliberately NOT what this
+    asserts: composed with a later FIFO-from-the-end eviction cap, plain table
+    order would drop every DesignSpec section before any BusinessSpec one --
+    backwards for a phase whose whole goal is delivering the design contract
+    to a UI-implementing executor.
+    """
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    business = "\n\n".join(
+        "## " + section + " Section " + section + "\nBody " + section
+        for section in T.BUSINESS_SPEC_SECTIONS
+    )
+    design = "\n\n".join(
+        "## " + section + " Section " + section + "\nBody " + section
+        for section in T.DESIGN_SPEC_SECTIONS
+    )
+    with open(os.path.join(root, "specs", "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(business + "\n")
+    with open(os.path.join(root, "specs", "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(design + "\n")
+
+    doc = {
+        "metadata": {
+            "designBundle": {
+                "businessSpec": "specs/BusinessSpec.md",
+                "designSpec": "specs/DesignSpec.md",
+            }
+        }
+    }
+    pairs = T.spec_sections([doc], root)
+    assert not isinstance(pairs, dict)
+    assert all(isinstance(pair, tuple) and len(pair) == 2 for pair in pairs)
+    assert [label for label, _ in pairs] == [
+        "BusinessSpec § 1", "DesignSpec § 1",
+        "BusinessSpec § 2", "DesignSpec § 2.2",
+        "BusinessSpec § 3", "DesignSpec § 3",
+        "BusinessSpec § 4", "DesignSpec § 4",
+        "BusinessSpec § 4.1", "DesignSpec § 6",
+        "BusinessSpec § 5", "DesignSpec § 8",
+        "BusinessSpec § 5.1",
+        "BusinessSpec § 5.3",
+        "BusinessSpec § 7",
+        "BusinessSpec § 9",
+        "BusinessSpec § 11",
+    ]
+
+
+def test_spec_sections_omits_a_contract_number_absent_from_the_fixture(tmp_path):
+    """A contract-listed section with no matching heading anywhere in the
+    resolved spec produces no entry at all -- never an entry with empty
+    content."""
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nOnly section 1 is here.\n")
+
+    doc = {"metadata": {"designBundle": {"businessSpec": "specs/BusinessSpec.md"}}}
+    pairs = T.spec_sections([doc], root)
+    assert pairs == [("BusinessSpec § 1", "Only section 1 is here.")]
+    assert "BusinessSpec § 2" not in [label for label, _ in pairs]
 
 
 def test_the_version_gate_is_sort_v_and_not_an_approximation_of_it():
@@ -4353,16 +4489,28 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     docstring because its path is document-sourced rather than an argument.
     The variable is named brainstorm_path, not path, so it cannot collide
     with the literal the fourth open's own check above matches.
+
+    THE NINTH open() ARRIVED WITH spec_sections(), and it is a second caller
+    of the CONFINEMENT get-story-context's own metadata.designBundle reads
+    already established, not a new capability: the same confined_spec_path()
+    the second open (validate-tasks' spec read) already calls, the same soft
+    (path, inside) return, the same read mode. What is new is WHERE the
+    result goes: validate-tasks compares the bytes against a citation and
+    discards them, spec_sections() slices them by section number and keeps
+    the slices. The literal is `open(path, "rb")`, identical to the fourth
+    open's own -- a real second occurrence of that exact text, not a new
+    form, which is why the SET of distinct literals below is unchanged while
+    the total count moves.
     """
     code = _code()
-    assert code.count("open(") == 8
+    assert code.count("open(") == 9
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
     assert 'open(brainstorm_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 8
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 9
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -4446,8 +4594,16 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # before this module ever saw it, the same CLI-argument confinement every
     # tasks-file path here already gets. No new root, no new leaf: the rule
     # the other forty-four keep holds for this one too.
-    assert code.count("os.path.") == 45
-    assert code.count("os.path.isfile(") == 8
+    #
+    # The forty-sixth is spec_sections()' own isfile(), over a path
+    # confined_spec_path() already resolved and approved two lines above --
+    # the same "is this really a file" check validate-tasks' own two guarded
+    # call sites already make after their own confined_spec_path() call, not
+    # a new predicate. No new root: the path is PROJECT_ROOT concatenated
+    # with a relative string metadata.designBundle supplied, confined before
+    # this isfile() ever runs.
+    assert code.count("os.path.") == 46
+    assert code.count("os.path.isfile(") == 9
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8

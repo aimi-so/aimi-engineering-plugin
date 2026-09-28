@@ -1764,15 +1764,24 @@ def subsection_body(spec_bytes, section, normalize):
     interpolated it, so the `.` in "2.1" is a wildcard and matches a heading
     reading "2X1" -- ds-secao-ponto-curinga-sozinha records that.
 
+    The boundary after `section` accepts an optional literal '.' before the
+    space-or-end-of-line it already required, so a heading written
+    `## <n>. <title>` -- the only shape skills/aimi-design-handoff/references/
+    spec-output-shape.md documents that skill as writing -- matches the same as
+    the pre-existing period-less `## <n> <title>` form every golden fixture
+    uses. The added `\.?` sits strictly after the existing literal match, so
+    the digit-dot-as-wildcard behaviour above is unaffected: a period in
+    "2.1" is still consumed by the section literal itself, never by this group.
+
     Returns b"" for a section that is not there, which the callers read as "not
     found" -- the same conflation `[ -z "$subsection_body" ]` made, so a section
     that exists but holds only blank lines is reported as missing too.
     """
     heading_matches = re.compile(
-        rb"^(?:\xc2\xa7" + _AWK_SPACE + rb"*)?" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+        rb"^(?:\xc2\xa7" + _AWK_SPACE + rb"*)?" + section + rb"\.?(?:" + _AWK_SPACE + rb"|\Z)"
     )
     heading_anywhere = re.compile(
-        rb"\xc2\xa7" + _AWK_SPACE + rb"*" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+        rb"\xc2\xa7" + _AWK_SPACE + rb"*" + section + rb"\.?(?:" + _AWK_SPACE + rb"|\Z)"
     )
     lines = spec_bytes.split(b"\n")
     if lines and lines[-1] == b"":
@@ -2899,6 +2908,100 @@ def _decisions_dropped_marker(dropped):
         for entry_heading, entry_size in dropped
     ]
     return ("[design decisions dropped — cap exceeded: " + "; ".join(parts) + "]").encode("utf-8")
+
+
+# The spec-section-contract's own two tables (commands/references/spec-
+# section-contract.md), copied verbatim in the table's own row order.
+# BusinessSpec has 11 rows -- § 6 is not one of them; that file's own
+# "No Project-Specific Assumption" prose calls § 6 nonexistent. Re-read the
+# contract file rather than trust this copy if it has since changed.
+BUSINESS_SPEC_SECTIONS = ("1", "2", "3", "4", "4.1", "5", "5.1", "5.3", "7", "9", "11")
+DESIGN_SPEC_SECTIONS = ("1", "2.2", "3", "4", "6", "8")
+
+
+def spec_sections(docs, project_root):
+    """Slice BusinessSpec.md/DesignSpec.md content by the contract's own §
+    number, for the two spec paths `metadata.designBundle` names on docs[0].
+
+    BINDS TO docs[0] ALONE -- the same story/metadata scope
+    op_get_story_context already uses for `story`/`metadata` -- and never
+    folds over the whole document stream the way bundle_guidance() does.
+    bundle_guidance()'s own docstring calls that whole-stream fold "faithful
+    rather than sensible" for prose nobody parses; this function returns
+    structured content a story executor reads, so the same shortcut is wrong
+    here on purpose.
+
+    Each of businessSpec/designSpec is resolved through confined_spec_path()
+    UNCONDITIONALLY -- no frontend_only/prototype_count gate, unlike
+    validate_tasks' two guarded call sites -- using its soft (path, inside)
+    return, never require_in_project()'s hard exit: get-story-context is a
+    no-lock, always-must-succeed read every spawned executor's first action
+    depends on. A path absent from metadata, not a non-empty string, escaping
+    --project-root, or naming a file absent on disk contributes no pairs for
+    that spec and raises nothing -- it is skipped silently and the other spec
+    is unaffected.
+
+    THE RETURN ORDER IS A DECLARED CONTRACT, not contract-table order. Plain
+    table order (every BusinessSpec row, then every DesignSpec row) composed
+    with a FIFO-from-the-end eviction cap would drop every DesignSpec section
+    before any BusinessSpec one -- backwards for a phase whose whole goal is
+    delivering the design contract to a UI-implementing executor. Instead the
+    two tuples are interleaved position by position -- BUSINESS_SPEC_SECTIONS[i]
+    paired with DESIGN_SPEC_SECTIONS[i] for each i, BusinessSpec first at each
+    position -- and once the shorter tuple is exhausted the longer one
+    continues alone, in its own table order. With 11 BusinessSpec rows and 6
+    DesignSpec rows that reads B§1, D§1, B§2, D§2.2, B§3, D§3, B§4, D§4,
+    B§4.1, D§6, B§5, D§8, then the remaining B§5.1, B§5.3, B§7, B§9, B§11. A
+    section absent from either tuple's slot (the tuples are already the same
+    length as each other's contract, so this only happens past the shorter
+    tuple's end) is simply not offered that turn. Eviction from the end (see
+    the story that caps this list) therefore removes the lowest-priority
+    sections of BOTH specs before it reaches a high-priority section of
+    either.
+
+    A contract-listed section with no heading matching it anywhere in the
+    resolved spec produces NO entry -- never an entry with empty content.
+    Returns `list[(label, content)]`, never a dict.
+
+    A section number that is a strict prefix of another in the same spec
+    (BusinessSpec § 4 and § 4.1; § 5, § 5.1 and § 5.3) means the boundary
+    scanner's own nesting rule -- a deeper heading is collected along with its
+    body -- makes a parent section's sliced text legitimately CONTAIN its
+    child section's text too. Both pairs are still emitted separately; this is
+    expected duplication, not a bug.
+
+    Neither design_context() nor op_get_story_context() calls this function --
+    wiring the new data into the live get-story-context payload, and teaching
+    the story executor to read it, is a later story's job in this same phase.
+    """
+    first = docs[0] if docs else None
+    bundle = jq_index(jq_index(first, "metadata"), "designBundle")
+
+    spec_bytes = {}
+    for label, key in (("BusinessSpec", "businessSpec"), ("DesignSpec", "designSpec")):
+        relative = jq_index(bundle, key)
+        content = None
+        if isinstance(relative, str) and relative:
+            path, inside = confined_spec_path(project_root, relative)
+            if inside and os.path.isfile(path):
+                with open(path, "rb") as handle:
+                    content = handle.read()
+        spec_bytes[label] = content
+
+    width = max(len(BUSINESS_SPEC_SECTIONS), len(DESIGN_SPEC_SECTIONS))
+    pairs = []
+    for index in range(width):
+        for label, sections in (
+            ("BusinessSpec", BUSINESS_SPEC_SECTIONS),
+            ("DesignSpec", DESIGN_SPEC_SECTIONS),
+        ):
+            if index >= len(sections) or spec_bytes[label] is None:
+                continue
+            section = sections[index]
+            body = subsection_body(spec_bytes[label], section.encode("utf-8"), normalize=False)
+            if body:
+                pairs.append((label + " § " + section, body.decode("utf-8", "replace")))
+    return pairs
 
 
 def design_decisions(brainstorm_bytes):
