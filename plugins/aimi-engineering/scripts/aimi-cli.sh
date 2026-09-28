@@ -1903,7 +1903,7 @@ _resolve_skills_base_dir() {
   printf ''
 }
 
-# Get story context (story slice + metadata + skills + designContext + skillsDropped)
+# Get story context (story slice + metadata + skills + designContext + dropped)
 # by ID — for subagent self-brief.
 #
 # THE HOTTEST VERB IN THE SYSTEM: every story-executor agent /aimi:execute
@@ -16523,10 +16523,13 @@ COMMANDS:
     get-story <id> [--tasks-file <path>]
                               Get full story object by ID (read-only)
     get-story-context <id> [--tasks-file <path>]
-                              Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
+                              Get story slice + metadata + skills[] + designContext + dropped[] as JSON
                               (for subagent self-brief). Output keys: story, metadata, skills,
-                              designContext. skills[] contains {name, path, content} per
-                              declared skill. designContext contains {decisions, bundleGuidance}.
+                              designContext, dropped. skills[] contains {name, path, content} per
+                              declared skill. designContext contains {decisions, bundleGuidance,
+                              specSections}. dropped[] contains {kind, name, path, section, reason,
+                              bytes, deferred} per excluded skill, evicted spec section, or spec
+                              file missing on disk / escaping the project root.
     verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
                  [--skip-matching <regex>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and

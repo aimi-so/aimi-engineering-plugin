@@ -1787,7 +1787,7 @@ TASKSEOF
 
 test_get_story_context_skills_dropped() {
   echo ""
-  echo "=== Testing get-story-context skillsDropped: always present, and what it names ==="
+  echo "=== Testing get-story-context dropped: always present, and what it names ==="
 
   # The eviction warnings go to stderr and always did, because stdout is piped
   # straight into a JSON parse by every consumer there is. A caller running this
@@ -1800,8 +1800,8 @@ test_get_story_context_skills_dropped() {
   "$CLI" init-session > /dev/null
   local output
   output=$("$CLI" get-story-context US-001 2>/dev/null)
-  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
-    "skills_dropped: the key is an empty array when nothing was dropped"
+  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.dropped')" \
+    "dropped: the key is an empty array when nothing was dropped"
 
   # (2) An individually oversized skill is dropped BEFORE the aggregate loop, so
   # the two small siblings declared after it survive. The pre-port loop popped
@@ -1851,14 +1851,14 @@ TASKSEOF
   stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
   rm -f "$stderr_file"
 
-  assert_exit_code "0" "$exit_code" "skills_dropped: an oversized skill does not sink the payload"
+  assert_exit_code "0" "$exit_code" "dropped: an oversized skill does not sink the payload"
   assert_eq '["alpha","beta"]' "$(printf '%s' "$output" | jq -c '[.skills[].name]')" \
-    "skills_dropped: both small siblings survive an oversized skill declared first"
-  assert_eq '[{"name":"gigante","bytes":102401,"reason":"oversized"}]' \
-    "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
-    "skills_dropped: the oversized skill is reported with its own size and reason"
+    "dropped: both small siblings survive an oversized skill declared first"
+  assert_eq '[{"kind":"skill","name":"gigante","path":null,"section":null,"reason":"oversized","bytes":102401,"deferred":false}]' \
+    "$(printf '%s' "$output" | jq -c '.dropped')" \
+    "dropped: the oversized skill is reported with kind, its own size and reason"
   assert_stderr_contains "exceeds the 100KB skills cap on its own" "$stderr_output" \
-    "skills_dropped: the oversized drop has its own warning, distinct from the aggregate one"
+    "dropped: the oversized drop has its own warning, distinct from the aggregate one"
 
   rm -rf "$tmp_dir"
 }
@@ -1926,8 +1926,11 @@ BRAINSTORMEOF
 TASKSEOF
 
   # cd to $tmp_dir so find_aimi_root() picks up $tmp_dir/.aimi/
+  # Stdout only, not 2>&1: this designBundle's two spec files do not exist on
+  # disk (US-003's specFile check now warns about that on stderr), and this
+  # test's own JSON parse below must not have those warning lines mixed in.
   local output exit_code
-  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>/dev/null)
   exit_code=$?
 
   assert_exit_code "0" "$exit_code" "design_context: exits 0"

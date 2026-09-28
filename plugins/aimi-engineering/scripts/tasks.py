@@ -2835,6 +2835,13 @@ def skills_payload(names, base_dir, warn):
     what a story lists first is what survives -- which is precisely what the
     single reverse-pop loop could not offer once an oversized entry was in the
     array ahead of the others.
+
+    `dropped` entries carry the seven-key shape every kind of drop in this
+    module now shares (see op_get_story_context's own `dropped[]` assembly):
+    `kind:"skill"`, `name` set, `path`/`section` null (a skill has neither),
+    `reason` unchanged ("oversized"/"aggregate"), `bytes` the measured size,
+    `deferred:false` -- a dropped skill is gone from this payload entirely,
+    with nowhere left for the executor to read it on demand.
     """
     kept = []
     dropped = []
@@ -2849,7 +2856,10 @@ def skills_payload(names, base_dir, warn):
                 "skill " + name + " dropped — " + str(size)
                 + " bytes exceeds the 100KB skills cap on its own"
             )
-            dropped.append({"name": name, "bytes": size, "reason": "oversized"})
+            dropped.append({
+                "kind": "skill", "name": name, "path": None, "section": None,
+                "reason": "oversized", "bytes": size, "deferred": False,
+            })
             continue
         kept.append(({"name": name, "path": relative, "content": content}, size))
 
@@ -2857,7 +2867,10 @@ def skills_payload(names, base_dir, warn):
     while aggregate > SKILLS_CAP and kept:
         entry, size = kept.pop()
         warn("skill " + entry["name"] + " dropped — aggregate skills context exceeded 100KB")
-        dropped.append({"name": entry["name"], "bytes": size, "reason": "aggregate"})
+        dropped.append({
+            "kind": "skill", "name": entry["name"], "path": None, "section": None,
+            "reason": "aggregate", "bytes": size, "deferred": False,
+        })
         aggregate -= size
 
     return [entry for entry, _ in kept], dropped
@@ -2928,7 +2941,7 @@ BUSINESS_SPEC_SECTIONS = ("1", "2", "3", "4", "4.1", "5", "5.1", "5.3", "7", "9"
 DESIGN_SPEC_SECTIONS = ("1", "2.2", "3", "4", "6", "8")
 
 
-def spec_sections(docs, project_root):
+def spec_sections(docs, project_root, file_facts=None):
     """Slice BusinessSpec.md/DesignSpec.md content by the contract's own §
     number, for the two spec paths `metadata.designBundle` names on docs[0].
 
@@ -2979,9 +2992,20 @@ def spec_sections(docs, project_root):
     child section's text too. Both pairs are still emitted separately; this is
     expected duplication, not a bug.
 
-    Neither design_context() nor op_get_story_context() calls this function --
-    wiring the new data into the live get-story-context payload, and teaching
-    the story executor to read it, is a later story's job in this same phase.
+    design_context() is the one caller (via op_get_story_context), and it
+    needs one fact this function's own return cannot carry: WHY a spec
+    produced no pairs at all -- absent from metadata, escaping --project-root,
+    or missing on disk are three different `dropped[]` reasons (or no drop at
+    all), and confined_spec_path() is only ever called here, once per label,
+    to answer it. `file_facts`, when passed a dict, is populated in place with
+    one entry per label -- {"relative": <declared path or None>, "inside":
+    <bool or None>, "isfile": <bool or None>} -- reusing the exact
+    confined_spec_path()/os.path.isfile() results this function already
+    computes for slicing, so a caller that wants both the sliced pairs and the
+    confinement facts resolves each spec path through confined_spec_path()
+    exactly ONCE rather than calling it a second time of its own. Every
+    existing caller (the pairs-only signature) is unaffected: the default
+    `None` skips the extra bookkeeping and the return value is unchanged.
     """
     first = docs[0] if docs else None
     bundle = jq_index(jq_index(first, "metadata"), "designBundle")
@@ -2989,13 +3013,23 @@ def spec_sections(docs, project_root):
     spec_bytes = {}
     for label, key in (("BusinessSpec", "businessSpec"), ("DesignSpec", "designSpec")):
         relative = jq_index(bundle, key)
+        declared = relative if isinstance(relative, str) and relative else None
         content = None
-        if isinstance(relative, str) and relative:
-            path, inside = confined_spec_path(project_root, relative)
-            if inside and os.path.isfile(path):
+        inside = None
+        isfile = None
+        if declared is not None:
+            path, inside = confined_spec_path(project_root, declared)
+            isfile = inside and os.path.isfile(path)
+            if isfile:
                 with open(path, "rb") as handle:
                     content = handle.read()
         spec_bytes[label] = content
+        if file_facts is not None:
+            file_facts[label] = {
+                "relative": declared,
+                "inside": inside,
+                "isfile": bool(isfile) if isfile is not None else None,
+            }
 
     width = max(len(BUSINESS_SPEC_SECTIONS), len(DESIGN_SPEC_SECTIONS))
     pairs = []
@@ -3176,11 +3210,16 @@ def bundle_guidance(docs):
     )
 
 
-def design_context(docs, project_root):
-    """`{decisions, bundleGuidance}`, both always present and both always
-    strings -- never null, never absent. The story-executor prompt interpolates
-    them directly, so an absent key and an empty one are not the same thing to
-    the only consumer there is.
+def design_context(docs, project_root, warn):
+    """`{decisions, bundleGuidance, specSections}`, all three always present
+    and always the right empty value when there is nothing to say -- never
+    null, never absent. The story-executor prompt interpolates them directly,
+    so an absent key and an empty one are not the same thing to the only
+    consumer there is. Returns `(context, dropped)`: `context` is the dict
+    above, `dropped` is this function's own contribution to
+    op_get_story_context's unified `dropped[]` list (skills_payload()
+    contributes the rest) -- kept apart from `context` because `dropped` is a
+    TOP-LEVEL payload key, not a `designContext` one.
 
     The brainstorm path is NOT confined to the project root, and that is the
     pre-port rule reproduced rather than an oversight: an absolute
@@ -3188,6 +3227,14 @@ def design_context(docs, project_root):
     PROJECT_ROOT with no traversal check. validate-tasks' spec paths were
     confined in their own commit, with their own diff; doing the same here on
     the way past would hide a rule change inside a port.
+
+    `specSections` and the spec-shaped `dropped` entries are this function's
+    own wiring of spec_sections()/capped_spec_sections() into the live
+    payload (see their own docstrings for the slicing and cap rules). Both
+    spec paths are resolved through confined_spec_path() exactly ONCE for the
+    whole payload build -- spec_sections()'s own `file_facts` out-parameter
+    hands back the confinement/existence facts it already computed for
+    slicing, so this function never re-resolves either path itself.
     """
     relative = _raw_lines(
         value
@@ -3201,7 +3248,49 @@ def design_context(docs, project_root):
         if os.path.isfile(path):
             with open(path, "rb") as handle:
                 decisions = design_decisions(handle.read())
-    return {"decisions": decisions, "bundleGuidance": bundle_guidance(docs)}
+
+    file_facts = {}
+    pairs = spec_sections(docs, project_root, file_facts)
+    kept, capped_dropped = capped_spec_sections(pairs)
+    spec_sections_payload = {label: content for label, content in kept}
+
+    dropped = []
+    for label in ("BusinessSpec", "DesignSpec"):
+        facts = file_facts.get(label) or {}
+        if facts.get("relative") is None:
+            continue
+        if not facts["inside"]:
+            reason = "escapes-project-root"
+        elif not facts["isfile"]:
+            reason = "missing-on-disk"
+        else:
+            continue
+        warn("spec file " + facts["relative"] + " dropped — " + reason)
+        dropped.append({
+            "kind": "specFile", "name": None, "path": facts["relative"],
+            "section": None, "reason": reason, "bytes": None, "deferred": False,
+        })
+
+    for entry in capped_dropped:
+        section_label = entry["section"]
+        spec_label = section_label.split(" § ", 1)[0]
+        relative_path = (file_facts.get(spec_label) or {}).get("relative")
+        warn(
+            "spec section " + section_label + " dropped — "
+            + entry["reason"] + " (" + str(entry["bytes"]) + " bytes)"
+        )
+        dropped.append({
+            "kind": "specSection", "name": None, "path": relative_path,
+            "section": section_label, "reason": entry["reason"],
+            "bytes": entry["bytes"], "deferred": True,
+        })
+
+    context = {
+        "decisions": decisions,
+        "bundleGuidance": bundle_guidance(docs),
+        "specSections": spec_sections_payload,
+    }
+    return context, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -4417,10 +4506,11 @@ def op_get_story_context(argv):
     with the BRAINSTORM read's message because the skills read never touches
     `.metadata`, and bundle-string with the bundle's for the same reason.
 
-    A pure reader: no lock, no temp file, nothing opened for writing. The two
-    files it does open -- a SKILL.md and a brainstorm -- are read-only and are
-    named by the document, which is why they are opened here rather than in
-    bash.
+    A pure reader: no lock, no temp file, nothing opened for writing. Every
+    file it does open -- a SKILL.md, a brainstorm, and (since US-003 wired
+    spec_sections() in) up to two spec files named by metadata.designBundle --
+    is read-only and named by the document, which is why they are opened here
+    rather than in bash.
     """
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
@@ -4437,10 +4527,11 @@ def op_get_story_context(argv):
     def warn(message):
         sys.stderr.write(message + "\n")
 
-    skills, dropped = skills_payload(
+    skills, skills_dropped = skills_payload(
         declared_skill_names(docs, story_id), skills_base_dir, warn
     )
-    context = design_context(docs, project_root)
+    context, spec_dropped = design_context(docs, project_root, warn)
+    dropped = skills_dropped + spec_dropped
 
     # `--slurpfile tf` then `$tf[0]`: the story and the metadata come from the
     # FIRST document alone, however many the file holds. `select` is a filter
@@ -4454,7 +4545,7 @@ def op_get_story_context(argv):
                 "metadata": projected_metadata(jq_index(first, "metadata")),
                 "skills": skills,
                 "designContext": context,
-                "skillsDropped": dropped,
+                "dropped": dropped,
             }
         )
     return 0

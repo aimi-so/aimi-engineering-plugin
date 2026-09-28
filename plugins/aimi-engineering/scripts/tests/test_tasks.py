@@ -31,8 +31,10 @@ hand-written tests beside it carry the fidelity argument. It is also the one
 block whose port changed rules on purpose: four of them, named in
 CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
 engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
-comparison strips one key (`skillsDropped`) from the actual stdout before
-comparing, and everything else still has to match the recording byte for byte.
+comparison strips one key (`dropped`, renamed from `skillsDropped` by US-003,
+and, since the same story, `designContext.specSections`, a key that did not
+exist at capture time either) from the actual stdout before comparing, and
+everything else still has to match the recording byte for byte.
 The fourth, brainstorm-secao-duplicada, differs from the first three in one
 way: its recorded value WAS updated to the new output (US-002's shape rule and
 provenance line), rather than kept as pre-port evidence the way
@@ -3288,11 +3290,19 @@ def test_the_subsection_scanner_keeps_the_asymmetry_between_the_two_specs():
 # of a megabyte to the golden file.
 _RUN = re.compile(r"(.)\1{255,}", re.S)
 
-# The one key the payload gained. It is stripped from the ACTUAL stdout before
-# the corpus comparison, so everything else -- key order, indentation, the
+# The top-level key the payload gained (originally `skillsDropped`, renamed to
+# `dropped` by US-003). It is stripped from the ACTUAL stdout before the
+# corpus comparison, so everything else -- key order, indentation, the
 # trailing newline -- still has to match the recording byte for byte rather
 # than merely parse to the same object.
-_DROPPED_KEY = re.compile(r',\n  "skillsDropped": (?:\[\]|\[\n(?:.|\n)*?\n  \])\n\}', re.S)
+_DROPPED_KEY = re.compile(r',\n  "dropped": (?:\[\]|\[\n(?:.|\n)*?\n  \])\n\}', re.S)
+
+# The second key the payload gained, since the same story: `designContext`'s
+# own `specSections`, nested one level deeper than `dropped` and never
+# recorded by any capture -- spec_sections() did not exist yet. Stripped the
+# same way and for the same reason: this key's PRESENCE is new, not its
+# renaming, so it needs a mask of its own rather than reuse of the one above.
+_SPEC_SECTIONS_KEY = re.compile(r',\n    "specSections": (?:\{\}|\{\n(?:.|\n)*?\n    \})\n  \}', re.S)
 
 
 def _rle(text):
@@ -3301,6 +3311,17 @@ def _rle(text):
 
 def _without_dropped(text):
     return _DROPPED_KEY.sub("\n}", text)
+
+
+def _without_spec_sections(text):
+    return _SPEC_SECTIONS_KEY.sub("\n  }", text)
+
+
+def _without_added_keys(text):
+    """Both of US-003's additions stripped in one call -- the shape every
+    corpus-comparison call site below needs, since the payload now carries
+    two keys no recording has ever seen."""
+    return _without_dropped(_without_spec_sections(text))
 
 
 def _replay_context(case, tmp_path):
@@ -3389,6 +3410,15 @@ CONTEXT_DECISIONS = {
     "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
     "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
     "brainstorm-secao-duplicada": "two matched sections now carry provenance instead of merging bare",
+    # US-003: both cases declare a designBundle whose businessSpec/designSpec
+    # point at files that were never created (files: [] / a brainstorm only).
+    # Before this story nothing checked those paths at all, so the recording
+    # is silent; spec_sections()'s new confinement check now reports each one
+    # missing-on-disk, which is two new stderr lines -- exactly what AC5 asks
+    # for, asserted in full by test_dangling_bundle_paths_are_reported_missing
+    # below rather than by this byte-for-byte comparison.
+    "bundle-completo": "a dangling designBundle path is now reported missing-on-disk",
+    "bundle-e-brainstorm": "a dangling designBundle path is now reported missing-on-disk",
 }
 
 
@@ -3402,7 +3432,7 @@ def test_the_story_context_port_reproduces_the_jq(label, tmp_path):
         pytest.skip(CONTEXT_DECISIONS[label])
     for field in ("exit", "stderr", "state_after"):
         assert actual[field] == case[field], label + " . " + field
-    assert _without_dropped(actual["stdout"]) == case["stdout"], label + " . stdout"
+    assert _without_added_keys(actual["stdout"]) == case["stdout"], label + " . stdout"
 
 
 def test_the_story_context_tables_name_only_cases_that_exist():
@@ -3410,7 +3440,33 @@ def test_the_story_context_tables_name_only_cases_that_exist():
     assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
     assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
     assert len(CONTEXT) == 57
-    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 10, "47 of 57 match; keep this in step"
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 12, "45 of 57 match; keep this in step"
+
+
+def test_dangling_bundle_paths_are_reported_missing_on_disk(tmp_path):
+    """US-003 AC5, asserted against the two CONTEXT_DECISIONS entries that
+    name it: bundle-completo and bundle-e-brainstorm both declare a
+    designBundle whose businessSpec/designSpec point at files nobody ever
+    created. Before this story nothing checked those paths, so the golden
+    recording's stderr is empty for both -- the two new lines are the finding,
+    not a regression, and this is the dedicated assertion CONTEXT_DECISIONS
+    points at rather than the byte-for-byte comparison it skips.
+    """
+    for label in ("bundle-completo", "bundle-e-brainstorm"):
+        actual, payload = _context_stdout(label, tmp_path / label)
+        assert actual["stderr"] == (
+            "spec file .aimi/design/b/business-spec.md dropped — missing-on-disk\n"
+            "spec file .aimi/design/b/design-spec.md dropped — missing-on-disk\n"
+        ), label
+        paths = sorted(entry["path"] for entry in payload["dropped"])
+        assert paths == [
+            ".aimi/design/b/business-spec.md", ".aimi/design/b/design-spec.md",
+        ], label
+        assert all(entry["kind"] == "specFile" for entry in payload["dropped"]), label
+        assert all(entry["reason"] == "missing-on-disk" for entry in payload["dropped"]), label
+        assert all(entry["bytes"] is None for entry in payload["dropped"]), label
+        assert all(entry["deferred"] is False for entry in payload["dropped"]), label
+        assert payload["designContext"]["specSections"] == {}, label
 
 
 def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
@@ -3468,7 +3524,7 @@ def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, 
         ), "dropped whole, not truncated"
     else:
         assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
-        assert payload["skillsDropped"] == []
+        assert payload["dropped"] == []
 
 
 def test_no_jq_survives_in_the_wrapper_and_it_crosses_once():
@@ -3500,12 +3556,14 @@ def _context_stdout(label, tmp_path):
 
 def test_the_payload_carries_five_keys_in_the_order_a_consumer_reads_them(tmp_path):
     """The shape IS the contract here: this payload is parsed by an agent, not
-    by a caller who can read a diff. skillsDropped is appended LAST so the four
-    keys that were always there keep their positions."""
+    by a caller who can read a diff. `dropped` (renamed from `skillsDropped`
+    by US-003) is appended LAST so the four keys that were always there keep
+    their positions. `designContext` gained a third key of its own, the same
+    story: `specSections`, always present and last among the three."""
     _, payload = _context_stdout("skills-tres", tmp_path)
-    assert list(payload) == ["story", "metadata", "skills", "designContext", "skillsDropped"]
+    assert list(payload) == ["story", "metadata", "skills", "designContext", "dropped"]
     assert [list(skill) for skill in payload["skills"]] == [["name", "path", "content"]] * 3
-    assert list(payload["designContext"]) == ["decisions", "bundleGuidance"]
+    assert list(payload["designContext"]) == ["decisions", "bundleGuidance", "specSections"]
     assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta", "gama"]
 
 
@@ -3516,20 +3574,157 @@ def test_skills_dropped_is_present_and_empty_when_nothing_was_dropped(tmp_path):
     for label in ("sem-skills", "skills-vazio", "skills-tres", "skill-ausente",
                   "skills-base-nao-resolvida", "cap-fronteira-exata"):
         _, payload = _context_stdout(label, tmp_path / label)
-        assert payload["skillsDropped"] == [], label
+        assert payload["dropped"] == [], label
 
     # and the recordings prove the key is genuinely NEW rather than renamed:
-    # nothing in the pre-port corpus ever printed it.
+    # nothing in the pre-port corpus ever printed it (under either name).
     assert not any("skillsDropped" in case["stdout"] for case in CONTEXT.values())
+    assert not any('"dropped"' in case["stdout"] for case in CONTEXT.values())
 
 
-def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
-    """The corpus comparison removes skillsDropped textually, which is only
-    honest if removing it leaves the recording exactly. Asserted once, in full,
-    against a case that drops nothing."""
+def test_the_only_added_keys_are_the_ones_the_comparison_strips(tmp_path):
+    """The corpus comparison removes `dropped` and `designContext.specSections`
+    textually, which is only honest if removing both leaves the recording
+    exactly. Asserted once, in full, against a case that drops nothing and
+    carries no designBundle."""
     actual, _ = _context_stdout("skills-tres", tmp_path)
-    assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
-    assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+    assert actual["stdout"].endswith(',\n  "dropped": []\n}\n')
+    assert '"specSections": {}' in actual["stdout"]
+    assert _without_added_keys(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+def test_dropped_is_empty_in_the_clean_case(tmp_path, capsys):
+    """US-003 AC6: a story declaring no skills, no designBundle, and metadata
+    that names no spec paths produces `dropped == []` -- proven directly by a
+    dedicated test rather than incidentally by a case that happens to drop
+    nothing."""
+    root = os.path.realpath(str(tmp_path))
+    path = _rs_file(root, "clean.json", [_rs_story("US-001", title="Plain story")])
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", ""]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dropped"] == []
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_dropped_records_a_skill_a_spec_section_and_a_missing_spec_file(tmp_path, capsys, monkeypatch):
+    """US-003 AC7: one fixture engineered to trigger all three drop kinds at
+    once -- an oversized skill, an evicted spec section, and a designBundle
+    path missing on disk -- produces a `dropped` list with one entry of each
+    kind carrying exactly the fields this story specifies. Checked entry by
+    entry, not merely that the key exists: an assertion that only checks
+    presence proves nothing about the populated shape.
+    """
+    monkeypatch.setattr(T, "SKILLS_CAP", 10)
+    monkeypatch.setattr(T, "SPEC_CAP", 10)
+
+    root = os.path.realpath(str(tmp_path))
+    skills_base = os.path.join(root, "skills")
+    os.makedirs(os.path.join(skills_base, "gigante"))
+    with open(os.path.join(skills_base, "gigante", "SKILL.md"), "w", encoding="utf-8") as handle:
+        handle.write("a body well over the ten-byte cap\n")
+
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nA section body well over the ten-byte cap too.\n")
+
+    story = _rs_story("US-001", title="Story with a skill and a bundle")
+    story["skills"] = ["gigante"]
+    metadata = {
+        "title": "t",
+        "branchName": "b",
+        "designBundle": {
+            "businessSpec": "specs/Missing.md",
+            "designSpec": "specs/DesignSpec.md",
+        },
+    }
+    path = os.path.join(root, "engineered.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}, handle
+        )
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", skills_base]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    dropped = payload["dropped"]
+    assert len(dropped) == 3
+
+    by_kind = {entry["kind"]: entry for entry in dropped}
+    assert set(by_kind) == {"skill", "specSection", "specFile"}
+
+    skill_entry = by_kind["skill"]
+    assert skill_entry == {
+        "kind": "skill", "name": "gigante", "path": None, "section": None,
+        "reason": "oversized", "bytes": skill_entry["bytes"], "deferred": False,
+    }
+    assert skill_entry["bytes"] > 10
+
+    section_entry = by_kind["specSection"]
+    assert section_entry == {
+        "kind": "specSection", "name": None, "path": "specs/DesignSpec.md",
+        "section": "DesignSpec § 1", "reason": "oversized",
+        "bytes": section_entry["bytes"], "deferred": True,
+    }
+    assert section_entry["bytes"] > 10
+
+    file_entry = by_kind["specFile"]
+    assert file_entry == {
+        "kind": "specFile", "name": None, "path": "specs/Missing.md",
+        "section": None, "reason": "missing-on-disk", "bytes": None,
+        "deferred": False,
+    }
+
+    # The oversized section never made it into specSections -- deferred, not
+    # kept -- so the object every UI-implementing executor reads is empty.
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_dropped_reports_a_spec_file_escaping_the_project_root(tmp_path, capsys):
+    """US-003 AC5's other reason: a designBundle path that resolves outside
+    --project-root via '../' traversal produces a `specFile` entry with
+    `reason: "escapes-project-root"`, distinct from `"missing-on-disk"` -- the
+    engineered fixture above never exercises this branch, since its own
+    missing path is merely absent, not escaping."""
+    root = os.path.realpath(str(tmp_path / "proj"))
+    os.makedirs(root)
+    parent = os.path.dirname(root)
+    os.makedirs(os.path.join(parent, "outside"), exist_ok=True)
+    with open(os.path.join(parent, "outside", "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\n\nShould never be read.\n")
+
+    story = _rs_story("US-001", title="Story with an escaping bundle path")
+    metadata = {
+        "title": "t", "branchName": "b",
+        "designBundle": {"designSpec": "../outside/Secret.md"},
+    }
+    path = os.path.join(root, "escaping.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}, handle
+        )
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", ""]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "../outside/Secret.md",
+        "section": None, "reason": "escapes-project-root", "bytes": None,
+        "deferred": False,
+    }]
+    # The escaping file is never opened -- spec_sections() degrades silently,
+    # the same soft (path, inside) rule its own docstring documents.
+    assert payload["designContext"]["specSections"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -3714,8 +3909,9 @@ def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
         actual, payload = _context_stdout(label, tmp_path / label)
         answers[label] = actual["stdout"]
         assert [skill["name"] for skill in payload["skills"]] == ["pequeno"]
-        assert payload["skillsDropped"] == [
-            {"name": "mb", "bytes": 102600, "reason": "oversized"}
+        assert payload["dropped"] == [
+            {"kind": "skill", "name": "mb", "path": None, "section": None,
+             "reason": "oversized", "bytes": 102600, "deferred": False}
         ]
         assert "102600 bytes exceeds the 100KB skills cap" in actual["stderr"]
     assert answers["cap-multibyte-c"] == answers["cap-multibyte-c-utf-8"]
@@ -3741,8 +3937,9 @@ def test_an_oversized_skill_is_dropped_without_draining_its_siblings(tmp_path):
 
     actual, payload = _context_stdout("cap-gigante-primeiro", tmp_path)
     assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta"]
-    assert payload["skillsDropped"] == [
-        {"name": "gigante", "bytes": 102401, "reason": "oversized"}
+    assert payload["dropped"] == [
+        {"kind": "skill", "name": "gigante", "path": None, "section": None,
+         "reason": "oversized", "bytes": 102401, "deferred": False}
     ]
     assert actual["stderr"] == (
         "skill gigante dropped — 102401 bytes exceeds the 100KB skills cap on its own\n"
@@ -3762,7 +3959,8 @@ def test_the_aggregate_cap_and_its_boundary_are_untouched(tmp_path):
     assert [skill["name"] for skill in exact["skills"]] == ["alpha", "beta"]
     actual, over = _context_stdout("cap-fronteira-mais-um", tmp_path / "mais-um")
     assert [skill["name"] for skill in over["skills"]] == ["alpha"]
-    assert over["skillsDropped"] == [{"name": "beta", "bytes": 51201, "reason": "aggregate"}]
+    assert over["dropped"] == [{"kind": "skill", "name": "beta", "path": None, "section": None,
+                                 "reason": "aggregate", "bytes": 51201, "deferred": False}]
     assert actual["stderr"] == CONTEXT["cap-fronteira-mais-um"]["stderr"]
 
 
