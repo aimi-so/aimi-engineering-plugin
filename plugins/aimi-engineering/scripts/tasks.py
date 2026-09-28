@@ -2707,6 +2707,15 @@ SKILLS_CAP = 102400
 # size compared against this cap today is still `len()` on a bytes object.
 DECISIONS_CAP = 65536
 
+# A dedicated budget for the spec content a story's payload embeds (see
+# capped_spec_sections() below), independent of both caps above by operator
+# decision at the phase 2.5 gate: sized on DECISIONS_CAP's own order of
+# magnitude, never reused from SKILLS_CAP, and never reused from the
+# unrelated 200KB plan-time per-file spec truncation cap elsewhere in this
+# module -- that cap is paid once per plan run, this one is paid on every
+# story spawn.
+SPEC_CAP = 65536
+
 # The shape rule a `## ` heading's own text is tested against, from US-001's
 # corpus measurement (`.aimi/research/design-decisions-section-shapes.md`):
 # case-insensitive, matches a word starting `Decis` continuing `ion` (covers
@@ -3075,6 +3084,53 @@ def design_decisions(brainstorm_bytes):
     marker = _decisions_dropped_marker(dropped)
     result = marker if not survivors else survivors + b"\n\n" + marker
     return result.decode("utf-8", "replace")
+
+
+def capped_spec_sections(sections):
+    """Whole-section eviction over an already-sliced spec section list, the
+    same two-pass shape skills_payload() and design_decisions() already use:
+    drop any section whose own content alone exceeds SPEC_CAP first, then
+    evict whole sections from the end of what remains while the aggregate is
+    still over cap. No section is ever partially included -- this is a lazy-
+    loading optimisation over what a payload carries inline, never a hard
+    information cap: a section dropped here is deferred, not lost, since the
+    bundle root and spec paths it was sliced from stay in the payload
+    unconditionally via bundle_guidance() and can still be read on demand.
+
+    `sections` is the caller's DECLARED PRIORITY ORDER, highest priority
+    first -- the same declaration-order-is-priority-order rule
+    skills_payload()'s own docstring states. Every section list this
+    function receives is already sliced by contract section number (see the
+    § N[.N] extractor, spec_sections() above); this function does no
+    markdown heading-shape detection of its own and reuses none of
+    design_decisions()'s DECISIONS_HEADING_RE / _split_top_sections
+    machinery, which exists to find a section inside a raw brainstorm
+    document -- a shape this input has already had removed before it
+    arrives here.
+
+    Returns (kept, dropped): `kept` is the surviving (label, content) pairs,
+    in their original order; `dropped` is a list of
+    {"section": label, "bytes": size, "reason": "oversized"|"aggregate"}
+    dicts, one per evicted section, in the order each was evicted, reusing
+    skills_payload()'s own reason vocabulary.
+    """
+    sized = [(label, content, len(content.encode("utf-8"))) for label, content in sections]
+
+    kept = []
+    dropped = []
+    for label, content, size in sized:
+        if size > SPEC_CAP:
+            dropped.append({"section": label, "bytes": size, "reason": "oversized"})
+            continue
+        kept.append((label, content, size))
+
+    aggregate = sum(size for _, _, size in kept)
+    while aggregate > SPEC_CAP and kept:
+        label, content, size = kept.pop()
+        dropped.append({"section": label, "bytes": size, "reason": "aggregate"})
+        aggregate -= size
+
+    return [(label, content) for label, content, _ in kept], dropped
 
 
 BUNDLE_GUIDANCE = (

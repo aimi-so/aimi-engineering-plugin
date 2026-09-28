@@ -3133,6 +3133,84 @@ def test_spec_sections_omits_a_contract_number_absent_from_the_fixture(tmp_path)
     assert "BusinessSpec § 2" not in [label for label, _ in pairs]
 
 
+def test_spec_cap_is_a_new_dedicated_constant():
+    """Three separately named budgets, not a renamed reuse of any of the
+    others: SPEC_CAP is sized on DECISIONS_CAP's own order of magnitude by
+    the phase's operator decision, but it is its own constant."""
+    assert T.SPEC_CAP == 65536
+    assert T.SKILLS_CAP == 102400
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_capped_spec_sections_returns_every_section_unchanged_when_comfortably_under_the_cap():
+    """Proving the cap does not fire on ordinary input -- every section comes
+    back in `kept`, unchanged, and `dropped` is empty."""
+    sections = [("BusinessSpec § 1", "primeira"), ("DesignSpec § 1", "segunda")]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == sections
+    assert dropped == []
+
+
+def test_capped_spec_sections_preserves_declaration_order_among_survivors():
+    """Declaration order is priority order and survives untouched when
+    nothing is evicted -- the same rule skills_payload() states for its own
+    declaration order."""
+    sections = [
+        ("BusinessSpec § 1", "um"),
+        ("DesignSpec § 1", "dois"),
+        ("BusinessSpec § 2", "tres"),
+    ]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert [label for label, _ in kept] == [
+        "BusinessSpec § 1", "DesignSpec § 1", "BusinessSpec § 2",
+    ]
+    assert dropped == []
+
+
+def test_capped_spec_sections_evicts_the_lowest_priority_section_when_the_aggregate_exceeds_a_lowered_cap(
+    monkeypatch,
+):
+    """Neither section alone exceeds the cap, but their combined size does.
+    The lowest-priority section -- last in the caller's declared order,
+    mirroring skills_payload()'s and design_decisions()'s own end-of-order
+    eviction -- is dropped whole; the higher-priority section survives
+    intact."""
+    monkeypatch.setattr(T, "SPEC_CAP", 100)
+    sections = [("BusinessSpec § 1", "a" * 60), ("DesignSpec § 1", "b" * 60)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == [("BusinessSpec § 1", "a" * 60)]
+    assert dropped == [{"section": "DesignSpec § 1", "bytes": 60, "reason": "aggregate"}]
+
+
+def test_capped_spec_sections_drops_a_single_oversized_section_whole_never_truncated(monkeypatch):
+    """A section too large on its own is dropped whole, before any aggregate
+    comparison runs, and never truncated into a partial blob."""
+    monkeypatch.setattr(T, "SPEC_CAP", 100)
+    sections = [("BusinessSpec § 1", "d" * 200)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == []
+    assert dropped == [{"section": "BusinessSpec § 1", "bytes": 200, "reason": "oversized"}]
+
+
+def test_capped_spec_sections_evicts_against_the_real_65536_byte_cap_with_no_monkeypatch():
+    """Proving the shipped production constant itself evicts a genuinely
+    oversized section -- not merely a monkeypatched stand-in."""
+    sections = [("BusinessSpec § 1", "e" * 70000)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == []
+    assert dropped == [{"section": "BusinessSpec § 1", "bytes": 70000, "reason": "oversized"}]
+
+
+def test_capped_spec_sections_does_not_reuse_markdown_heading_shape_detection():
+    """capped_spec_sections() reuses none of design_decisions()'s markdown
+    heading-shape detection machinery -- its input already arrives pre-sliced
+    by contract section number, a different section shape than a raw
+    brainstorm document's `## ` headings."""
+    body = _code().split("def capped_spec_sections", 1)[1].split("\ndef ", 1)[0]
+    assert "DECISIONS_HEADING_RE" not in body
+    assert "_split_top_sections" not in body
+
+
 def test_the_version_gate_is_sort_v_and_not_an_approximation_of_it():
     """R1 is `sort -V | head -n1`, so it accepts what filevercmp accepts rather
     than what semver would. The reconstruction was fuzzed against the real
