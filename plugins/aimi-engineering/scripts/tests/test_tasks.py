@@ -87,8 +87,12 @@ import tasks as T  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
+TASKS_PY = os.path.join(SCRIPTS, "tasks.py")
 
-with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handle:
+_GOLDEN_PATH = os.path.join(HERE, "golden_from_jq.json")
+_GOLDEN_MTIME_AT_IMPORT = os.path.getmtime(_GOLDEN_PATH)
+
+with open(_GOLDEN_PATH, encoding="utf-8") as _handle:
     GOLDEN = json.load(_handle)
 
 CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
@@ -4144,6 +4148,329 @@ def test_the_declared_list_is_read_the_way_jq_r_and_mapfile_read_it():
     # stream to iterate rather than an error.
     assert T.declared_skill_names([{"userStories": [{"id": "US-001"}]}], "US-001") == []
     assert T.declared_skill_names([{"userStories": []}], "US-001") == []
+
+
+# ---------------------------------------------------------------------------
+# outline:05 -- a real payload proves the spec-as-data contract [US-005]
+# ---------------------------------------------------------------------------
+#
+# Every test below runs `tasks.py get-story-context` as its own real
+# subprocess -- the exact argv cmd_get_story_context builds at
+# aimi-cli.sh:1945-1947 -- rather than calling op_get_story_context() in
+# process the way the CONTEXT block above does. That distinction is the
+# story: US-005's own job is to prove the contract from a payload that was
+# actually BUILT, RUN and PARSED, not merely asserted against source. Every
+# fixture lives under pytest's own tmp_path, never this repository's .aimi/,
+# and --project-root is always passed explicitly -- never left to
+# find_aimi_root's climb, which would silently retarget which directory the
+# fixture's relative designBundle paths resolve against.
+#
+# KNOWN PLANNING DEFECT, recorded here rather than silently reinterpreted:
+# the story JSON's own AC1 asks for a negative twin where an "uncited"
+# contract section (BusinessSpec § 11) "never appears anywhere in the
+# payload", framed as proof that extraction is "scoped to what the story's
+# own citations call authoritative". That framing does not hold against the
+# real spec_sections(): extraction is scoped to metadata.designBundle and the
+# fixed 17-entry section contract (BUSINESS_SPEC_SECTIONS /
+# DESIGN_SPEC_SECTIONS), read once per FILE (docs[0]) -- there is no
+# citation-scanner anywhere in this path, and a section that really is a
+# heading in the bundle and really is on the contract table surfaces for
+# every story in that tasks file, whether or not that particular story's own
+# acceptanceCriteria happen to mention it. The negative twin below instead
+# proves the real, load-bearing property: a section is extracted only when a
+# real MARKDOWN HEADING for it exists -- plain prose that mentions a number
+# (a numbered list item, a forward reference) is not enough. That is what
+# stands between this payload and "a full-file dump wearing the contract's
+# name", and it is the honest version of what AC1 was reaching for.
+
+_SENTINEL_BUSINESS_3 = "BUSINESS_RULE_SENTINEL_7f3a"
+_SENTINEL_DESIGN_6 = "DESIGN_COMPONENT_SENTINEL_9c2e"
+
+# The exact bodies subsection_body() slices out of the fixture files built by
+# _build_spec_contract_root() below -- computed once here rather than
+# reconstructed per assertion, so every test that reads one of these two
+# sections compares against the identical literal.
+_BUSINESS_SECTION_3_BODY = (
+    "\n" + _SENTINEL_BUSINESS_3 + "\n\n"
+    "See the numbered list below.\n\n"
+    "11. This is a plain list item, not a heading, and must never be "
+    "read as section 11."
+)
+_DESIGN_SECTION_6_BODY = "\n" + _SENTINEL_DESIGN_6
+
+
+def _run_get_story_context(tasks_file, story_id, project_root, skills_base_dir="", cwd=None):
+    """The real subprocess AC1 asks for: the exact argv cmd_get_story_context
+    builds (aimi-cli.sh:1945-1947), invoked directly against tasks.py so
+    --project-root is supplied by the caller rather than discovered by
+    find_aimi_root's climb. Returns the finished subprocess.CompletedProcess
+    untouched -- the caller decides whether stdout is worth parsing as JSON,
+    the same way a refusal's stdout is not.
+    """
+    argv = [
+        sys.executable, TASKS_PY, "get-story-context",
+        "--tasks-file", tasks_file, "--story-id", story_id,
+        "--project-root", project_root, "--skills-base-dir", skills_base_dir,
+    ]
+    return subprocess.run(
+        argv, cwd=cwd or project_root, capture_output=True, text=True, timeout=60
+    )
+
+
+def _build_spec_contract_root(tmp_path):
+    """One fixture tree for every criterion this story proves, laid out so
+    each test opens only the files its own criterion needs:
+
+        root/.aimi/tasks/contract.json      -- criteria 1 and 2 (US-001)
+        root/.aimi/tasks/missing-spec.json  -- criterion 3, missing case
+        root/.aimi/tasks/escaping-spec.json -- criterion 3, escaping case
+        root/.aimi/tasks/proto-dropped.json -- criterion 4, positive
+        root/.aimi/tasks/proto-clean.json   -- criterion 4, negative twin
+        root/project/bundle/BusinessSpec.md -- a real "## 3." heading, plus a
+                                                plain-text "11." list item
+                                                that is NOT a heading
+        root/project/bundle/DesignSpec.md   -- a real "## 6." heading
+
+    `root` sits one level inside tmp_path (tmp_path/proj) so a designBundle
+    path of "../outside/..." resolves to a real sibling directory still under
+    tmp_path, never outside pytest's own temp area -- the same shape
+    test_dropped_reports_a_spec_file_escaping_the_project_root above uses.
+    Every returned path is an absolute string rooted under tmp_path; nothing
+    here is written inside this repository's own .aimi/.
+    """
+    root = os.path.realpath(str(tmp_path / "proj"))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    bundle_dir = os.path.join(root, "project", "bundle")
+    os.makedirs(tasks_dir)
+    os.makedirs(bundle_dir)
+
+    # Carries the SAME heading and sentinel as the real DesignSpec.md below,
+    # so a test that finds the sentinel absent from the payload is proof the
+    # escaping path was never opened -- not merely proof this file is boring.
+    outside_dir = os.path.join(str(tmp_path), "outside")
+    os.makedirs(outside_dir)
+    with open(os.path.join(outside_dir, "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 6. Components\n\n" + _SENTINEL_DESIGN_6 + "\n")
+
+    with open(os.path.join(bundle_dir, "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "# BusinessSpec\n\n"
+            "## 3. Business Rules\n\n"
+            + _SENTINEL_BUSINESS_3 + "\n\n"
+            "See the numbered list below.\n\n"
+            "11. This is a plain list item, not a heading, and must never be "
+            "read as section 11.\n"
+        )
+    with open(os.path.join(bundle_dir, "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("# DesignSpec\n\n## 6. Components\n\n" + _SENTINEL_DESIGN_6 + "\n")
+
+    def story(story_id, acceptance_criterion):
+        return {
+            "id": story_id, "title": "s", "description": "d",
+            "acceptanceCriteria": [acceptance_criterion], "priority": 1,
+            "status": "pending", "dependsOn": [], "notes": "",
+        }
+
+    def write(name, metadata, stories):
+        path = os.path.join(tasks_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"schemaVersion": "3.3", "metadata": metadata, "userStories": stories}, handle
+            )
+        return path
+
+    contract_path = write(
+        "contract.json",
+        {
+            "title": "t", "branchName": "b",
+            "designBundle": {
+                "businessSpec": "project/bundle/BusinessSpec.md",
+                "designSpec": "project/bundle/DesignSpec.md",
+            },
+        },
+        [story("US-001", "Follows BusinessSpec § 3 and DesignSpec § 6")],
+    )
+    missing_path = write(
+        "missing-spec.json",
+        {
+            "title": "t", "branchName": "b",
+            "designBundle": {
+                "businessSpec": "project/bundle/BusinessSpec.md",
+                "designSpec": "project/bundle/DesignSpec-missing.md",
+            },
+        },
+        [story("US-001", "x")],
+    )
+    escaping_path = write(
+        "escaping-spec.json",
+        {"title": "t", "branchName": "b", "designBundle": {"designSpec": "../outside/Secret.md"}},
+        [story("US-001", "x")],
+    )
+    proto_dropped_path = write(
+        "proto-dropped.json",
+        {
+            "title": "t", "branchName": "b",
+            "prototypeDropped": [
+                {"path": "project/bundle/prototype.html", "reason": "aggregate-cap", "bytes": 123456}
+            ],
+        },
+        [story("US-001", "x")],
+    )
+    proto_clean_path = write(
+        "proto-clean.json", {"title": "t", "branchName": "b"}, [story("US-001", "x")]
+    )
+
+    return {
+        "root": root,
+        "contract": contract_path,
+        "missing_spec": missing_path,
+        "escaping_spec": escaping_path,
+        "proto_dropped": proto_dropped_path,
+        "proto_clean": proto_clean_path,
+    }
+
+
+def test_cited_sentinel_text_arrives_as_data_and_the_uncited_number_does_not(tmp_path):
+    """Criterion 1, proven end to end: a real subprocess payload carries the
+    cited BusinessSpec § 3 / DesignSpec § 6 sentinel text as DATA, reachable
+    under designContext.specSections keyed by label. The negative twin --
+    see the section-header note above for why AC1's own "uncited citation"
+    framing does not hold against the real code -- is that a plain-text "11."
+    list item, never a markdown heading, produces no "BusinessSpec § 11" key
+    at all. Asserted as one exact dict equality so a stray third key would
+    fail this test even if both sentinels were still present.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    proc = _run_get_story_context(fixture["contract"], "US-001", fixture["root"])
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    payload = json.loads(proc.stdout)
+
+    assert payload["designContext"]["specSections"] == {
+        "BusinessSpec § 3": _BUSINESS_SECTION_3_BODY,
+        "DesignSpec § 6": _DESIGN_SECTION_6_BODY,
+    }
+    assert payload["dropped"] == []
+
+
+def test_project_root_flag_decides_resolution_not_cwd(tmp_path):
+    """Criterion 2: identical --project-root from two different CWDs returns
+    byte-identical stdout/stderr; a different --project-root (a sibling
+    tmp_path directory with no bundle underneath it at all) reaches
+    criterion 3's missing-file outcome instead of the section content --
+    proving the relative designBundle paths are resolved against the flag's
+    value, never os.getcwd() and never a find_aimi_root climb.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    unrelated_cwd = tmp_path / "unrelated-cwd"
+    unrelated_cwd.mkdir()
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+
+    inside = _run_get_story_context(
+        fixture["contract"], "US-001", fixture["root"], cwd=fixture["root"]
+    )
+    outside = _run_get_story_context(
+        fixture["contract"], "US-001", fixture["root"], cwd=str(unrelated_cwd)
+    )
+    assert inside.returncode == 0 and outside.returncode == 0
+    assert inside.stderr == "" and outside.stderr == ""
+    assert inside.stdout == outside.stdout
+
+    mismatched = _run_get_story_context(
+        fixture["contract"], "US-001", str(other_root), cwd=fixture["root"]
+    )
+    assert mismatched.returncode == 0, mismatched.stderr
+    payload = json.loads(mismatched.stdout)
+    assert payload["designContext"]["specSections"] == {}
+    assert {entry["kind"] for entry in payload["dropped"]} == {"specFile"}
+    assert {entry["reason"] for entry in payload["dropped"]} == {"missing-on-disk"}
+    assert {entry["path"] for entry in payload["dropped"]} == {
+        "project/bundle/BusinessSpec.md", "project/bundle/DesignSpec.md",
+    }
+
+
+def test_a_missing_spec_file_is_recorded_and_a_present_one_is_not(tmp_path):
+    """Criterion 3: a designBundle path that resolves inside --project-root
+    via confined_spec_path but was never written on disk yields exactly one
+    dropped {kind: "specFile", reason: "missing-on-disk", ...} entry -- and
+    the sibling businessSpec path in the SAME fixture file, which does exist,
+    contributes none, so its own section content still reaches the payload.
+    A companion fixture whose designSpec escapes the project root via '../'
+    gets reason: "escapes-project-root" instead -- a second, distinguishable
+    positive case, not a second negative twin.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+
+    missing = _run_get_story_context(fixture["missing_spec"], "US-001", fixture["root"])
+    assert missing.returncode == 0, missing.stderr
+    payload = json.loads(missing.stdout)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "project/bundle/DesignSpec-missing.md",
+        "section": None, "reason": "missing-on-disk", "bytes": None, "deferred": False,
+    }]
+    assert payload["designContext"]["specSections"] == {
+        "BusinessSpec § 3": _BUSINESS_SECTION_3_BODY,
+    }
+
+    escaping = _run_get_story_context(fixture["escaping_spec"], "US-001", fixture["root"])
+    assert escaping.returncode == 0, escaping.stderr
+    payload = json.loads(escaping.stdout)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "../outside/Secret.md",
+        "section": None, "reason": "escapes-project-root", "bytes": None, "deferred": False,
+    }]
+    # The escaping file is never opened -- a heading that matches "§ 6" sits
+    # right there in outside/Secret.md, and it must never surface.
+    assert escaping.stdout.count(_SENTINEL_DESIGN_6) == 0
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_prototype_dropped_surfaces_in_metadata_and_is_absent_when_nothing_was_dropped(tmp_path):
+    """Criterion 4: metadata.prototypeDropped, now that outline:04 added it to
+    STORY_CONTEXT_METADATA_KEYS, arrives byte-identical to what the fixture
+    wrote -- from its own payload alone, the story can tell the prototype its
+    acceptance criteria assumed is gone. The negative twin is presence, not
+    truthiness (projected_metadata's own documented rule): a story with
+    nothing dropped has the key entirely ABSENT from metadata, never null and
+    never [].
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+
+    dropped_run = _run_get_story_context(fixture["proto_dropped"], "US-001", fixture["root"])
+    assert dropped_run.returncode == 0, dropped_run.stderr
+    payload = json.loads(dropped_run.stdout)
+    assert payload["metadata"] == {
+        "prototypeDropped": [
+            {"path": "project/bundle/prototype.html", "reason": "aggregate-cap", "bytes": 123456}
+        ]
+    }
+
+    clean_run = _run_get_story_context(fixture["proto_clean"], "US-001", fixture["root"])
+    assert clean_run.returncode == 0, clean_run.stderr
+    payload = json.loads(clean_run.stdout)
+    assert payload["metadata"] == {}
+    assert "prototypeDropped" not in payload["metadata"]
+
+
+def test_the_spec_contract_fixture_stays_under_tmp_path_and_leaves_the_golden_file_alone(tmp_path):
+    """Fixture hygiene, asserted rather than assumed: every path
+    _build_spec_contract_root() writes lives under tmp_path, never this
+    repository's own .aimi/ -- the same discipline this phase's own
+    known-gaps record names, since a discovered root would silently retarget
+    which directory the fixture's relative bundle paths resolve against.
+    golden_from_jq.json's mtime is unchanged before and after this module's
+    tests run: nothing in this section reads it, writes it, or regenerates
+    it -- the four criteria above are asserted against a payload this proof
+    builds and runs itself, never against the get-story-context golden
+    corpus's existing 57 story_context_cases.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    tmp_root = os.path.realpath(str(tmp_path))
+    for key, value in fixture.items():
+        assert value.startswith(tmp_root + os.sep), key
+
+    assert os.path.getmtime(_GOLDEN_PATH) == _GOLDEN_MTIME_AT_IMPORT
 
 
 # ---------------------------------------------------------------------------
