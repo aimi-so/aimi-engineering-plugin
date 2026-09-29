@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.144.0] - 2026-09-28
+
+### Added
+- `spec_sections()` in `tasks.py` slices a design bundle's `BusinessSpec.md` and `DesignSpec.md` by the spec section contract's own section numbers — the number the contract fixes, never the free-text title beside it — and returns the sections in an interleaved BusinessSpec/DesignSpec priority order, so a cap that evicts from the end drops the lowest-priority sections of both specs before the highest-priority section of either. Both spec paths go through `confined_spec_path()` unconditionally, resolve against the threaded `--project-root`, and bind to the first document of the stream, like `story` and `metadata` beside them.
+- `SPEC_CAP` (65536 bytes) and `capped_spec_sections()`: whole-section eviction, oversized sections first, then from the end of the priority order. The cap is a deferral, not a loss — the bundle path stays in the payload, so an evicted section can still be read on demand.
+- `designContext.specSections` in the `get-story-context` payload: the sliced sections as data, a JSON object keyed by label (`"BusinessSpec § 2"`), always present and `{}` when there is no bundle. The story executor now receives the spec sections its read order calls authoritative, instead of a prose instruction to go and open a file.
+- One shared `dropped` record in the payload for everything it declared and did not carry: every entry carries `kind`, `name`, `path`, `section`, `reason`, `bytes` and `deferred`, with `null` where a field does not apply. Three kinds — `skill`, `specSection` (evicted by the cap, `deferred: true`) and `specFile`, a spec path that is `missing-on-disk` or `escapes-project-root`, which also prints one line on stderr. A missing spec is now recorded in the payload rather than left to whatever the agent improvises.
+- `metadata.prototypeDropped` is projected into the payload as the fourth key of `STORY_CONTEXT_METADATA_KEYS`, so a story whose criteria were written from a prototype later dropped can tell from its own context that the prototype is gone. The executor reads it as a record only and never opens, stats or resolves the path it names.
+- End-to-end tests that run `tasks.py get-story-context` as a real subprocess against fresh fixtures, each criterion paired with a negative twin. All four fail against the tree without these changes and pass against it.
+
+### Changed
+- The payload key `skillsDropped` is renamed `dropped`, with no alias. Its only consumers — `skills/story-executor/SKILL.md` and the test suites — move in the same change. `golden_from_jq.json` is unchanged: its comparison already strips the key.
+- `skills/story-executor/SKILL.md` reads `designContext.specSections` as data, mirroring its existing `metadata.designTokens` rule, falls back to the full spec file only for a detail that did not arrive, and reads four metadata keys where it read three.
+- Two `story_context` golden recordings, `bundle-completo` and `bundle-e-brainstorm`, move to `CONTEXT_DECISIONS`: their bundles point at spec files that do not exist, which now yields a recorded `missing-on-disk` entry instead of silence. A dedicated test asserts their new output in full.
+- The Tasks File Schema note on `metadata.prototypeDropped` in `plugins/aimi-engineering/CLAUDE.md` no longer claims the field has no consumer or is outside `STORY_CONTEXT_METADATA_KEYS`. It keeps the invariant that matters — the path is never resolved — and restates why no confinement is needed: the consumer acts on the entry's `reason`, never on its `path`.
+
+### Fixed
+- `subsection_body()` now reads a heading written as `## <n>. <title>`, with a period after the section number — the only shape the `aimi-design-handoff` skill added in 1.143.0 writes. Before, no bundle that skill produced was readable by the section scanner, nor by `validate-tasks`' citation check, which shares it. The period-less form still matches, and every `validate_tasks_cases` recording keeps its outcome.
+
 ## [1.143.0] - 2026-09-25
 
 ### Added
