@@ -180,27 +180,108 @@ test_detect_design_bundle_no_bundle() {
   rm -rf "$tmp"
 }
 
-# (6) Multiple bundles — newest mtime wins
-test_detect_design_bundle_newest_mtime_wins() {
+# (6) Multiple same-tier bundles, no bundle named -- refuses (exit 3), naming
+# every candidate, rather than silently electing one by mtime. This inverts
+# the prior behavior on purpose: mtime-based election is the exact thing
+# this phase removes, because --phase-dir's deterministic phase-tier win
+# only means something once the scan tier stops guessing on a tie.
+test_detect_design_bundle_ambiguous_scan_tier_refuses() {
   echo ""
-  echo "=== Testing detect-design-bundle: newest mtime wins among multiple bundles ==="
+  echo "=== Testing detect-design-bundle: ambiguous same-tier scan refuses (exit 3), listing every candidate ==="
 
-  local tmp stdout exit_code
+  local tmp stdout stderr_out exit_code stderr_file
   tmp=$(mktemp -d)
   local bundle_a bundle_b
   bundle_a=$(_make_bundle "$tmp" "bundle-a")
   bundle_b=$(_make_bundle "$tmp" "bundle-b")
 
-  # Bump bundle_b's README mtime so it is strictly newer than bundle_a's
+  # mtime no longer decides anything -- bump bundle_b's README mtime anyway,
+  # to prove the old newest-wins behavior is gone, not merely untested.
   touch "${bundle_b}/README.md"
 
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-design-bundle --root "$tmp" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_out=$(cat "$stderr_file"); rm -f "$stderr_file"
+
+  assert_exit_code "3" "$exit_code" "detect-design-bundle ambiguous scan tier: exits 3"
+
+  local ambiguous tier count
+  ambiguous=$(printf '%s' "$stdout" | jq -r '.ambiguous')
+  tier=$(printf '%s' "$stdout" | jq -r '.tier')
+  count=$(printf '%s' "$stdout" | jq -r '.candidates | length')
+  assert_eq "true" "$ambiguous" "detect-design-bundle ambiguous scan tier: ambiguous flag is true"
+  assert_eq "scan" "$tier"      "detect-design-bundle ambiguous scan tier: tier is scan"
+  assert_eq "2"    "$count"     "detect-design-bundle ambiguous scan tier: candidates length is 2"
+
+  local first second
+  first=$(printf '%s' "$stdout" | jq -r '.candidates[0].path')
+  second=$(printf '%s' "$stdout" | jq -r '.candidates[1].path')
+  assert_eq "bundle-a" "$first"  "detect-design-bundle ambiguous scan tier: candidates ordered by path, not mtime -- bundle-a first"
+  assert_eq "bundle-b" "$second" "detect-design-bundle ambiguous scan tier: candidates ordered by path, not mtime -- bundle-b second"
+
+  assert_contains "2 bundles match and none was named" "$stderr_out" "detect-design-bundle ambiguous scan tier: refusal summary line"
+  assert_contains "--bundle <path> to choose one" "$stderr_out" "detect-design-bundle ambiguous scan tier: refusal names the way out"
+  assert_contains "bundle-a" "$stderr_out" "detect-design-bundle ambiguous scan tier: refusal lists bundle-a"
+  assert_contains "bundle-b" "$stderr_out" "detect-design-bundle ambiguous scan tier: refusal lists bundle-b"
+
+  rm -rf "$tmp"
+}
+
+# (6b) Ambiguous scan-tier output is deterministic across mtime perturbation
+# in either direction -- candidate order depends only on path, never mtime.
+test_detect_design_bundle_ambiguous_tier_is_deterministic_across_mtime_changes() {
+  echo ""
+  echo "=== Testing detect-design-bundle: ambiguous scan tier output is byte-identical across mtime perturbation ==="
+
+  local tmp
+  tmp=$(mktemp -d)
+  local bundle_a
+  bundle_a=$(_make_bundle "$tmp" "bundle-a")
+  _make_bundle "$tmp" "bundle-b" >/dev/null
+
+  local out1 out2 out3
+  out1=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null)
+
+  touch -d '2001-01-01' "${bundle_a}/README.md"
+  out2=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null)
+
+  touch -d '2999-01-01' "${bundle_a}/README.md"
+  out3=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null)
+
+  assert_eq "$out1" "$out2" "detect-design-bundle ambiguous tier determinism: output unchanged after mtime set to the past"
+  assert_eq "$out2" "$out3" "detect-design-bundle ambiguous tier determinism: output unchanged after mtime set to the future"
+
+  rm -rf "$tmp"
+}
+
+# (6c) A candidate in the ambiguous array carrying neither spec file still
+# appears, with businessSpec/designSpec reported as JSON null -- nothing is
+# silently filtered from the list (D8).
+test_detect_design_bundle_ambiguous_candidates_include_bundle_with_neither_spec() {
+  echo ""
+  echo "=== Testing detect-design-bundle: ambiguous candidates include a bundle with neither spec file ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  local bundle_a
+  bundle_a=$(_make_bundle "$tmp" "bundle-a")
+  printf 'business content' > "${bundle_a}/project/BusinessSpec.md"
+  printf 'design content'   > "${bundle_a}/project/DesignSpec.md"
+  _make_bundle "$tmp" "bundle-b" >/dev/null
+  # bundle-b deliberately carries neither spec file.
+
   stdout=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "3" "$exit_code" "detect-design-bundle ambiguous neither-spec: exits 3"
 
-  assert_exit_code "0" "$exit_code" "detect-design-bundle newest mtime: exit code"
+  local bs ds
+  bs=$(printf '%s' "$stdout" | jq -r '.candidates[] | select(.path=="bundle-b") | .businessSpec')
+  ds=$(printf '%s' "$stdout" | jq -r '.candidates[] | select(.path=="bundle-b") | .designSpec')
+  assert_eq "null" "$bs" "detect-design-bundle ambiguous neither-spec: bundle-b businessSpec is null"
+  assert_eq "null" "$ds" "detect-design-bundle ambiguous neither-spec: bundle-b designSpec is null"
 
-  local path
-  path=$(printf '%s' "$stdout" | jq -r '.path')
-  assert_eq "bundle-b" "$path" "detect-design-bundle newest mtime: selects newest bundle"
+  local count
+  count=$(printf '%s' "$stdout" | jq -r '.candidates | length')
+  assert_eq "2" "$count" "detect-design-bundle ambiguous neither-spec: both candidates present, nothing filtered"
 
   rm -rf "$tmp"
 }
@@ -370,13 +451,13 @@ test_detect_design_bundle_help_documents_source_field() {
   local stdout
   stdout=$("$CLI" detect-design-bundle --help 2>&1)
 
-  if printf '%s' "$stdout" | grep -q 'aimi-generated'; then
+  if [ "$(printf '%s' "$stdout" | grep -c 'aimi-generated')" -gt 0 ]; then
     assert_eq "ok" "ok" "detect-design-bundle --help: documents source field values"
   else
     assert_eq "source values documented" "source values missing" "detect-design-bundle --help: documents source field values"
   fi
 
-  if printf '%s' "$stdout" | grep -qF '.aimi/design-bundles'; then
+  if [ "$(printf '%s' "$stdout" | grep -cF '.aimi/design-bundles')" -gt 0 ]; then
     assert_eq "ok" "ok" "detect-design-bundle --help: documents .aimi/design-bundles/<slug>/ reachability"
   else
     assert_eq "nested reachability documented" "nested reachability missing" "detect-design-bundle --help: documents .aimi/design-bundles/<slug>/ reachability"
@@ -393,13 +474,13 @@ test_help_flag_on_strict_subcommand() {
 
   assert_exit_code "0" "$exit_code" "detect-design-bundle --help: exit code is 0"
 
-  if printf '%s' "$stdout" | grep -q 'Unknown flag'; then
+  if [ "$(printf '%s' "$stdout" | grep -c 'Unknown flag')" -gt 0 ]; then
     assert_eq "no Unknown flag" "Unknown flag present" "detect-design-bundle --help: must not return 'Unknown flag'"
   else
     assert_eq "ok" "ok" "detect-design-bundle --help: no 'Unknown flag' string"
   fi
 
-  if printf '%s' "$stdout" | grep -q 'aimi-cli.sh - Deterministic'; then
+  if [ "$(printf '%s' "$stdout" | grep -c 'aimi-cli.sh - Deterministic')" -gt 0 ]; then
     assert_eq "ok" "ok" "detect-design-bundle --help: prints help doc header"
   else
     assert_eq "header present" "header missing" "detect-design-bundle --help: must include help doc header"
@@ -422,7 +503,7 @@ test_help_flag_on_side_effect_subcommand() {
 
   assert_exit_code "0" "$exit_code" "mark-complete --help: exit code is 0 (short-circuited)"
 
-  if printf '%s' "$stdout" | grep -q 'aimi-cli.sh - Deterministic'; then
+  if [ "$(printf '%s' "$stdout" | grep -c 'aimi-cli.sh - Deterministic')" -gt 0 ]; then
     assert_eq "ok" "ok" "mark-complete --help: prints help doc"
   else
     assert_eq "help present" "help missing" "mark-complete --help: must print help doc"
@@ -512,6 +593,19 @@ test_detect_design_bundle_bundle_flag_refuses_non_bundle_or_missing() {
   assert_exit_code "1" "$exit_code" "detect-design-bundle --bundle nonexistent path: exit code"
   assert_contains "does-not-exist" "$stderr" "detect-design-bundle --bundle nonexistent path: message names the given path"
 
+  # A --bundle path missing at TWO OR MORE levels (not even its own parent
+  # exists) used to make path_within_project fall back to an unresolved,
+  # relative string that never matched the PROJECT_ROOT/* prefix check --
+  # misreporting a path that is genuinely inside the project as one that
+  # escapes it. _resolve_for_confinement_check now walks up to the deepest
+  # existing ancestor instead of checking only the immediate parent, so this
+  # is correctly confined and refused for what it actually is: not a bundle.
+  stderr=$("$CLI" detect-design-bundle --bundle "nested/does/not/exist" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --bundle multi-level-missing path: exit code"
+  assert_contains "nested/does/not/exist" "$stderr" "detect-design-bundle --bundle multi-level-missing path: message names the given path"
+  assert_eq "0" "$(printf '%s' "$stderr" | grep -cF 'escapes project root')" \
+    "detect-design-bundle --bundle multi-level-missing path: never misreported as escaping the project root"
+
   rm -rf "not-a-bundle"
 }
 
@@ -571,16 +665,158 @@ test_detect_design_bundle_help_documents_bundle_flag() {
   # per-verb slice) -- so it would pass even against the pre-change help
   # text and never discriminate. This phrase is unique to the new
   # detect-design-bundle section added by this story.
-  if printf '%s' "$stdout" | grep -qF -- 'Point directly at one bundle directory'; then
+  if [ "$(printf '%s' "$stdout" | grep -cF -- 'Point directly at one bundle directory')" -gt 0 ]; then
     assert_eq "ok" "ok" "detect-design-bundle --help: documents --bundle flag"
   else
     assert_eq "--bundle documented" "--bundle missing" "detect-design-bundle --help: documents --bundle flag"
   fi
 
-  if printf '%s' "$stdout" | grep -qF -- 'import-design-bundle'; then
+  if [ "$(printf '%s' "$stdout" | grep -cF -- 'import-design-bundle')" -gt 0 ]; then
     assert_eq "ok" "ok" "detect-design-bundle --help: documents the import-design-bundle refusal"
   else
     assert_eq "import-design-bundle documented" "import-design-bundle missing" "detect-design-bundle --help: documents the import-design-bundle refusal"
+  fi
+}
+
+# (18) --phase-dir's own design-bundle/ wins over every scan-tier match,
+# reporting a PROJECT_ROOT-relative path and naming the ignored scan count (AC1)
+test_detect_design_bundle_phase_bundle_wins_over_scan() {
+  echo ""
+  echo "=== Testing detect-design-bundle --phase-dir: the phase bundle wins over the scan tier ==="
+
+  mkdir -p "scan-sibling/chats" "scan-sibling/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "scan-sibling/README.md"
+
+  local phase_dir
+  phase_dir="$(pwd)/.aimi/tasks/myfeature/phase-5-foo"
+  mkdir -p "${phase_dir}/design-bundle/project"
+  printf 'This is a **handoff bundle** generated by the aimi-engineering plugin, not by Claude Design.\n' \
+    > "${phase_dir}/design-bundle/README.md"
+
+  local stdout stderr_file stderr_out exit_code
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-design-bundle --phase-dir "$phase_dir" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_out=$(cat "$stderr_file"); rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --phase-dir win: exit code"
+
+  local path_out
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq ".aimi/tasks/myfeature/phase-5-foo/design-bundle" "$path_out" \
+    "detect-design-bundle --phase-dir win: path is the project-root-relative phase bundle, not the scan sibling"
+
+  assert_contains "using the phase bundle" "$stderr_out" "detect-design-bundle --phase-dir win: stderr names the phase-tier win"
+  assert_contains "1 other bundle(s) ignored" "$stderr_out" "detect-design-bundle --phase-dir win: stderr counts the ignored scan sibling"
+
+  rm -rf "scan-sibling" ".aimi/tasks/myfeature"
+}
+
+# (19) --phase-dir named but its design-bundle/ carries no handoff marker
+# falls back to the scan tier silently -- no refusal, no phase-win line (AC2)
+test_detect_design_bundle_phase_dir_without_bundle_falls_back_to_scan() {
+  echo ""
+  echo "=== Testing detect-design-bundle --phase-dir: falls back to the scan tier when the phase has no qualifying bundle ==="
+
+  mkdir -p "scan-sibling2/chats" "scan-sibling2/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "scan-sibling2/README.md"
+
+  local phase_dir
+  phase_dir="$(pwd)/.aimi/tasks/myfeature2/phase-9-bar"
+  mkdir -p "$phase_dir"
+  # Deliberately no design-bundle/ at all under this phase directory.
+
+  local stdout stderr_file stderr_out exit_code
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-design-bundle --phase-dir "$phase_dir" --root "scan-sibling2" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_out=$(cat "$stderr_file"); rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --phase-dir fallback: exit code"
+
+  local path_out
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "scan-sibling2" "$path_out" "detect-design-bundle --phase-dir fallback: returns the scan-tier candidate"
+
+  assert_eq "0" "$(printf '%s' "$stderr_out" | grep -cF 'using the phase bundle')" \
+    "detect-design-bundle --phase-dir fallback: no phase-win line printed"
+
+  rm -rf "scan-sibling2" ".aimi/tasks/myfeature2"
+}
+
+# (20) A --phase-dir that resolves inside the project but does not exist on
+# disk AT ALL -- not even its own feature folder -- falls back to the scan
+# tier the same as an existing-but-markerless one. This is the real
+# /aimi:plan ordering (a phase's directory does not exist until that phase
+# is planned), and it must never be refused as escaping the project root
+# merely because it is absent (orchestrator correction, measured against the
+# pre-fix _resolve_for_confinement_check, which only checked one parent level).
+test_detect_design_bundle_phase_dir_nonexistent_inside_project_falls_back_to_scan() {
+  echo ""
+  echo "=== Testing detect-design-bundle --phase-dir: a nonexistent-but-inside-project phase dir falls back to scan, never refuses ==="
+
+  mkdir -p "scan-sibling3/chats" "scan-sibling3/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "scan-sibling3/README.md"
+
+  local phase_dir
+  # Several levels deep, and NONE of them exist yet -- not even
+  # .aimi/tasks/myfeature3 -- unlike test (19) above, which at least creates
+  # the phase directory itself.
+  phase_dir="$(pwd)/.aimi/tasks/myfeature3/phase-1-brandnew"
+
+  local stdout stderr_file stderr_out exit_code
+  stderr_file=$(mktemp)
+  stdout=$("$CLI" detect-design-bundle --phase-dir "$phase_dir" --root "scan-sibling3" 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_out=$(cat "$stderr_file"); rm -f "$stderr_file"
+
+  assert_exit_code "0" "$exit_code" \
+    "detect-design-bundle --phase-dir nonexistent-inside: exit 0, never the escape refusal"
+  assert_eq "0" "$(printf '%s' "$stderr_out" | grep -cF 'escapes project root')" \
+    "detect-design-bundle --phase-dir nonexistent-inside: never reports escaping the project root"
+
+  local path_out
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "scan-sibling3" "$path_out" "detect-design-bundle --phase-dir nonexistent-inside: falls back to the scan-tier candidate"
+
+  rm -rf "scan-sibling3"
+}
+
+# (21) --phase-dir resolving OUTSIDE the project root is refused before any
+# scan or README read -- it carries none of --root's absolute-path exception (D5)
+test_detect_design_bundle_phase_dir_outside_project_refused() {
+  echo ""
+  echo "=== Testing detect-design-bundle --phase-dir: a path outside the project root is refused ==="
+
+  local outside
+  outside=$(mktemp -d)
+
+  local stderr_out exit_code
+  stderr_out=$("$CLI" detect-design-bundle --phase-dir "$outside" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  rm -rf "$outside"
+
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --phase-dir outside project: exit code"
+  assert_contains "Path escapes project root" "$stderr_out" "detect-design-bundle --phase-dir outside project: refusal message"
+}
+
+# (22) --help documents the new --phase-dir flag and its phase-tier/ambiguity contracts
+test_detect_design_bundle_help_documents_phase_dir_flag() {
+  echo ""
+  echo "=== Testing detect-design-bundle --help: documents the --phase-dir flag ==="
+
+  local stdout
+  stdout=$("$CLI" detect-design-bundle --help 2>&1)
+
+  if [ "$(printf '%s' "$stdout" | grep -cF -- '--phase-dir')" -gt 0 ]; then
+    assert_eq "ok" "ok" "detect-design-bundle --help: documents --phase-dir flag"
+  else
+    assert_eq "--phase-dir documented" "--phase-dir missing" "detect-design-bundle --help: documents --phase-dir flag"
+  fi
+
+  if [ "$(printf '%s' "$stdout" | grep -cF -- 'ambiguous')" -gt 0 ]; then
+    assert_eq "ok" "ok" "detect-design-bundle --help: documents the ambiguity contract"
+  else
+    assert_eq "ambiguous documented" "ambiguous missing" "detect-design-bundle --help: documents the ambiguity contract"
   fi
 }
 
@@ -9355,7 +9591,9 @@ main() {
   test_detect_design_bundle_only_business_spec
   test_detect_design_bundle_only_design_spec
   test_detect_design_bundle_no_bundle
-  test_detect_design_bundle_newest_mtime_wins
+  test_detect_design_bundle_ambiguous_scan_tier_refuses
+  test_detect_design_bundle_ambiguous_tier_is_deterministic_across_mtime_changes
+  test_detect_design_bundle_ambiguous_candidates_include_bundle_with_neither_spec
   test_detect_design_bundle_partial_bundle
   test_detect_design_bundle_root_is_bundle
   test_detect_design_bundle_mixed_case_specs
@@ -9371,6 +9609,11 @@ main() {
   test_detect_design_bundle_bundle_flag_refuses_outside_project
   test_detect_design_bundle_nested_root_inside_project_is_project_relative
   test_detect_design_bundle_help_documents_bundle_flag
+  test_detect_design_bundle_phase_bundle_wins_over_scan
+  test_detect_design_bundle_phase_dir_without_bundle_falls_back_to_scan
+  test_detect_design_bundle_phase_dir_nonexistent_inside_project_falls_back_to_scan
+  test_detect_design_bundle_phase_dir_outside_project_refused
+  test_detect_design_bundle_help_documents_phase_dir_flag
 
   # Bundle Prototype Generation Tests
   echo ""

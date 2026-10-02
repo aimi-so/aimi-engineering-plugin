@@ -110,13 +110,39 @@ _resolve_for_confinement_check() {
     resolve_path "$target_path"
     return
   fi
-  local parent_dir
-  parent_dir=$(dirname "$target_path")
-  if [ -e "$parent_dir" ]; then
-    echo "$(resolve_path "$parent_dir")/$(basename "$target_path")"
-  else
-    echo "$target_path"
-  fi
+
+  # Walk upward collecting the path components that do not exist yet,
+  # stopping at the first ancestor directory that does -- rather than only
+  # checking the immediate parent, as this used to. A path several levels
+  # of missing directories deep (e.g. a phase directory /aimi:plan has not
+  # created yet, where even the feature folder above it does not exist)
+  # still resolves against PROJECT_ROOT correctly this way, instead of
+  # falling through to the raw, unresolved string the moment even the
+  # immediate parent is missing too -- which could misreport a path that is
+  # genuinely inside PROJECT_ROOT as one that escapes it.
+  local -a missing=()
+  local probe="$target_path"
+  while [ ! -e "$probe" ]; do
+    missing+=("$(basename "$probe")")
+    local parent
+    parent=$(dirname "$probe")
+    if [ "$parent" = "$probe" ]; then
+      # Walked to the filesystem root with nothing existing at all -- there
+      # is nothing left on disk to anchor a resolution to.
+      echo "$target_path"
+      return
+    fi
+    probe="$parent"
+  done
+
+  # $probe now names the deepest existing ancestor; $missing holds the
+  # components walked off along the way, leaf-first -- join them back on
+  # in the opposite order (shallowest first) to rebuild the path.
+  local suffix="" comp
+  for comp in "${missing[@]}"; do
+    suffix="/${comp}${suffix}"
+  done
+  echo "$(resolve_path "$probe")${suffix}"
 }
 
 # Silent predicate: the decision half of validate_path_in_project's rule,
@@ -10573,27 +10599,200 @@ cmd_forge_resolve_review_thread() {
   printf '%s\n' "$result"
 }
 
+# Collect design-bundle candidate directories under scan_root, mtime-free --
+# the root-is-bundle precheck, depth-1 children (skipping .worktrees,
+# node_modules, .aimi, vendor), and the .aimi/design-bundles/*/ exception,
+# unchanged from cmd_detect_design_bundle's original discovery loop other
+# than dropping every mtime computation. Prints one absolute candidate path
+# per line (each ending in "/"), sorted lexicographically by path so repeated
+# calls over an unchanged tree are always byte-identical -- never by mtime.
+# Shared by _select_design_bundle and cmd_detect_design_bundle's own --all
+# branch, which used to each walk this tree their own way.
+# Relies on cmd_detect_design_bundle's own HANDOFF_MARKER and
+# AIMI_GENERATED_MARKER through bash's dynamic scoping across the call stack
+# -- the same mechanism _build_bundle_json already relies on to reach
+# cmd_detect_design_bundle's own scan_root -- so this must only ever be
+# called from within cmd_detect_design_bundle's own execution.
+# Usage: _collect_design_bundle_candidates "$scan_root"
+_collect_design_bundle_candidates() {
+  local scan_root="$1"
+
+  local root_normalized="${scan_root%/}/"
+  local root_readme="${root_normalized}README.md"
+  if [ -f "$root_readme" ] && { grep -qF "$HANDOFF_MARKER" "$root_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$root_readme"; }; then
+    printf '%s\n' "$root_normalized"
+    return 0
+  fi
+
+  local -a unsorted=()
+  local subdir
+  for subdir in "${scan_root}"/*/; do
+    [ -d "$subdir" ] || continue
+
+    local base
+    base=$(basename "$subdir")
+
+    # Skip noise directories
+    case "$base" in
+      .worktrees|node_modules|.aimi|vendor) continue ;;
+    esac
+
+    local readme="${subdir}README.md"
+    [ -f "$readme" ] || continue
+
+    # Fixed-string, case-sensitive marker check — either marker qualifies
+    grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
+
+    unsorted+=("$subdir")
+  done
+
+  # Second, narrow scan pass: a bundle this plugin generated itself under
+  # <scan_root>/.aimi/design-bundles/<slug>/, reachable without pointing
+  # --root at it directly. The noise-directory skip above excludes .aimi/
+  # wholesale (state, cache, research, tasks, .tasks-staging all live under
+  # it and must stay unreachable) — this is a fixed, plugin-owned exception
+  # to that exclusion, not a relaxation of it.
+  if [ -d "${scan_root%/}/.aimi/design-bundles" ]; then
+    for subdir in "${scan_root%/}/.aimi/design-bundles"/*/; do
+      [ -d "$subdir" ] || continue
+
+      local readme="${subdir}README.md"
+      [ -f "$readme" ] || continue
+
+      grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
+
+      unsorted+=("$subdir")
+    done
+  fi
+
+  if [ ${#unsorted[@]} -gt 0 ]; then
+    printf '%s\n' "${unsorted[@]}" | sort
+  fi
+}
+
+# Elects which design bundle cmd_detect_design_bundle reports when no bundle
+# was named via --bundle and --all was not requested: the phase tier
+# (--phase-dir's own design-bundle/, when it qualifies) always wins over the
+# scan tier, and the scan tier refuses (exit 3) with every same-tier
+# candidate listed when two or more tie with no bundle named -- never
+# silently electing one by mtime or any other order.
+# Relies on cmd_detect_design_bundle's own HANDOFF_MARKER,
+# AIMI_GENERATED_MARKER and _build_bundle_json through bash's dynamic
+# scoping across the call stack -- the same mechanism _build_bundle_json
+# already relies on to reach cmd_detect_design_bundle's own scan_root -- so
+# this must only ever be called from within cmd_detect_design_bundle's own
+# execution, after those are defined.
+# Usage: _select_design_bundle "$phase_dir" "$scan_root"
+# Exit: 0 (null, single match, or phase-tier win) or 3 (ambiguous scan tier)
+_select_design_bundle() {
+  local phase_dir="$1"
+  local scan_root="$2"
+
+  # Phase tier: at most one candidate, ever -- ambiguity within it alone is
+  # structurally impossible (D3), so there is no phase-tier refusal branch.
+  # A phase_dir that does not resolve to a directory at all, or whose
+  # design-bundle/README.md is missing or carries neither marker, simply
+  # leaves phase_bundle empty -- falling through to the scan tier below
+  # rather than refusing, since a phase's directory does not exist until
+  # /aimi:plan creates it.
+  local phase_bundle=""
+  if [ -n "$phase_dir" ]; then
+    local phase_bundle_dir="${phase_dir%/}/design-bundle/"
+    local phase_readme="${phase_bundle_dir}README.md"
+    if [ -f "$phase_readme" ] && { grep -qF "$HANDOFF_MARKER" "$phase_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$phase_readme"; }; then
+      phase_bundle="$phase_bundle_dir"
+    fi
+  fi
+
+  # The scan tier always runs, win or not, so a phase-tier win's own "N
+  # other bundle(s) ignored" count below is a real count, never a placeholder.
+  local -a scan_candidates=()
+  local _sdb_line
+  while IFS= read -r _sdb_line; do
+    [ -n "$_sdb_line" ] && scan_candidates+=("$_sdb_line")
+  done < <(_collect_design_bundle_candidates "$scan_root")
+  local scan_count=${#scan_candidates[@]}
+
+  if [ -n "$phase_bundle" ]; then
+    local bundle_json bundle_path
+    bundle_json=$(_build_bundle_json "$phase_bundle")
+    bundle_path=$(printf '%s' "$bundle_json" | jq -r '.path')
+    printf '%s\n' "$bundle_json"
+    echo "detect-design-bundle: using the phase bundle $bundle_path (named by --phase-dir); $scan_count other bundle(s) ignored" >&2
+    return 0
+  fi
+
+  if [ "$scan_count" -eq 0 ]; then
+    echo "null"
+    return 0
+  elif [ "$scan_count" -eq 1 ]; then
+    _build_bundle_json "${scan_candidates[0]}"
+    return 0
+  fi
+
+  # Two or more same-tier candidates with no bundle named: refuse, listing
+  # every candidate -- never silently electing one (mtime or otherwise).
+  local candidates_json="[]"
+  local subdir
+  for subdir in "${scan_candidates[@]}"; do
+    local bundle_json
+    bundle_json=$(_build_bundle_json "$subdir")
+    candidates_json=$(echo "$candidates_json" | jq --argjson b "$bundle_json" '. + [$b]')
+  done
+
+  jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+
+  {
+    echo "detect-design-bundle: $scan_count bundles match and none was named -- pass --bundle <path> to choose one"
+    printf '%s' "$candidates_json" | jq -r '.[].path'
+  } >&2
+
+  return 3
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
-# Returns JSON object when found, "null" when not found.
-# With --all, returns a JSON array sorted newest-first (by directory mtime).
+# Returns JSON object when found, "null" when not found. Candidates are
+# collected mtime-free and ordered by path -- never by mtime -- so repeated
+# calls over an unchanged tree are always byte-identical.
+# With --all, returns a JSON array of every scan-tier match, path-sorted; it
+# never refuses, even when the non---all path over the same tree would.
 # With --bundle <path>, skips scan-root resolution entirely and reports on
 # that one directory directly -- always confined to PROJECT_ROOT, with no
 # absolute-path exception and no children-scan fallback on a miss (D5).
+# With --phase-dir <dir>, a phase's own <dir>/design-bundle/ is checked first
+# and wins over the scan tier when it qualifies (phase tier) -- it holds at
+# most one candidate, so no phase-tier ambiguity is possible (D3). --phase-dir
+# is always confined to PROJECT_ROOT, with no absolute-path exception (D5);
+# unlike --bundle, a --phase-dir that resolves inside the project but does
+# not exist, or exists without a qualifying README, falls back to the scan
+# tier silently rather than refusing -- a phase's directory does not exist
+# until /aimi:plan creates it, so absence alone is never treated as an error.
+# With neither flag naming a bundle, two or more scan-tier candidates tying
+# in the same tier refuse (exit 3) with every candidate listed, rather than
+# silently electing one.
 cmd_detect_design_bundle() {
-  local root="" all=false json=false bundle_arg=""
+  local root="" all=false json=false bundle_arg="" phase_dir=""
 
   # Parse flags
   while [ $# -gt 0 ]; do
     case "$1" in
-      --root)   shift; root="${1:-}" ;;
-      --bundle) shift; bundle_arg="${1:-}" ;;
-      --all)    all=true ;;
-      --json)   json=true ;;
+      --root)      shift; root="${1:-}" ;;
+      --bundle)    shift; bundle_arg="${1:-}" ;;
+      --phase-dir) shift; phase_dir="${1:-}" ;;
+      --all)       all=true ;;
+      --json)      json=true ;;
       *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
   done
+
+  # --phase-dir is ALWAYS confined to PROJECT_ROOT -- no --root-style
+  # absolute-path exception (D5) -- checked before any scan or README read,
+  # including the phase-tier marker check in _select_design_bundle below.
+  if [ -n "$phase_dir" ]; then
+    validate_path_in_project "$phase_dir"
+  fi
 
   # The handoff marker (fixed string, case-sensitive)
   local HANDOFF_MARKER='This is a **handoff bundle** from Claude Design (claude.ai/design).'
@@ -10766,106 +10965,37 @@ cmd_detect_design_bundle() {
     exit 1
   fi
 
-  # Collect matching bundles: each entry is "<mtime> <abspath>"
-  local found_paths=()
-
-  # Pre-check: scan_root may itself be a bundle directory. When its README has
-  # the handoff marker, treat it as a single bundle and skip the children scan.
-  local root_normalized="${scan_root%/}/"
-  local root_readme="${root_normalized}README.md"
-  if [ -f "$root_readme" ] && { grep -qF "$HANDOFF_MARKER" "$root_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$root_readme"; }; then
-    local root_mtime
-    if command -v stat >/dev/null 2>&1; then
-      root_mtime=$(stat -c '%Y' "$root_normalized" 2>/dev/null || stat -f '%m' "$root_normalized" 2>/dev/null || echo 0)
-    else
-      root_mtime=0
-    fi
-    found_paths+=("${root_mtime} ${root_normalized}")
-  else
-    for subdir in "${scan_root}"/*/; do
-      [ -d "$subdir" ] || continue
-
-      local base
-      base=$(basename "$subdir")
-
-      # Skip noise directories
-      case "$base" in
-        .worktrees|node_modules|.aimi|vendor) continue ;;
-      esac
-
-      local readme="${subdir}README.md"
-      [ -f "$readme" ] || continue
-
-      # Fixed-string, case-sensitive marker check — either marker qualifies
-      grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
-
-      # Get directory mtime (seconds since epoch) — stat is not POSIX-portable;
-      # use date-based approach via ls for mtime sorting, falling back to 0
-      local mtime
-      if command -v stat >/dev/null 2>&1; then
-        # GNU stat (Linux) or BSD stat (macOS)
-        mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
-      else
-        mtime=0
-      fi
-
-      found_paths+=("${mtime} ${subdir}")
-    done
-
-    # Second, narrow scan pass: a bundle this plugin generated itself under
-    # <scan_root>/.aimi/design-bundles/<slug>/, reachable without pointing
-    # --root at it directly. The noise-directory skip above excludes .aimi/
-    # wholesale (state, cache, research, tasks, .tasks-staging all live under
-    # it and must stay unreachable) — this is a fixed, plugin-owned exception
-    # to that exclusion, not a relaxation of it.
-    if [ -d "${scan_root%/}/.aimi/design-bundles" ]; then
-      for subdir in "${scan_root%/}/.aimi/design-bundles"/*/; do
-        [ -d "$subdir" ] || continue
-
-        local readme="${subdir}README.md"
-        [ -f "$readme" ] || continue
-
-        grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
-
-        local mtime
-        if command -v stat >/dev/null 2>&1; then
-          mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
-        else
-          mtime=0
-        fi
-
-        found_paths+=("${mtime} ${subdir}")
-      done
-    fi
-  fi
-
-  # No bundles found
-  if [ ${#found_paths[@]} -eq 0 ]; then
-    echo "null"
-    return 0
-  fi
-
-  # Sort found_paths by mtime descending (newest first)
-  local sorted_paths
-  sorted_paths=$(printf '%s\n' "${found_paths[@]}" | sort -rn)
-
   if [ "$all" = true ]; then
-    # Return all bundles as a JSON array, sorted newest-first
+    # Return every scan-tier match as a JSON array, path-sorted -- never
+    # refuses, even when the non---all path over the same tree would (the
+    # contract this flag has always had; only the ordering changed, from
+    # mtime to path, since nothing in the existing suite or in commands/
+    # pins --all's prior mtime-first order).
+    local -a all_candidates=()
+    local _ddb_line
+    while IFS= read -r _ddb_line; do
+      [ -n "$_ddb_line" ] && all_candidates+=("$_ddb_line")
+    done < <(_collect_design_bundle_candidates "$scan_root")
+
     local entries_json="[]"
-    while IFS= read -r entry; do
-      local subdir="${entry#* }"
+    local subdir
+    for subdir in "${all_candidates[@]}"; do
       local bundle_json
       bundle_json=$(_build_bundle_json "$subdir")
       entries_json=$(echo "$entries_json" | jq --argjson b "$bundle_json" '. + [$b]')
-    done <<< "$sorted_paths"
+    done
     echo "$entries_json"
-  else
-    # Return only the newest bundle
-    local newest_entry
-    newest_entry=$(echo "$sorted_paths" | head -1)
-    local newest_subdir="${newest_entry#* }"
-    _build_bundle_json "$newest_subdir"
+    return 0
   fi
+
+  # No bundle named via --bundle, and --all not requested: the phase tier
+  # (--phase-dir's own design-bundle/) wins when it qualifies, otherwise the
+  # scan tier answers -- null, the sole match, or an exit-3 refusal listing
+  # every same-tier candidate when two or more tie. _select_design_bundle's
+  # own exit code (0 or 3) is this function's last statement, so it
+  # propagates through the detect-design-bundle dispatch arm and main() under
+  # this file's own `set -euo pipefail` with no explicit `exit 3` needed here.
+  _select_design_bundle "$phase_dir" "$scan_root"
 }
 
 # ============================================================================
@@ -17043,7 +17173,7 @@ COMMANDS:
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
                               30 days. .aimi/archive is ignored. Silent when nothing cleaned.
-    detect-design-bundle [--root <path> | --bundle <path>] [--all] [--json]
+    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json]
                               Detect a design handoff bundle -- either a Claude
                               Design export or one this plugin generated itself.
                               --root may point at a bundle directory directly,
@@ -17065,9 +17195,19 @@ COMMANDS:
                               PROJECT_ROOT, however deep --root nests it; a
                               bundle outside PROJECT_ROOT (--root's own
                               absolute-path exception only) keeps the older
-                              scan-root-relative/basename form.
-                              --root    Scan <path> (bundle or parent) instead of CWD
-                              --bundle  Point directly at one bundle directory.
+                              scan-root-relative/basename form. Scan-tier
+                              candidates are collected mtime-free and ordered
+                              by path -- never by mtime, which no longer
+                              breaks a tie. With no bundle named (no --bundle,
+                              and --phase-dir did not win) and two or more
+                              scan-tier candidates tie, the verb refuses --
+                              exit 3, stdout {ambiguous:true,tier:"scan",
+                              candidates:[...]} (same per-entry shape as a
+                              single answer, ordered by path), stderr naming
+                              the count and listing every candidate path --
+                              rather than silently electing one.
+                              --root       Scan <path> (bundle or parent) instead of CWD
+                              --bundle     Point directly at one bundle directory.
                               Always confined to PROJECT_ROOT -- relative or
                               absolute, no exception -- and never falls back to
                               scanning the given path's children on a miss. A
@@ -17077,8 +17217,26 @@ COMMANDS:
                               not a bundle (no README.md, or a README.md with
                               neither marker), or that does not exist at all, is
                               refused naming the given path.
-                              --all     Return all matching bundles as JSON array
-                              --json    Alias; output is always JSON
+                              --phase-dir  Check <path>/design-bundle/ first (the
+                              fixed lookup location for a planned phase's own
+                              bundle); when it qualifies, it wins over every
+                              scan-tier match -- stderr names the win and how
+                              many scan-tier matches it out-ranked. Always
+                              confined to PROJECT_ROOT, with no --root-style
+                              absolute-path exception. Unlike --bundle, a
+                              --phase-dir that resolves inside the project but
+                              does not exist yet, or whose design-bundle/ has
+                              no qualifying README, falls back to the scan
+                              tier silently rather than refusing -- a phase's
+                              own directory does not exist until /aimi:plan
+                              creates it, so its absence alone is never an
+                              error. Only a --phase-dir resolving OUTSIDE the
+                              project is refused (exit 1, before any scan or
+                              README read).
+                              --all        Return every scan-tier match as a JSON
+                              array, path-sorted; never refuses, even when the
+                              non---all path over the same tree would.
+                              --json       Alias; output is always JSON
     bundle-prototype-status --bundle <path> --topic <slug> [--force]
                               Check whether a bundle prototype needs (re-)generation.
                               Returns JSON with keys: needs_generation (bool),
