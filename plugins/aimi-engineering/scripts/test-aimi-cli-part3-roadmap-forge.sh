@@ -18,6 +18,7 @@ set -uo pipefail
 #   - Roadmap Lifecycle Tests (US-002)
 #   - normalize-status / status field Tests (US-003)
 #   - Design Bundle Detection Tests
+#   - import-design-bundle Tests
 #   - Bundle Prototype Generation Tests
 #   - Phase Folder Discovery Tests (US-004)
 #   - Payload Budget Estimation Tests (US-004)
@@ -818,6 +819,185 @@ test_detect_design_bundle_help_documents_phase_dir_flag() {
   else
     assert_eq "ambiguous documented" "ambiguous missing" "detect-design-bundle --help: documents the ambiguity contract"
   fi
+}
+
+# ============================================================================
+# import-design-bundle Tests
+# ============================================================================
+# Each test below is self-contained (its own mktemp --from and its own --to
+# slug) rather than chaining off a sibling test's state, so these run
+# correctly in isolation or in any order.
+
+# (1) First import: copies --from into --to, status "imported", bundle field
+# is --to's own path (as given, already project-root-relative), files/bytes
+# match what was actually copied.
+test_import_design_bundle_imported() {
+  echo ""
+  echo "=== Testing import-design-bundle: first import -> status imported ==="
+
+  local src stdout exit_code
+  src=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+  printf 'biz' > "${src}/project/BusinessSpec.md"
+
+  local reldest=".aimi/design-bundles/import-imported-test"
+  stdout=$("$CLI" import-design-bundle --from "$src" --to "$reldest" 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "import-design-bundle imported: exit code"
+  assert_eq "imported" "$(printf '%s' "$stdout" | jq -r '.status')" "import-design-bundle imported: status"
+  assert_eq "$reldest" "$(printf '%s' "$stdout" | jq -r '.bundle')" "import-design-bundle imported: bundle field is --to's project-relative path"
+  assert_eq "2" "$(printf '%s' "$stdout" | jq -r '.files')" "import-design-bundle imported: files count matches what was copied"
+  assert_eq "yes" "$([ -f "${reldest}/project/BusinessSpec.md" ] && echo yes || echo no)" "import-design-bundle imported: dest file was written"
+
+  rm -rf "$src" "$reldest"
+}
+
+# (2) Identical re-import: status "reused", every destination file's mtime
+# left exactly as it was -- nothing rewritten.
+test_import_design_bundle_reused_leaves_destination_untouched() {
+  echo ""
+  echo "=== Testing import-design-bundle: identical re-import -> status reused, mtime untouched ==="
+
+  local src stdout exit_code
+  src=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+  printf 'biz' > "${src}/project/BusinessSpec.md"
+
+  local reldest=".aimi/design-bundles/import-reused-test"
+  "$CLI" import-design-bundle --from "$src" --to "$reldest" >/dev/null 2>&1
+
+  local before_mtime
+  before_mtime=$(stat -c '%Y' "${reldest}/project/BusinessSpec.md" 2>/dev/null || stat -f '%m' "${reldest}/project/BusinessSpec.md" 2>/dev/null)
+  sleep 1
+
+  stdout=$("$CLI" import-design-bundle --from "$src" --to "$reldest" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "import-design-bundle reused: exit code"
+  assert_eq "reused" "$(printf '%s' "$stdout" | jq -r '.status')" "import-design-bundle reused: status"
+
+  local after_mtime
+  after_mtime=$(stat -c '%Y' "${reldest}/project/BusinessSpec.md" 2>/dev/null || stat -f '%m' "${reldest}/project/BusinessSpec.md" 2>/dev/null)
+  assert_eq "$before_mtime" "$after_mtime" "import-design-bundle reused: destination mtime left untouched"
+
+  rm -rf "$src" "$reldest"
+}
+
+# (3) A --to that already holds a DIFFERENT copy is refused without
+# --reimport, naming --from, --to and --reimport, and --to is left
+# byte-for-byte unchanged.
+test_import_design_bundle_differing_copy_refused_without_reimport() {
+  echo ""
+  echo "=== Testing import-design-bundle: differing copy refused without --reimport, naming --from/--to/--reimport ==="
+
+  local src stderr exit_code
+  src=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+  printf 'biz' > "${src}/project/BusinessSpec.md"
+
+  local reldest=".aimi/design-bundles/import-differs-test"
+  "$CLI" import-design-bundle --from "$src" --to "$reldest" >/dev/null 2>&1
+
+  printf 'biz-CHANGED' > "${src}/project/BusinessSpec.md"
+  stderr=$("$CLI" import-design-bundle --from "$src" --to "$reldest" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "import-design-bundle differing copy: exit code"
+  assert_contains "$src" "$stderr" "import-design-bundle differing copy: message names --from"
+  assert_contains "$reldest" "$stderr" "import-design-bundle differing copy: message names --to"
+  assert_contains "--reimport" "$stderr" "import-design-bundle differing copy: message names --reimport"
+  assert_eq "biz" "$(cat "${reldest}/project/BusinessSpec.md")" "import-design-bundle differing copy: destination left byte-for-byte unchanged"
+
+  rm -rf "$src" "$reldest"
+}
+
+# (4) The identical command with --reimport appended replaces --to
+# atomically, status "replaced", new content on disk.
+test_import_design_bundle_reimport_replaces_atomically() {
+  echo ""
+  echo "=== Testing import-design-bundle: --reimport replaces the destination atomically ==="
+
+  local src stdout exit_code
+  src=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+  printf 'biz' > "${src}/project/BusinessSpec.md"
+
+  local reldest=".aimi/design-bundles/import-reimport-test"
+  "$CLI" import-design-bundle --from "$src" --to "$reldest" >/dev/null 2>&1
+
+  printf 'biz-CHANGED' > "${src}/project/BusinessSpec.md"
+  stdout=$("$CLI" import-design-bundle --from "$src" --to "$reldest" --reimport 2>&1) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "import-design-bundle --reimport: exit code"
+  assert_eq "replaced" "$(printf '%s' "$stdout" | jq -r '.status')" "import-design-bundle --reimport: status"
+  assert_eq "biz-CHANGED" "$(cat "${reldest}/project/BusinessSpec.md")" "import-design-bundle --reimport: destination now holds the new content"
+
+  rm -rf "$src" "$reldest"
+}
+
+# (5) --from that does not resolve to a bundle (no README.md, or a README.md
+# with neither marker) is refused, naming the --from path, before --to is
+# ever written.
+test_import_design_bundle_non_bundle_source_refused() {
+  echo ""
+  echo "=== Testing import-design-bundle: non-bundle --from refused, naming the path, nothing written at --to ==="
+
+  local nobundle stderr exit_code
+  nobundle=$(mktemp -d)
+
+  local reldest=".aimi/design-bundles/import-nonbundle-test"
+  stderr=$("$CLI" import-design-bundle --from "$nobundle" --to "$reldest" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "import-design-bundle non-bundle source: exit code"
+  assert_contains "$nobundle" "$stderr" "import-design-bundle non-bundle source: message names the --from path"
+  assert_eq "no" "$([ -e "$reldest" ] && echo yes || echo no)" "import-design-bundle non-bundle source: nothing written at --to"
+
+  rm -rf "$nobundle" "$reldest"
+}
+
+# (6) A --to whose project-root-relative path is neither of the two allowed
+# shapes is refused, naming the given --to value.
+test_import_design_bundle_disallowed_to_shape_refused() {
+  echo ""
+  echo "=== Testing import-design-bundle: disallowed --to shape refused, naming the --to value ==="
+
+  local src stderr exit_code
+  src=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+
+  stderr=$("$CLI" import-design-bundle --from "$src" --to ".aimi/not-a-bundle-shape" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "import-design-bundle disallowed shape: exit code"
+  assert_contains ".aimi/not-a-bundle-shape" "$stderr" "import-design-bundle disallowed shape: message names the --to value"
+
+  rm -rf "$src" ".aimi/not-a-bundle-shape"
+}
+
+# (7) A symlink anywhere inside --from that resolves outside --from's own
+# tree is refused, naming the offending entry, with no partial copy left at
+# --to.
+test_import_design_bundle_escaping_symlink_refused() {
+  echo ""
+  echo "=== Testing import-design-bundle: escaping symlink refused, naming the entry, no partial copy ==="
+
+  local src outside stderr exit_code
+  src=$(mktemp -d)
+  outside=$(mktemp -d)
+  mkdir -p "${src}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${src}/README.md"
+  printf 'outside-secret' > "${outside}/secret.txt"
+  ln -s "${outside}/secret.txt" "${src}/project/escape-link"
+
+  local reldest=".aimi/design-bundles/import-escape-test"
+  stderr=$("$CLI" import-design-bundle --from "$src" --to "$reldest" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "1" "$exit_code" "import-design-bundle escaping symlink: exit code"
+  assert_contains "escape-link" "$stderr" "import-design-bundle escaping symlink: message names the offending entry"
+  assert_eq "no" "$([ -e "$reldest" ] && echo yes || echo no)" "import-design-bundle escaping symlink: no partial copy left at destination"
+
+  rm -rf "$src" "$outside" "$reldest"
 }
 
 # ============================================================================
@@ -9614,6 +9794,17 @@ main() {
   test_detect_design_bundle_phase_dir_nonexistent_inside_project_falls_back_to_scan
   test_detect_design_bundle_phase_dir_outside_project_refused
   test_detect_design_bundle_help_documents_phase_dir_flag
+
+  # import-design-bundle Tests
+  echo ""
+  echo "--- import-design-bundle Tests ---"
+  test_import_design_bundle_imported
+  test_import_design_bundle_reused_leaves_destination_untouched
+  test_import_design_bundle_differing_copy_refused_without_reimport
+  test_import_design_bundle_reimport_replaces_atomically
+  test_import_design_bundle_non_bundle_source_refused
+  test_import_design_bundle_disallowed_to_shape_refused
+  test_import_design_bundle_escaping_symlink_refused
 
   # Bundle Prototype Generation Tests
   echo ""
