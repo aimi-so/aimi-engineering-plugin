@@ -462,6 +462,128 @@ test_detect_design_bundle_partial_bundle() {
   rm -rf "$tmp"
 }
 
+# (13) --bundle <path> inside the project (relative and absolute) reports
+# PROJECT_ROOT-relative fields, never merely the bundle's own basename (AC1)
+test_detect_design_bundle_bundle_flag_inside_project() {
+  echo ""
+  echo "=== Testing detect-design-bundle --bundle: inside the project, reports PROJECT_ROOT-relative paths (relative and absolute arg) ==="
+
+  mkdir -p "a/b/my-bundle/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "a/b/my-bundle/README.md"
+  printf 'business content' > "a/b/my-bundle/project/BusinessSpec.md"
+
+  local stdout exit_code path_out bs_out
+  stdout=$("$CLI" detect-design-bundle --bundle "a/b/my-bundle" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --bundle relative: exit code"
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "a/b/my-bundle" "$path_out" "detect-design-bundle --bundle relative: path is PROJECT_ROOT-relative, not the bundle's own basename"
+  bs_out=$(printf '%s' "$stdout" | jq -r '.businessSpec')
+  assert_eq "a/b/my-bundle/project/BusinessSpec.md" "$bs_out" "detect-design-bundle --bundle relative: businessSpec is PROJECT_ROOT-relative"
+
+  local abs_bundle
+  abs_bundle="$(pwd)/a/b/my-bundle"
+  stdout=$("$CLI" detect-design-bundle --bundle "$abs_bundle" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --bundle absolute: exit code"
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "a/b/my-bundle" "$path_out" "detect-design-bundle --bundle absolute: path is the same PROJECT_ROOT-relative value"
+
+  rm -rf "a"
+}
+
+# (14) --bundle <path> refuses a non-bundle directory and a nonexistent path,
+# naming the given path in both cases, never falling back to a children scan (AC2)
+test_detect_design_bundle_bundle_flag_refuses_non_bundle_or_missing() {
+  echo ""
+  echo "=== Testing detect-design-bundle --bundle: refuses a non-bundle or nonexistent path, naming it, no children-scan fallback ==="
+
+  # A child of not-a-bundle/ IS a qualifying bundle -- if --bundle fell back
+  # to scanning children on a miss (the way --root does), this would find it.
+  mkdir -p "not-a-bundle/some-child"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "not-a-bundle/some-child/README.md"
+
+  local stderr exit_code
+  stderr=$("$CLI" detect-design-bundle --bundle "not-a-bundle" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --bundle non-bundle dir: exit code"
+  assert_contains "not-a-bundle" "$stderr" "detect-design-bundle --bundle non-bundle dir: message names the given path"
+
+  stderr=$("$CLI" detect-design-bundle --bundle "does-not-exist" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --bundle nonexistent path: exit code"
+  assert_contains "does-not-exist" "$stderr" "detect-design-bundle --bundle nonexistent path: message names the given path"
+
+  rm -rf "not-a-bundle"
+}
+
+# (15) --bundle <path> outside the project is refused, naming import-design-bundle,
+# the bundle never read in place (AC3, D5/D6)
+test_detect_design_bundle_bundle_flag_refuses_outside_project() {
+  echo ""
+  echo "=== Testing detect-design-bundle --bundle: refuses a path outside the project, naming import-design-bundle ==="
+
+  local outside
+  outside=$(mktemp -d)
+  mkdir -p "${outside}/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "${outside}/README.md"
+
+  local stderr exit_code
+  stderr=$("$CLI" detect-design-bundle --bundle "$outside" 2>&1 1>/dev/null) && exit_code=0 || exit_code=$?
+  rm -rf "$outside"
+
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --bundle outside project: exit code"
+  assert_contains "import-design-bundle" "$stderr" "detect-design-bundle --bundle outside project: message names import-design-bundle as the way in"
+}
+
+# (16) A nested --root pointed directly at a bundle inside the project reports
+# PROJECT_ROOT-relative paths, not the bundle's own basename (AC4, D10)
+test_detect_design_bundle_nested_root_inside_project_is_project_relative() {
+  echo ""
+  echo "=== Testing detect-design-bundle --root (D10): a bundle nested inside the project reports PROJECT_ROOT-relative paths ==="
+
+  mkdir -p "c/d/design/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' \
+    > "c/d/design/README.md"
+  printf 'business content' > "c/d/design/project/BusinessSpec.md"
+
+  local stdout exit_code path_out bs_out
+  stdout=$("$CLI" detect-design-bundle --root "c/d/design" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle nested --root inside project: exit code"
+  path_out=$(printf '%s' "$stdout" | jq -r '.path')
+  assert_eq "c/d/design" "$path_out" "detect-design-bundle nested --root inside project (D10): path is PROJECT_ROOT-relative, not the bundle's own basename"
+  bs_out=$(printf '%s' "$stdout" | jq -r '.businessSpec')
+  assert_eq "c/d/design/project/BusinessSpec.md" "$bs_out" "detect-design-bundle nested --root inside project (D10): businessSpec is PROJECT_ROOT-relative"
+
+  rm -rf "c"
+}
+
+# (17) --help documents the new --bundle flag and both of its refusal messages (AC6)
+test_detect_design_bundle_help_documents_bundle_flag() {
+  echo ""
+  echo "=== Testing detect-design-bundle --help: documents the --bundle flag and its refusals ==="
+
+  local stdout
+  stdout=$("$CLI" detect-design-bundle --help 2>&1)
+
+  # A bare "--bundle" substring also matches bundle-prototype-status's own,
+  # unrelated --bundle flag elsewhere in the same full help dump (the
+  # universal --help short-circuit prints every verb's usage, not a
+  # per-verb slice) -- so it would pass even against the pre-change help
+  # text and never discriminate. This phrase is unique to the new
+  # detect-design-bundle section added by this story.
+  if printf '%s' "$stdout" | grep -qF -- 'Point directly at one bundle directory'; then
+    assert_eq "ok" "ok" "detect-design-bundle --help: documents --bundle flag"
+  else
+    assert_eq "--bundle documented" "--bundle missing" "detect-design-bundle --help: documents --bundle flag"
+  fi
+
+  if printf '%s' "$stdout" | grep -qF -- 'import-design-bundle'; then
+    assert_eq "ok" "ok" "detect-design-bundle --help: documents the import-design-bundle refusal"
+  else
+    assert_eq "import-design-bundle documented" "import-design-bundle missing" "detect-design-bundle --help: documents the import-design-bundle refusal"
+  fi
+}
+
 # ============================================================================
 # Bundle Prototype Generation Tests
 # ============================================================================
@@ -9244,6 +9366,11 @@ main() {
   test_detect_design_bundle_help_documents_source_field
   test_help_flag_on_strict_subcommand
   test_help_flag_on_side_effect_subcommand
+  test_detect_design_bundle_bundle_flag_inside_project
+  test_detect_design_bundle_bundle_flag_refuses_non_bundle_or_missing
+  test_detect_design_bundle_bundle_flag_refuses_outside_project
+  test_detect_design_bundle_nested_root_inside_project_is_project_relative
+  test_detect_design_bundle_help_documents_bundle_flag
 
   # Bundle Prototype Generation Tests
   echo ""
