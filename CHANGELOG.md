@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.145.0] - 2026-10-03
+
+### Added
+- `detect-design-bundle --bundle <path>`: a direct pointer at one bundle directory, bypassing scan-root resolution entirely. Always confined to `PROJECT_ROOT`, relative or absolute, with no exception and no children-scan fallback on a miss — a non-bundle or nonexistent target is refused naming the given path, and a target outside the project is refused naming `import-design-bundle` as the way to bring it in, without the bundle ever being read in place.
+- `detect-design-bundle --phase-dir <dir>`: a phase's own `design-bundle/` wins over the scan tier when it qualifies (the phase tier holds at most one candidate, so no phase-tier ambiguity branch exists). Confined to `PROJECT_ROOT` with no `--root`-style absolute-path exception, but a path that resolves inside the project and simply does not exist yet — a phase's directory does not exist until that phase is planned — falls back to the scan tier silently rather than refusing, since absence alone is never an error.
+- `import-design-bundle --from <path> --to <path> [--reimport]`: copies a Claude Design or aimi-generated bundle living outside the repository into one of the two shapes a bundle is ever read back from (`.aimi/tasks/<feature>/<phase-dir>/design-bundle` or `.aimi/design-bundles/<slug>`). `--from` is read-only and never confined to `PROJECT_ROOT`; `--to` is confined and restricted to those two shapes. A whole-tree symlink scan runs before any copy, refusing on the first entry that resolves outside `--from`'s own tree, and the copy itself lands via mktemp-then-mv. A `--to` that already holds a byte-for-byte-identical copy is left untouched (`status: "reused"`, no mtime rewritten); a `--to` holding a different copy is refused unless `--reimport` replaces it atomically.
+- `/aimi:plan` accepts `--bundle`/`--reimport` alongside its existing `--root`, all sourced from and stripped out of `FEATURE_DESCRIPTION` in the same block, and forwards `--phase-dir` to `detect-design-bundle` once Rolling-Wave Phase Selection has picked a phase — Design Bundle Detection, Bundle Prototype Auto-Generation and Phase 0.7 Spec Ingestion all move to run after that selection instead of before it. An outside-project `--bundle` is brought in via `import-design-bundle` before detection runs.
+- `/aimi:brainstorm` Step 0.7 gains an Ambiguous Bundle Resolution section: a picker session gets one `AskUserQuestion` listing up to four candidates (path plus which specs each carries) with a "proceed without a bundle" escape option, re-detecting via `--bundle` on a pick; agent mode logs every candidate and proceeds without guessing.
+
+### Changed
+- `detect-design-bundle` no longer elects the newest bundle by mtime. The scan tier's candidate collection is now mtime-free and path-sorted; with two or more same-tier candidates and none named by `--bundle`/`--phase-dir`, it exits 3 with `{ambiguous:true,tier:"scan",candidates:[...]}` listing every candidate, instead of silently electing one. This changes behaviour for any repository that kept several design bundles around: a call that used to resolve quietly to the most recently touched one now stops and asks.
+- Every path `detect-design-bundle` returns (`path`, `readme`, `chats[]`, `prototypes[]`, `businessSpec`, `designSpec`) for a bundle that resolves inside `PROJECT_ROOT` is now relative to `PROJECT_ROOT`, however deeply `--root` or `--phase-dir` nests it, rather than merely the bundle's own basename. A bundle resolving outside `PROJECT_ROOT` — reachable only through `--root`'s own absolute-path exception — keeps the prior scan-root-relative/basename form.
+- `/aimi:plan` and `/aimi:brainstorm` capture `detect-design-bundle`'s stdout and exit status separately at every call site instead of swallowing a failure into an empty default, branching explicitly on a null result, an object result, or the exit-3 ambiguity refusal.
+- The design-handoff gate's own re-detect in `/aimi:brainstorm` switches from `--root` to `--bundle`, since `--bundle` reads the named path directly as the bundle rather than leaning on `--root`'s former child-scan workaround.
+
+### Fixed
+- A nested bundle reached via `--root` reported paths relative to its own basename rather than to `PROJECT_ROOT`, which the story executor could not resolve.
+- `plan.md` referenced two bundle metadata keys the verb never emitted (`designBundleMeta.bundlePath`, `bundlePayload.prototypes`).
+- `/aimi:plan` and `/aimi:brainstorm` swallowed every `detect-design-bundle` detection failure, including the exit-3 ambiguity refusal, into "no bundle found".
+- A nonexistent path inside the project, missing at two or more directory levels, was reported as escaping the project: the shared confinement-check helper now walks up to the deepest existing ancestor instead of checking only the immediate parent.
+- A SIGPIPE race in the CLI test suite's help-text assertions: `cmd_help`'s output is large enough to exceed a pipe buffer, so a `grep -q` could SIGPIPE the still-writing `printf` on the other end under `set -o pipefail` and read a real hit as a miss. Converted to `grep -c`, which always consumes its whole input and cannot exit early.
+
 ## [1.144.0] - 2026-09-28
 
 ### Added
