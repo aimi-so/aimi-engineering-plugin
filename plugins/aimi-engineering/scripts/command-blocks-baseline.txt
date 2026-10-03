@@ -74,6 +74,7 @@ loop-scope	plan.md	PROJECT_PATH	# SUSPECTED LIVE DEFECT: only the Phase 3e valid
 # sentence) and SPLIT_BRANCH_ARGS (the variable the `mapfile` failed to fill).
 # Both are gone. That is what this list is for: a NEW name means a new one.
 unassigned	brainstorm.md	renderBundlePending	# bundle-detection verdict the surrounding prose resolves; no block assigns it
+unassigned	brainstorm.md	CHOSEN_BUNDLE_PATH	# AskUserQuestion pick the surrounding prose resolves; no block assigns it
 unassigned	execute.md	ARTIFACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
 unassigned	execute.md	CONTRACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
 unassigned	execute.md	DECISIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs

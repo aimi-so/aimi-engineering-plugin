@@ -94,26 +94,112 @@ case "$ARGUMENTS" in
 esac
 ```
 
-Run detection (failure is silent and non-blocking):
+Run detection, capturing stdout and the exit status separately from stderr —
+never merged, and never swallowed into an empty default the way this call
+used to be:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BUNDLE_ERR_FILE=$(mktemp)
 if [ -n "$BUNDLE_ARG" ]; then
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>"$BUNDLE_ERR_FILE")
 else
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_RESULT=""
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>"$BUNDLE_ERR_FILE")
 fi
+BUNDLE_STATUS=$?
+BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+rm -f "$BUNDLE_ERR_FILE"
 ```
 
 Derive working-memory values from the result:
 
-- `bundleDetected` — `true` if `BUNDLE_RESULT` is non-empty and is not the literal string `null`; otherwise `false`.
+- `bundleDetected` — `true` only when `BUNDLE_STATUS` is `0` and `BUNDLE_RESULT` is non-empty and is not the literal string `null`; otherwise `false`. A `BUNDLE_STATUS` of `3` carries the ambiguity payload (`{"ambiguous":true,...}`) in `BUNDLE_RESULT`, never a real bundle — that case is resolved by the "Step 0.7 Ambiguous Bundle Resolution" section below, not by this bullet.
 - `bundlePayload` — the full JSON string from `BUNDLE_RESULT` when `bundleDetected=true`; empty string otherwise.
-- `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; the value of `BUNDLE_ARG` if set and detection succeeded; empty string otherwise.
+- `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; empty string otherwise.
 
 When `bundleDetected=false`, all downstream phases degrade gracefully — no
 error, no warning, no change to existing behavior.
+
+### Step 0.7 Ambiguous Bundle Resolution
+
+Branches on `BUNDLE_STATUS` from the detection call above. When `BUNDLE_STATUS`
+is `0` (whether `bundleDetected` ended up `true`, or `false` from a literal
+`null`), this section does not fire at all — proceed straight to Step 0.7
+Design Handoff Offer below exactly as if this section did not exist. The three
+subsections below are mutually exclusive on `BUNDLE_STATUS` and
+`INTERACTIVE_MODE`, and brainstorm never aborts over a bundle in any of them
+(D9).
+
+#### Interactive Picker (status 3)
+
+Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=picker`. `BUNDLE_RESULT`
+parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in
+`.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null`
+when that spec is absent).
+
+Present exactly one AskUserQuestion, naming the count and listing the first 4
+entries of `.candidates[]` in their own path order, escape hatch last per
+`commands/references/interactivity.md`'s Option Format. Compose the question
+and option text in the same language `$FEATURE_DESCRIPTION` is written in,
+per the Adaptive Language Rule (`commands/references/user-communication.md`
+§ Adaptive Language Rule) — the English wording below is an illustration for
+a reader of this file, not a fixed string to emit verbatim:
+
+```
+Design Bundle Detection found <N> bundles and none was named. Which one should this brainstorm use?
+A — <candidates[0].path> (<"BusinessSpec, DesignSpec" | "BusinessSpec only" | "DesignSpec only" | "no specs", from that candidate's own businessSpec/designSpec>)
+B — <candidates[1].path> (...)
+...
+None — proceed without a bundle
+```
+
+- **[None, the escape option]:** `bundleDetected` stays `false`
+  (already derived above). Proceed to Step 0.7 Design Handoff Offer below.
+- **[A pick]:** set `CHOSEN_BUNDLE_PATH` to the selected candidate's own
+  `.path`, then re-detect directly against it — a candidate the CLI's own scan
+  already returned is already inside `AIMI_ROOT`, so no realpath/import
+  resolution is needed:
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  BUNDLE_ERR_FILE=$(mktemp)
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle "$CHOSEN_BUNDLE_PATH" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STATUS=$?
+  BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+  rm -f "$BUNDLE_ERR_FILE"
+  ```
+
+  Re-derive `bundleDetected`, `bundlePayload` and `bundlePath` from this fresh
+  result using the exact same rule stated above (`BUNDLE_STATUS=0` and
+  non-null is required for `bundleDetected=true`) — no second test is written
+  here. A second ambiguity is structurally impossible: `--bundle` names
+  exactly one directory. Proceed to Step 0.7 Design Handoff Offer below.
+
+#### Agent Mode (status 3)
+
+Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=agent`. There is no user to
+ask, so do not guess: log exactly one line to the brainstorm document's
+working memory naming every candidate, leave `bundleDetected` as `false`
+(already derived above), and proceed:
+
+```
+agent-mode: design-bundle-ambiguous — <N> bundles found and none was named (<candidates[0].path>, <candidates[1].path>, ...); re-run with --bundle <path> to choose one.
+```
+
+#### Other Detection Failure (status neither 0 nor 3)
+
+Fires when `BUNDLE_STATUS` is neither `0` nor `3`, in either picker or agent
+mode. Log one warning line carrying the CLI's own stderr and proceed without a
+bundle:
+
+```
+bundle detection failed (exit <BUNDLE_STATUS>): <BUNDLE_STDERR>
+```
+
+Leave `bundleDetected` as `false` (already derived above) and continue to
+Step 0.7 Design Handoff Offer below.
 
 ### Step 0.7 Design Handoff Offer
 
@@ -171,12 +257,23 @@ Skip — proceed without a bundle
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root ".aimi/design-bundles/<topic-slug>" 2>/dev/null) || BUNDLE_RESULT=""
+   BUNDLE_ERR_FILE=$(mktemp)
+   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle ".aimi/design-bundles/<topic-slug>" 2>"$BUNDLE_ERR_FILE")
+   BUNDLE_STATUS=$?
+   BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+   rm -f "$BUNDLE_ERR_FILE"
    ```
 
-   `--root` is mandatory here — never a bare `detect-design-bundle` call: `cmd_detect_design_bundle`'s child-scan skips any directory literally named `.aimi` (`scripts/aimi-cli.sh`'s `case ... .worktrees|node_modules|.aimi|vendor) continue ;;`), while pointing `--root` directly at the generated bundle directory reaches that function's own pre-check, which treats the named root itself as a bundle candidate (checking `<root>/README.md`) before any child-scan runs.
+   `--bundle` is mandatory here — never a bare `detect-design-bundle` call,
+   and never `--root`: `--bundle` reads the named path directly as the bundle
+   itself (per `outline:01`/D4's "fails loudly if it is not a bundle"), which
+   is simpler than `--root`'s former child-scan workaround (that scan used to
+   skip any directory literally named `.aimi`, so pointing `--root` at the
+   parent directory was needed to reach a pre-check that treated the
+   generated directory itself as a candidate before any child-scan ran) and
+   needs no explanation tied to that `.aimi`-skip case at all.
 
-4. **Re-derive.** Re-derive `bundleDetected`, `bundlePayload`, and `bundlePath` from this fresh `BUNDLE_RESULT` using the exact same non-empty-and-not-literal-`null` test stated in the bullet list above — no second test is written here, and no branch reads the generated `BusinessSpec.md`/`DesignSpec.md` directly outside this re-detection path.
+4. **Re-derive.** Re-derive `bundleDetected`, `bundlePayload`, and `bundlePath` from this fresh result using the exact same rule stated in the bullet list above (`BUNDLE_STATUS` must be `0` and `BUNDLE_RESULT` non-null for `bundleDetected=true`) — no second test is written here, and no branch reads the generated `BusinessSpec.md`/`DesignSpec.md` directly outside this re-detection path. `--bundle` never produces its own ambiguity (it names exactly one directory), so any non-zero `BUNDLE_STATUS` here is simply "no detectable bundle", the same as step 5 below.
 
 5. **When `bundleDetected` is still `false`** after re-detection (the skill did not produce a detectable bundle), log exactly one warning line to the brainstorm document's working memory:
 
