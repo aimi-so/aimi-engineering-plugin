@@ -5215,6 +5215,38 @@ EOF
   rm -rf "$iso_dir"
 }
 
+# Two reviews of ONE phase: Step 5's per-story design review and the phase
+# visual gate's review both name the same feature and phase. Without --kind the
+# second write replaced the first -- and the gate's review is the file
+# roadmap-record-visual-gate --review points at. Every assertion below fails
+# against a write-review that does not know --kind (it refuses the flag).
+test_write_review_kind_keeps_two_reviews_apart() {
+  echo ""
+  echo "=== write-review --kind: two reviews of one phase never overwrite each other ==="
+
+  local feature="wr-kind"
+  _wr_cleanup "$feature"
+
+  local out exit_code
+  out=$(printf '# Design review\n' | "$CLI" write-review --feature "$feature" --phase 3 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review --kind: the unsuffixed review is written"
+
+  out=$(printf '# Visual gate review\n' | "$CLI" write-review --feature "$feature" --phase 3 --kind visual-gate 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "write-review --kind: the suffixed review is written"
+  assert_contains "/reviews/${feature}-phase-3-visual-gate.md" "$(printf '%s' "$out" | jq -r '.review' 2>/dev/null)" "write-review --kind: reports the suffixed path"
+  assert_eq "# Design review" "$(cat "$AIMI_DIR/reviews/${feature}-phase-3.md" 2>/dev/null)" "write-review --kind: the unsuffixed review survives the second write"
+  assert_eq "# Visual gate review" "$(cat "$AIMI_DIR/reviews/${feature}-phase-3-visual-gate.md" 2>/dev/null)" "write-review --kind: the suffixed review holds its own content"
+
+  out=$(printf 'x\n' | "$CLI" write-review --feature "$feature" --phase 3 --kind "../Bad" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "write-review --kind: refuses a kind that is not one lowercase slug"
+  assert_contains "--kind must be one lowercase slug" "$out" "write-review --kind: says why the kind was refused"
+  assert_eq "2" "$(find "$AIMI_DIR/reviews" -name "${feature}-phase-3*" | wc -l | tr -d ' ')" "write-review --kind: a refused kind wrote nothing"
+
+  assert_contains "write-review [--feature <slug> --phase <N>] [--kind <name>]" "$("$CLI" help 2>&1)" "help: documents write-review --kind"
+
+  _wr_cleanup "$feature"
+}
+
 test_write_review_registered_in_help_and_dispatcher() {
   echo ""
   echo "=== write-review: listed in help with its flags and routed by the dispatcher ==="
@@ -9980,6 +10012,7 @@ main() {
   test_write_review_survives_the_session
   test_write_review_refuses_before_it_writes
   test_write_review_flat_mode_derives_from_tasks_basename
+  test_write_review_kind_keeps_two_reviews_apart
   test_write_review_registered_in_help_and_dispatcher
 
   # Detect Forge Tests (US-001) -- the foundational contract every later

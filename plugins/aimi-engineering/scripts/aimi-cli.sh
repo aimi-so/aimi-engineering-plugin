@@ -16295,6 +16295,15 @@ cmd_roadmap_write_handoff() {
 # phase that does not exist; deriving from the tasks file basename names it
 # after something that genuinely identifies this run instead.
 #
+# --kind <name> is an optional suffix, appended to whichever name the mode above
+# chose: <feature>-phase-<N>-<name>.md, or <tasks basename>-<name>.md. It exists
+# because one phase has more than one review. Step 5's per-story design review
+# and the phase visual gate's review both name the same feature and phase, so
+# without a suffix the later write replaces the earlier one -- and the gate's
+# review is the one roadmap-record-visual-gate --review points at. Absent, the
+# name is byte-identical to what it always was. The name is one lowercase slug
+# component, so it can neither carry a path separator nor start with a dash.
+#
 # A single flag with no partner is refused rather than guessed: --phase alone
 # cannot borrow --feature's flat-mode meaning, and --feature alone cannot
 # invent a phase number, so half a pair is treated as a mistake rather than as
@@ -16303,12 +16312,13 @@ cmd_roadmap_write_handoff() {
 # The path is confined by validate_path_in_project, the standing authority over
 # every path arriving as a CLI ARGUMENT -- no second check is invented here.
 cmd_write_review() {
-  local feature="" phase_id=""
+  local feature="" phase_id="" kind=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --feature) shift; feature="${1:-}" ;;
       --phase) shift; phase_id="${1:-}" ;;
+      --kind) shift; kind="${1:-}" ;;
       *)
         echo "Error: write-review: unknown flag: $1" >&2
         exit 1
@@ -16317,8 +16327,14 @@ cmd_write_review() {
     shift
   done
 
-  local reviews_dir review_path
+  if [ -n "$kind" ] && ! [[ "$kind" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "Error: write-review: --kind must be one lowercase slug (^[a-z0-9][a-z0-9-]*\$) -- got: $kind" >&2
+    exit 1
+  fi
+
+  local reviews_dir review_path suffix=""
   reviews_dir="$AIMI_DIR/reviews"
+  [ -n "$kind" ] && suffix="-$kind"
 
   if [ -n "$feature" ] || [ -n "$phase_id" ]; then
     if [ -z "$feature" ] || [ -z "$phase_id" ]; then
@@ -16327,11 +16343,11 @@ cmd_write_review() {
     fi
     _roadmap_validate_feature "$feature" "write-review"
     _roadmap_validate_phase_id "$phase_id" "write-review"
-    review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+    review_path="$reviews_dir/${feature}-phase-${phase_id}${suffix}.md"
   else
     local tasks_file
     tasks_file=$(get_tasks_file) || exit 1
-    review_path="$reviews_dir/$(basename "$tasks_file" .json).md"
+    review_path="$reviews_dir/$(basename "$tasks_file" .json)${suffix}.md"
   fi
 
   validate_path_in_project "$review_path"
@@ -18053,7 +18069,7 @@ COMMANDS:
                               "visual"; visualStories is [{id, url}], groups the
                               number of resolved tasks files. A phase id absent
                               from roadmap.json is refused.
-    write-review [--feature <slug> --phase <N>]
+    write-review [--feature <slug> --phase <N>] [--kind <name>]
                               Read a review as markdown on stdin and atomically
                               write it to disk, so the review outlives the
                               session that produced it. With --feature and
@@ -18063,7 +18079,10 @@ COMMANDS:
                               pair to name a file with), writes to
                               .aimi/reviews/<active tasks file's basename>.md
                               instead -- one flag without its partner is
-                              refused rather than guessed. The body is stored
+                              refused rather than guessed. --kind <name> appends
+                              -<name> to either name, so two reviews of one
+                              phase (.aimi/reviews/<slug>-phase-<N>-<name>.md)
+                              never overwrite each other. The body is stored
                               verbatim -- backticks and code fences are a
                               review's content, not something to strip -- and an
                               empty stdin is refused rather than written. Needs

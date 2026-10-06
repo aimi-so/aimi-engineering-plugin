@@ -4254,7 +4254,7 @@ A `visual-gate: skipped — <reason>` line means the gate recorded its `skipped`
 
 Spawn `aimi-engineering:design:aimi-design-implementation-reviewer` via the Task tool **exactly once for the whole phase** — never once per story, unlike Step 4's per-story design review. The prompt's **first line is the literal `MODE: phase-close-visual-gate`**; without it the agent falls back to per-story mode and never emits a `visual_gate_verdict` block. After it, give the agent the parsed `visual-gate-input:` object's fields: `prototypePaths` (every prototype path), `designSpecPath` (only when non-null), `stories` (the full `{storyId, url}` list) and `containerPath`.
 
-Persist the reviewer's raw final response with `write-review` **before** the verdict is parsed, so a malformed verdict still leaves the transcript on disk, then parse **only the LAST** fenced `visual_gate_verdict` block, strictly. The fence is built with `printf` rather than typed, so this block carries no literal fence line of its own:
+Persist the reviewer's raw final response with `write-review --kind visual-gate` **before** the verdict is parsed — the suffix gives this review its own file, `.aimi/reviews/<feature>-phase-<N>-visual-gate.md`, so Step 5's design review, which names the same feature and phase, cannot overwrite the file `--review` points at — so a malformed verdict still leaves the transcript on disk, then parse **only the LAST** fenced `visual_gate_verdict` block, strictly. The fence is built with `printf` rather than typed, so this block carries no literal fence line of its own:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -4263,7 +4263,7 @@ VG_REVIEW_BODY=$(cat <<'VG_REVIEW_EOF'
 [paste the reviewer's raw final response here, verbatim]
 VG_REVIEW_EOF
 )
-VG_REVIEW_JSON=$(printf '%s\n' "$VG_REVIEW_BODY" | $AIMI_CLI write-review --feature "$FEATURE" --phase "$PHASE_ID") || VG_REVIEW_JSON=""
+VG_REVIEW_JSON=$(printf '%s\n' "$VG_REVIEW_BODY" | $AIMI_CLI write-review --feature "$FEATURE" --phase "$PHASE_ID" --kind visual-gate) || VG_REVIEW_JSON=""
 REVIEW_PATH=$(printf '%s' "$VG_REVIEW_JSON" | jq -r '.review // empty' 2>/dev/null)
 VG_FENCE=$(printf '\140\140\140')
 VG_VERDICT_JSON=$(printf '%s\n' "$VG_REVIEW_BODY" | awk -v fence="$VG_FENCE" 'BEGIN { open = fence "visual_gate_verdict" } $0 == open { inb = 1; buf = ""; next } inb && $0 == fence { inb = 0; last = buf; have = 1; next } inb { buf = buf $0 "\n" } END { if (have) printf "%s", last }')
