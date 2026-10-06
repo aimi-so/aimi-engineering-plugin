@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.146.1] - 2026-10-06
+
+### Added
+- `write-review --kind <name>`: an optional suffix appended to the review's file name, giving `.aimi/reviews/<slug>-phase-<N>-<name>.md` (or `<tasks basename>-<name>.md` in a flat execution). The name must be one lowercase slug, `^[a-z0-9][a-z0-9-]*$`, and is refused before anything is read or written otherwise. Without `--kind` the path is unchanged.
+
+### Fixed
+- The phase visual gate's review and Step 5's design review wrote the same `.aimi/reviews/<feature>-phase-<N>.md`, so on a UI phase with a prototype the design review, written later, replaced the gate's review — the file `roadmap-record-visual-gate --review` points at. The gate now writes with `--kind visual-gate`, to its own file; the design review keeps its path.
+
 ## [1.146.0] - 2026-10-06
 
 ### Added
