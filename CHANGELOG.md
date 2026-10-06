@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.146.0] - 2026-10-06
+
+### Added
+- `roadmap-record-visual-gate --feature <f> --phase <n> --status <passed|skipped|accepted|diverges> [--reason <text>]`: a locked, idempotent write of `phases[].visualGate`, the one record of a phase's live-versus-prototype comparison.
+- `roadmap-visual-gate-required --feature <f> --phase <n>`: a read-only derivation of whether a phase owes that comparison. It is true only when the phase's tasks file carries a non-empty `prototypePaths` and at least one completed visual-strategy story, aggregated across the members of a split phase; it also reports `reason` and the resolved `groups` count.
+- The design implementation reviewer gains a second, explicitly triggered mode: a prompt opening with the literal line `MODE: phase-close-visual-gate` compares every completed visual story of a phase in one call, against the prototype and, when supplied, the whole DesignSpec read directly rather than through the capped section excerpt. An explicit DesignSpec statement authorizing a departure is not drift; DesignSpec silence never authorizes one, so the prototype governs. Every element resolves to match or divergence, never both, and the mode never answers "skip". It ends with exactly one `visual_gate_verdict` fenced block whose divergences each cite the prototype path or a `DesignSpec § N` as their source. The per-story mode is unchanged.
+- `/aimi:execute` gains a Phase Visual Gate step between Creates Verification and Write Handoff, reached only when creates verification passed and run while the phase's dev server is still up. It records `skipped` with a stated reason, and spawns no reviewer, for a split phase or more than one participating project group (each repository serves its own phase branch), for `agent-browser` not being installed, and for a visual story URL with no dev server resolved for the phase branch. Otherwise it rewrites each story URL to the live server, runs the reviewer, and records `passed` on a pass. On a divergence, a picker session may accept it with a typed reason (`accepted`); any other answer, and every unattended run, records `diverges` and moves the phase to `verification_failed` with the claim released, so re-running `/aimi:execute` re-runs the gate. A missing or unparseable verdict records nothing and leaves the phase `in_progress`. A phase with no comparison owed records nothing and carries the printed `not-required` line into the handoff.
+- The phase handoff gains a locked `visual-gate:` line stating the recorded outcome.
+
+### Changed
+- `roadmap-set-status` now refuses `completed` for a phase that owes a visual comparison unless `phases[].visualGate.status` is `passed`, `skipped` or `accepted`; an unrecorded gate and a recorded `diverges` each get their own refusal message naming `roadmap-record-visual-gate`. This is a precondition of the completed gate itself and is never lifted by `--force`. A failure to read or compute the requirement degrades to the gate's existing advisory rather than refusing.
+- A UI phase that previously closed without any live comparison now stops at the completed transition until the gate is recorded.
+
 ## [1.145.0] - 2026-10-03
 
 ### Added
