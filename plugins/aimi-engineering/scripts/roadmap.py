@@ -4468,6 +4468,179 @@ def op_set_status(argv):
     return 0
 
 
+VISUAL_GATE_STATUSES = ("passed", "diverges", "skipped", "accepted")
+# A verdict other than "passed" is a decision somebody took against a
+# comparison that did not come out clean, so it must say why.
+VISUAL_GATE_REASON_REQUIRED = ("diverges", "skipped", "accepted")
+VISUAL_GATE_REASON_MAXLEN = 2000
+
+
+def _visual_gate_requirement(roadmap_path, doc, phase):
+    """Does this phase owe a visual comparison, derived from its own tasks
+    file(s) and nothing else.
+
+    required is the AND of two signals, never either alone: a non-empty
+    metadata.prototypePaths (there is a reference to compare against) AND at
+    least one COMPLETED story carrying verification.strategy == "visual" (the
+    plan declared a visual check and the work was done). metadata.designBundle
+    carries no prototype list of its own anywhere in this codebase, so its
+    "bundle with prototypes" case is the same prototypePaths signal.
+
+    ONE PREDICATE, ONE OWNER: this is the function a completed-phase gate must
+    call to decide whether a UI phase may close, so the partition rule lives
+    here once rather than in each caller. Member resolution is
+    _completed_gate_resolve_members and the did-work filter is
+    _completed_story_ids -- both reused, neither restated.
+
+    Returns {required, reason, prototypePaths, designSpec, visualStories,
+    groups}. An unreadable member draws the same audible advisory the
+    completed gate gives and contributes nothing.
+    """
+    # Deferred for the same reason _completed_gate_refusals defers it: tasks.py
+    # imports this module at its own module scope.
+    from tasks import MalformedTasks, jq_equal, verification_report
+
+    phase_id = phase.get("id")
+    members = _completed_gate_resolve_members(roadmap_path, doc, phase)
+    if not members:
+        main_file = _phase_tasks_path(roadmap_path, doc, phase)
+        tried = main_file if main_file is not None else "<no feature configured for this roadmap>"
+        return {
+            "required": False,
+            "reason": "no tasks file resolved for phase " + _num(phase_id)
+            + " (tried " + tried + " and " + _phase_dir_path(roadmap_path, phase) + ")",
+            "prototypePaths": [],
+            "designSpec": None,
+            "visualStories": [],
+            "groups": 0,
+        }
+
+    prototype_paths = []
+    design_spec = None
+    visual_stories = []
+    for member_path in members:
+        tasks, reason = _read_tasks_with_reason(member_path)
+        if tasks is None:
+            _completed_gate_advise(phase_id, member_path + " -- " + reason)
+            continue
+        try:
+            visual = verification_report(tasks).get("visual") or []
+        except MalformedTasks:
+            _completed_gate_advise(
+                phase_id, member_path + " -- malformed document (unexpected shape)"
+            )
+            continue
+
+        metadata = tasks.get("metadata") if isinstance(tasks, dict) else None
+        if isinstance(metadata, dict):
+            declared = metadata.get("prototypePaths")
+            if isinstance(declared, list):
+                for entry in declared:
+                    if isinstance(entry, str) and entry != "" and entry not in prototype_paths:
+                        prototype_paths.append(entry)
+            bundle = metadata.get("designBundle")
+            if design_spec is None and isinstance(bundle, dict):
+                spec = bundle.get("designSpec")
+                if isinstance(spec, str) and spec != "":
+                    design_spec = spec
+
+        done = _completed_story_ids(tasks)
+        for entry in visual:
+            if any(jq_equal(entry.get("id"), finished) for finished in done):
+                visual_stories.append({"id": entry.get("id"), "url": entry.get("url")})
+
+    if not prototype_paths:
+        reason = (
+            "no prototype paths declared (metadata.prototypePaths is empty or absent across "
+            + str(len(members)) + " tasks file(s)); " + str(len(visual_stories))
+            + " completed visual stor(ies) -- nothing to compare against"
+        )
+    elif not visual_stories:
+        reason = (
+            str(len(prototype_paths)) + " prototype path(s) declared but no completed story "
+            'carries verification.strategy == "visual" across ' + str(len(members))
+            + " tasks file(s) -- nothing was built to compare"
+        )
+    else:
+        reason = (
+            str(len(prototype_paths)) + " prototype path(s) and "
+            + str(len(visual_stories)) + " completed visual stor(ies) across "
+            + str(len(members)) + " tasks file(s) -- a visual comparison is owed"
+        )
+    return {
+        "required": bool(prototype_paths) and bool(visual_stories),
+        "reason": reason,
+        "prototypePaths": prototype_paths,
+        "designSpec": design_spec,
+        "visualStories": visual_stories,
+        "groups": len(members),
+    }
+
+
+def op_visual_gate_required(argv):
+    """Read-only: whether the phase owes a visual comparison. Bash takes no
+    lock for it -- nothing here writes."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    if not path or phase_raw is None:
+        die("Usage: roadmap.py visual-gate-required --roadmap <path> --phase <id>")
+    doc = read_doc(path, "roadmap-visual-gate-required")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    phase = next(
+        (p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None
+    )
+    if phase is None:
+        die("Error: roadmap-visual-gate-required: phase " + phase_raw + " not found in " + path)
+    _emit(_visual_gate_requirement(path, doc, phase))
+    return 0
+
+
+def op_record_visual_gate(argv):
+    """The locked write of a phase's visual-gate verdict. Always overwrites the
+    whole object -- no read-old-merge-new -- which is what makes a resumed or
+    re-verified phase idempotent: one record per phase, never a second one."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    status = _flag(argv, "--status")
+    reason = _flag(argv, "--reason")
+    review = _flag(argv, "--review")
+    if not path or phase_raw is None or status is None:
+        die(
+            "Usage: roadmap.py record-visual-gate --roadmap <path> --phase <id> "
+            "--status <passed|diverges|skipped|accepted> [--reason <text>] [--review <path>]"
+        )
+    # Fixed order, mirroring op_set_verification: vocabulary, then the
+    # status/reason pairing, then the document.
+    if status not in VISUAL_GATE_STATUSES:
+        die(
+            "Error: roadmap-record-visual-gate: --status must be one of "
+            + "|".join(VISUAL_GATE_STATUSES) + ", got: " + status
+        )
+    if status in VISUAL_GATE_REASON_REQUIRED and (reason is None or reason.strip() == ""):
+        die(
+            "Error: roadmap-record-visual-gate: --reason is required when --status is "
+            + status
+        )
+    doc = read_doc(path, "roadmap-record-visual-gate")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    matches = [p for p in (doc.get("phases") or []) if p.get("id") == phase_id]
+    if not matches:
+        die("Error: roadmap-record-visual-gate: phase " + phase_raw + " not found in " + path)
+
+    cleaned = rm_sanitize(reason, VISUAL_GATE_REASON_MAXLEN) if reason else None
+    record = {
+        "status": status,
+        "reason": cleaned if cleaned else None,
+        "review": review if review else None,
+        "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    for phase in matches:
+        phase["visualGate"] = dict(record)
+    write_doc_atomically(path, doc)
+    _emit({"phase": phase_id, "visualGate": record})
+    return 0
+
+
 def op_claim(argv):
     """The locked check-and-set: release what is stale, then choose.
 
@@ -4752,6 +4925,8 @@ _OPS = {
     "sweep": op_sweep,
     "write-handoff": op_write_handoff,
     "phase-overlap": op_phase_overlap,
+    "record-visual-gate": op_record_visual_gate,
+    "visual-gate-required": op_visual_gate_required,
 }
 
 # The aimi-cli.sh verb each op serves, for the ops whose names differ. Every
@@ -4768,6 +4943,8 @@ _VERB_FOR_OP = {
     "release-claim": "roadmap-release-claim",
     "reconcile": "roadmap-reconcile",
     "write-handoff": "roadmap-write-handoff",
+    "record-visual-gate": "roadmap-record-visual-gate",
+    "visual-gate-required": "roadmap-visual-gate-required",
     "init-validate": "roadmap-init",
     "init-write": "roadmap-init",
     "amend-validate": "roadmap-amend-phase",

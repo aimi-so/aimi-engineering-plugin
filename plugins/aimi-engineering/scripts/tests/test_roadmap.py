@@ -4660,3 +4660,200 @@ def test_completed_gate_traversal_shaped_sibling_is_inert(tmp_path):
     assert resolved_sibling not in members
     escaped = os.path.realpath(os.path.join(phase_dir, "../../etc/passwd"))
     assert escaped not in members
+
+
+# ---------------------------------------------------------------------------
+# roadmap-record-visual-gate / roadmap-visual-gate-required
+#
+# The write (D3) and the owes-a-comparison read (D7). `required` is the AND of
+# two signals -- a non-empty metadata.prototypePaths and a COMPLETED story with
+# verification.strategy "visual" -- and each half is asserted failing alone.
+# ---------------------------------------------------------------------------
+
+
+def _vg_story(sid, status="completed", strategy="visual", url="http://x/" ):
+    return {"id": sid, "status": status,
+            "verification": {"strategy": strategy, "status": "pending", "url": url + sid}}
+
+
+def _vg_fixture(tmp_path, members, feature="vg"):
+    """members: {basename: tasks doc}. Returns the roadmap path."""
+    base = os.path.realpath(str(tmp_path))
+    feature_dir = os.path.join(base, "proj", ".aimi", "tasks", feature)
+    phase_dir = os.path.join(feature_dir, "phase-1")
+    os.makedirs(phase_dir, exist_ok=True)
+    roadmap_path = os.path.join(feature_dir, "roadmap.json")
+    with open(roadmap_path, "w", encoding="utf-8") as handle:
+        json.dump({"roadmapVersion": "2.0", "feature": feature,
+                   "phases": [dict(_GATE_PHASE)]}, handle)
+    for name, doc in members.items():
+        with open(os.path.join(phase_dir, name), "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+    return roadmap_path
+
+
+def _vg_required(roadmap_path, phase="1"):
+    return _run(["visual-gate-required", "--roadmap", roadmap_path, "--phase", phase])
+
+
+def _vg_record(roadmap_path, *flags, phase="1"):
+    return _run(["record-visual-gate", "--roadmap", roadmap_path, "--phase", phase, *flags])
+
+
+def _vg_phase(roadmap_path):
+    with open(roadmap_path, encoding="utf-8") as handle:
+        return json.load(handle)["phases"][0]
+
+
+def test_visual_gate_required_true_when_both_signals_are_present(tmp_path):
+    path = _vg_fixture(tmp_path, {"vg-phase-1-tasks.json": {
+        "metadata": {"prototypePaths": ["p/a.html", "p/a.html", "", 3],
+                     "designBundle": {"designSpec": "b/DesignSpec.md"}},
+        "userStories": [_vg_story("US-001"), _vg_story("US-002", strategy="test")],
+    }})
+    result = _vg_required(path)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["required"] is True
+    assert out["reason"]
+    assert out["prototypePaths"] == ["p/a.html"]
+    assert out["designSpec"] == "b/DesignSpec.md"
+    assert out["visualStories"] == [{"id": "US-001", "url": "http://x/US-001"}]
+    assert out["groups"] == 1
+
+
+def test_visual_gate_required_false_with_no_prototype_even_with_a_visual_story(tmp_path):
+    for metadata in ({}, {"prototypePaths": []}, {"prototypePaths": [""]}):
+        path = _vg_fixture(tmp_path, {"vg-phase-1-tasks.json": {
+            "metadata": metadata, "userStories": [_vg_story("US-001")],
+        }})
+        out = json.loads(_vg_required(path).stdout)
+        assert out["required"] is False
+        assert "no prototype paths" in out["reason"]
+        assert out["prototypePaths"] == []
+        assert len(out["visualStories"]) == 1
+
+
+def test_visual_gate_required_false_with_prototype_but_no_completed_visual_story(tmp_path):
+    path = _vg_fixture(tmp_path, {"vg-phase-1-tasks.json": {
+        "metadata": {"prototypePaths": ["p/a.html"]},
+        "userStories": [_vg_story("US-001", status="skipped"),
+                        _vg_story("US-002", strategy="test")],
+    }})
+    out = json.loads(_vg_required(path).stdout)
+    assert out["required"] is False
+    assert 'no completed story carries verification.strategy == "visual"' in out["reason"]
+    assert out["prototypePaths"] == ["p/a.html"]
+    assert out["visualStories"] == []
+
+
+def test_visual_gate_required_with_no_tasks_file_answers_false_and_names_the_search(tmp_path):
+    path = _vg_fixture(tmp_path, {})
+    out = json.loads(_vg_required(path).stdout)
+    assert out["required"] is False
+    assert out["groups"] == 0
+    assert out["prototypePaths"] == [] and out["visualStories"] == []
+    assert out["designSpec"] is None
+    assert "no tasks file resolved for phase 1 (tried " in out["reason"]
+
+
+def test_visual_gate_required_aggregates_a_split_phase_across_members(tmp_path):
+    web, api = "vg-phase-1-web-tasks.json", "vg-phase-1-api-tasks.json"
+    path = _vg_fixture(tmp_path, {
+        web: {"metadata": {"splitGroup": {"project": "web", "index": 1, "total": 2,
+                                          "siblings": [api]},
+                           "prototypePaths": ["p/a.html"]},
+              "userStories": [_vg_story("US-001")]},
+        api: {"metadata": {"splitGroup": {"project": "api", "index": 2, "total": 2,
+                                          "siblings": [web]},
+                           "prototypePaths": ["p/a.html", "p/b.html"]},
+              "userStories": [_vg_story("US-101")]},
+    })
+    out = json.loads(_vg_required(path).stdout)
+    assert out["groups"] == 2
+    assert out["required"] is True
+    assert sorted(out["prototypePaths"]) == ["p/a.html", "p/b.html"]
+    assert sorted(s["id"] for s in out["visualStories"]) == ["US-001", "US-101"]
+
+
+def test_visual_gate_required_unreadable_member_draws_an_advisory_and_contributes_nothing(tmp_path):
+    web, api = "vg-phase-1-web-tasks.json", "vg-phase-1-api-tasks.json"
+    path = _vg_fixture(tmp_path, {
+        web: {"metadata": {"splitGroup": {"project": "web", "index": 1, "total": 2,
+                                          "siblings": [api]},
+                           "prototypePaths": ["p/a.html"]},
+              "userStories": [_vg_story("US-001")]},
+    })
+    with open(os.path.join(os.path.dirname(path), "phase-1", api), "w") as handle:
+        handle.write("{ not json")
+    result = _vg_required(path)
+    assert result.returncode == 0
+    assert result.stderr.count("could not judge") == 1
+    out = json.loads(result.stdout)
+    assert out["groups"] == 2 and out["required"] is True
+
+
+def test_the_requirement_predicate_is_a_standalone_function():
+    """outline:02 calls this exact predicate; it must not be inlined in the op."""
+    assert callable(R._visual_gate_requirement)
+    assert "_visual_gate_requirement(" in inspect.getsource(R.op_visual_gate_required)
+
+
+def test_record_visual_gate_round_trip_and_idempotent_overwrite(tmp_path):
+    path = _vg_fixture(tmp_path, {})
+    first = _vg_record(path, "--status", "passed")
+    assert first.returncode == 0, first.stderr
+    gate = _vg_phase(path)["visualGate"]
+    assert list(gate) == ["status", "reason", "review", "recordedAt"]
+    assert gate["status"] == "passed" and gate["reason"] is None and gate["review"] is None
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", gate["recordedAt"])
+    assert json.loads(first.stdout)["visualGate"] == gate
+
+    second = _vg_record(path, "--status", "diverges", "--reason", "x", "--review", "r.md")
+    assert second.returncode == 0, second.stderr
+    gate = _vg_phase(path)["visualGate"]
+    assert gate["status"] == "diverges" and gate["reason"] == "x" and gate["review"] == "r.md"
+    assert not isinstance(_vg_phase(path)["visualGate"], list)
+
+
+@pytest.mark.parametrize("status", ["diverges", "skipped", "accepted"])
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_record_visual_gate_requires_a_reason_for_non_passed(tmp_path, status, reason):
+    path = _vg_fixture(tmp_path, {})
+    before = open(path, "rb").read()
+    flags = ["--status", status] + ([] if reason is None else ["--reason", reason])
+    result = _vg_record(path, *flags)
+    assert result.returncode == 1
+    assert "--reason is required" in result.stderr
+    assert open(path, "rb").read() == before
+
+
+def test_record_visual_gate_accepts_every_status_and_refuses_an_unknown_one(tmp_path):
+    path = _vg_fixture(tmp_path, {})
+    for status in ("passed", "diverges", "skipped", "accepted"):
+        result = _vg_record(path, "--status", status, "--reason", "because")
+        assert result.returncode == 0, (status, result.stderr)
+        assert _vg_phase(path)["visualGate"]["status"] == status
+    before = open(path, "rb").read()
+    result = _vg_record(path, "--status", "bogus")
+    assert result.returncode == 1
+    for name in ("passed", "diverges", "skipped", "accepted"):
+        assert name in result.stderr
+    assert open(path, "rb").read() == before
+
+
+def test_both_visual_gate_ops_refuse_an_absent_phase_naming_id_and_path(tmp_path):
+    path = _vg_fixture(tmp_path, {})
+    before = open(path, "rb").read()
+    for result in (_vg_record(path, "--status", "passed", phase="9"),
+                   _vg_required(path, phase="9")):
+        assert result.returncode == 1
+        assert "phase 9 not found in " + path in result.stderr
+    assert open(path, "rb").read() == before
+
+
+def test_visual_gate_ops_are_registered_under_the_verb_a_caller_can_run():
+    assert R._VERB_FOR_OP["record-visual-gate"] == "roadmap-record-visual-gate"
+    assert R._VERB_FOR_OP["visual-gate-required"] == "roadmap-visual-gate-required"
+    assert R._OPS["record-visual-gate"] is R.op_record_visual_gate
+    assert R._OPS["visual-gate-required"] is R.op_visual_gate_required

@@ -15963,6 +15963,96 @@ cmd_roadmap_set_status() {
   printf '%s\n' "$out"
 }
 
+# Writes a phase's visual-gate verdict into roadmap.json, in place.
+#
+# cmd_roadmap_set_status's shape: one crossing, inside the lock. This verb takes
+# no stdin payload, so every refusal reachable without the document (feature,
+# phase id, status vocabulary, --review confinement) happens here before the
+# lock, and the ones that need the file (reason pairing is judged in roadmap.py
+# so the vocabulary lives beside its reason rule; phase-not-found) happen inside
+# the single crossing. Ungated by _roadmap_require_contracts: it reads and
+# writes no creates/needs entry. --review is confined here, before the lock,
+# the way every other path that arrives as a CLI argument is.
+cmd_roadmap_record_visual_gate() {
+  local feature="" phase_id="" status="" reason="" review=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; status="${1:-}" ;;
+      --reason) shift; reason="${1:-}" ;;
+      --review) shift; review="${1:-}" ;;
+      *)
+        echo "Error: roadmap-record-visual-gate: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-record-visual-gate"
+
+  case "$status" in
+    passed|diverges|skipped|accepted) ;;
+    *)
+      echo "Error: roadmap-record-visual-gate: --status must be one of passed|diverges|skipped|accepted, got: $status" >&2
+      exit 1
+      ;;
+  esac
+
+  [ -n "$review" ] && validate_path_in_project "$review"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-record-visual-gate" "$feature")
+
+  check_python3
+  local reason_args=() review_args=()
+  [ -n "$reason" ] && reason_args=(--reason "$reason")
+  [ -n "$review" ] && review_args=(--review "$review")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      python3 "$(_aimi_roadmap_py)" record-visual-gate \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$status" \
+        "${reason_args[@]}" "${review_args[@]}"
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# Whether a phase owes a visual comparison, derived from its own tasks file(s).
+# Structurally cmd_roadmap_get: a read, so no lock, and ungated by
+# _roadmap_require_contracts (no creates/needs entry is read).
+cmd_roadmap_visual_gate_required() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: roadmap-visual-gate-required: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-visual-gate-required"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-visual-gate-required" "$feature")
+
+  check_python3
+  python3 "$(_aimi_roadmap_py)" visual-gate-required \
+    --roadmap "$roadmap_path" --phase "$phase_id"
+}
+
 cmd_roadmap_claim() {
   local feature="" session_id="" session_pid="" phase_override=""
 
@@ -17938,6 +18028,31 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
+    roadmap-record-visual-gate --feature <slug> --phase <id> --status <passed|diverges|skipped|accepted> [--reason <text>] [--review <path>]
+                              Locked read-modify-write. Records a phase's
+                              visual-gate verdict as phases[].visualGate =
+                              {status, reason, review, recordedAt} (reason and
+                              review null when not given; recordedAt is an
+                              ISO-8601 UTC time). --status accepts exactly
+                              passed|diverges|skipped|accepted. --reason is
+                              required (non-blank) for diverges, skipped and
+                              accepted, and optional for passed. --review must
+                              resolve inside the project root. Always replaces
+                              the whole visualGate object in place, so a resumed
+                              or re-verified phase carries one record, never two.
+                              A phase id absent from roadmap.json is refused,
+                              naming the id and the roadmap path.
+    roadmap-visual-gate-required --feature <slug> --phase <id>
+                              Read-only. Derives, from the phase's own tasks
+                              file(s) (every member of a split phase), whether a
+                              visual comparison is owed. Prints
+                              {required, reason, prototypePaths, designSpec,
+                              visualStories, groups}: required is true only when
+                              metadata.prototypePaths is non-empty AND at least
+                              one completed story carries verification.strategy
+                              "visual"; visualStories is [{id, url}], groups the
+                              number of resolved tasks files. A phase id absent
+                              from roadmap.json is refused.
     write-review [--feature <slug> --phase <N>]
                               Read a review as markdown on stdin and atomically
                               write it to disk, so the review outlives the
@@ -18307,6 +18422,8 @@ main() {
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
+    roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
+    roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;

@@ -4994,6 +4994,77 @@ test_roadmap_write_handoff_enables_validate_contracts_delivery() {
   rm -rf ".aimi/tasks/$feature"
 }
 
+test_roadmap_visual_gate_record_and_required() {
+  echo ""
+  echo "=== roadmap-record-visual-gate / roadmap-visual-gate-required: round trip, refusals with their text, help ==="
+
+  local feature="rm-visual-gate"
+  rm -rf ".aimi/tasks/$feature"
+  jq -n '[{id: 1, name: "Root", goal: "g", slug: "root", dependsOn: []}]' | "$CLI" roadmap-init --feature "$feature" >/dev/null
+
+  local roadmap=".aimi/tasks/$feature/roadmap.json"
+  local phase_dir=".aimi/tasks/$feature/phase-1-root"
+  mkdir -p "$phase_dir"
+  jq -n '{metadata: {prototypePaths: ["p/a.html"]},
+          userStories: [{id: "US-001", status: "completed",
+                         verification: {strategy: "visual", status: "pending", url: "http://x/1"}}]}' \
+    > "$phase_dir/${feature}-phase-1-tasks.json"
+
+  local output exit_code
+  output=$("$CLI" roadmap-visual-gate-required --feature "$feature" --phase 1 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-visual-gate-required: exits 0"
+  assert_eq "true" "$(printf '%s' "$output" | jq -r '.required')" "roadmap-visual-gate-required: required is true with prototype + completed visual story"
+  assert_eq "p/a.html" "$(printf '%s' "$output" | jq -r '.prototypePaths[0]')" "roadmap-visual-gate-required: carries the prototype paths"
+  assert_eq '{"id":"US-001","url":"http://x/1"}' "$(printf '%s' "$output" | jq -c '.visualStories[0]')" "roadmap-visual-gate-required: visualStories carries {id, url}"
+  assert_eq "1" "$(printf '%s' "$output" | jq -r '.groups')" "roadmap-visual-gate-required: groups is 1 for an un-split phase"
+
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status passed 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "roadmap-record-visual-gate: --status passed exits 0"
+  output=$("$CLI" roadmap-get --feature "$feature" --phase 1 2>&1)
+  assert_eq "passed|null|null" "$(printf '%s' "$output" | jq -r '.visualGate | "\(.status)|\(.reason)|\(.review)"')" "roadmap-get: visualGate persisted with null reason and review"
+  assert_eq "1" "$(printf '%s' "$output" | jq -r '.visualGate.recordedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$") | if . then 1 else 0 end')" "roadmap-get: visualGate.recordedAt is ISO-8601"
+
+  "$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status diverges --reason "x" >/dev/null 2>&1
+  output=$("$CLI" roadmap-get --feature "$feature" --phase 1 2>&1)
+  assert_eq "diverges|x" "$(printf '%s' "$output" | jq -r '.visualGate | "\(.status)|\(.reason)"')" "roadmap-record-visual-gate: a second call overwrites the same object in place"
+  assert_eq "object" "$(printf '%s' "$output" | jq -r '.visualGate | type')" "roadmap-record-visual-gate: visualGate stays a single object, never appended"
+
+  local before after
+  before=$(cksum < "$roadmap")
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status diverges 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-record-visual-gate: diverges without --reason is refused"
+  assert_contains "--reason is required" "$output" "roadmap-record-visual-gate: names --reason as required"
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status accepted --reason "   " 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-record-visual-gate: a whitespace-only --reason is refused"
+  assert_contains "--reason is required" "$output" "roadmap-record-visual-gate: whitespace-only reason names --reason as required"
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status bogus 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-record-visual-gate: an unknown status is refused"
+  assert_contains "passed|diverges|skipped|accepted" "$output" "roadmap-record-visual-gate: names all four accepted statuses"
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 7 --status passed 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-record-visual-gate: an absent phase is refused"
+  assert_contains "phase 7 not found in" "$output" "roadmap-record-visual-gate: names the absent phase id"
+  assert_contains "roadmap.json" "$output" "roadmap-record-visual-gate: names the roadmap path"
+  output=$("$CLI" roadmap-visual-gate-required --feature "$feature" --phase 7 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-visual-gate-required: an absent phase is refused"
+  assert_contains "phase 7 not found in" "$output" "roadmap-visual-gate-required: names the absent phase id"
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase abc --status passed 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "must be a numeric phase id" "$output" "roadmap-record-visual-gate: a non-numeric phase id is refused by the shared message"
+  output=$("$CLI" roadmap-visual-gate-required --feature "$feature" --phase abc 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "must be a numeric phase id" "$output" "roadmap-visual-gate-required: a non-numeric phase id is refused by the shared message"
+  output=$("$CLI" roadmap-record-visual-gate --feature "$feature" --phase 1 --status passed --review ../../../etc/passwd 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "roadmap-record-visual-gate: a --review path escaping the project root is refused"
+  assert_contains "escapes project root" "$output" "roadmap-record-visual-gate: --review refusal is the shared confinement message"
+  after=$(cksum < "$roadmap")
+  assert_eq "$before" "$after" "roadmap-record-visual-gate: every refusal left roadmap.json byte-for-byte unchanged"
+
+  local help_text
+  help_text=$("$CLI" help 2>&1)
+  assert_eq "1" "$([ "$(printf '%s' "$help_text" | grep -c 'roadmap-record-visual-gate')" -gt 0 ] && echo 1 || echo 0)" "help: lists roadmap-record-visual-gate"
+  assert_eq "1" "$([ "$(printf '%s' "$help_text" | grep -c 'roadmap-visual-gate-required')" -gt 0 ] && echo 1 || echo 0)" "help: lists roadmap-visual-gate-required"
+
+  rm -rf ".aimi/tasks/$feature"
+}
+
 # ---------------------------------------------------------------------------
 # write-review Tests (phase 3 US-009)
 # ---------------------------------------------------------------------------
@@ -9900,6 +9971,7 @@ main() {
   test_roadmap_set_status_cancel_never_claimable
   test_roadmap_write_handoff_five_headings_sanitized
   test_roadmap_write_handoff_enables_validate_contracts_delivery
+  test_roadmap_visual_gate_record_and_required
 
   # write-review: the verb that puts a phase's design review on disk, so it
   # outlives the session that produced it (phase 3 US-009).
