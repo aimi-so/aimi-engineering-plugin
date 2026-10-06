@@ -4129,7 +4129,8 @@ _GATE_PHASE = {
 }
 
 
-def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feature="gate"):
+def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feature="gate",
+                  metadata_extra=None, phase_extra=None):
     """A roadmap with one in_progress phase, its own tasks file, and a handoff.
 
     `tasks=False` writes no tasks file at all -- the shape every phase had
@@ -4144,7 +4145,7 @@ def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feat
     roadmap = {
         "roadmapVersion": "2.0", "feature": feature,
         "createdAt": "2020-01-01T00:00:00Z", "brainstormPath": None,
-        "phases": [dict(_GATE_PHASE)],
+        "phases": [dict(_GATE_PHASE, **(phase_extra or {}))],
     }
     with open(os.path.join(feature_dir, "roadmap.json"), "w", encoding="utf-8") as handle:
         json.dump(roadmap, handle)
@@ -4153,6 +4154,8 @@ def _gate_fixture(tmp_path, stories, smells=None, handoff=True, tasks=True, feat
         doc = {"userStories": stories}
         if smells is not None:
             doc["metadata"] = {"smellWarnings": smells}
+        if metadata_extra:
+            doc["metadata"] = dict(doc.get("metadata") or {}, **metadata_extra)
         with open(
             os.path.join(phase_dir, feature + "-phase-1-tasks.json"), "w", encoding="utf-8"
         ) as handle:
@@ -4857,3 +4860,69 @@ def test_visual_gate_ops_are_registered_under_the_verb_a_caller_can_run():
     assert R._VERB_FOR_OP["visual-gate-required"] == "roadmap-visual-gate-required"
     assert R._OPS["record-visual-gate"] is R.op_record_visual_gate
     assert R._OPS["visual-gate-required"] is R.op_visual_gate_required
+
+
+# --- phase-close visual gate (completed refuses an unrecorded/diverged comparison) ---
+
+
+def _visual_story(sid, status="completed"):
+    return {"id": sid, "status": status, "verification": {"strategy": "visual", "status": "passed"}}
+
+
+def _visual_gate_fixture(tmp_path, required=True, visual_gate=None):
+    """A phase that owes (required=True) or does not owe a visual comparison per
+    the one predicate _visual_gate_requirement, with phase.visualGate set to
+    `visual_gate` when given. Not-required drops the prototype list."""
+    metadata_extra = {"prototypePaths": [".aimi/prototypes/p.html"]} if required else None
+    phase_extra = {"visualGate": visual_gate} if visual_gate is not None else None
+    return _gate_fixture(
+        tmp_path, [_visual_story("US-001")],
+        metadata_extra=metadata_extra, phase_extra=phase_extra,
+    )
+
+
+def test_a_required_visual_gate_with_no_record_refuses_and_names_the_verb(tmp_path):
+    root, env, feature = _visual_gate_fixture(tmp_path)
+    proc = _close(root, env, feature)
+    assert proc.returncode != 0
+    assert "roadmap-record-visual-gate" in proc.stderr
+    assert "phase 1" in proc.stderr
+    assert "diverges" not in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+def test_a_required_visual_gate_recorded_diverges_still_refuses(tmp_path):
+    root, env, feature = _visual_gate_fixture(
+        tmp_path, visual_gate={"status": "diverges", "reason": "spacing", "review": None, "recordedAt": "2020-01-01T00:00:00Z"})
+    proc = _close(root, env, feature)
+    assert proc.returncode != 0
+    assert "roadmap-record-visual-gate" in proc.stderr
+    assert "diverges" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+
+@pytest.mark.parametrize("status", ["passed", "skipped", "accepted"])
+def test_a_required_visual_gate_recorded_passed_skipped_or_accepted_closes(tmp_path, status):
+    """GUARD-RAIL: these closed before the visual gate existed and must keep closing."""
+    root, env, feature = _visual_gate_fixture(
+        tmp_path, visual_gate={"status": status, "reason": "r", "review": None, "recordedAt": "2020-01-01T00:00:00Z"})
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+@pytest.mark.parametrize("visual_gate", [None, {"status": "diverges"}])
+def test_a_phase_that_does_not_owe_a_comparison_closes_exactly_as_before(tmp_path, visual_gate):
+    """GUARD-RAIL: not-required is unchanged, whatever phase.visualGate holds."""
+    root, env, feature = _visual_gate_fixture(tmp_path, required=False, visual_gate=visual_gate)
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_force_does_not_bypass_the_visual_gate_either(tmp_path):
+    root, env, feature = _visual_gate_fixture(tmp_path)
+    proc = _close(root, env, feature, force=True)
+    assert proc.returncode != 0
+    assert "roadmap-record-visual-gate" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress"

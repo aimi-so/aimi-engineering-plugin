@@ -44,7 +44,9 @@ pins its total, over a hundred of those assertions drive these verbs as black
 boxes through the CLI, and a faithful port does not move a single one of them.
 """
 
+import contextlib
 import fcntl
+import io
 import json
 import os
 import re
@@ -4305,7 +4307,7 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
             phase_id,
             "no tasks file resolved (tried " + tried + " and " + _phase_dir_path(roadmap_path, phase) + ")",
         )
-        return []
+        return _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
     lines = []
     for member_path in members:
@@ -4346,7 +4348,7 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
             for entry in _unacknowledged_verify_coverage(tasks)
             if did_work(entry.get("storyId"))
         ]
-    return lines
+    return lines + _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
 
 def op_set_status(argv):
@@ -4575,6 +4577,48 @@ def _visual_gate_requirement(roadmap_path, doc, phase):
         "visualStories": visual_stories,
         "groups": len(members),
     }
+
+
+def _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase):
+    """The phase-level visual-gate line(s) for the completed gate: one line
+    when the phase owes a visual comparison (per _visual_gate_requirement, the
+    one predicate that decides it) and phase.visualGate.status is not one of
+    passed/skipped/accepted, an empty list otherwise.
+
+    Called ONCE per phase, never per member -- visualGate is one record per
+    phase. Any failure to read or compute the requirement degrades to the
+    completed gate's own advisory and an empty list, never a refusal and never
+    an uncaught exception held under the roadmap lock.
+    """
+    try:
+        # The predicate advises about every unreadable member itself; this
+        # gate's own per-member loop has already said so for the same files,
+        # so its stderr is discarded rather than doubled.
+        with contextlib.redirect_stderr(io.StringIO()):
+            requirement = _visual_gate_requirement(roadmap_path, doc, phase)
+        required = bool(requirement.get("required"))
+    except Exception as exc:  # noqa: BLE001 -- degrade audibly, never refuse on an unknown
+        _completed_gate_advise(
+            phase_id, "the visual-gate requirement -- " + type(exc).__name__
+        )
+        return []
+    if not required:
+        return []
+
+    record = phase.get("visualGate")
+    status = record.get("status") if isinstance(record, dict) else None
+    if status in ("passed", "skipped", "accepted"):
+        return []
+    if status == "diverges":
+        return [
+            "  phase " + _num(phase_id) + ": visual gate recorded diverges -- the live "
+            "implementation was compared against its prototype and differs; resolve it and "
+            "re-record with roadmap-record-visual-gate (passed, or accepted with a reason)"
+        ]
+    return [
+        "  phase " + _num(phase_id) + ": owes a visual comparison of the live implementation "
+        "against its prototype and none is recorded -- record one with roadmap-record-visual-gate"
+    ]
 
 
 def op_visual_gate_required(argv):

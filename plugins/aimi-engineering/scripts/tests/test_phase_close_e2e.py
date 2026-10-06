@@ -96,11 +96,11 @@ def _phase_tasks_path(project, feature, phase_id, slug):
     )
 
 
-def _write_tasks_file(path, stories, phase_id=1):
+def _write_tasks_file(path, stories, phase_id=1, metadata_extra=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     doc = {
         "schemaVersion": "3.3",
-        "metadata": {"title": "Fixture Phase", "type": "phase"},
+        "metadata": dict({"title": "Fixture Phase", "type": "phase"}, **(metadata_extra or {})),
         "userStories": stories,
     }
     with open(path, "w", encoding="utf-8") as handle:
@@ -461,3 +461,78 @@ def test_a_split_phase_closes_only_once_every_member_is_judged(tmp_path):
     for member_path in (alpha_path, beta_path):
         report = _verification_report(project, env, member_path)
         assert report["verdicts"]["pending"] == 0, member_path
+
+
+# ---------------------------------------------------------------------------
+# The phase-close visual gate -- a UI phase closes only once its comparison is recorded
+# ---------------------------------------------------------------------------
+
+
+def _set_visual_gate(project, feature, phase_id, visual_gate):
+    """Set (or, with None, pop) phases[i].visualGate on roadmap.json -- plain file
+    I/O, the way this module's fixtures already build state."""
+    path = os.path.join(project, ".aimi", "tasks", feature, "roadmap.json")
+    with open(path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    for phase in doc["phases"]:
+        if phase["id"] == phase_id:
+            if visual_gate is None:
+                phase.pop("visualGate", None)
+            else:
+                phase["visualGate"] = visual_gate
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2)
+
+
+def test_a_ui_phase_refuses_to_close_until_its_visual_gate_is_recorded(tmp_path):
+    root = str(tmp_path)
+    project, env = _build_root(root)
+    feature = "e2e-visual"
+    tasks_path = _phase_tasks_path(project, feature, 1, "fixture")
+    _write_tasks_file(
+        tasks_path,
+        [
+            {
+                "id": "US-001",
+                "title": "Visual story",
+                "description": "Completes with a visual verification.",
+                "acceptanceCriteria": ["matches the prototype"],
+                "status": "pending",
+                "dependsOn": [],
+                "verification": {"strategy": "visual", "status": "pending"},
+            }
+        ],
+        metadata_extra={"prototypePaths": [".aimi/prototypes/p.html"]},
+    )
+    _init_phase(project, env, feature)
+    _assert_ok(
+        _run(project, env, ["mark-complete", "US-001", "--tasks-file", tasks_path]),
+        "mark-complete US-001",
+    )
+    _assert_ok(
+        _run(project, env, ["set-verification", "US-001", "passed", "--tasks-file", tasks_path]),
+        "set-verification US-001",
+    )
+    _assert_ok(_write_handoff(project, env, feature), "roadmap-write-handoff")
+
+    # No record at all.
+    close = _set_status_completed(project, env, feature)
+    assert close.returncode != 0
+    assert "roadmap-record-visual-gate" in close.stderr
+    assert "phase 1" in close.stderr
+
+    # A recorded divergence still refuses.
+    _set_visual_gate(project, feature, 1, {
+        "status": "diverges", "reason": "spacing", "review": None,
+        "recordedAt": "2020-01-01T00:00:00Z",
+    })
+    close = _set_status_completed(project, env, feature)
+    assert close.returncode != 0
+    assert "roadmap-record-visual-gate" in close.stderr
+
+    # Accepted closes.
+    _set_visual_gate(project, feature, 1, {
+        "status": "accepted", "reason": "known and tolerated", "review": None,
+        "recordedAt": "2020-01-01T00:00:00Z",
+    })
+    _assert_ok(_set_status_completed(project, env, feature), "roadmap-set-status --status completed")
