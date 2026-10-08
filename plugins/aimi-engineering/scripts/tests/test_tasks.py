@@ -5103,16 +5103,24 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     open's own -- a real second occurrence of that exact text, not a new
     form, which is why the SET of distinct literals below is unchanged while
     the total count moves.
+
+    THE TENTH open() ARRIVED WITH spec-derivation, and it is a read of a file
+    named by a CLI ARGUMENT (--input) rather than by a document: the same
+    caller-supplied, bash-confined shape as design-decisions' eighth. The
+    literal is `open(input_path, "rb")` -- a new distinct form, because the
+    variable is named for what it is, so the set below gains one member. It
+    is a read, never a write; the verb emits to stdout only.
     """
     code = _code()
-    assert code.count("open(") == 9
+    assert code.count("open(") == 10
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
     assert 'open(brainstorm_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 9
+    assert 'open(input_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 10
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -6746,6 +6754,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "verify-probe",
         "list-known-gaps",
         "design-decisions",
+        "spec-derivation",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -10082,3 +10091,124 @@ def test_every_metadata_key_plan_md_writes_is_named_in_the_plugin_s_schema_doc()
         "-- in the key enumeration, or in a paragraph of its own -- in the same "
         "commit that adds it to plan.md's template."
     )
+
+
+# ---------------------------------------------------------------------------
+# spec-derivation: validation, relabel of evidence-less absences, markdown rows
+# ---------------------------------------------------------------------------
+
+RELABEL_LABEL = "unchecked (claimed absent, no evidence)"
+
+
+def _spec_payload(*records):
+    return {"records": list(records)}
+
+
+def test_spec_derivation_relabels_an_absent_record_with_no_evidence(capsys):
+    result = T.derive_spec_records(
+        _spec_payload({"kind": "entity", "name": "Invoice", "status": "absent", "evidence": []})
+    )
+    assert result["records"] == [
+        {"kind": "entity", "name": "Invoice", "status": "unchecked", "evidence": []}
+    ]
+    assert result["relabeled"] == ["entity:Invoice"]
+    assert capsys.readouterr().err == (
+        "spec-derivation: entity 'Invoice' claimed absent with no evidence - relabeled unchecked\n"
+    )
+    assert result["markdown"]["entities"] == "| Invoice | " + RELABEL_LABEL + " | — |"
+    assert result["markdown"]["endpoints"] == ""
+
+
+def test_spec_derivation_passes_a_genuine_unchecked_record_through(capsys):
+    result = T.derive_spec_records(
+        _spec_payload({"kind": "endpoint", "name": "GET /x", "status": "unchecked", "evidence": []})
+    )
+    assert result["records"][0]["status"] == "unchecked"
+    assert result["relabeled"] == []
+    assert capsys.readouterr().err == ""
+    # The distinct label belongs to relabeled records only.
+    assert result["markdown"]["endpoints"] == "| GET /x | unchecked | — |"
+
+
+def test_spec_derivation_keeps_absent_with_evidence_and_renders_rows_in_order(capsys):
+    result = T.derive_spec_records(
+        _spec_payload(
+            {"kind": "entity", "name": "B", "status": "present", "evidence": ["a.rb:1", "b.rb:2"]},
+            {"kind": "endpoint", "name": "GET /y", "status": "absent", "evidence": ["r.rb:3"]},
+            {"kind": "entity", "name": "A", "status": "absent"},
+        )
+    )
+    assert result["records"][1]["status"] == "absent"
+    assert result["relabeled"] == ["entity:A"]
+    assert result["markdown"]["entities"] == (
+        "| B | present | a.rb:1; b.rb:2 |\n| A | " + RELABEL_LABEL + " | — |"
+    )
+    assert result["markdown"]["endpoints"] == "| GET /y | absent | r.rb:3 |"
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ([], "input must be a JSON object"),
+        ({"records": {}}, "'records' must be a list"),
+        ({}, "'records' must be a list"),
+        ({"records": [5]}, "records[0] must be an object"),
+        (
+            {"records": [{"kind": "widget", "name": "X", "status": "present"}]},
+            "records[0].kind must be 'entity' or 'endpoint' (got \"widget\")",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "maybe"}]},
+            "records[0].status must be 'present', 'absent' or 'unchecked' (got \"maybe\")",
+        ),
+        (
+            {"records": [{"kind": "entity", "status": "present"}]},
+            "records[0].name must be a non-empty string",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": " ", "status": "present"}]},
+            "records[0].name must be a non-empty string",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "present", "evidence": "a"}]},
+            "records[0].evidence must be a list of strings",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "present", "evidence": [1]}]},
+            "records[0].evidence must be a list of strings",
+        ),
+        (
+            {
+                "records": [
+                    {"kind": "entity", "name": "A", "status": "present"},
+                    {"kind": "nope", "name": "X", "status": "present"},
+                ]
+            },
+            "records[1].kind must be",
+        ),
+    ],
+)
+def test_spec_derivation_refuses_malformed_records_naming_index_and_field(payload, expected):
+    with pytest.raises(ValueError) as refusal:
+        T.derive_spec_records(payload)
+    assert expected in str(refusal.value)
+
+
+def test_spec_derivation_op_reads_the_file_and_refuses_bad_json(tmp_path, capsys):
+    good = tmp_path / "in.json"
+    good.write_text(
+        json.dumps(_spec_payload({"kind": "entity", "name": "E", "status": "absent", "evidence": []})),
+        encoding="utf-8",
+    )
+    assert T.op_spec_derivation(["--input", str(good)]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out)["relabeled"] == ["entity:E"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    with pytest.raises(SystemExit) as exited:
+        T.op_spec_derivation(["--input", str(bad)])
+    assert exited.value.code == 1
+    assert "Error: spec-derivation: input is not valid JSON:" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_spec_derivation([])

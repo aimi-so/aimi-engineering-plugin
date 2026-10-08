@@ -2169,6 +2169,43 @@ cmd_design_decisions() {
   python3 "$(_aimi_tasks_py)" design-decisions --brainstorm-path "$brainstorm_path"
 }
 
+# Validate a research agent's entity/endpoint presence findings, relabel every
+# `absent` claim that carries no evidence to `unchecked`, and render the
+# BusinessSpec section 4 / section 5 markdown rows. Read-only, no lock: nothing
+# here touches tasks.json. --input arrives as a CLI argument, so it is confined
+# by validate_path_in_project BEFORE check_python3 and before python3 starts;
+# the op in tasks.py never re-checks it (the same split design-decisions has).
+#
+# Flags: --input <path> (required)
+cmd_spec_derivation() {
+  local input_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --input)
+        shift
+        input_path="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh spec-derivation --input <path>" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$input_path" ]; then
+    echo "Usage: aimi-cli.sh spec-derivation --input <path>" >&2
+    exit 1
+  fi
+
+  input_path=$(resolve_path "$input_path")
+  validate_path_in_project "$input_path"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" spec-derivation --input "$input_path"
+}
+
 # Mark a story as in-progress
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
@@ -17074,6 +17111,20 @@ COMMANDS:
                               python3 starts, because it arrives as a CLI argument --
                               distinct from get-story-context's own unconfined,
                               document-sourced read of metadata.brainstormPath.
+    spec-derivation --input <path>
+                              Validate a JSON file shaped {"records":[{"kind":
+                              "entity"|"endpoint","name":"...","status":"present"|
+                              "absent"|"unchecked","evidence":["..."]}]} and print
+                              {records, relabeled, markdown:{entities, endpoints}}.
+                              A record claimed `absent` with an empty evidence
+                              array is relabeled `unchecked` (listed in relabeled
+                              as <kind>:<name>, one stderr line each); a genuine
+                              `unchecked` record passes through unchanged. The
+                              markdown strings hold one `| name | status | evidence |`
+                              row per record, in input order. Malformed input exits
+                              1 naming the record index and the invalid field.
+                              --input is confined to the project root by
+                              validate_path_in_project before python3 starts.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -18406,6 +18457,7 @@ main() {
     verify-probe)      shift; cmd_verify_probe "$@" ;;
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     design-decisions)  shift; cmd_design_decisions "$@" ;;
+    spec-derivation)   shift; cmd_spec_derivation "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;

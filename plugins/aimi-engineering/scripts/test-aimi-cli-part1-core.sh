@@ -11365,6 +11365,91 @@ test_update_field_refuses_non_identifier_path() {
     "update-field: path containing a space is refused by name on stderr"
 }
 
+test_spec_derivation() {
+  echo ""
+  echo "=== Testing spec-derivation: validation, relabel of evidence-less absences, markdown rows, confinement ==="
+
+  local input="$TEST_DIR/spec-derivation-input.json"
+  local output stderr_output exit_code
+
+  cat > "$input" << 'SPECEOF'
+{"records":[
+ {"kind":"entity","name":"Invoice","status":"absent","evidence":[]},
+ {"kind":"entity","name":"Customer","status":"unchecked","evidence":[]},
+ {"kind":"entity","name":"Order","status":"present","evidence":["app/models/order.rb:1","db/schema.rb:40"]},
+ {"kind":"endpoint","name":"POST /invoices","status":"absent"},
+ {"kind":"endpoint","name":"GET /orders","status":"absent","evidence":["config/routes.rb:12"]}
+]}
+SPECEOF
+
+  exit_code=0
+  output=$("$CLI" spec-derivation --input "$input" 2> "$TEST_DIR/spec-derivation.err") || exit_code=$?
+  stderr_output=$(cat "$TEST_DIR/spec-derivation.err")
+  assert_exit_code "0" "$exit_code" "spec-derivation: valid input exits 0"
+  assert_eq '["entity:Invoice","endpoint:POST /invoices"]' "$(echo "$output" | jq -c '.relabeled')" \
+    "spec-derivation: only evidence-less absent records are listed as relabeled"
+  assert_eq "unchecked" "$(echo "$output" | jq -r '.records[0].status')" \
+    "spec-derivation: an evidence-less absent record is relabeled unchecked in records"
+  assert_eq "unchecked" "$(echo "$output" | jq -r '.records[1].status')" \
+    "spec-derivation: a genuine unchecked record passes through unchanged"
+  assert_eq "absent" "$(echo "$output" | jq -r '.records[4].status')" \
+    "spec-derivation: an absent record WITH evidence stays absent"
+  assert_eq "[]" "$(echo "$output" | jq -c '.records[3].evidence')" \
+    "spec-derivation: a missing evidence key normalizes to an empty list"
+  assert_eq "| Invoice | unchecked (claimed absent, no evidence) | — |
+| Customer | unchecked | — |
+| Order | present | app/models/order.rb:1; db/schema.rb:40 |" "$(echo "$output" | jq -r '.markdown.entities')" \
+    "spec-derivation: entity rows render in input order with the relabeled label only on relabeled records"
+  assert_eq "| POST /invoices | unchecked (claimed absent, no evidence) | — |
+| GET /orders | absent | config/routes.rb:12 |" "$(echo "$output" | jq -r '.markdown.endpoints')" \
+    "spec-derivation: endpoint rows render in input order"
+  assert_contains "spec-derivation: entity 'Invoice' claimed absent with no evidence - relabeled unchecked" "$stderr_output" \
+    "spec-derivation: stderr names the relabeled entity"
+  assert_contains "spec-derivation: endpoint 'POST /invoices' claimed absent with no evidence - relabeled unchecked" "$stderr_output" \
+    "spec-derivation: stderr names the relabeled endpoint"
+  case "$stderr_output" in
+    *"'Customer'"*) assert_eq "quiet" "noisy" "spec-derivation: a genuine unchecked record draws no stderr line" ;;
+    *) assert_eq "quiet" "quiet" "spec-derivation: a genuine unchecked record draws no stderr line" ;;
+  esac
+
+  # Refusals: each asserts the exit status AND the exact text.
+  local bad="$TEST_DIR/spec-derivation-bad.json"
+  _spec_derivation_refusal() {
+    local label="$1" body="$2" expected="$3"
+    printf '%s' "$body" > "$bad"
+    exit_code=0
+    stderr_output=$("$CLI" spec-derivation --input "$bad" 2>&1 >/dev/null) || exit_code=$?
+    assert_exit_code "1" "$exit_code" "spec-derivation: $label exits 1"
+    assert_contains "$expected" "$stderr_output" "spec-derivation: $label refusal text"
+  }
+  _spec_derivation_refusal "invalid JSON" '{not json' \
+    "Error: spec-derivation: input is not valid JSON:"
+  _spec_derivation_refusal "records not a list" '{"records":{}}' \
+    "Error: spec-derivation: 'records' must be a list"
+  _spec_derivation_refusal "invalid kind" '{"records":[{"kind":"widget","name":"X","status":"present"}]}' \
+    "Error: spec-derivation: records[0].kind must be 'entity' or 'endpoint' (got \"widget\")"
+  _spec_derivation_refusal "invalid status" '{"records":[{"kind":"entity","name":"A","status":"present"},{"kind":"entity","name":"X","status":"maybe"}]}' \
+    "Error: spec-derivation: records[1].status must be 'present', 'absent' or 'unchecked' (got \"maybe\")"
+  _spec_derivation_refusal "missing name" '{"records":[{"kind":"entity","status":"present"}]}' \
+    "Error: spec-derivation: records[0].name must be a non-empty string"
+  _spec_derivation_refusal "empty name" '{"records":[{"kind":"entity","name":"  ","status":"present"}]}' \
+    "Error: spec-derivation: records[0].name must be a non-empty string"
+  _spec_derivation_refusal "evidence not a list" '{"records":[{"kind":"entity","name":"X","status":"present","evidence":"a.rb"}]}' \
+    "Error: spec-derivation: records[0].evidence must be a list of strings"
+  _spec_derivation_refusal "evidence with a non-string" '{"records":[{"kind":"entity","name":"X","status":"present","evidence":["a",1]}]}' \
+    "Error: spec-derivation: records[0].evidence must be a list of strings"
+
+  # Confinement of the CLI-argument path happens in bash, before python3.
+  exit_code=0
+  stderr_output=$("$CLI" spec-derivation --input /etc/hostname 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "spec-derivation: --input outside the project root exits 1"
+  assert_contains "Error: Path escapes project root — access denied" "$stderr_output" \
+    "spec-derivation: --input outside the project root is refused by validate_path_in_project"
+
+  rm -f "$input" "$bad" "$TEST_DIR/spec-derivation.err"
+  unset -f _spec_derivation_refusal
+}
+
 test_update_field_verification_value_guard() {
   echo ""
   echo "=== Testing update-field: verification.status/.strategy are constrained to their documented value sets ==="
@@ -11784,6 +11869,11 @@ main() {
   test_find_tasks_all_empty_dir_with_decoy
   test_init_session_file_flag
   test_init_session_file_flag_validation
+
+  # spec-derivation tests
+  echo ""
+  echo "--- Spec Derivation Tests ---"
+  test_spec_derivation
 
   # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

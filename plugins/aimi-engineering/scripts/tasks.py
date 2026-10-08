@@ -3047,6 +3047,82 @@ def spec_sections(docs, project_root, file_facts=None):
     return pairs
 
 
+SPEC_RECORD_KINDS = ("entity", "endpoint")
+SPEC_RECORD_STATUSES = ("present", "absent", "unchecked")
+SPEC_RELABELED_LABEL = "unchecked (claimed absent, no evidence)"
+
+
+def derive_spec_records(payload):
+    """Validate a research agent's entity/endpoint presence findings, relabel
+    every `absent` claim that carries no evidence to `unchecked`, and render the
+    BusinessSpec section 4 / section 5 markdown rows.
+
+    `absent` is a positive claim ("I looked and it is not there") and an empty
+    `evidence` array says nothing was looked at, so the claim is downgraded to
+    the honest answer. A record that arrived as `unchecked` with no evidence is
+    the genuine never-checked case and passes through untouched -- it is NOT
+    added to `relabeled`, which lists only the records this function changed.
+
+    Raises ValueError naming the record's index and the invalid field.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("input must be a JSON object with a 'records' list")
+    raw = payload.get("records")
+    if not isinstance(raw, list):
+        raise ValueError("'records' must be a list")
+    records = []
+    relabeled = []
+    labels = []
+    for index, item in enumerate(raw):
+        where = "records[%d]" % index
+        if not isinstance(item, dict):
+            raise ValueError(where + " must be an object")
+        kind = item.get("kind")
+        if kind not in SPEC_RECORD_KINDS:
+            raise ValueError(
+                where + ".kind must be 'entity' or 'endpoint' (got %s)" % json.dumps(kind)
+            )
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(where + ".name must be a non-empty string")
+        status = item.get("status")
+        if status not in SPEC_RECORD_STATUSES:
+            raise ValueError(
+                where
+                + ".status must be 'present', 'absent' or 'unchecked' (got %s)"
+                % json.dumps(status)
+            )
+        evidence = item.get("evidence", [])
+        if not isinstance(evidence, list) or not all(isinstance(e, str) for e in evidence):
+            raise ValueError(where + ".evidence must be a list of strings")
+        relabel = status == "absent" and not evidence
+        if relabel:
+            status = "unchecked"
+            relabeled.append(kind + ":" + name)
+            sys.stderr.write(
+                "spec-derivation: %s '%s' claimed absent with no evidence - relabeled unchecked\n"
+                % (kind, name)
+            )
+        records.append(
+            {"kind": kind, "name": name, "status": status, "evidence": list(evidence)}
+        )
+        labels.append(SPEC_RELABELED_LABEL if relabel else status)
+    rows = {"entity": [], "endpoint": []}
+    for record, label in zip(records, labels):
+        rows[record["kind"]].append(
+            "| %s | %s | %s |"
+            % (record["name"], label, "; ".join(record["evidence"]) or "\u2014")
+        )
+    return {
+        "records": records,
+        "relabeled": relabeled,
+        "markdown": {
+            "entities": "\n".join(rows["entity"]),
+            "endpoints": "\n".join(rows["endpoint"]),
+        },
+    }
+
+
 def design_decisions(brainstorm_bytes):
     """The awk/sed/awk/sed/head pipeline, rewritten from a single-heading
     prefix match into a shape rule over every top-level `## ` heading (see
@@ -7710,6 +7786,32 @@ def op_design_decisions(argv):
     return 0
 
 
+def op_spec_derivation(argv):
+    """The validated, relabeled, rendered form of a research agent's
+    entity/endpoint findings, read from the file named by --input.
+
+    --input already crossed aimi-cli.sh's validate_path_in_project by the time
+    this runs -- confinement of a CLI-ARGUMENT path is that function's job, the
+    same split op_design_decisions documents. Nothing here re-checks it.
+    """
+    input_path = _flag(argv, "--input")
+    if not input_path:
+        die("Usage: tasks.py spec-derivation --input <path>")
+    try:
+        with open(input_path, "rb") as handle:
+            payload = json.loads(handle.read())
+    except OSError as err:
+        die("Error: spec-derivation: cannot read input: %s" % err.strerror)
+    except ValueError as err:
+        die("Error: spec-derivation: input is not valid JSON: %s" % err)
+    try:
+        result = derive_spec_records(payload)
+    except ValueError as err:
+        die("Error: spec-derivation: " + str(err))
+    _emit(result)
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -7752,6 +7854,7 @@ _OPS = {
     "verify-probe": op_verify_probe,
     "list-known-gaps": op_list_known_gaps,
     "design-decisions": op_design_decisions,
+    "spec-derivation": op_spec_derivation,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }
