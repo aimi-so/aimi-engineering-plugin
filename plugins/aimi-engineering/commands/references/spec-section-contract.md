@@ -62,7 +62,7 @@ invisible to the stricter of the two readers.
 | `BusinessSpec § 5.3` | An endpoint group subsection of § 5; every `endpoints[].responseShape` source cites a subsection here, checked by `spec_contains`'s fixed-string containment | `plan.md`, `tasks.py` `validate-tasks` |
 | `BusinessSpec § 7` | Personas / roles; one story per tier | `brainstorm.md` Users auto-pass and Personas render, `plan.md` `userRoles`, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 9` | Acceptance / success criteria, seeded verbatim with rule ids preserved | `brainstorm.md` Success auto-pass, `plan.md` AC seeding, `deepen.md` missing-AC gate, `aimi-design-bundle-researcher.md`, `aimi-bundle-prototype-author.md`, `aimi-story-expander.md`, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
-| `BusinessSpec § 11` | Open questions; bundle-sourced OQs are not exempt from resolve/defer | `brainstorm.md`, `commands/references/business-spec-authoring.md` |
+| `BusinessSpec § 11` | Open questions; bundle-sourced OQs are not exempt from resolve/defer | `brainstorm.md`, `plan.md`, `commands/references/business-spec-authoring.md` |
 
 ## DesignSpec Sections
 

@@ -197,6 +197,22 @@ After reading the brainstorm (if one was found), parse its YAML frontmatter for 
 
 If no brainstorm was found, or the loaded brainstorm has no `foundationProposalPath` key, this subsection is a no-op and Phase 1.9's fire-condition check behaves exactly as it did before this feature.
 
+### Reuse Brainstorm Design Bundle
+
+After reading the brainstorm (if one was found), parse its YAML frontmatter for a `designBundle:` object — gated on the **same condition** as `### Reuse Brainstorm Research` above (a brainstorm must have been loaded this session). The object has the five fields `commands/brainstorm.md`'s "designBundle frontmatter rules" emit: `root`, `readme`, `chats`, `businessSpec`, `designSpec` (the last two are always present and `null` when absent).
+
+1. **Parse `designBundle.root`** — a path to the bundle directory, relative to `AIMI_ROOT` (an absolute path is kept as written). If no brainstorm was loaded, or its frontmatter has no `designBundle:` key (legacy brainstorm, or one with no bundle), skip this entire subsection with no error and leave the working-memory `brainstormBundleRoot` variable unset.
+2. **Store it** in working memory as `brainstormBundleRoot` (empty until a `designBundle.root` is parsed):
+
+   ```bash
+   brainstormBundleRoot=""   # replaced by the parsed designBundle.root when present
+   ```
+
+   and log `designBundle reuse: <root>`. This subsection reads and stores only; it resolves, confines and imports nothing — `### Design Bundle Detection` below applies the same `realpath` confinement to it that it applies to a typed `--bundle`.
+3. **Precedence:** `brainstormBundleRoot` feeds `BUNDLE_ARG` in `### Design Bundle Detection` only when no `--bundle <path>` token was typed on the command line. An explicit flag always wins over frontmatter, the same precedence explicit research paths take over `researchPaths`.
+
+If the brainstorm has no `designBundle:` key, behaviour is unchanged (backward-compatible with legacy brainstorms).
+
 ### Roadmap Materialization
 
 Only runs when a brainstorm was loaded above — a `phases:` frontmatter key can exist only on a brainstorm document, so when no brainstorm was found this entire section is skipped with no log line. When this is the case, set the `roadmapMaterializationVerdict` working-memory variable to `not-run` — this gate's own trigger check (the `phases:` frontmatter parse below) never evaluates this run — and proceed directly to Rolling-Wave Phase Selection below. This step turns `/aimi:brainstorm`'s Phase 3.5 roadmap-gate output (the `phases:` frontmatter block — see `commands/brainstorm.md` "phases frontmatter rules") into durable, guard-protected state via `aimi-cli.sh`. `/aimi:brainstorm` never writes `.aimi/tasks/<feature-slug>/roadmap.json` itself; this is the only place that does. The "Sanitize every phase field," "Derive and validate each phase's directory segment," and "Detect existing roadmap.json and materialize" steps below are also reused, by name, by the Scope-Context Classification (Inline Fallback) subsection further down this phase — the fallback proposes a `phases` array itself, from a classification pass rather than brainstorm frontmatter, and re-enters this section's steps to sanitize and materialize it rather than reimplementing them.
@@ -686,13 +702,19 @@ case " $FEATURE_DESCRIPTION " in
     FEATURE_DESCRIPTION=$(echo "$FEATURE_DESCRIPTION" | sed 's/[[:space:]]*--reimport[[:space:]]*/  /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     ;;
 esac
+if [ -z "$BUNDLE_ARG" ] && [ -n "${brainstormBundleRoot:-}" ]; then
+  case "$brainstormBundleRoot" in
+    /*) BUNDLE_ARG="$brainstormBundleRoot" ;;
+    *)  BUNDLE_ARG="$AIMI_ROOT/$brainstormBundleRoot" ;;
+  esac
+fi
 BUNDLE_SHAPE_OK=true
 case "$BUNDLE_ARG" in
   --*) BUNDLE_SHAPE_OK=false ;;
 esac
 ```
 
-When `BUNDLE_SHAPE_OK=false`: report `[plan] --bundle requires a path argument` and STOP the entire `/aimi:plan` invocation — nothing below this point runs. An empty `BUNDLE_ARG` is not an error; it just means no `--bundle` was named.
+When `BUNDLE_SHAPE_OK=false`: report `[plan] --bundle requires a path argument` and STOP the entire `/aimi:plan` invocation — nothing below this point runs. An empty `BUNDLE_ARG` is not an error; it just means no `--bundle` was named. When no `--bundle` token was typed, the block above fills `BUNDLE_ARG` from the brainstorm's `designBundle.root` (`### Reuse Brainstorm Design Bundle`); a typed `--bundle` is never overridden by it, and the value then takes the same `realpath` confinement and import path below as a typed one.
 
 **When `BUNDLE_ARG` is non-empty, resolve it before any `detect-design-bundle` call runs — D5's confinement rule applies here exactly as it applies inside the verb itself:**
 
@@ -857,6 +879,36 @@ When `designBundleMeta` is non-null:
 - Extract the `prototypes` array from the bundle metadata (may be empty).
 - For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
 - Stash the full bundle object as `designBundleMeta` for Phase 4 metadata derivation.
+
+### Phase-Tier Spec Detail Authoring
+
+Runs after `### Design Bundle Detection` has resolved `designBundleMeta` and before `### Phase 0.7: Spec Ingestion`. Fires only when ALL hold: `ROADMAP_MODE=true`, `designBundleMeta.businessSpec` is non-null, and that file contains the literal marker line `<!-- aimi:per-phase-detail-deferred -->` (a brainstorm of a phased feature writes it in each per-phase section; see `commands/references/business-spec-authoring.md` § Core vs per-phase). Otherwise skip with no output. It never fires when `ROADMAP_MODE=false` — a flat feature has no phase-tier location to author into. This subsection never prompts, in any mode.
+
+The write path is always `$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle` (`$featureSlug` and `$PHASE_DIR` from `#### Extract selected-phase working memory`), never any other location. Check for an existing bundle first:
+
+```bash
+PHASE_TIER_DIR="$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle"
+if [ -f "$PHASE_TIER_DIR/README.md" ]; then
+  echo "phase-tier spec detail: $PHASE_TIER_DIR already authored — skipping"
+fi
+```
+
+When `README.md` exists, authoring is skipped entirely and the existing phase-tier bundle is never overwritten; continue to the re-detection step below. Otherwise author:
+
+1. **Core sections verbatim.** Copy BusinessSpec § 1, § 3, § 7 and § 11 from the feature-level BusinessSpec unchanged. Resolve each section number at run time from `commands/references/spec-section-contract.md`, as `business-spec-authoring.md`'s Write procedure directs, never from this text. A core section is never edited in place: when this phase's detail contradicts one, leave it as is and add the contradiction to § 11 as an open question.
+2. **Evidence for § 4/§ 5.** Spawn the `aimi-spec-deriver` agent with `targets` taken from this phase's own `areas` (`PHASE_AREAS_JSON`) and its `creates`/`needs` identities, then render its `spec_derivation` block with `$AIMI_CLI spec-derivation --input <scratch file>`, exactly as `business-spec-authoring.md` § Propose-then-correct step 2 shows. Entity and endpoint rows come from the verb and nowhere else.
+3. **Author § 2/§ 4/§ 5/§ 9** for this phase by following `business-spec-authoring.md`'s Write procedure, its Propose-then-correct and Absent-vs-unchecked rules, and its agent-mode behavior as written there: proposals are accepted as returned, and any item that would need an operator becomes a § 11 open question. Do not re-implement those rules here.
+4. **Write the bundle.** `README.md` with the generated-bundle marker as `skills/aimi-design-handoff/references/spec-output-shape.md` § `README.md` directs (read from `aimi-cli.sh` at write time, never retyped), `project/BusinessSpec.md` with the sections above, and, when `designBundleMeta.designSpec` is non-null, `project/DesignSpec.md` copied verbatim from it.
+
+**Re-detect.** After authoring, or after the skip-on-exists branch, re-run detection against the phase directory so `designBundleMeta` reflects the phase-tier bundle, which `_select_design_bundle` prefers over the scan tier:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR")
+```
+
+Overwrite `designBundleMeta` with the result (`null` or a JSON object); `### Phase 0.7: Spec Ingestion` then reads `businessSpecPath`/`designSpecPath` from it.
 
 ### Phase 0.7: Spec Ingestion
 
