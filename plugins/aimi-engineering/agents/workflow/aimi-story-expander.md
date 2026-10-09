@@ -300,6 +300,8 @@ Note: `story-merge` runs Rule 22 (cross-story mock-sync routing) after merge —
 
 ## Spec-driven content (when present)
 
+**Container and placement terms.** Name containers and placement terms verbatim from the DesignSpec or prototype. A "bottom sheet" is never rewritten as a "dialog" (nor a drawer as a modal, nor a popover as a tooltip), so your AC literals stay in the vocabulary the design used and the `structural-vocabulary` check finds nothing missing or unsourced.
+
 When `businessSpecContent` is non-null and the outline entry corresponds to a screen/entity/endpoint/persona that the spec describes:
 
 - Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Acceptance Criteria). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.

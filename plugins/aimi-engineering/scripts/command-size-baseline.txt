@@ -50,7 +50,7 @@
 # backs.
 
 execute.md	434225
-plan.md	395414
+plan.md	397366
 brainstorm.md	144723
 open-pr.md	84576
 references/forge-contract.md	45757
@@ -66,6 +66,6 @@ skills/story-executor/SKILL.md	65461
 skills/task-planner/SKILL.md	23241
 
 agents/research/aimi-foundation-architect.md	22980
-agents/workflow/aimi-story-expander.md	44057
+agents/workflow/aimi-story-expander.md	44410
 agents/research/aimi-learnings-researcher.md	16486
 agents/research/aimi-design-bundle-researcher.md	16604

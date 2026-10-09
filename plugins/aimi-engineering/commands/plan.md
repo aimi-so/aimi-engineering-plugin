@@ -3694,6 +3694,8 @@ Run the loop below once, on every axis — there is no separate single-file bran
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+DESIGN_SPEC_PATH=""      # fill with designBundleMeta.designSpec when it is non-null
+PROTOTYPE_HTML_PATHS=""  # fill with the resolved prototype HTML paths, one per line
 while IFS= read -r VALIDATE_FILE; do
   [ -n "$VALIDATE_FILE" ] || continue
   echo "Validating $VALIDATE_FILE"
@@ -3711,8 +3713,28 @@ while IFS= read -r VALIDATE_FILE; do
     echo "validate-waves rejected $VALIDATE_FILE" >&2
     exit 1
   fi
+  # Advisory only: no `exit` follows this call, whatever it returns.
+  if [ -n "${DESIGN_SPEC_PATH:-}" ] || [ -n "${PROTOTYPE_HTML_PATHS:-}" ]; then
+    set --
+    [ -z "${DESIGN_SPEC_PATH:-}" ] || set -- "$@" --spec "$DESIGN_SPEC_PATH"
+    while IFS= read -r PROTO_PATH; do
+      [ -n "$PROTO_PATH" ] || continue
+      set -- "$@" --prototype "$PROTO_PATH"
+    done <<< "${PROTOTYPE_HTML_PATHS:-}"
+    SV_JSON=$($AIMI_CLI structural-vocabulary --tasks "$VALIDATE_FILE" "$@" </dev/null) || SV_JSON=""
+    if [ -z "$SV_JSON" ]; then
+      echo "structural-vocabulary: no report for $VALIDATE_FILE (advisory, continuing)" >&2
+    elif [ "$(printf '%s' "$SV_JSON" | jq -r '.measured')" = "true" ]; then
+      echo "Structural vocabulary ($VALIDATE_FILE):"
+      printf '%s' "$SV_JSON" | jq -r '(.missing[]? | "  missing: " + .), (.unsourced[]? | "  unsourced: " + .)'
+    else
+      echo "Structural vocabulary ($VALIDATE_FILE): nothing to measure"
+    fi
+  fi
 done <<< "$VALIDATE_FILES"
 ```
+
+**The `structural-vocabulary` call is advisory, and that is deliberate — it is the one call in this loop that never aborts the run.** It runs only for a UI phase (a non-null `designBundleMeta.designSpec` or a non-empty `resolvedPrototypePaths`, narrowed to prototype HTML files) and passes each spec and prototype path as its own quoted `--spec` / `--prototype` flag through the positional parameters, never from an unquoted string variable that zsh would not word-split. `missing` names a source term that never reaches the generated stories; `unsourced` names a container term a story uses that the design never named. A non-zero exit or empty output is logged and the loop continues; `measured: false` prints `nothing to measure`.
 
 `init-session --file` rebinds the session's active tasks file, so the five `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run Phase 4.5 from the top rather than validating the remaining files against a half-fixed set. When the failure came from `normalize-verification` or `normalize-status`, inspect that file for malformed `verification` / `status` fields before retrying.
 
@@ -3758,6 +3780,7 @@ Outline: [N] stories (edits: [M])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
+[If structural-vocabulary measured]: Vocabulary: [N] missing, [M] unsourced (advisory)
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
 [If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
