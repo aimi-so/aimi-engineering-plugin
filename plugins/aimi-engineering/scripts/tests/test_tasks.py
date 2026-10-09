@@ -5219,7 +5219,15 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # a new predicate. No new root: the path is PROJECT_ROOT concatenated
     # with a relative string metadata.designBundle supplied, confined before
     # this isfile() ever runs.
-    assert code.count("os.path.") == 46
+    #
+    # The last TWO are op_probe_plan's realpath() calls, over the temporary
+    # directory it just made and over the repository top level git reported,
+    # compared to refuse a scratch directory that would land inside the
+    # repository. Neither names a path of its own: the first is
+    # tempfile.TemporaryDirectory's, the second is git's answer, and the
+    # worktree path beneath the first is built by string concatenation, so
+    # no join() was added. No new root, no leaf this module chose.
+    assert code.count("os.path.") == 48
     assert code.count("os.path.isfile(") == 9
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -6759,6 +6767,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "metadata",
         "verification-report",
         "verify-probe",
+        "probe-plan",
         "list-known-gaps",
         "design-decisions",
         "spec-derivation",
@@ -10402,3 +10411,324 @@ def test_guard_rails_never_aborts_on_a_non_object_implementation():
 def test_guard_rails_probe_verify_itself_adds_no_key(tmp_path):
     results = T.probe_verify("true\n", str(tmp_path))
     assert all("guardRail" not in entry for entry in results)
+
+
+# ---------------------------------------------------------------------------
+# probe-plan: a tasks file's verifies, measured at its own baseRef
+# ---------------------------------------------------------------------------
+#
+# Every case builds a throwaway git repository with two commits: the first is
+# the baseRef, the second adds `feature.txt`, the file a story's `test -f`
+# asserts. A segment that passes only because the second commit exists must
+# read discriminates:true at the first commit and false at the second.
+
+
+def _plan_git(root, *args):
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(name, None)
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false"] + list(args),
+        cwd=root, env=env, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _plan_repo(tmp_path, stories, metadata=None, base="first"):
+    """(root, tasks_file, first_sha, second_sha). `metadata.baseRef` is the
+    first commit unless `base` says otherwise ('none' omits it)."""
+    base_dir = os.path.realpath(str(tmp_path))
+    root = os.path.join(base_dir, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    _plan_git(root, "init", "-q")
+    with open(os.path.join(root, "README"), "w", encoding="utf-8") as handle:
+        handle.write("one\n")
+    _plan_git(root, "add", "README")
+    _plan_git(root, "commit", "-q", "-m", "first")
+    first = _plan_git(root, "rev-parse", "HEAD")
+    with open(os.path.join(root, "feature.txt"), "w", encoding="utf-8") as handle:
+        handle.write("two\n")
+    _plan_git(root, "add", "feature.txt")
+    _plan_git(root, "commit", "-q", "-m", "second")
+    second = _plan_git(root, "rev-parse", "HEAD")
+    meta = {"title": "t", "branchName": "b"}
+    if base != "none":
+        meta["baseRef"] = first if base == "first" else base
+    meta.update(metadata or {})
+    built = []
+    for index, spec in enumerate(stories, start=1):
+        story = {
+            "id": "US-%03d" % index, "title": "s", "description": "d",
+            "acceptanceCriteria": ["x"], "priority": 1, "status": "pending",
+            "dependsOn": [],
+        }
+        story.update(spec)
+        built.append(story)
+    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3", "metadata": meta, "userStories": built}, handle)
+    return root, tasks_file, first, second
+
+
+def _plan_run(root, tasks_file, *flags, env_extra=None, cwd=None):
+    env = _isolated_env(os.path.dirname(root))
+    env.update(env_extra or {})
+    return subprocess.run(
+        ["bash", CLI, "probe-plan", "--tasks-file", tasks_file] + list(flags),
+        cwd=cwd or root, env=env, capture_output=True, text=True, timeout=120,
+    )
+
+
+def _plan_ok(root, tasks_file, *flags, **kw):
+    proc = _plan_run(root, tasks_file, *flags, **kw)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_PLAN_VERIFY = {"implementation": {"verify": "test -f feature.txt\ntest -f README\n"}}
+
+
+def test_probe_plan_measures_the_base_commit_not_the_working_tree(tmp_path):
+    root, tasks_file, first, second = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    at_first = _plan_ok(root, tasks_file)
+    segments = {s["segment"]: s for s in at_first["stories"][0]["segments"]}
+    assert segments["test -f feature.txt"]["discriminates"] is True
+    assert segments["test -f README"]["discriminates"] is False
+    # the working tree HAS feature.txt, so a probe of it would say False
+    assert os.path.exists(os.path.join(root, "feature.txt"))
+    at_second = _plan_ok(root, tasks_file, "--ref", second)
+    segments = {s["segment"]: s for s in at_second["stories"][0]["segments"]}
+    assert at_second["baseRef"] == second
+    assert segments["test -f feature.txt"]["discriminates"] is False
+
+
+def test_probe_plan_measures_and_reports_the_payload_shape(tmp_path):
+    root, tasks_file, first, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert list(out) == ["baseRef", "probed", "policy", "stories",
+                         "unlabelledNonDiscriminating", "unmeasured"]
+    assert out["baseRef"] == first and out["probed"] is True
+    assert out["policy"] == T.PROBE_PLAN_NONDISCRIMINATING_POLICY
+    assert out["stories"][0]["id"] == "US-001"
+    for segment in out["stories"][0]["segments"]:
+        assert {"segment", "exit", "discriminates", "guardRail"} <= set(segment)
+
+
+def test_probe_plan_reports_unlabelled_non_discriminating_segments(tmp_path):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert out["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}
+    ]
+    assert out["unmeasured"] == []
+
+
+def test_probe_plan_reports_the_policy_constant(tmp_path):
+    assert T.PROBE_PLAN_NONDISCRIMINATING_POLICY in ("report", "refuse")
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    assert _plan_ok(root, tasks_file)["policy"] == T.PROBE_PLAN_NONDISCRIMINATING_POLICY
+    not_probed = _plan_ok(*_plan_repo(tmp_path / "np", [_PLAN_VERIFY], base="none")[:2])
+    assert "policy" not in not_probed
+
+
+def test_probe_plan_leaves_the_worktree_list_and_the_caller_tree_untouched(tmp_path, monkeypatch):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    listing = lambda: _plan_git(root, "worktree", "list", "--porcelain")
+    status = lambda: _plan_git(root, "status", "--porcelain", "--ignored")
+    before_list, before_status = listing(), status()
+    seen = {}
+    _plan_ok(root, tasks_file)
+    assert listing() == before_list and status() == before_status
+    assert not os.path.exists(os.path.join(root, ".worktrees"))
+    # the failure exit path: a segment run that raises still cleans up
+    monkeypatch.delenv(T.VERIFY_PROBE_ACTIVE_ENV, raising=False)
+
+    def boom(text, cwd, skip_matching=None, timeout=None):
+        seen["cwd"] = cwd
+        assert os.path.isdir(cwd)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(T, "probe_verify", boom)
+    with pytest.raises(RuntimeError):
+        T.op_probe_plan(["--tasks-file", tasks_file, "--cwd", root])
+    assert listing() == before_list and status() == before_status
+    assert not os.path.exists(seen["cwd"])
+    assert not os.path.exists(os.path.dirname(seen["cwd"]))
+
+
+def test_probe_plan_is_not_probed_when_the_baseref_is_absent_unknown_or_the_repo_is_not_git(tmp_path):
+    keys_omitted = ("stories", "unlabelledNonDiscriminating", "unmeasured")
+
+    def check(out, ref, reason_part):
+        assert out["probed"] is False and out["baseRef"] == ref
+        assert reason_part in out["reason"], out
+        assert not any(key in out for key in keys_omitted)
+
+    root, tasks_file, first, _ = _plan_repo(tmp_path / "a", [_PLAN_VERIFY], base="none")
+    check(_plan_ok(root, tasks_file), None, "absent")
+    check(_plan_ok(root, tasks_file, "--ref", "-x"), "-x", "'-'")
+    check(_plan_ok(root, tasks_file, "--ref", "0" * 40), "0" * 40, "does not resolve")
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "b", [_PLAN_VERIFY], base="nosuchref")
+    check(_plan_ok(root2, tasks2), "nosuchref", "does not resolve")
+    # TMPDIR pointed into the repository
+    root3, tasks3, _, _ = _plan_repo(tmp_path / "c", [_PLAN_VERIFY])
+    inside = os.path.join(root3, "scratch")
+    os.makedirs(inside)
+    out = _plan_ok(root3, tasks3, env_extra={"TMPDIR": inside})
+    check(out, _plan_git(root3, "rev-parse", "HEAD~1"), "inside the repository")
+    assert os.listdir(inside) == []
+    # not a git repository at all
+    plain = os.path.join(os.path.realpath(str(tmp_path / "d")), "proj")
+    os.makedirs(os.path.join(plain, ".aimi", "tasks"))
+    plain_tasks = os.path.join(plain, ".aimi", "tasks", "p-tasks.json")
+    with open(plain_tasks, "w", encoding="utf-8") as handle:
+        json.dump({"metadata": {"baseRef": "abc"}, "userStories": []}, handle)
+    check(_plan_ok(plain, plain_tasks, env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(plain)}),
+          "abc", "not inside a git repository")
+    # no git on PATH
+    root4, tasks4, _, _ = _plan_repo(tmp_path / "e", [_PLAN_VERIFY])
+    nogit = os.path.join(os.path.dirname(root4), "bin")
+    os.makedirs(nogit)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        for tool in os.listdir(directory):
+            link = os.path.join(nogit, tool)
+            if tool != "git" and not os.path.lexists(link):
+                os.symlink(os.path.join(directory, tool), link)
+    check(_plan_ok(root4, tasks4, env_extra={"PATH": nogit}),
+          _plan_git(root4, "rev-parse", "HEAD~1"), "git is not installed")
+
+
+def test_probe_plan_skips_suites_by_default_and_lists_them_unmeasured(tmp_path):
+    verify = "python3 -m pytest tests/ -q\npytest tests/ -q -k name\nbash scripts/test-x.sh\ntrue\n"
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
+    out = _plan_ok(root, tasks_file)
+    by_segment = {s["segment"]: s for s in out["stories"][0]["segments"]}
+    assert by_segment["python3 -m pytest tests/ -q"]["skipped"] is True
+    assert by_segment["bash scripts/test-x.sh"]["skipped"] is True
+    assert "skipped" not in by_segment["pytest tests/ -q -k name"]
+    assert by_segment["pytest tests/ -q -k name"]["discriminates"] is not None
+    unmeasured = {u["segment"]: u["why"] for u in out["unmeasured"]}
+    assert "python3 -m pytest tests/ -q" in unmeasured and "bash scripts/test-x.sh" in unmeasured
+    for why in (unmeasured["python3 -m pytest tests/ -q"], unmeasured["bash scripts/test-x.sh"]):
+        assert "--run-suites" in why
+    assert {u["segment"] for u in out["unlabelledNonDiscriminating"]} <= {"true"}
+
+
+def test_probe_plan_suite_pattern_matches_only_untargeted_suites():
+    pattern = re.compile(T._PROBE_PLAN_SUITE_PATTERN)
+    assert pattern.search("python3 -m pytest plugins/x/tests/ -q")
+    assert pattern.search("bash plugins/x/scripts/test-aimi-cli.sh")
+    assert not pattern.search("python3 -m pytest plugins/x/tests/t.py -q -k probe_plan")
+    assert not pattern.search("python3 -m pytest plugins/x/tests/t.py::test_one -q")
+    assert not pattern.search("bash -n plugins/x/scripts/aimi-cli.sh")
+
+
+def test_probe_plan_run_suites_measures_what_the_default_skips(tmp_path):
+    verify = "pytest --version\n"
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
+    default = _plan_ok(root, tasks_file)
+    assert default["stories"][0]["segments"][0]["skipped"] is True
+    measured = _plan_ok(root, tasks_file, "--run-suites")
+    entry = measured["stories"][0]["segments"][0]
+    assert "skipped" not in entry and entry["discriminates"] is not None
+    assert not any(u["segment"] == "pytest --version" and "skipped" in u["why"]
+                   for u in measured["unmeasured"])
+
+
+def test_probe_plan_marks_guard_rails_and_excludes_them_from_the_unlabelled_list(tmp_path):
+    labelled = {"implementation": {"verify": "test -f feature.txt\ntest -f README\n",
+                                   "guardRails": ["test -f README"]}}
+    root, tasks_file, _, _ = _plan_repo(tmp_path / "l", [labelled])
+    out = _plan_ok(root, tasks_file)
+    flags = {s["segment"]: s["guardRail"] for s in out["stories"][0]["segments"]}
+    assert flags == {"test -f feature.txt": False, "test -f README": True}
+    assert out["unlabelledNonDiscriminating"] == []
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "u", [_PLAN_VERIFY])
+    assert _plan_ok(root2, tasks2)["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}
+    ]
+
+
+def test_probe_plan_names_stories_it_could_not_probe(tmp_path, monkeypatch):
+    stories = [
+        {},  # no implementation: segments [], nothing unmeasured
+        {"implementation": {"verify": ""}},
+        {"implementation": {"verify": ["a", "b"]}},
+        {"project": "../escape", "implementation": {"verify": "true"}},
+        {"project": "nodir", "implementation": {"verify": "true"}},
+    ]
+    root, tasks_file, _, _ = _plan_repo(tmp_path, stories)
+    out = _plan_ok(root, tasks_file)
+    by_id = {s["id"]: s["segments"] for s in out["stories"]}
+    assert by_id["US-001"] == [] and by_id["US-002"] == []
+    named = {u["id"]: u["why"] for u in out["unmeasured"]}
+    assert set(named) == {"US-003", "US-004", "US-005"}
+    assert "string" in named["US-003"]
+    assert "routable" in named["US-004"]
+    assert "does not exist" in named["US-005"]
+    # a verdict-less entry names its own cause
+    monkeypatch.delenv(T.VERIFY_PROBE_ACTIVE_ENV, raising=False)
+    canned = [
+        {"segment": "a", "exit": None, "discriminates": None, "timedOut": True},
+        {"segment": "b", "exit": None, "discriminates": None, "unresolvedState": ["W", "X"]},
+        {"segment": "c", "exit": None, "discriminates": None, "unterminated": "open quote"},
+    ]
+    monkeypatch.setattr(T, "probe_verify", lambda *a, **k: [dict(e) for e in canned])
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "two", [_PLAN_VERIFY])
+    reasons = T._probe_plan_stories(
+        T.load_docs(tasks2), tasks2, root2, "x", "", None)[2]
+    assert [r["segment"] for r in reasons] == ["a", "b", "c"]
+    assert "timed out" in reasons[0]["why"]
+    assert "W, X" in reasons[1]["why"]
+    assert "unterminated" in reasons[2]["why"]
+
+
+def test_probe_plan_refuses_to_run_inside_a_probe(tmp_path):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    proc = _plan_run(root, tasks_file, env_extra={T.VERIFY_PROBE_ACTIVE_ENV: "1"})
+    assert proc.returncode != 0 and proc.stdout == ""
+    assert "refusing to run inside another probe" in proc.stderr
+    for way_out in ("does not itself call verify-probe", "probe_verify()"):
+        assert way_out in proc.stderr
+    started = time.time()
+    previous = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        with pytest.raises(SystemExit):
+            T.op_probe_plan(["--tasks-file", "/nao/existe.json"])
+    finally:
+        if previous is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = previous
+    assert time.time() - started < 1.0
+
+
+def test_probe_plan_wrapper_crosses_once_takes_no_lock_and_confines_the_tasks_file(tmp_path):
+    body = _executable(dict(_wrappers())["cmd_probe_plan"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    assert body.count("validate_path_in_project") == 1
+    assert body.index("validate_path_in_project") < body.index("check_python3")
+    assert 'AIMI_INVOCATION_DIR:-$PWD' in body
+    for flag in ("--tasks-file", "--ref", "--run-suites"):
+        assert flag in body
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    refused = _plan_run(root, tasks_file, "--bogus")
+    assert refused.returncode == 1 and "probe-plan --tasks-file <path>" in refused.stderr
+    outside = os.path.join(os.path.dirname(root), "elsewhere-tasks.json")
+    with open(outside, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    escaped = _plan_run(root, outside)
+    assert escaped.returncode != 0 and escaped.stdout == ""
+
+
+def test_probe_plan_op_is_registered_under_the_verb_name():
+    assert T._OPS["probe-plan"] is T.op_probe_plan
+    with open(CLI, encoding="utf-8") as handle:
+        source = handle.read()
+    assert 'shift; cmd_probe_plan "$@"' in source
+    assert "probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" in source

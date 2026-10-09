@@ -2077,6 +2077,51 @@ cmd_verify_probe() {
     --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}"
 }
 
+# Run every story's implementation.verify at the tasks file's own
+# metadata.baseRef in one throwaway detached worktree and name the segments that
+# already pass there. Read-only for the caller's tree and takes no lock.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file),
+#        --ref <sha> (wins over metadata.baseRef), --run-suites (do not skip
+#        full-suite segments). The tasks-file argument is confined BEFORE
+#        python3 starts; --ref is a git revision, not a path, and is validated
+#        in tasks.py where the git calls are made.
+cmd_probe_plan() {
+  local tasks_file="" ref="" run_suites=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      --ref) shift; ref="${1:-}" ;;
+      --run-suites) run_suites=1 ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  local extra=()
+  if [ -n "$ref" ]; then
+    extra+=(--ref "$ref")
+  fi
+  if [ "$run_suites" -eq 1 ]; then
+    extra+=(--run-suites)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" probe-plan \
+    --tasks-file "$tasks_file" \
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" ${extra[@]+"${extra[@]}"}
+}
+
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
 #
 # Those files are the only diagnosis this pipeline produces for free, and until
@@ -17141,6 +17186,20 @@ COMMANDS:
                               every skipped segment is one this probe can no longer warn about.
                               A segment that outlives the per-segment ceiling answers the same
                               null: a run that was cut off measured nothing.
+    probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]
+                              Run every story's implementation.verify at the tasks file's own
+                              metadata.baseRef (or --ref, which wins) in ONE throwaway
+                              detached git worktree outside the repository, and print
+                              {baseRef, probed, policy, stories, unlabelledNonDiscriminating,
+                              unmeasured}. unlabelledNonDiscriminating names, by story id and
+                              segment, each segment that already PASSED at baseRef and is not
+                              labelled in implementation.guardRails. Full-suite segments (a
+                              pytest run with no -k or :: selector, any test-*.sh) are skipped
+                              by default and listed in unmeasured; --run-suites measures
+                              them. A baseRef that cannot be used answers
+                              {baseRef, probed:false, reason} at exit 0 with the result
+                              arrays omitted, never an empty-but-clean report. Like
+                              verify-probe it refuses to run inside another probe.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
@@ -18522,6 +18581,7 @@ main() {
     get-story)         shift; cmd_get_story "$@" ;;
     get-story-context) shift; cmd_get_story_context "$@" ;;
     verify-probe)      shift; cmd_verify_probe "$@" ;;
+    probe-plan)        shift; cmd_probe_plan "$@" ;;
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     design-decisions)  shift; cmd_design_decisions "$@" ;;
     spec-derivation)   shift; cmd_spec_derivation "$@" ;;

@@ -6029,6 +6029,28 @@ _VERIFY_PROBE_REENTRY = (
     "probe_verify() in tasks.py directly, which is not guarded."
 )
 
+# probe-plan's refusal is the same sentence with the verb's own name, so the
+# two exits are stated once (above) and cannot drift apart.
+_PROBE_PLAN_REENTRY = _VERIFY_PROBE_REENTRY.replace(
+    "verify-probe: refusing to run inside another verify-probe",
+    "probe-plan: refusing to run inside another probe",
+    1,
+)
+
+# What probe-plan does with a segment that passes at baseRef and is not marked
+# as a guard rail. "report" lists it; "refuse" is the only other valid value.
+# A later outline entry decides the final value; callers read it from the
+# `policy` key of the probed:true payload and never parse prose for it.
+PROBE_PLAN_NONDISCRIMINATING_POLICY = "report"
+
+# Segments probe-plan does not run unless --run-suites is given: a pytest run
+# naming neither `-k` nor a `::` node selector, and any test-*.sh suite
+# script. probe_verify tests it only against segments that survived its own
+# `||`, `cd` and assignment branches, so it can never drop a context segment.
+_PROBE_PLAN_SUITE_PATTERN = (
+    r"(?s)(?:^(?!.*(?:\s-k\s|::)).*\bpytest\b|\btest-[A-Za-z0-9_.-]+\.sh\b)"
+)
+
 # What the refusal says when `implementation.verify` is PRESENT and is not a
 # string. Same shape as the constant above and for the same reason: the
 # message is the only place that states the whole problem, so it names the
@@ -7479,6 +7501,207 @@ def op_verify_probe(argv):
     return 0
 
 
+_GIT_ENV_DROPPED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+def _probe_plan_git(args, cwd):
+    """`git <args>` in `cwd` as (returncode, stdout, stderr), or None when git
+    cannot be run at all (not installed, or `cwd` is gone). The three variables
+    that pin git to one repository are removed from the environment it gets, so
+    a caller running inside a hook probes the repository `cwd` names."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROPPED}
+    try:
+        proc = subprocess.run(
+            ["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _probe_plan_not_probed(ref, reason):
+    """The answer for a baseRef that cannot be probed. The result arrays are
+    OMITTED, not empty: no reader can mistake emptiness for a clean bill."""
+    return {"baseRef": ref, "probed": False, "reason": reason}
+
+
+def _probe_plan_why(entry):
+    """Why a probe entry carries no verdict, named by its own cause."""
+    if entry.get("skipped"):
+        return (
+            "skipped as a full-suite segment; pass --run-suites to measure it"
+        )
+    if entry.get("timedOut"):
+        return "timed out before a verdict"
+    if entry.get("unresolvedState"):
+        return "reads shell state nothing provides: %s" % ", ".join(
+            str(name) for name in entry["unresolvedState"]
+        )
+    if entry.get("unterminated"):
+        return "the verify is unterminated (%s), so it would not run as written" % (
+            entry["unterminated"],
+        )
+    return "no verdict could be reached"
+
+
+def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
+    """The per-story loop. Returns (stories, unlabelled, unmeasured)."""
+    stories_out, unlabelled, unmeasured = [], [], []
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("userStories"), list):
+            continue
+        for story in doc["userStories"]:
+            if not isinstance(story, dict):
+                continue
+            sid = story.get("id")
+            implementation = story.get("implementation")
+            verify = implementation.get("verify") if isinstance(implementation, dict) else None
+            if verify is None or (isinstance(verify, str) and not verify.strip()):
+                stories_out.append({"id": sid, "segments": []})
+                continue
+            if not isinstance(verify, str):
+                stories_out.append({"id": sid, "segments": []})
+                unmeasured.append({
+                    "id": sid, "segment": None,
+                    "why": "implementation.verify is %s, not a string"
+                    % _verify_probe_type_name(verify),
+                })
+                continue
+            project = _report_project(story)
+            if project is not None and _invalid_project(project):
+                stories_out.append({"id": sid, "segments": []})
+                unmeasured.append({
+                    "id": sid, "segment": None,
+                    "why": "project %r is not a routable project path" % project,
+                })
+                continue
+            rel = prefix + (project if project not in (None, ".") else "")
+            probe_dir = rel.rstrip("/")
+            if probe_dir:
+                found = _probe_plan_git(["cat-file", "-e", sha + ":" + probe_dir], git_tree)
+                if found is None or found[0] != 0:
+                    stories_out.append({"id": sid, "segments": []})
+                    unmeasured.append({
+                        "id": sid, "segment": None,
+                        "why": "project directory %s does not exist at the base commit" % probe_dir,
+                    })
+                    continue
+            results = probe_verify(
+                verify, git_tree + "/" + rel, skip_matching=skip_matching
+            )
+            rails = set(guard_rails_for_story(path, sid)) if isinstance(sid, str) else set()
+            for entry in results:
+                entry["guardRail"] = entry["segment"] in rails
+                if entry["discriminates"] is False and not entry["guardRail"]:
+                    unlabelled.append({"id": sid, "segment": entry["segment"]})
+                elif entry["discriminates"] is None:
+                    unmeasured.append({
+                        "id": sid, "segment": entry["segment"],
+                        "why": _probe_plan_why(entry),
+                    })
+            stories_out.append({"id": sid, "segments": results})
+    return stories_out, unlabelled, unmeasured
+
+
+def op_probe_plan(argv):
+    """Every story's verify, run at the tasks file's own `metadata.baseRef` in
+    ONE throwaway detached worktree, so a segment that already passes before
+    any story is built is named before the plan reaches /aimi:execute.
+
+    THE RE-ENTRANCY GUARD IS THE FIRST STATEMENT, for the reason
+    `op_verify_probe` gives: this verb runs verify segments, so a verify that
+    calls it back would recurse.
+
+    `probed` IS DECIDED BEFORE ANYTHING IS CREATED. Every baseRef that cannot be
+    used (absent, option-shaped, no git, not a repository, an unknown commit, a
+    scratch directory inside the repository, a failed `worktree add`) answers
+    `{baseRef, probed: false, reason}` at exit 0 with the result arrays
+    OMITTED -- emptiness must never read as a clean bill of health.
+
+    THE TREE LIVES UNDER A `TemporaryDirectory` OUTSIDE THE REPOSITORY and is
+    removed with `git worktree remove --force` then `git worktree prune` in a
+    `finally`, so the caller's `git worktree list` is unchanged on every exit
+    path. The base tree carries no gitignored state: a segment that fails there
+    only because the tree is unprepared reads as discriminating, the safe
+    direction. This verb REPORTS; the refuse-or-report decision is `policy`.
+    """
+    if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
+        die(_PROBE_PLAN_REENTRY)
+    path = _flag(argv, "--tasks-file")
+    cwd = _flag(argv, "--cwd") or os.getcwd()
+    ref = _flag(argv, "--ref")
+    run_suites = "--run-suites" in argv
+    if not path:
+        die(
+            "Usage: tasks.py probe-plan --tasks-file <path> [--cwd <dir>] "
+            "[--ref <sha>] [--run-suites]"
+        )
+    docs = read_docs(path, "probe-plan")
+    if not ref:
+        ref = None
+        for doc in docs:
+            meta = doc.get("metadata") if isinstance(doc, dict) else None
+            candidate = meta.get("baseRef") if isinstance(meta, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                ref = candidate
+                break
+    if ref is None:
+        _emit(_probe_plan_not_probed(None, "metadata.baseRef is absent and no --ref was given"))
+        return 0
+    if ref.startswith("-"):
+        _emit(_probe_plan_not_probed(ref, "the ref begins with '-' and is not a commit name"))
+        return 0
+    top = _probe_plan_git(["rev-parse", "--show-toplevel"], cwd)
+    if top is None:
+        _emit(_probe_plan_not_probed(ref, "git is not installed or cannot run here"))
+        return 0
+    if top[0] != 0:
+        _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        return 0
+    toplevel = top[1].strip()
+    resolved = _probe_plan_git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], toplevel)
+    if resolved is None or resolved[0] != 0 or not resolved[1].strip():
+        _emit(_probe_plan_not_probed(ref, "the ref does not resolve to a commit in this repository"))
+        return 0
+    sha = resolved[1].strip()
+    shown = _probe_plan_git(["rev-parse", "--show-prefix"], cwd)
+    prefix = shown[1].strip() if shown is not None and shown[0] == 0 else ""
+    with tempfile.TemporaryDirectory(prefix="aimi-probe-plan-") as scratch:
+        scratch_real = os.path.realpath(scratch)
+        top_real = os.path.realpath(toplevel)
+        if scratch_real == top_real or scratch_real.startswith(top_real + "/"):
+            _emit(_probe_plan_not_probed(
+                ref, "the temporary directory would land inside the repository"
+            ))
+            return 0
+        git_tree = scratch_real + "/tree"
+        added = _probe_plan_git(["worktree", "add", "--detach", git_tree, sha], toplevel)
+        if added is None or added[0] != 0:
+            _probe_plan_git(["worktree", "prune"], toplevel)
+            detail = (added[2].strip().splitlines() or ["no output"])[0] if added else "git cannot run"
+            _emit(_probe_plan_not_probed(ref, "git worktree add failed: " + detail))
+            return 0
+        try:
+            stories_out, unlabelled, unmeasured = _probe_plan_stories(
+                docs, path, git_tree, sha, prefix,
+                None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+            )
+        finally:
+            removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
+            _probe_plan_git(["worktree", "prune"], toplevel)
+            if removed is None or removed[0] != 0:
+                sys.stderr.write("probe-plan: could not remove the temporary worktree %s\n" % git_tree)
+    _emit({
+        "baseRef": ref,
+        "probed": True,
+        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
+        "stories": stories_out,
+        "unlabelledNonDiscriminating": unlabelled,
+        "unmeasured": unmeasured,
+    })
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # list-known-gaps -- the corpus the executors write and no plan has ever read
 # ---------------------------------------------------------------------------
@@ -8019,6 +8242,7 @@ _OPS = {
     "init-session": op_init_session,
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
+    "probe-plan": op_probe_plan,
     "list-known-gaps": op_list_known_gaps,
     "design-decisions": op_design_decisions,
     "spec-derivation": op_spec_derivation,
