@@ -19,24 +19,13 @@ repository access is needed, and nothing here should ever become an open
 question — if the operator can describe their own product, you can write it
 down.
 
-- **Purpose** — what the feature does and why it exists, in a sentence or
-  two.
-- **Screens / views** — the canonical list of screens or views this feature
-  needs. Ask for names in the order the operator thinks of them; preserve
-  that order when you write the list.
-- **Business rules** — ask the operator to state each rule as a short,
-  numbered sentence. Assign each one an `RN-NN` id in the order they give
-  them to you (`RN-01`, `RN-02`, …) — do not renumber or reorder what they
-  told you.
-- **Data models / entities** — only if the feature has a non-trivial one;
-  skip this for a feature with no persistent data of its own.
-- **Personas / roles** — who uses each screen, and what differs between
-  roles if anything does.
-- **Acceptance criteria** — ask the operator to state, in their own words,
-  what "done" looks like for each screen or rule. Record their wording
-  verbatim rather than rephrasing it into your own house style — the
-  acceptance criteria a bundle carries are meant to read as the operator's
-  own bar for success, not yours.
+The Category A items (purpose, screens / views, business rules, personas /
+roles, acceptance criteria, and the data-model note) are defined once, in
+`commands/references/business-spec-authoring.md` under its **Questionnaire**
+section. Follow that section for what to ask, how to number business rules
+(`RN-NN`, in the order given) and how to record acceptance criteria verbatim.
+Entities and endpoints are not asked for: that reference's
+**Propose-then-correct** section covers them.
 
 ## Category B — Ask By Name, or Leave Open
 

@@ -11,6 +11,7 @@ current reader depends on; adding a new dependency on a number means adding its
 row here in the same change.
 
 **Consumed by:** `commands/brainstorm.md`, `commands/plan.md`, `commands/deepen.md`,
+`commands/references/business-spec-authoring.md`,
 `agents/research/aimi-design-bundle-researcher.md`,
 `agents/research/aimi-bundle-prototype-author.md`,
 `agents/workflow/aimi-story-expander.md`, `skills/story-executor/SKILL.md`, and
@@ -51,17 +52,17 @@ invisible to the stricter of the two readers.
 
 | Section | Backs | Consumers |
 | --- | --- | --- |
-| `BusinessSpec § 1` | Purpose / overview | `brainstorm.md` Purpose auto-pass, `plan.md` |
+| `BusinessSpec § 1` | Purpose / overview | `brainstorm.md` Purpose auto-pass, `plan.md`, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 2` | The canonical screen/view list (see *Screen List* below) | `plan.md` screen-per-story decomposition and validation (around lines 2711, 3498), `deepen.md` missing-AC gate (around line 226) |
-| `BusinessSpec § 3` | Business rules, each with an `RN-NN` id | `plan.md` `businessRules`, `deepen.md` rule-id annotation gate, `skills/story-executor/SKILL.md` Rule-ID citation rule |
+| `BusinessSpec § 3` | Business rules, each with an `RN-NN` id | `plan.md` `businessRules`, `deepen.md` rule-id annotation gate, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 4` | Data models / entities; one story per non-trivial entity | `plan.md` `dataModels`, `aimi-design-bundle-researcher.md` verbatim passthrough |
 | `BusinessSpec § 4.1` | A numbered subsection of § 4 | `aimi-design-bundle-researcher.md` (citation-example use only) |
 | `BusinessSpec § 5` | Endpoint / API groups (with `§ 5.1`, `§ 5.3` subsections) | `plan.md`, `aimi-design-bundle-researcher.md` |
 | `BusinessSpec § 5.1` | An endpoint group subsection of § 5 | `plan.md` |
 | `BusinessSpec § 5.3` | An endpoint group subsection of § 5; every `endpoints[].responseShape` source cites a subsection here, checked by `spec_contains`'s fixed-string containment | `plan.md`, `tasks.py` `validate-tasks` |
-| `BusinessSpec § 7` | Personas / roles; one story per tier | `brainstorm.md` Users auto-pass and Personas render, `plan.md` `userRoles` |
-| `BusinessSpec § 9` | Acceptance / success criteria, seeded verbatim with rule ids preserved | `brainstorm.md` Success auto-pass, `plan.md` AC seeding, `deepen.md` missing-AC gate, `aimi-design-bundle-researcher.md`, `aimi-bundle-prototype-author.md`, `aimi-story-expander.md`, `skills/story-executor/SKILL.md` Rule-ID citation rule |
-| `BusinessSpec § 11` | Open questions; bundle-sourced OQs are not exempt from resolve/defer | `brainstorm.md` |
+| `BusinessSpec § 7` | Personas / roles; one story per tier | `brainstorm.md` Users auto-pass and Personas render, `plan.md` `userRoles`, `commands/references/business-spec-authoring.md` |
+| `BusinessSpec § 9` | Acceptance / success criteria, seeded verbatim with rule ids preserved | `brainstorm.md` Success auto-pass, `plan.md` AC seeding, `deepen.md` missing-AC gate, `aimi-design-bundle-researcher.md`, `aimi-bundle-prototype-author.md`, `aimi-story-expander.md`, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
+| `BusinessSpec § 11` | Open questions; bundle-sourced OQs are not exempt from resolve/defer | `brainstorm.md`, `commands/references/business-spec-authoring.md` |
 
 ## DesignSpec Sections
 
