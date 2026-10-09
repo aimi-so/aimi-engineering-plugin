@@ -2206,6 +2206,54 @@ cmd_spec_derivation() {
   python3 "$(_aimi_tasks_py)" spec-derivation --input "$input_path"
 }
 
+# Measure the structural vocabulary (container/placement terms such as "bottom
+# sheet" or "dialog") a tasks file's stories use against what a spec or
+# prototype names. Read-only, no lock, advisory: it reports `missing` and
+# `unsourced` and never blocks. Every path arrives as a CLI argument, so each
+# is confined by validate_path_in_project BEFORE check_python3 and before
+# python3 starts; the op in tasks.py never re-checks them.
+#
+# Flags: --tasks <path> (required), --spec <path>... , --prototype <path>...
+cmd_structural_vocabulary() {
+  local tasks_path="" spec_paths=() prototype_paths=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks) shift; tasks_path="${1:-}" ;;
+      --spec) shift; spec_paths+=("${1:-}") ;;
+      --prototype) shift; prototype_paths+=("${1:-}") ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]..." >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$tasks_path" ]; then
+    echo "Usage: aimi-cli.sh structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]..." >&2
+    exit 1
+  fi
+
+  local args=() p
+  tasks_path=$(resolve_path "$tasks_path")
+  validate_path_in_project "$tasks_path"
+  args+=(--tasks-file "$tasks_path")
+  for p in ${spec_paths[@]+"${spec_paths[@]}"}; do
+    p=$(resolve_path "$p")
+    validate_path_in_project "$p"
+    args+=(--spec "$p")
+  done
+  for p in ${prototype_paths[@]+"${prototype_paths[@]}"}; do
+    p=$(resolve_path "$p")
+    validate_path_in_project "$p"
+    args+=(--prototype "$p")
+  done
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" structural-vocabulary "${args[@]}"
+}
+
 # Mark a story as in-progress
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
 cmd_mark_in_progress() {
@@ -17125,6 +17173,25 @@ COMMANDS:
                               1 naming the record index and the invalid field.
                               --input is confined to the project root by
                               validate_path_in_project before python3 starts.
+    structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]...
+                              Count a fixed lexicon of container/placement terms
+                              (STRUCTURAL_LEXICON in tasks.py: bottom sheet, dialog,
+                              modal, drawer, sidebar, side panel, header, footer, tab
+                              bar, toolbar, stepper, step indicator, card, list, grid,
+                              popover, tooltip, toast, banner, accordion, carousel,
+                              full-screen, overlay, split view) verbatim, case-
+                              insensitive, as whole phrases, in the spec/prototype
+                              files and in the tasks file's story text (title,
+                              description, acceptanceCriteria, implementation.approach,
+                              tasks[], notes). Prints {measured, terms, missing,
+                              unsourced}: `missing` are terms a source names that no
+                              story mentions, `unsourced` terms stories use that no
+                              source names. When no term occurs anywhere it prints
+                              {"measured": false, "terms": [], "missing": [],
+                              "unsourced": []} and exits 0. Advisory only. Every path
+                              is confined by validate_path_in_project before python3
+                              starts; an unreadable or invalid --tasks file exits 1
+                              naming it.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -18458,6 +18525,7 @@ main() {
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     design-decisions)  shift; cmd_design_decisions "$@" ;;
     spec-derivation)   shift; cmd_spec_derivation "$@" ;;
+    structural-vocabulary) shift; cmd_structural_vocabulary "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
