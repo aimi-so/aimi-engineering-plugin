@@ -3123,6 +3123,85 @@ def derive_spec_records(payload):
     }
 
 
+STRUCTURAL_LEXICON = (
+    "bottom sheet",
+    "dialog",
+    "modal",
+    "drawer",
+    "sidebar",
+    "side panel",
+    "header",
+    "footer",
+    "tab bar",
+    "toolbar",
+    "stepper",
+    "step indicator",
+    "card",
+    "list",
+    "grid",
+    "popover",
+    "tooltip",
+    "toast",
+    "banner",
+    "accordion",
+    "carousel",
+    "full-screen",
+    "overlay",
+    "split view",
+)
+
+
+def _story_text(story):
+    """One story's text for structural-vocabulary: title, description, every
+    acceptanceCriteria entry, implementation.approach, every tasks[] entry and
+    notes -- and no other field. A missing or mistyped field is empty text."""
+    if not isinstance(story, dict):
+        return ""
+    implementation = story.get("implementation")
+    parts = [story.get("title"), story.get("description")]
+    criteria = story.get("acceptanceCriteria")
+    parts.extend(criteria if isinstance(criteria, list) else [criteria])
+    parts.append(implementation.get("approach") if isinstance(implementation, dict) else None)
+    tasks = story.get("tasks")
+    parts.extend(tasks if isinstance(tasks, list) else [tasks])
+    parts.append(story.get("notes"))
+    return "\n".join(part for part in parts if isinstance(part, str))
+
+
+def measure_structural_vocabulary(stories, source_texts):
+    """Count each STRUCTURAL_LEXICON term, verbatim, case-insensitive and as a
+    whole phrase (a word-boundary match, so "playlist" is not "list"), in the
+    spec/prototype texts and in the stories' text.
+
+    `terms` lists only terms that occur somewhere, as {term, sourceCount,
+    storyCount}. `missing` holds terms a source names that no story mentions;
+    `unsourced` holds terms stories use that no source names. `measured` is
+    false when no term occurs anywhere -- there was nothing to measure.
+    """
+    story_blob = "\n".join(_story_text(story) for story in stories)
+    source_blob = "\n".join(source_texts)
+    terms = []
+    missing = []
+    unsourced = []
+    for term in STRUCTURAL_LEXICON:
+        pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.IGNORECASE)
+        source_count = len(pattern.findall(source_blob))
+        story_count = len(pattern.findall(story_blob))
+        if not (source_count or story_count):
+            continue
+        terms.append({"term": term, "sourceCount": source_count, "storyCount": story_count})
+        if source_count and not story_count:
+            missing.append(term)
+        if story_count and not source_count:
+            unsourced.append(term)
+    return {
+        "measured": bool(terms),
+        "terms": terms,
+        "missing": missing,
+        "unsourced": unsourced,
+    }
+
+
 def design_decisions(brainstorm_bytes):
     """The awk/sed/awk/sed/head pipeline, rewritten from a single-heading
     prefix match into a shape rule over every top-level `## ` heading (see
@@ -7812,6 +7891,37 @@ def op_spec_derivation(argv):
     return 0
 
 
+def op_structural_vocabulary(argv):
+    """The structural-vocabulary measurement of the tasks file named by
+    --tasks-file against every --spec and --prototype text (both repeatable).
+
+    Every path already crossed aimi-cli.sh's validate_path_in_project by the
+    time this runs -- confinement of a CLI-ARGUMENT path is that function's
+    job, the same split op_design_decisions documents. Nothing here re-checks
+    it. Advisory only: a consumer decides what to do with the answer.
+    """
+    tasks_path = _flag(argv, "--tasks-file")
+    if not tasks_path:
+        die("Usage: tasks.py structural-vocabulary --tasks-file <path> [--spec <path>]... [--prototype <path>]...")
+    docs = read_docs(tasks_path, "structural-vocabulary")
+    stories = []
+    for doc in docs:
+        if isinstance(doc, dict) and isinstance(doc.get("userStories"), list):
+            stories.extend(doc["userStories"])
+    texts = []
+    for index, arg in enumerate(argv):
+        if arg in ("--spec", "--prototype") and index + 1 < len(argv):
+            source_path = argv[index + 1]
+            try:
+                with open(source_path, "rb") as handle:
+                    texts.append(handle.read().decode("utf-8", "replace"))
+            except OSError as err:
+                die("Error: structural-vocabulary: cannot read %s %s: %s"
+                    % (arg[2:], source_path, err.strerror))
+    _emit(measure_structural_vocabulary(stories, texts))
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -7855,6 +7965,7 @@ _OPS = {
     "list-known-gaps": op_list_known_gaps,
     "design-decisions": op_design_decisions,
     "spec-derivation": op_spec_derivation,
+    "structural-vocabulary": op_structural_vocabulary,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }

@@ -11450,6 +11450,65 @@ SPECEOF
   unset -f _spec_derivation_refusal
 }
 
+test_structural_vocabulary() {
+  echo ""
+  echo "=== Testing structural-vocabulary: missing/unsourced terms, whole-phrase matching, measured:false degrade, refusals ==="
+
+  local spec="$TEST_DIR/structural-vocabulary-spec.md"
+  local tasks="$TEST_DIR/structural-vocabulary-tasks.json"
+  local playlist="$TEST_DIR/structural-vocabulary-playlist.json"
+  local output stderr_output exit_code
+
+  printf 'The filter panel opens as a bottom sheet on mobile.\n' > "$spec"
+  cat > "$tasks" << 'SVEOF'
+{"schemaVersion":"3.3","metadata":{},"userStories":[{"id":"US-001","title":"Filter panel","description":"As a shopper, I want filters","acceptanceCriteria":["Tapping Filter opens a Dialog with filter controls"],"status":"pending","dependsOn":[]}]}
+SVEOF
+  cat > "$playlist" << 'SVEOF'
+{"schemaVersion":"3.3","metadata":{},"userStories":[{"id":"US-001","title":"Playlist","description":"As a listener, I want a playlist","acceptanceCriteria":["The playlist screen shows tracks"],"status":"pending","dependsOn":[]}]}
+SVEOF
+
+  exit_code=0
+  output=$("$CLI" structural-vocabulary --tasks "$tasks" --spec "$spec") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "structural-vocabulary: valid input exits 0"
+  assert_eq "true" "$(echo "$output" | jq -r '.measured')" \
+    "structural-vocabulary: measured is true when terms occur"
+  assert_eq '["bottom sheet"]' "$(echo "$output" | jq -c '.missing')" \
+    "structural-vocabulary: a spec term no story mentions is missing"
+  assert_eq '["dialog"]' "$(echo "$output" | jq -c '.unsourced')" \
+    "structural-vocabulary: a story term no source names is unsourced (case-insensitive)"
+
+  exit_code=0
+  output=$("$CLI" structural-vocabulary --tasks "$playlist") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "structural-vocabulary: playlist-only tasks exit 0"
+  assert_eq '{"measured":false,"terms":[],"missing":[],"unsourced":[]}' "$(echo "$output" | jq -c '.')" \
+    "structural-vocabulary: 'playlist' is not an occurrence of 'list' (measured:false degrade)"
+
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$TEST_DIR/structural-vocabulary-absent.json" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: a missing --tasks file exits 1"
+  assert_contains "structural-vocabulary-absent.json" "$stderr_output" \
+    "structural-vocabulary: the refusal names the unreadable file"
+
+  printf '{not json' > "$TEST_DIR/structural-vocabulary-bad.json"
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$TEST_DIR/structural-vocabulary-bad.json" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: an invalid-JSON --tasks file exits 1"
+  assert_contains "structural-vocabulary-bad.json" "$stderr_output" \
+    "structural-vocabulary: the invalid-JSON refusal names the file"
+  case "$stderr_output" in
+    *Traceback*) assert_eq "clean" "traceback" "structural-vocabulary: no Python traceback on invalid JSON" ;;
+    *) assert_eq "clean" "clean" "structural-vocabulary: no Python traceback on invalid JSON" ;;
+  esac
+
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$tasks" --spec /etc/hostname 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: --spec outside the project root exits 1"
+  assert_contains "Error: Path escapes project root — access denied" "$stderr_output" \
+    "structural-vocabulary: --spec outside the project root is refused by validate_path_in_project"
+
+  rm -f "$spec" "$tasks" "$playlist" "$TEST_DIR/structural-vocabulary-bad.json"
+}
+
 test_update_field_verification_value_guard() {
   echo ""
   echo "=== Testing update-field: verification.status/.strategy are constrained to their documented value sets ==="
@@ -11874,6 +11933,11 @@ main() {
   echo ""
   echo "--- Spec Derivation Tests ---"
   test_spec_derivation
+
+  # structural-vocabulary tests
+  echo ""
+  echo "--- Structural Vocabulary Tests ---"
+  test_structural_vocabulary
 
   # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

@@ -5110,9 +5110,15 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     literal is `open(input_path, "rb")` -- a new distinct form, because the
     variable is named for what it is, so the set below gains one member. It
     is a read, never a write; the verb emits to stdout only.
+
+    THE ELEVENTH open() ARRIVED WITH structural-vocabulary, and it is the same
+    caller-supplied, bash-confined read as the tenth: the --spec and
+    --prototype texts it measures. The literal is `open(source_path, "rb")`, a
+    new distinct form, so the set below gains one member. It is a read, and it
+    adds no os.path call -- an unreadable file is an OSError, not a predicate.
     """
     code = _code()
-    assert code.count("open(") == 10
+    assert code.count("open(") == 11
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
@@ -5120,7 +5126,8 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     assert 'open(full, "r", encoding="utf-8")' in code
     assert 'open(brainstorm_path, "rb")' in code
     assert 'open(input_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 10
+    assert 'open(source_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 11
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -6755,6 +6762,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "list-known-gaps",
         "design-decisions",
         "spec-derivation",
+        "structural-vocabulary",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -10212,3 +10220,96 @@ def test_spec_derivation_op_reads_the_file_and_refuses_bad_json(tmp_path, capsys
     assert "Error: spec-derivation: input is not valid JSON:" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         T.op_spec_derivation([])
+
+
+# ---------------------------------------------------------------------------
+# structural-vocabulary: whole-phrase lexicon counts, missing / unsourced
+# ---------------------------------------------------------------------------
+
+
+def _svoc_story(text, **extra):
+    story = {"id": "US-001", "title": text, "description": "", "acceptanceCriteria": []}
+    story.update(extra)
+    return story
+
+
+def test_structural_vocabulary_reproduces_the_bottom_sheet_vs_dialog_incident():
+    result = T.measure_structural_vocabulary(
+        [_svoc_story("Filter", acceptanceCriteria=["Tapping Filter opens a dialog"])],
+        ["The filter panel opens as a bottom sheet on mobile."],
+    )
+    assert result["measured"] is True
+    assert "bottom sheet" in result["missing"]
+    assert "dialog" in result["unsourced"]
+
+
+def test_structural_vocabulary_matches_whole_phrases_only():
+    result = T.measure_structural_vocabulary(
+        [_svoc_story("Playlist", description="a playlist of tracks")], ["A playlist screen."]
+    )
+    assert result == {"measured": False, "terms": [], "missing": [], "unsourced": []}
+    spaced = T.measure_structural_vocabulary([_svoc_story("a list")], ["The List view"])
+    assert [t["term"] for t in spaced["terms"]] == ["list"]
+    assert spaced["missing"] == [] and spaced["unsourced"] == []
+
+
+def test_structural_vocabulary_is_unmeasured_when_nothing_occurs():
+    assert T.measure_structural_vocabulary([_svoc_story("Nothing relevant")], []) == {
+        "measured": False,
+        "terms": [],
+        "missing": [],
+        "unsourced": [],
+    }
+
+
+def test_structural_vocabulary_reads_exactly_the_documented_story_fields():
+    story = {
+        "title": "t",
+        "description": "d",
+        "acceptanceCriteria": ["a modal"],
+        "implementation": {"approach": "a drawer", "files": ["toast.py"], "verify": "banner"},
+        "tasks": ["a carousel"],
+        "notes": "an accordion",
+        "gate": {"prompt": "popover"},
+    }
+    result = T.measure_structural_vocabulary([story], [])
+    assert {t["term"] for t in result["terms"]} == {"modal", "drawer", "carousel", "accordion"}
+    # A story with missing or mistyped fields never raises.
+    assert T.measure_structural_vocabulary([{}, "x", {"tasks": None, "implementation": 3}], [])["measured"] is False
+
+
+def test_structural_vocabulary_lexicon_has_the_required_terms():
+    required = {
+        "bottom sheet", "dialog", "modal", "drawer", "sidebar", "side panel", "header",
+        "footer", "tab bar", "toolbar", "stepper", "step indicator", "card", "list", "grid",
+        "popover", "tooltip", "toast", "banner", "accordion", "carousel", "full-screen",
+        "overlay", "split view",
+    }
+    assert required <= set(T.STRUCTURAL_LEXICON)
+
+
+def test_structural_vocabulary_op_reads_files_and_refuses_unreadable_ones(tmp_path, capsys):
+    tasks = tmp_path / "t.json"
+    tasks.write_text(
+        json.dumps({"userStories": [_svoc_story("x", acceptanceCriteria=["a dialog"])]}),
+        encoding="utf-8",
+    )
+    spec = tmp_path / "s.md"
+    spec.write_text("a bottom sheet", encoding="utf-8")
+    assert T.op_structural_vocabulary(["--tasks-file", str(tasks), "--spec", str(spec)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["missing"] == ["bottom sheet"] and out["unsourced"] == ["dialog"]
+    with pytest.raises(SystemExit) as exited:
+        T.op_structural_vocabulary(["--tasks-file", str(tmp_path / "gone.json")])
+    assert exited.value.code == 1
+    assert "gone.json" in capsys.readouterr().err
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary(["--tasks-file", str(bad)])
+    assert "bad.json" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary(["--tasks-file", str(tasks), "--spec", str(tmp_path / "no.md")])
+    assert "no.md" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary([])
