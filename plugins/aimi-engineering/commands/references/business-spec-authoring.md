@@ -33,7 +33,7 @@ Entities and endpoints are repository facts, not operator opinions, so they are 
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty -- re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 DERIVATION_FILE="<scratch path holding the spec_derivation JSON>"
 $AIMI_CLI spec-derivation --input "$DERIVATION_FILE"
 ```
