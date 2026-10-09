@@ -1718,3 +1718,142 @@ def test_a_phase_is_matched_numerically_and_never_by_string():
     assert SM._jq_number(1.0) == 1 and isinstance(SM._jq_number(1.0), int)
     assert SM._jq_number(1.1) == 1.1
     assert SM._num(1.0) == "1" and SM._num(1.1) == "1.1"
+
+
+# --- Phase 4.3 NOT EVALUATED: span classes and the capped line -------------
+
+
+@pytest.mark.parametrize(
+    "span,shape",
+    [
+        ("--agent-mode", "flags"),
+        ("-q -x", "flags"),
+        ("commands/execute.md", "path"),
+        ("plugins/aimi-engineering/scripts/tasks.py", "path"),
+        ("tasks.json", "file-extension"),
+        ("README.md", "file-extension"),
+        ("metadata.smellWarnings", "dotted-key"),
+        ("userStories[].id", "file-extension"),  # also dotted-key; first shape wins
+        ("200", "no-shell-word"),
+        (">=3", "no-shell-word"),
+        ('"Save"', "no-shell-word"),
+    ],
+)
+def test_span_class_shape_positive(span, shape):
+    assert SM._non_command_shape(span) == shape
+
+
+@pytest.mark.parametrize(
+    "span",
+    ["probe-plan", "npm test", "pytest", "./gradlew", "./scripts/run.sh", "make build"],
+)
+def test_span_class_shape_negative(span):
+    assert SM._non_command_shape(span) is None
+
+
+def test_span_class_precedence_and_whole_term_introduced():
+    story = {
+        "title": "Add probe-plan support",
+        "implementation": {"approach": "Wire Widget in", "files": ["src/a.py", "tasks.json"]},
+    }
+    cited = {"probe", "widget", "tasks.json", "other"}
+    classes = SM._classify_not_evaluated_spans(story, cited)
+    assert classes == {
+        "nonCommand": ["tasks.json"],
+        "introduced": ["widget"],
+        "unrecognised": ["other", "probe"],
+    }
+
+
+def test_span_class_reason_b_entry_adds_key_and_keeps_reason(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    story = {
+        "id": "US-001",
+        "project": ".",
+        "acceptanceCriteria": ["See `commands/execute.md` and `zzz`, and `tasks.json`."],
+        "implementation": {"verify": "true"},
+    }
+    _, _, _, ne = SM.verify_coverage_findings([story], str(tmp_path))
+    assert ne[0]["reason"] == (
+        "cites nothing in its project's derived vocabulary: commands/execute.md, tasks.json, zzz"
+    )
+    assert ne[0]["spanClasses"] == {
+        "nonCommand": ["commands/execute.md", "tasks.json"],
+        "introduced": [],
+        "unrecognised": ["zzz"],
+    }
+    none_cited = {"id": "US-002", "acceptanceCriteria": ["nothing"]}
+    _, _, _, ne2 = SM.verify_coverage_findings([none_cited], str(tmp_path))
+    assert "spanClasses" not in ne2[0]
+
+
+def _cap_story(title, spans, verify="true"):
+    return {
+        **_staging_story(title),
+        "acceptanceCriteria": ["Cites " + " ".join("`" + s + "`" for s in spans)],
+        "implementation": {"files": ["src/x.py"], "approach": "Implement it", "verify": verify},
+    }
+
+
+def test_not_evaluated_cap_end_to_end(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    files = {
+        "01-a.json": {
+            **_staging_story("A"),
+            "acceptanceCriteria": ["Running `pytest` must be green."],
+            "implementation": {"files": ["src/x.py"], "approach": "x", "verify": "flake8"},
+        }
+    }
+    for n in range(2, 9):
+        files["%02d-s.json" % n] = _cap_story("S%d" % n, ["zz%d" % n])
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    line = [l for l in proc.stderr.splitlines() if "NOT EVALUATED" in l]
+    assert len(line) == 1
+    assert "+2 more stories" in line[0]
+    assert "do not read them as CHECKED-AND-CLEAN" in line[0]
+    assert line[0].count("[unrecognised]") == 5
+    assert "verify-coverage" in proc.stderr and "US-001" in proc.stderr
+    assert {w["type"] for w in doc["metadata"]["smellWarnings"]} <= {
+        "orphan-symbol",
+        "verify-coverage",
+    }
+
+
+def test_not_evaluated_cap_spans_and_full_data(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest]\n", encoding="utf-8")
+    spans = ["aa", "bb", "cc", "dd", "ee"]
+    stories = [{**_cap_story("S%d" % n, spans if n == 1 else ["q%d" % n]), "id": "US-00%d" % n,
+                "project": "."} for n in range(1, 8)]
+    _, _, _, ne = SM.verify_coverage_findings(stories, str(tmp_path))
+    assert len(ne) == 7
+    assert ne[0]["spanClasses"]["unrecognised"] == spans
+    line = SM._format_not_evaluated_line(ne)
+    assert "aa [unrecognised], bb [unrecognised], cc [unrecognised], +2 more spans (2 unrecognised)" in line
+    assert "dd" not in line
+    assert line.endswith("+2 more stories")
+
+
+def test_not_evaluated_cap_orders_stories_and_spans():
+    ne = [
+        {"id": "US-001", "reason": "no acceptance criterion cites a command in backticks"},
+        {
+            "id": "US-002",
+            "reason": "r",
+            "spanClasses": {"nonCommand": ["a.md"], "introduced": [], "unrecognised": []},
+        },
+        {
+            "id": "US-003",
+            "reason": "r",
+            "spanClasses": {"nonCommand": ["a.md"], "introduced": ["i"], "unrecognised": ["u"]},
+        },
+    ]
+    line = SM._format_not_evaluated_line(ne)
+    assert line.index("US-003") < line.index("US-002") < line.index("US-001")
+    assert "u [unrecognised], i [introduced], a.md [non-command]" in line
+
+
+def test_not_evaluated_cap_golden_corpus_has_no_phase_4_3_text():
+    for case in GOLDEN["story_merge_cases"]:
+        blob = json.dumps(case)
+        assert "NOT EVALUATED" not in blob and "Phase 4.3" not in blob, case["label"]

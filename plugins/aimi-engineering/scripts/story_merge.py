@@ -899,6 +899,151 @@ def _cited_commands(text):
     return {span.strip() for span in _BACKTICK_SPAN_RE.findall(text) if span.strip()}
 
 
+_NOT_EVALUATED_MAX_STORIES = 5
+_NOT_EVALUATED_MAX_SPANS = 3
+
+_FILE_EXTENSION_RE = re.compile(r"^[^\s]*\.[A-Za-z]{1,8}$")
+_DOTTED_KEY_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\[\d*\])?(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\d*\])?)+$"
+)
+_QUOTED_LITERAL_RE = re.compile(r"^(?:\"[^\"]*\"|'[^']*')$")
+
+
+def _shape_flags_alone(span):
+    tokens = span.split()
+    return bool(tokens) and all(t.startswith("-") for t in tokens)
+
+
+def _shape_path(span):
+    if len(span.split()) != 1 or "/" not in span:
+        return False
+    return not (span.startswith("./") or span.startswith("-"))
+
+
+def _shape_file_extension(span):
+    # A leading './' can be an executable, same carve-out as the path shape.
+    return (
+        len(span.split()) == 1
+        and not span.startswith("./")
+        and _FILE_EXTENSION_RE.match(span) is not None
+    )
+
+
+def _shape_dotted_key(span):
+    return _DOTTED_KEY_RE.match(span) is not None
+
+
+def _shape_no_shell_word(span):
+    return re.search(r"[A-Za-z]", span) is None or _QUOTED_LITERAL_RE.match(span) is not None
+
+
+_NON_COMMAND_SHAPES = (
+    ("flags", _shape_flags_alone),
+    ("path", _shape_path),
+    ("file-extension", _shape_file_extension),
+    ("dotted-key", _shape_dotted_key),
+    ("no-shell-word", _shape_no_shell_word),
+)
+
+
+def _non_command_shape(span):
+    """Name of the first shape in _NON_COMMAND_SHAPES `span` has, else None.
+
+    A span that is not a command at all (a flag list, a path, a file name, a
+    JSON key, a number or quoted literal). A bare identifier or a multi-word
+    span (`npm test`, `pytest`, `./gradlew`) matches no shape.
+    """
+    for name, predicate in _NON_COMMAND_SHAPES:
+        if predicate(span):
+            return name
+    return None
+
+
+def _classify_not_evaluated_spans(story, cited):
+    """Partition `cited` into {nonCommand, introduced, unrecognised}, each a
+    sorted list. Precedence: nonCommand, then introduced, then unrecognised.
+
+    `introduced`: the span appears as a whole term (no word character or '-'
+    on either side) in the story's own title, implementation.approach or an
+    implementation.files entry, case-insensitively. A heuristic that changes a
+    label only -- the span stays not evaluated whichever class it lands in.
+    """
+    implementation = story.get("implementation")
+    haystack_parts = [story.get("title"), _implementation_approach(story)]
+    haystack_parts.extend(_implementation_files(story) if not _falsy(implementation) else [])
+    haystack = "\n".join(p for p in haystack_parts if isinstance(p, str))
+    classes = {"nonCommand": [], "introduced": [], "unrecognised": []}
+    for span in sorted(cited):
+        if _non_command_shape(span) is not None:
+            classes["nonCommand"].append(span)
+        elif re.search(
+            r"(?<![\w-])" + re.escape(span) + r"(?![\w-])", haystack, re.IGNORECASE
+        ):
+            classes["introduced"].append(span)
+        else:
+            classes["unrecognised"].append(span)
+    return classes
+
+
+_SPAN_CLASS_LABELS = (
+    ("unrecognised", "[unrecognised]"),
+    ("introduced", "[introduced]"),
+    ("nonCommand", "[non-command]"),
+)
+_NOT_EVALUATED_PREFIX = "cites nothing in its project's derived vocabulary: "
+
+
+def _format_not_evaluated_line(entries):
+    """The capped body of the NOT EVALUATED line (everything between the
+    'for ' and the closing sentence). Stories: unrecognised-bearing first, then
+    only nonCommand/introduced, then reason-(a) entries, stable within each
+    group; at most _NOT_EVALUATED_MAX_STORIES shown, then '+N more stories'.
+    Spans per story: unrecognised, introduced, nonCommand, each sorted and
+    labelled, at most _NOT_EVALUATED_MAX_SPANS, then '+N more spans (class
+    counts)'.
+    """
+
+    def priority(entry):
+        classes = entry.get("spanClasses")
+        if classes is None:
+            return 2
+        return 0 if classes["unrecognised"] else 1
+
+    ordered = sorted(entries, key=priority)
+    shown = ordered[:_NOT_EVALUATED_MAX_STORIES]
+    parts = []
+    for entry in shown:
+        classes = entry.get("spanClasses")
+        if classes is None:
+            parts.append(entry["id"] + " (" + entry["reason"] + ")")
+            continue
+        flat = [
+            (span, label)
+            for key, label in _SPAN_CLASS_LABELS
+            for span in classes[key]
+        ]
+        visible = flat[:_NOT_EVALUATED_MAX_SPANS]
+        text = _join(", ", [span + " " + label for span, label in visible])
+        omitted = flat[_NOT_EVALUATED_MAX_SPANS:]
+        if omitted:
+            counts = _join(
+                ", ",
+                [
+                    str(n) + " " + label.strip("[]")
+                    for key, label in _SPAN_CLASS_LABELS
+                    for n in [sum(1 for _, lab in omitted if lab == label)]
+                    if n
+                ],
+            )
+            text += ", +" + str(len(omitted)) + " more spans (" + counts + ")"
+        parts.append(entry["id"] + " (" + _NOT_EVALUATED_PREFIX + text + ")")
+    line = _join("; ", parts)
+    hidden = len(ordered) - len(shown)
+    if hidden:
+        line += "; +" + str(hidden) + " more stories"
+    return line
+
+
 def verify_coverage_findings(stories, project_root):
     """Phase 4.3: a story whose acceptanceCriteria cite (in backticks) a
     repo-vocabulary command that implementation.verify's own text never runs.
@@ -943,6 +1088,16 @@ def verify_coverage_findings(stories, project_root):
     group vocabulary was derived without trouble that sentence is FALSE, so
     folding either state in would trade a silence for a lie, which is a
     regression of the same family as the one this list fixes.
+
+    Every reason-(b) entry also carries `spanClasses`, ADDED beside `id` and
+    `reason` (both unchanged): {nonCommand, introduced, unrecognised}, three
+    sorted lists partitioning the cited spans. Precedence is nonCommand
+    (_non_command_shape), then introduced (whole term in the story's title,
+    approach or files), then unrecognised. Reason-(a) entries carry no
+    spanClasses. The NOT EVALUATED line caps what it prints
+    (_NOT_EVALUATED_MAX_STORIES / _NOT_EVALUATED_MAX_SPANS), listing
+    unrecognised spans first, then introduced, then non-command; the full
+    classified data stays in this return value.
     """
     vocabulary_cache = {}
     findings = []
@@ -989,6 +1144,7 @@ def verify_coverage_findings(stories, project_root):
                     "id": story["id"],
                     "reason": "cites nothing in its project's derived vocabulary: "
                     + _join(", ", sorted(cited)),
+                    "spanClasses": _classify_not_evaluated_spans(story, cited),
                 }
             )
             continue
@@ -2080,13 +2236,7 @@ def main(argv):
     if verify_coverage_not_evaluated and phase_43_reported:
         sys.stderr.write(
             "Warning: story-merge: Phase 4.3 verify-coverage NOT EVALUATED for "
-            + _join(
-                "; ",
-                [
-                    entry["id"] + " (" + entry["reason"] + ")"
-                    for entry in verify_coverage_not_evaluated
-                ],
-            )
+            + _format_not_evaluated_line(verify_coverage_not_evaluated)
             + " -- this phase measured nothing about these stories; do not read"
             + " them as CHECKED-AND-CLEAN\n"
         )
