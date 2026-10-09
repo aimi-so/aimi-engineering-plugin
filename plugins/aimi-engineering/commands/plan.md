@@ -1390,11 +1390,15 @@ FIGURES_JSON=$($AIMI_CLI research-figures "$RESEARCH_OUT" 2>/dev/null || printf 
 MEASURE_BLOCKS=$(printf '%s' "$FIGURES_JSON" | jq -r '.blocks // empty' 2>/dev/null)
 BARE_FIGURES=$(printf '%s' "$FIGURES_JSON" | jq -r '.figures_outside // empty' 2>/dev/null)
 DEAD_KEYS=$(printf '%s' "$FIGURES_JSON" | jq -r '(.dead_keys // []) | map("block \(.block) reads \(.key) against \(.subject)") | join("; ")' 2>/dev/null)
+UNRECORDED=$(printf '%s' "$FIGURES_JSON" | jq -r '(.unrecorded // []) | map("block \(.block) line \(.line) `\(.command)`") | join("; ")' 2>/dev/null)
 if [ "${MEASURE_BLOCKS:-1}" = 0 ] && [ "${BARE_FIGURES:-0}" -ge 10 ]; then
   echo "warning: research file carries no measure block - blocks=${MEASURE_BLOCKS}, figures_outside=${BARE_FIGURES}, so every figure in it is UNVERIFIED: $RESEARCH_OUT"
 fi
 if [ -n "${DEAD_KEYS:-}" ]; then
   echo "warning: a measure block indexes a name its own subject does not carry, so its figure is independent of the corpus - ${DEAD_KEYS}: $RESEARCH_OUT"
+fi
+if [ -n "${UNRECORDED:-}" ]; then
+  echo "warning: a measure block records a command with no output, so its figure is UNVERIFIED - ${UNRECORDED}: $RESEARCH_OUT"
 fi
 ```
 
@@ -1404,7 +1408,7 @@ fi
 
 **The `dead_keys` line answers a different question, and the three together still leave a fourth open.** `blocks` proves a block EXISTS. Phase 1.6's re-execution below proves it REPRODUCES. `dead_keys` proves its subject is ADDRESSED — it is what catches a figure produced by `x.get('output','')` over case objects that carry no `output` key, which returned its default for every input and was therefore independent of the corpus, and which re-execution had PASSED twice, because a wrong-but-deterministic command reproduces its own wrong output forever. None of the three proves the command answers the question the prose asks. That last step is human reading, and nothing here claims it.
 
-**The measure-block warning never blocks**, and neither does the `dead_keys` one. Both are advisory in the same way: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status, and no path is dropped from `researchWritten` by either. They add at most two more lines per path to the at-most-two-lines-and-always-continues promise below, which they extend rather than replace. Their scope is this section's own — every researcher Task this run actually spawns, at both spawn sites (Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below) — and never a path taken from `reusedResearch`, for which no Task was spawned this run and so nothing was promised to land.
+**The measure-block warning never blocks**, and neither do the `dead_keys` and `unrecorded` ones (`unrecorded` names a block recording a command with no output under it). All three are advisory in the same way: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status, and no path is dropped from `researchWritten` by any of them. They add at most three more lines per path to the at-most-two-lines-and-always-continues promise below, which they extend rather than replace. Their scope is this section's own — every researcher Task this run actually spawns, at both spawn sites (Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below) — and never a path taken from `reusedResearch`, for which no Task was spawned this run and so nothing was promised to land.
 
 **Recover before you drop.** This branch fires only when the block above printed its warning — the file did not land. Look at the same Task return's pointer block for an `unwritten_findings:` key before giving up on that researcher.
 
@@ -1565,7 +1569,12 @@ For each file, in this order:
 3. **Compare.** Run each surviving block from the repository root and compare
    its output against the output recorded inside the block, and against the
    figure the prose cites. All three must agree character for character.
-4. **A figure with no block is `UNVERIFIED`.** Including one the researcher
+4. **A block with no recorded output is `UNVERIFIED` and is not re-executed.**
+   When `research-figures` lists a block under `unrecorded`, the block holds a
+   command and nothing to compare against; running it would produce a comparison
+   against nothing. Mark its figure `UNVERIFIED` in the consolidation, carried
+   forward like a refused block, and never raise a Conflicts entry for it.
+5. **A figure with no block is `UNVERIFIED`.** Including one the researcher
    reached by arithmetic over two other figures — the case that produced the
    worst drift this rule exists to stop. Carry the `UNVERIFIED` mark forward
    into the consolidation body so any story that later quotes the figure quotes

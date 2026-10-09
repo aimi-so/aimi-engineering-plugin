@@ -14638,6 +14638,8 @@ $rp_entry"
 #                    four-digit years excluded via ^(19|20)[0-9]{2}$
 #   dead_keys        per measure block, the names its command indexes a
 #                    STRUCTURED subject by that the subject does not carry
+#   unrecorded       per measure block, the first command recorded WITHOUT any
+#                    output beneath it: [{block, line, command}]
 #
 # THE RULE ALREADY EXISTED; WHAT WAS MISSING IS THE MEASUREMENT. The three
 # research agents' Structured Findings Format has required a ```measure block
@@ -14662,6 +14664,18 @@ $rp_entry"
 # written only when something was actually found, absent otherwise, never
 # `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
 # which is what every caller written before this third count reads.
+#
+# `unrecorded` follows the same omitted-when-empty rule and reports a block
+# that records a command and nothing else: a `$ ` line with no non-blank,
+# non-command content line before the closing fence. Phase 1.6 would otherwise
+# re-execute it into a comparison against nothing. `block` is the same 1-based
+# index dead_keys uses, `line` the 1-based file line of the `$ ` line, `command`
+# the text with the prompt stripped (continuation lines of a multi-line command
+# are part of it, joined by the same double-quote parity rule). A block whose
+# command is still unbalanced at the closing fence is NOT reported. Exempt by
+# design, because they are empty on success: `grep -q ...` (also combined flags
+# such as -Eq), `test ...`, and `[ ... ]` / `[[ ... ]]`. A block mixing exempt
+# and non-exempt commands with no output names its first non-exempt command.
 #
 # Nothing here is executed. The file is read and counted, never sourced, and
 # the commands inside its measure blocks are treated as text -- which is why
@@ -14805,6 +14819,52 @@ $subject_keys"
   done
 }
 
+# One TSV record per measure block that records a command and no output: block
+# index, the 1-based file line of the command's `$ ` line, the command text
+# (prompt stripped, continuation lines joined by a space). Prints nothing for a
+# clean file. Parity and continuation handling mirror
+# _research_figures_dead_keys deliberately; a block whose command is still
+# unbalanced at the closing fence is dropped, not reported.
+# Usage: _research_figures_unrecorded "<research file path>"
+_research_figures_unrecorded() {
+  local file_path="$1"
+  awk '
+    function dq(s,   n, i) {
+      n = 0
+      for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == "\"") n++
+      return n
+    }
+    function done_cmd(c, ln) {
+      ncmds++
+      if (first == "" && c !~ /^grep[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-[A-Za-z]*q/ \
+          && c !~ /^test[[:space:]]/ && c !~ /^\[\[?[[:space:]]/) {
+        first = c; firstline = ln
+      }
+    }
+    /^```measure[[:space:]]*$/ {
+      inblock = 1; idx++; acc = ""; open = 0
+      ncmds = 0; first = ""; firstline = 0; has_out = 0
+      next
+    }
+    inblock && /^```[[:space:]]*$/ {
+      if (!open && ncmds > 0 && !has_out && first != "") print idx "\t" firstline "\t" first
+      inblock = 0; open = 0; acc = ""
+      next
+    }
+    inblock && open {
+      acc = acc " " $0
+      if (dq(acc) % 2 == 0) { done_cmd(acc, startnr); acc = ""; open = 0 }
+      next
+    }
+    inblock && /^\$ / {
+      acc = substr($0, 3); startnr = NR
+      if (dq(acc) % 2 == 0) { done_cmd(acc, startnr); acc = "" } else { open = 1 }
+      next
+    }
+    inblock && /[^[:space:]]/ { has_out = 1 }
+  ' "$file_path"
+}
+
 cmd_research_figures() {
   local file_path=""
 
@@ -14871,14 +14931,22 @@ cmd_research_figures() {
         | split("\t")
         | {block: (.[0] | tonumber), key: .[1], subject: .[2]})')
 
+  local unrec_records unrec_json
+  unrec_records=$(_research_figures_unrecorded "$file_path")
+  unrec_json=$(printf '%s' "$unrec_records" \
+    | jq -R -s 'split("\n")
+        | map(select(length > 0)
+        | split("\t")
+        | {block: (.[0] | tonumber), line: (.[1] | tonumber), command: (.[2:] | join("\t"))})')
+
   jq -n \
     --argjson blocks "${blocks:-0}" \
     --argjson figures "${figures:-0}" \
     --argjson dead "$dead_json" \
-    'if ($dead | length) > 0
-       then {blocks: $blocks, figures_outside: $figures, dead_keys: $dead}
-       else {blocks: $blocks, figures_outside: $figures}
-     end'
+    --argjson unrec "$unrec_json" \
+    '{blocks: $blocks, figures_outside: $figures}
+     + (if ($dead | length) > 0 then {dead_keys: $dead} else {} end)
+     + (if ($unrec | length) > 0 then {unrecorded: $unrec} else {} end)'
 }
 
 # ============================================================================
@@ -17630,6 +17698,11 @@ COMMANDS:
                               not carry. dead_keys is omitted entirely when empty (the
                               baseRef/prototypeDropped convention), never [], so a clean
                               file prints exactly blocks and figures_outside.
+                              unrecorded lists [{block, line, command}] for a block that
+                              records a command with no output beneath it (line is the
+                              1-based file line of the `$ ` line); omitted when empty, like
+                              dead_keys. Exempt, being empty by design: grep -q (also -Eq),
+                              test, and [ ... ] / [[ ... ]]. Unbalanced commands are skipped.
                               A block whose subject is not structured (a grep or awk over a
                               .md) contributes no names and is never reported.
                               Reports only: nothing is executed, no threshold is applied and

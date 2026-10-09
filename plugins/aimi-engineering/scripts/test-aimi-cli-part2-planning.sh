@@ -2115,6 +2115,67 @@ RFMLEOF
   assert_contains "research-figures" "$("$CLI" help 2>/dev/null)" \
     "research-figures: the usage text names the verb"
 
+  # --- unrecorded, two-sided: a command with no output beneath it ---
+  printf '# T\n\n```measure\n$ wc -l baz\n```\n' > "$rf_dir/unrec-bare.md"
+  printf '# T\n\n```measure\n$ wc -l baz\n42 baz\n```\n' > "$rf_dir/unrec-ok.md"
+  printf '# T\n\n```measure\n$ python3 -c "\nprint(1)"\n```\n' > "$rf_dir/unrec-ml-bare.md"
+  printf '# T\n\n```measure\n$ python3 -c "\nprint(1)"\n1\n```\n' > "$rf_dir/unrec-ml-ok.md"
+  printf '# T\n\n```measure\n$ python3 -c "\nprint(1)\n```\n' > "$rf_dir/unrec-open.md"
+  printf '# T\n\n```measure\n$ grep -Eq foo bar\n```\n' > "$rf_dir/unrec-grepq.md"
+  printf '# T\n\n```measure\n$ test -f bar\n```\n' > "$rf_dir/unrec-test.md"
+  printf '# T\n\n```measure\n$ [ -f bar ]\n```\n' > "$rf_dir/unrec-br1.md"
+  printf '# T\n\n```measure\n$ [[ -f bar ]]\n```\n' > "$rf_dir/unrec-br2.md"
+  printf '# T\n\n```measure\n$ grep -q foo bar\n$ wc -l baz\n```\n' > "$rf_dir/unrec-mixed.md"
+
+  local ur_name
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-bare.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.unrecorded | length')" \
+    "research-figures: a bare command block is reported once in unrecorded"
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.unrecorded[0].block')" \
+    "research-figures: unrecorded names the block index"
+  assert_eq "4" "$(printf '%s' "$rf_out" | jq -r '.unrecorded[0].line')" \
+    "research-figures: unrecorded names the file line of the command"
+  assert_eq "wc -l baz" "$(printf '%s' "$rf_out" | jq -r '.unrecorded[0].command')" \
+    "research-figures: unrecorded carries the command with the prompt stripped"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-ok.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "blocks,figures_outside" "$(printf '%s' "$rf_out" | jq -r '[keys[]] | join(",")')" \
+    "research-figures: a recorded block is not in unrecorded and the key set is unchanged"
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-ml-bare.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "1" "$(printf '%s' "$rf_out" | jq -r '.unrecorded | length')" \
+    "research-figures: a multi-line command with no output is reported in unrecorded"
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-ml-ok.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "null" "$(printf '%s' "$rf_out" | jq -r '.unrecorded')" \
+    "research-figures: a multi-line command with an output line is not in unrecorded"
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-open.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "null" "$(printf '%s' "$rf_out" | jq -r '.unrecorded')" \
+    "research-figures: an unbalanced command at the closing fence is not in unrecorded"
+
+  for ur_name in grepq test br1 br2; do
+    pushd "$rf_dir" >/dev/null
+    rf_out=$("$CLI" research-figures "$rf_dir/unrec-$ur_name.md" 2>/dev/null) || true
+    popd >/dev/null
+    assert_eq "null" "$(printf '%s' "$rf_out" | jq -r '.unrecorded')" \
+      "research-figures: unrecorded exempts the empty-by-design $ur_name command form"
+  done
+
+  pushd "$rf_dir" >/dev/null
+  rf_out=$("$CLI" research-figures "$rf_dir/unrec-mixed.md" 2>/dev/null) || true
+  popd >/dev/null
+  assert_eq "wc -l baz" "$(printf '%s' "$rf_out" | jq -r '.unrecorded[0].command')" \
+    "research-figures: a mixed exempt and non-exempt block with no output names the first non-exempt command in unrecorded"
+
   rm -rf "$rf_dir"
 }
 
