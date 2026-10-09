@@ -7448,7 +7448,8 @@ def test_a_missing_branchname_is_still_the_word_null():
 # branch is never run.
 
 
-def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=False):
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=False,
+           guard_rails=None):
     """A one-story project whose story carries `verify`, probed through the CLI.
 
     `files` are created relative to the project root before the run, and `cwd`
@@ -7486,6 +7487,8 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=Fa
     }
     if verify is not None:
         story["implementation"] = {"verify": verify}
+        if guard_rails is not None:
+            story["implementation"]["guardRails"] = guard_rails
     document = {
         "schemaVersion": "3.3",
         "metadata": {"title": "t", "branchName": "b"},
@@ -8138,9 +8141,9 @@ def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
         files=("existe.txt",),
     )
     assert probed == [
-        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False},
-        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False},
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
+        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False, "guardRail": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
     ]
 
 
@@ -8284,12 +8287,13 @@ def test_a_segment_reading_no_variable_at_all_keeps_its_verdict(tmp_path):
     same keys in the same order, no `unresolvedState` key at all."""
     _, probed = _probe(tmp_path, "true\ntest -f ausente.txt\n")
     assert probed == [
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
         {
             "segment": "test -f ausente.txt",
             "exit": 1,
             "discriminates": True,
             "unsatisfiable": False,
+            "guardRail": False,
         },
     ]
 
@@ -8471,7 +8475,7 @@ def test_a_segment_passing_both_runs_stays_discriminates_false(tmp_path):
     _, before = _probe(tmp_path, "true\n")
     _, after = _probe(tmp_path, "true\n", previous=before)
     assert after == [
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False}
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False}
     ]
 
 
@@ -8484,12 +8488,12 @@ def test_a_regression_is_not_unsatisfiable_only_a_double_failure_is(tmp_path):
     passing rules it out, whichever side it is."""
     root, before = _probe(tmp_path, "test -f existe.txt\n", files=("existe.txt",))
     assert before == [
-        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False}
+        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False}
     ]
     os.remove(os.path.join(root, "existe.txt"))
     _, after = _probe(tmp_path, "test -f existe.txt\n", previous=before)
     assert after == [
-        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False}
+        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False, "guardRail": False}
     ]
 
 
@@ -8805,9 +8809,9 @@ def test_an_ordinary_non_nested_call_is_unchanged(tmp_path):
     root, tasks_file = _probe_project(tmp_path, {"US-001": "true\nfalse\n"})
     expected = [
         {"segment": "true", "exit": 0, "discriminates": False,
-         "unsatisfiable": False},
+         "unsatisfiable": False, "guardRail": False},
         {"segment": "false", "exit": 1, "discriminates": True,
-         "unsatisfiable": False},
+         "unsatisfiable": False, "guardRail": False},
     ]
     for marker in (None, ""):
         proc = _run_probe_cli(root, tasks_file, "US-001", marker=marker)
@@ -10313,3 +10317,88 @@ def test_structural_vocabulary_op_reads_files_and_refuses_unreadable_ones(tmp_pa
     assert "no.md" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         T.op_structural_vocabulary([])
+
+
+# ---------------------------------------------------------------------------
+# implementation.guardRails -- labelling the segments that pass by design
+# ---------------------------------------------------------------------------
+
+
+def _guard_rails_doc(rails, verify="true\nfalse\n", implementation=None):
+    doc = _one_task_doc("x")
+    story = doc["userStories"][0]
+    del story["tasks"]
+    if implementation is not None:
+        story["implementation"] = implementation
+    else:
+        story["implementation"] = {"verify": verify}
+        if rails is not _NO_IMPLEMENTATION:
+            story["implementation"]["guardRails"] = rails
+    return doc
+
+
+def test_guard_rails_marks_the_listed_segment_and_no_other(tmp_path):
+    verify = "true\nfalse\ngrep -q x /dev/null\n"
+    root, probed = _probe(tmp_path, verify, guard_rails=["true"])
+    assert [e["guardRail"] for e in probed] == [True, False, False]
+    assert all("guardRail" in e for e in probed)
+    artifact = [f for f in os.listdir(os.path.join(root, ".aimi", "tasks")) if f.startswith("verify-probe-")]
+    with open(os.path.join(root, ".aimi", "tasks", artifact[0]), encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert on_disk == probed
+
+
+def test_guard_rails_absent_means_false_everywhere_including_skipped(tmp_path):
+    _, probed = _probe(tmp_path, "true\nfalse\n")
+    assert [e["guardRail"] for e in probed] == [False, False]
+    _, probed = _probe(tmp_path, "true\nfalse\n", flags=["--skip-matching", "false"],
+                       guard_rails=["true"])
+    assert [(e["segment"], e["guardRail"]) for e in probed] == [("true", True), ("false", False)]
+    assert probed[1].get("skipped") is True
+
+
+def test_guard_rails_heredoc_segment_is_one_segment():
+    verify = "cat <<EOF; echo a\nline two\nEOF\ntrue\n"
+    segments = [seg for _, seg in T.verify_segments(verify)]
+    heredoc = [seg for seg in segments if "line two" in seg][0]
+    assert T.validate_stories(_guard_rails_doc([heredoc], verify)) == {"valid": True, "errors": []}
+    result = T.validate_stories(_guard_rails_doc(["line two"], verify))
+    assert result["valid"] is False
+    assert result["errors"] == ["US-001: implementation.guardRails[0] matches no segment of implementation.verify"]
+
+
+def test_guard_rails_validator_accepts_absent_empty_and_matching():
+    ok = {"valid": True, "errors": []}
+    assert T.validate_stories(_guard_rails_doc(_NO_IMPLEMENTATION)) == ok
+    assert T.validate_stories(_guard_rails_doc([])) == ok
+    assert T.validate_stories(_guard_rails_doc(["true", "false"])) == ok
+
+
+def test_guard_rails_validator_refuses_each_defect_once_with_id_and_index():
+    prefix = "US-001: implementation.guardRails"
+    assert T.validate_stories(_guard_rails_doc("true"))["errors"] == [prefix + " must be an array"]
+    assert T.validate_stories(_guard_rails_doc({"a": 1}))["errors"] == [prefix + " must be an array"]
+    assert T.validate_stories(_guard_rails_doc(["true", 5, "", "nope"]))["errors"] == [
+        prefix + "[1] must be a non-empty string",
+        prefix + "[2] must be a non-empty string",
+        prefix + "[3] matches no segment of implementation.verify",
+    ]
+
+
+def test_guard_rails_with_absent_or_non_string_verify_match_nothing():
+    for implementation in ({"guardRails": ["true"]}, {"verify": ["true"], "guardRails": ["true"]}):
+        doc = _guard_rails_doc(None, implementation=implementation)
+        assert T.validate_stories(doc)["errors"] == [
+            "US-001: implementation.guardRails[0] matches no segment of implementation.verify"
+        ]
+
+
+def test_guard_rails_never_aborts_on_a_non_object_implementation():
+    for implementation in ("x", 5, ["a"], True):
+        doc = _guard_rails_doc(None, implementation=implementation)
+        assert T.validate_stories(doc) == {"valid": True, "errors": []}, implementation
+
+
+def test_guard_rails_probe_verify_itself_adds_no_key(tmp_path):
+    results = T.probe_verify("true\n", str(tmp_path))
+    assert all("guardRail" not in entry for entry in results)

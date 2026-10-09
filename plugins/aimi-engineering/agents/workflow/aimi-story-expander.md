@@ -114,6 +114,7 @@ Write exactly one JSON object to `outputPath`. Fields:
     "files": ["<concrete file paths from research>"],
     "approach": "<actionable strategy, referencing codebase patterns by file:line where possible>",
     "verify": "<executable command or checkable assertion>",
+    "guardRails": ["<optional: verbatim verify segments that pass by design>"],
     "prototypeAnchor": "<optional, relative path to the single prototype most relevant>"
   },
   "verification": {
@@ -188,6 +189,10 @@ Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fix
 **A story's own `implementation.verify` must NEVER name the `verify-probe` verb.** The executor probes a story by RUNNING that story's own verify segments (`skills/story-executor/SKILL.md` step 1.5), so a verify that calls the verb back re-enters the probe: the CLI refuses instead of answering, and the story then fails for a reason that has nothing to do with its own code. The same loop closes between two stories — A's verify probing B while B's probes A, two ids and neither equal to the other — so write neither shape.
 
 A story that must exercise the verb has two ways out: probe from a verify that does not itself call it (a sibling story's, or a throwaway fixture's), or call `probe_verify()` in `tasks.py` directly, which is not guarded. Point at the refusal rather than restating it — `_VERIFY_PROBE_REENTRY` in `plugins/aimi-engineering/scripts/tasks.py` is the one place that states the problem in full and names both exits, and it is the text whoever trips this actually reads.
+
+## Guard-rail segments
+
+List in `implementation.guardRails` every `verify` segment that passes by design, such as a full suite or a regression check. Each entry is the segment's text verbatim, exactly as `verify_segments` cuts it: split on `;`, `&&`, `||` and newlines, with a heredoc counted as one segment. Leave every segment that discriminates the before-state from the after-state out of the list; an unlabelled segment that already passes is then visible as a real finding. Omit the key when nothing passes by design.
 
 ## Verify coverage
 

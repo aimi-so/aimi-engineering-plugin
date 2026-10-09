@@ -140,13 +140,15 @@ Optional object providing implementation hints to the executing agent.
 | `files` | string[] | Yes | List of file paths the story is expected to touch. |
 | `approach` | string | Yes | Brief description of the implementation approach. |
 | `verify` | string | Yes | Command or instruction to verify the implementation (e.g., `"npm test"`, `"visual check"`). |
+| `guardRails` | string[] | No | Exact texts of `verify` segments that pass by design (full suites, regression checks), each equal to one segment as `verify-probe` cuts them. `verify-probe` reports a listed segment with `guardRail: true`; validated by `validate-stories`. |
 
 Example:
 ```json
 {
   "files": ["src/auth/middleware.ts", "src/auth/types.ts"],
   "approach": "Add JWT validation middleware using jsonwebtoken library",
-  "verify": "npm test -- --grep auth"
+  "verify": "npm test -- --grep auth && npm run lint",
+  "guardRails": ["npm run lint"]
 }
 ```
 
@@ -669,7 +671,7 @@ Before processing, validate:
 14. Dependency graph must be a valid DAG (no cycles, no self-refs, all refs exist)
 15. Each story's `project` (if present) must be a relative path with no `..` components and must match `^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$`
 16. Each story's `wave` (if present) must be a positive integer
-17. Each story's `implementation` (if present) must be an object with required fields: `files` (string[]), `approach` (string), `verify` (string)
+17. Each story's `implementation` (if present) must be an object with required fields: `files` (string[]), `approach` (string), `verify` (string); optional `guardRails` (string[], each entry a non-empty string equal to exactly one segment of `verify`, as cut by `verify_segments`; a heredoc segment containing `;` and newlines is ONE segment, so list its full text)
 18. Each story's `verification` (if present) must be an object with required `strategy` (one of: `test`, `visual`, `api`) and `status` (one of: `pending`, `passed`, `failed`, `skipped`); optional fields: `url` (string), `expect` (string), `skipReason` (string, present only alongside `status: "skipped"`)
 19. Each story's `gate` (if present) must be an object with required `type` (one of: `verify`, `decision`, `action`), `status` (one of: `pending`, `passed`, `failed`), and `prompt` (string); optional field: `options` (string[])
 20. Gate blocking rules: `decision` gates must have `status: "passed"` before the story can start; `action` gates must have `status: "passed"` before dependent stories can start; `verify` gates are non-blocking

@@ -1318,6 +1318,37 @@ def _story_errors(story):
         errors.append(
             story_id + ": missing required field: status — run normalize-status to fix"
         )
+    errors += _guard_rail_errors(story_id, story)
+    return errors
+
+
+def _guard_rail_errors(story_id, story):
+    """The implementation.guardRails rule, run last so no earlier error moves.
+
+    A guard-rail label is the EXACT text of one segment `verify_segments` cuts
+    from the story's own implementation.verify -- the splitter probe_verify
+    walks, reused rather than re-implemented. The object-type guard comes
+    first for the reason the note above gives: a bare jq_index on a scalar
+    implementation would abort the whole run. An absent guardRails is no rule
+    at all, so a document without the key validates byte for byte as before.
+    """
+    implementation = jq_index(story, "implementation", STORY)
+    if jq_type(implementation) != "object":
+        return []
+    rails = jq_index(implementation, "guardRails", STORY + ".implementation")
+    if rails is None:
+        return []
+    if jq_type(rails) != "array":
+        return [story_id + ": implementation.guardRails must be an array"]
+    verify = jq_index(implementation, "verify", STORY + ".implementation")
+    known = {segment for _, segment in verify_segments(verify)} if isinstance(verify, str) else set()
+    errors = []
+    for index, entry in enumerate(rails):
+        label = story_id + ": implementation.guardRails[" + str(index) + "]"
+        if not isinstance(entry, str) or entry == "":
+            errors.append(label + " must be a non-empty string")
+        elif entry not in known:
+            errors.append(label + " matches no segment of implementation.verify")
     return errors
 
 
@@ -7287,6 +7318,21 @@ def verify_text_for_story(path, story_id):
     return ""
 
 
+def guard_rails_for_story(path, story_id):
+    """The implementation.guardRails list of the story `verify_text_for_story`
+    would read, or `[]`. Same walk: the first matching story carrying a
+    non-empty string verify wins. A malformed value is an empty list here --
+    validate-stories is the place that refuses it."""
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if isinstance(verify, str) and verify.strip():
+                rails = jq_index(implementation, "guardRails", STORY + ".implementation")
+                return [r for r in rails if isinstance(r, str)] if isinstance(rails, list) else []
+    return []
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -7345,6 +7391,10 @@ def op_verify_probe(argv):
     to write degrades silently to `None` and leaves the cycle open with nobody
     told.
 
+    EVERY ENTRY CARRIES `guardRail` (true/false), set after `_match_previous`
+    from the story's `implementation.guardRails`; `probe_verify` itself still
+    returns entries without the key.
+
     `--previous-file` PRESENT MEANS `-post.json`, and it has to: writing the
     recomparison to the same path would overwrite the artifact it just read,
     destroying the comparison in the act of making it. It also puts under a
@@ -7393,6 +7443,13 @@ def op_verify_probe(argv):
     text = verify_text_for_story(path, story_id)
     results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
+    # `guardRail` is added HERE and not in probe_verify: the label is the
+    # story's own declaration, read from the document, while probe_verify
+    # measures a script it was handed. Present on every entry, true only for
+    # an entry whose segment text a guardRails label names exactly.
+    rails = set(guard_rails_for_story(path, story_id))
+    for entry in results:
+        entry["guardRail"] = entry["segment"] in rails
     # The artifact lands in the TASKS FILE'S OWN directory, and the argument
     # for that used to live in the skill prose that composed the name:
     # `find_aimi_root` stops at the first `.aimi/` it finds walking up from the
