@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.147.0] - 2026-10-08
+
+### Added
+- `spec-derivation --input <path>`: validates a JSON block of typed entity and endpoint records and renders them as BusinessSpec § 4 / § 5 markdown rows. A record claimed `absent` with no evidence is relabeled `unchecked`, listed under `relabeled`, and reported on stderr with a distinct marker, so an unverified absence never reads as a confirmed one; a genuine `unchecked` record passes through unchanged. `--input` is confined to the project before `python3` starts.
+- `structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]...`: counts a fixed lexicon of container and placement terms, whole-phrase and case-insensitive, in the spec and prototype files and in the tasks file's story text. It reports terms a source names that no story mentions (`missing`) and terms stories use that no source names (`unsourced`). Advisory only; every path is confined before `python3` starts.
+- `aimi-spec-deriver`, a read-only research agent that extracts a codebase's entities and endpoints as typed `present` / `absent` / `unchecked` records in a `spec_derivation` block, the input `spec-derivation` consumes.
+- An on-demand `business-spec-authoring` reference for brainstorm: the questionnaire, the propose-then-correct loop, and which sections are core and which are authored per phase.
+- `/aimi:brainstorm` gains Phase 3.9, Business Contract Authoring, which authors a BusinessSpec from the questionnaire and the derived records. The `designBundle` frontmatter key is extended to name the authored bundle as a source.
+- `/aimi:plan` Phase 4.5 prints a structural-vocabulary report beside plan validation. It is advisory and never blocks.
+
+### Changed
+- `/aimi:plan` consumes the `designBundle` a brainstorm recorded instead of asking for one again, and authors a phase's deferred spec detail into that phase's own bundle.
+- `aimi-story-expander` carries container and placement terms from the spec into story text verbatim, so the structural-vocabulary report can match them.
+- Two `AIMI_CLI` guard lines in command and reference text now use the canonical em dash the CLI approval hook matches literally.
+
 ## [1.146.1] - 2026-10-06
 
 ### Added
