@@ -2769,6 +2769,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
       'files': ['<concrete file paths>'],
       'approach': '<actionable strategy referencing codebase patterns>',
       'verify': '<executable command or checkable assertion>',
+      'guardRails': ['<optional - exact text of each verify segment that is SUPPOSED to pass before and after the work, as the probe segmenter splits it>'],
       'prototypeAnchor': '<optional, relative path to single prototype file>'
     },
     'verification': {
@@ -2799,6 +2800,11 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   a criterion written in plain prose that names no command at all ("the
   lint passes"). A criterion that only a human can confirm does not
   belong in 'verify' — route it to 'gate' instead.
+  A segment of 'verify' that is SUPPOSED to pass both before and after
+  the work (a regression guard on a sibling story's behaviour) is
+  labelled, not left bare: list its exact text in
+  'implementation.guardRails'. An unlabelled segment that already passes
+  before the work is reported at plan time as non-discriminating.
 
   IMPORTANT — never name 'verify-probe' inside 'verify':
   Do NOT write 'aimi-cli.sh verify-probe' into 'implementation.verify'.
@@ -3543,6 +3549,7 @@ Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `typ
         "files": ["string[] (required, concrete file paths from research)"],
         "approach": "string (required, actionable strategy referencing codebase patterns)",
         "verify": "string (required, executable command or checkable assertion)",
+        "guardRails": ["string[] (optional, exact text of each verify segment that is supposed to pass before and after the work, as the probe segmenter splits it)"],
         "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Pass 2 sub-agent when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
       },
       "verification": {
@@ -3759,6 +3766,56 @@ done <<< "$VALIDATE_FILES"
 
 **Note:** `validate-stories` catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema**: the plural `gates` field is rejected outright (use singular `gate`), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
 
+**Step 3 — Probe every written file's verifies:**
+
+After the validator loop passes, run `probe-plan` once for **every** file in `VALIDATE_FILES`, so each PROJECT-axis split is probed in its own repository at its own `metadata.baseRef`. The call is advisory in what it measures and strict in what it will not conceal: a probe that cannot answer is a `not probed` line and increments `K`, never a silent zero. The block prints the policy the verb reports, then one summary line, last.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+# phase45-probe-plan:begin
+PROBE_UNLABELLED=0
+PROBE_UNMEASURED=0
+PROBE_NOT_PROBED=0
+PROBE_POLICY="report"
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  not probed: $VALIDATE_FILE — python3 is not installed"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  PROBE_JSON=$("$AIMI_CLI" probe-plan --tasks-file "$VALIDATE_FILE" </dev/null 2>/dev/null) || PROBE_JSON=""
+  if ! printf '%s' "$PROBE_JSON" | jq -e 'type == "object" and (.probed | type) == "boolean"' >/dev/null 2>&1; then
+    echo "  not probed: $VALIDATE_FILE — probe-plan answered nothing usable"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  if [ "$(printf '%s' "$PROBE_JSON" | jq -r '.probed')" != "true" ]; then
+    PROBE_REASON=$(printf '%s' "$PROBE_JSON" | jq -r '(.reason // "no reason given") | tostring | gsub("[\\n\\r]"; " ") | gsub("`"; "") | gsub("\\$\\("; "") | .[0:200]')
+    echo "  not probed: $VALIDATE_FILE — $PROBE_REASON"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  PROBE_N=$(printf '%s' "$PROBE_JSON" | jq -r '[.unlabelledNonDiscriminating[]?] | length')
+  PROBE_M=$(printf '%s' "$PROBE_JSON" | jq -r '[.unmeasured[]?] | length')
+  PROBE_UNLABELLED=$((PROBE_UNLABELLED + PROBE_N))
+  PROBE_UNMEASURED=$((PROBE_UNMEASURED + PROBE_M))
+  [ "$(printf '%s' "$PROBE_JSON" | jq -r '.policy')" != "refuse" ] || PROBE_POLICY="refuse"
+  printf '%s' "$PROBE_JSON" | jq -r 'def clean: tostring | gsub("[\\n\\r]"; " ") | gsub("`"; "") | gsub("\\$\\("; "") | .[0:200]; (.unlabelledNonDiscriminating[]? | "  unlabelled non-discriminating: " + (.id | clean) + ": " + (.segment | clean)), (.unmeasured[]? | "  unmeasured: " + (.id | clean) + ": " + ((.segment // "(whole verify)") | clean) + " — " + ((.why // "no reason given") | clean))'
+done <<< "$VALIDATE_FILES"
+echo "Verify probe policy: $PROBE_POLICY"
+echo "Verify probe: $PROBE_UNLABELLED unlabelled non-discriminating, $PROBE_UNMEASURED unmeasured, $PROBE_NOT_PROBED not probed"
+# phase45-probe-plan:end
+```
+
+Every jq call above reads its input from a pipe and none opens a file. Text that originates in story verifies and in probe reasons is sanitized before it is printed — newlines and carriage returns become spaces, backticks and `$(` are removed, and the text is cut to 200 characters — the same four-step rule the Audit-warnings bullets in Step 5 apply (the backtick is spelled ``` so the block holds no literal one). `unlabelledNonDiscriminating` and `unmeasured` are the verb's own precomputed answers; the block counts and prints them and never re-derives a guard rail from `stories[].segments`. An `unmeasured` entry is a segment the probe could not judge — skipped suite, timeout, shell state it could not reproduce, or an unterminated quote — and is listed by name, never counted clean.
+
+**Applying the policy.** The block prints `Verify probe policy: report|refuse`, which is the `policy` key of the `probe-plan` payload; any other value is treated as `report`. The rationale for the recorded decision is in `commands/references/verify-probe-policy.md` — cite it, do not restate or parse it.
+- **`report`:** continue to Step 4.6. The findings above are in the report; nothing blocks.
+- **`refuse` with `N > 0`:** interactively, fix the written tasks file — label each named segment's exact text in `implementation.guardRails`, or rewrite the verify so it discriminates — re-write the file with the Write tool, and re-run Phase 4.5 from the top. In agent mode (`INTERACTIVE_MODE=agent`) STOP the whole `/aimi:plan` invocation and surface the report. A refusal never deletes a written tasks file.
+
 Do **not** proceed to the report step until all validations succeed.
 
 ## Step 4.6: Research GC (advisory, non-fatal)
@@ -3790,6 +3847,7 @@ Outline: [N] stories (edits: [M])
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
 [If structural-vocabulary measured]: Vocabulary: [N] missing, [M] unsourced (advisory)
+Verify probe: [N] unlabelled non-discriminating, [M] unmeasured, [K] not probed
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
 [If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
@@ -3804,6 +3862,8 @@ Next steps:
 ```
 
 **Tasks line:** render one `Tasks:` line per file in `MERGE_RETURN` (Phase 3e), in the returned order — one line on the legacy path, two on the SIDE axis, N on the PROJECT axis. On the PROJECT axis, suffix each line with its entry's own `project` and `storyCount` (e.g. `Tasks: .aimi/tasks/2026-07-27-checkout-apps-web-tasks.json (apps/web, 4 stories)`) so the reader can tell which repo each file drives. Never print a filename that is not in the returned list.
+
+**Verify probe line:** `Verify probe: N unlabelled non-discriminating, M unmeasured, K not probed` — always present, fed by the counts the Phase 4.5 Step 3 block printed (summed across every file in `VALIDATE_FILES`). A non-zero `K` means some file's verifies were never measured, which is a different statement from zero findings; list each `not probed` and `unmeasured` line beneath it as bullets.
 
 **Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
 
@@ -3882,6 +3942,9 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 4 | File write fails | Report error with path |
 | Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |
 | Phase 4.5 | Validation fails | Fix issues and re-run until passing |
+| Phase 4.5 | `probe-plan` unavailable or answering nothing usable (python3 missing, older CLI, non-zero exit, empty output) | Count the file as `not probed` and name it; never read it as zero findings; continue with the remaining files |
+| Phase 4.5 | `baseRef` unusable for a file (absent, not in the repository, unborn, shallow, `AIMI_ROOT` not a git repository) | `probe-plan` answers `probed:false` with a reason; report it as `not probed` for that file and continue |
+| Phase 4.5 | Refuse policy hit (`Verify probe policy: refuse` with unlabelled non-discriminating segments) | Interactive: label the segments in `implementation.guardRails` or rewrite the verify, re-write the file, re-run Phase 4.5 from the top. Agent mode: STOP the invocation with the report; never delete the written tasks file |
 | Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` — enforced twice, as prose in the argument-parsing step and as the executed `case` in the `--phase` override block, which emits `PHASE_GATE_OUTCOME=INVALID_SHAPE PHASE_OVERRIDE=<N> MAX_DECIMAL_LEVELS=1` on stderr and exits 1 | Compose the refusal from those fields per the Adaptive Language Rule — name the value and the one-decimal-level ceiling — and STOP. Never report it as a phase missing from the roadmap; that is the separate `ABSENT` outcome on the row below |
 | Rolling-Wave Phase Selection | `--phase <N>` of valid shape but absent from the roadmap | Two outcomes, split by `INTERACTIVE_MODE`. Picker: re-validate the id through `roadmap-get` first — a leading zero comes back as `must be a numeric phase id` and STOPs — then present one AskUserQuestion offering to author the phase. On Yes, write it with `roadmap-init --sync` and re-enter `Load the roadmap and ask the CLI which phases may be expanded`; on No, report `Phase [N] not found in [featureSlug]'s roadmap.` and STOP. Agent mode never authors: one log line naming the phase and the feature, and STOP |
 | Rolling-Wave Phase Selection | `--phase <N>` found but ineligible (wrong status, unmet dependsOn, or claimed) | Refuse before any research/expansion Task is spawned; name the phase and list every unmet dependency by id and status; STOP |
