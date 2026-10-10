@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.148.0] - 2026-10-09
+
+### Added
+- `probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]`: runs every story's `implementation.verify`, segment by segment (full-suite segments skipped unless `--run-suites`), against the tasks file's own `metadata.baseRef` in a throwaway worktree, and reports which segments already pass before any work is done (non-discriminating), which could not be measured (`unmeasured`, with a reason), and which were not probed. The payload carries precomputed `unlabelledNonDiscriminating` and `unmeasured` arrays and a `policy` key.
+- `implementation.guardRails`, an optional story field naming verify segments that are meant to pass both before and after the work. `probe-plan` marks a labelled segment as a guard-rail instead of reporting it as non-discriminating. `task-format-v3.md` and `aimi-story-expander` document the field.
+- `commands/references/verify-probe-policy.md`, the recorded decision for non-discriminating verify segments, with the measured corpus behind it: probing phases 1-7 at their own baseRefs found 279 unlabelled non-discriminating segments, 256 of them a guard-rail or instrument defect and 23 vacuous. Refusing on them would have been a false refusal in 256 cases, so the policy is report-only.
+- `research-figures` gains an `unrecorded` key listing research measure blocks that record a command without its output.
+
+### Changed
+- `/aimi:plan` Phase 4.5 runs `probe-plan` once per written tasks file, prints unlabelled non-discriminating, unmeasured and not-probed segments with a summary line, and branches on the payload's `policy`.
+- `/aimi:plan` Phases 1 and 1.6 handle the `unrecorded` key of `research-figures`.
+- `story-merge` verify-coverage separates spans that are not commands and story-introduced terms into their own classes, and caps its `NOT EVALUATED` line so a large file no longer produces an unbounded report.
+
 ## [1.147.0] - 2026-10-08
 
 ### Added
