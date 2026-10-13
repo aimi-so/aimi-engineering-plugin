@@ -2859,7 +2859,8 @@ def test_prototypedropped_acquired_no_consumer():
     tuple is the cleanup loop that MOVES and DELETES the paths it names.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
+        "prototypeSuperseded",
     )
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
@@ -3941,7 +3942,8 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     this rule. Re-run the grep the comment records when a reader is added.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
+        "prototypeSuperseded",
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 
@@ -11130,3 +11132,142 @@ def test_probe_plan_op_is_registered_under_the_verb_name():
         source = handle.read()
     assert 'shift; cmd_probe_plan "$@"' in source
     assert "probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" in source
+
+
+_WELL_FORMED_SUPERSEDED = {
+    "path": ".aimi/brainstorms/prototypes/x-variant-c.html",
+    "decision": "outline:edit:02",
+    "note": "The decision moves the filter bar below the list.",
+}
+
+
+def _replay_prototype_superseded(superseded, tmp_path, outside=None):
+    """R22's replay, built the way _replay_prototype_dropped is: bash never ran
+    this rule, so there is no jq recording and nothing for the golden corpus."""
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if superseded is not _ABSENT:
+        metadata["prototypeSuperseded"] = superseded
+    document = {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": outside or {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def _assert_refuses_prototype_superseded(actual):
+    assert actual["exit"] == 1
+    verdict = json.loads(actual["stdout"])
+    assert verdict["valid"] is False
+    assert any(
+        "metadata.prototypeSuperseded" in entry for entry in verdict["errors"]
+    ), verdict["errors"]
+    return verdict
+
+
+def test_prototype_superseded_absent_or_null_validates_exactly_as_before(tmp_path):
+    for value in (_ABSENT, None):
+        actual = _replay_prototype_superseded(value, tmp_path)
+        assert actual["exit"] == 0
+        assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+        assert actual["stderr"] == ""
+
+
+def test_prototype_superseded_well_formed_entry_is_accepted(tmp_path):
+    actual = _replay_prototype_superseded([_WELL_FORMED_SUPERSEDED], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+
+
+def test_prototype_superseded_empty_array_is_refused_with_its_own_message(tmp_path):
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded([], tmp_path)
+    )
+    assert any("omit the key" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_non_array_and_non_object_entry_are_refused(tmp_path):
+    for value in ({}, "x.html", [_WELL_FORMED_SUPERSEDED["path"]]):
+        _assert_refuses_prototype_superseded(_replay_prototype_superseded(value, tmp_path))
+
+
+@pytest.mark.parametrize("key", ["path", "decision", "note"])
+def test_prototype_superseded_missing_empty_or_non_string_field_is_refused(key, tmp_path):
+    missing = {k: v for k, v in _WELL_FORMED_SUPERSEDED.items() if k != key}
+    for entry in (missing, dict(_WELL_FORMED_SUPERSEDED, **{key: ""}),
+                  dict(_WELL_FORMED_SUPERSEDED, **{key: 7})):
+        verdict = _assert_refuses_prototype_superseded(
+            _replay_prototype_superseded([entry], tmp_path)
+        )
+        assert any("[0]." + key in entry for entry in verdict["errors"]), verdict["errors"]
+
+
+def test_prototype_superseded_unknown_key_is_refused(tmp_path):
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded(
+            [dict(_WELL_FORMED_SUPERSEDED, extra="x")], tmp_path
+        )
+    )
+    assert any("unknown key" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_path_escaping_the_project_root_is_refused(tmp_path):
+    # The target EXISTS outside the root: a missing one resolves through bash's
+    # documented unresolved-string arm and is accepted (see require_in_project).
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded(
+            [dict(_WELL_FORMED_SUPERSEDED, path="../fora/proto.html")],
+            tmp_path,
+            outside={"fora/proto.html": "<html></html>"},
+        )
+    )
+    assert any("escapes the project root" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_surfaces_in_metadata_and_is_absent_when_not_recorded(tmp_path):
+    root = tmp_path / "proj"
+    tasks_dir = root / ".aimi" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    story = {
+        "id": "US-001", "title": "t", "description": "d",
+        "acceptanceCriteria": ["a"], "status": "pending", "priority": 1,
+        "dependsOn": [], "wave": 0,
+    }
+
+    def write(name, metadata):
+        target = tasks_dir / name
+        target.write_text(
+            json.dumps({"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}),
+            encoding="utf-8",
+        )
+        return str(target)
+
+    base = {"title": "t", "branchName": "b"}
+    with_key = write("sup.json", dict(base, prototypeSuperseded=[_WELL_FORMED_SUPERSEDED]))
+    without = write("clean.json", base)
+
+    run = _run_get_story_context(with_key, "US-001", str(root))
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["metadata"] == {
+        "prototypeSuperseded": [_WELL_FORMED_SUPERSEDED]
+    }
+
+    run = _run_get_story_context(without, "US-001", str(root))
+    assert run.returncode == 0, run.stderr
+    assert "prototypeSuperseded" not in json.loads(run.stdout)["metadata"]

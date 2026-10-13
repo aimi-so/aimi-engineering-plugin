@@ -14777,7 +14777,8 @@ $rp_entry"
 # human reading, and this verb does not claim it.
 #
 # `dead_keys` follows the omitted-when-empty convention `metadata.baseRef`,
-# `metadata.pluginVersion` and `metadata.prototypeDropped` already use:
+# `metadata.pluginVersion`, `metadata.prototypeDropped` and
+# `metadata.prototypeSuperseded` already use:
 # written only when something was actually found, absent otherwise, never
 # `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
 # which is what every caller written before this third count reads.
@@ -17827,7 +17828,7 @@ COMMANDS:
                               ^(19|20)[0-9]{2}$), and dead_keys -- per block, the names its
                               command indexes a structured subject by that the subject does
                               not carry. dead_keys is omitted entirely when empty (the
-                              baseRef/prototypeDropped convention), never [], so a clean
+                              baseRef/prototypeDropped/prototypeSuperseded convention), never [], so a clean
                               file prints exactly blocks and figures_outside.
                               unrecorded lists [{block, line, command}] for a block that
                               records a command with no output beneath it (line is the

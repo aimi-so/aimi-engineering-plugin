@@ -2164,6 +2164,56 @@ def prototype_dropped_shape_errors(dropped):
     return problems
 
 
+def prototype_superseded_shape_errors(superseded):
+    """`metadata.prototypeSuperseded`'s shape, for R22. Returns a list of suffixes.
+
+    The sibling of prototype_dropped_shape_errors above and the same contract:
+    ABSENT (or an explicit null, which jq cannot tell from absent) is valid and
+    skipped by the caller, `[]` gets a message of its own because the key is
+    omitted-when-empty, and every element is an object carrying EXACTLY
+    `path`, `decision` and `note` -- each a non-empty string. An unknown key is
+    an error: the writer is /aimi:plan Phase 4 alone, so a stray key is the
+    plugin having written a record its own reader cannot parse.
+
+    The record names a prototype a later decision (`oqDecisions[]`) changed
+    something of. It stays in `metadata.prototypePaths` -- recorded, never
+    regenerated. `path` confinement is the CALLER's job, since it needs
+    project_root; this helper only judges shape.
+    """
+    if jq_type(superseded) != "array":
+        return [" is not an array (expected [{path, decision, note}, …])"]
+
+    if not superseded:
+        return [
+            " is an empty array — omit the key entirely when nothing was superseded"
+        ]
+
+    problems = []
+    for index, entry in enumerate(superseded):
+        where = "[" + str(index) + "]"
+        if jq_type(entry) != "object":
+            problems.append(
+                where + " is not an object (expected {path, decision, note})"
+            )
+            continue
+
+        for key in ("path", "decision", "note"):
+            value = jq_index(entry, key, ".metadata.prototypeSuperseded" + where)
+            if not isinstance(value, str) or not value:
+                problems.append(
+                    where + "." + key + " is missing or not a non-empty string"
+                )
+
+        for key in entry:
+            if key not in ("path", "decision", "note"):
+                problems.append(
+                    where + " has unknown key \"" + str(key)
+                    + "\" (allowed: path, decision, note)"
+                )
+
+    return problems
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -2629,6 +2679,39 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     if prototype_dropped is not None:
         for problem in prototype_dropped_shape_errors(prototype_dropped):
             errors.append(tasks_file + ": metadata.prototypeDropped" + problem)
+
+    # R22 -- metadata.prototypeSuperseded's shape and path confinement. Appended
+    # AFTER R21 for R17's reason: a rule below the last one can only add lines
+    # after everything already recorded. An ERROR, R21's reasoning held: the key
+    # has one writer (/aimi:plan Phase 4), so a malformed value is the plugin
+    # having written a record its reader cannot parse, and a warning would hand
+    # back the silence the record exists to break. ABSENT/null does nothing.
+    #
+    # UNLIKE prototypeDropped, this `path` IS confined, because it names a
+    # prototype the executor is told to read next to -- through
+    # confined_spec_path, never a fresh check. archive-task's cleanup tuple is
+    # deliberately NOT extended with this key (prototypeDropped is not in it
+    # either): `path` always points at an entry already in
+    # metadata.prototypePaths, which archive-task already confines and removes.
+    prototype_superseded = jq_index(doc0_metadata, "prototypeSuperseded", ".metadata")
+    if prototype_superseded is not None:
+        for problem in prototype_superseded_shape_errors(prototype_superseded):
+            errors.append(tasks_file + ": metadata.prototypeSuperseded" + problem)
+        if isinstance(prototype_superseded, list):
+            for index, entry in enumerate(prototype_superseded):
+                if jq_type(entry) != "object":
+                    continue
+                given = jq_index(
+                    entry, "path", ".metadata.prototypeSuperseded[" + str(index) + "]"
+                )
+                if not isinstance(given, str) or not given:
+                    continue
+                _resolved, inside = confined_spec_path(project_root, given)
+                if not inside:
+                    errors.append(
+                        tasks_file + ": metadata.prototypeSuperseded[" + str(index)
+                        + "].path escapes the project root: " + given
+                    )
 
     return errors
 
@@ -4649,7 +4732,8 @@ def op_validate_tasks(argv):
 # On 28 September 2026, over SKILL.md and both files under references/, that
 # printed five distinct matches -- metadata.designBundle (2 occurrences),
 # metadata.designTokens (1), metadata.prototypePaths (10) and
-# metadata.prototypeDropped (3), plus one metadata.baseRef that names a
+# metadata.prototypeDropped (3) -- and, once added, metadata.prototypeSuperseded --
+# plus one metadata.baseRef that names a
 # DIFFERENT document's field entirely (step 1.5's own prose about a verify
 # resolving baseRef from the full tasks file it reads directly, never from
 # this payload) and is excluded from the tuple below for that reason. Re-run
@@ -4664,7 +4748,20 @@ def op_validate_tasks(argv):
 # writes -- one object per resolved question, each carrying the question's own
 # prose -- and nothing in the executor has ever read it, so it travelled in
 # every spawn of every story for nothing.
-STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths", "prototypeDropped")
+#
+# metadata.prototypeSuperseded joined the tuple with the same measured read:
+# the executor checks it beside each prototypeDropped check (reading the
+# superseded entry NEXT TO the prototype). It is a RECORD of a decision, and
+# the key is deliberately absent from archive-task's cleanup tuple -- its
+# `path` always names an entry of metadata.prototypePaths, which archive-task
+# already confines and removes.
+STORY_CONTEXT_METADATA_KEYS = (
+    "designBundle",
+    "designTokens",
+    "prototypePaths",
+    "prototypeDropped",
+    "prototypeSuperseded",
+)
 
 
 def projected_metadata(metadata):
