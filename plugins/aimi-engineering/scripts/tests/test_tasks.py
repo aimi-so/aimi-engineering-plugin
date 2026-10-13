@@ -2103,7 +2103,9 @@ def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
 _ABSENT = object()
 
 
-def _replay_implementation(implementation, tmp_path, files=None, finalize=_ABSENT):
+def _replay_implementation(
+    implementation, tmp_path, files=None, finalize=_ABSENT, project=_ABSENT
+):
     """One story through the real CLI, carrying `implementation` as given.
 
     R17's own replay, built here for the reason _replay_line_anchor is built
@@ -2143,6 +2145,8 @@ def _replay_implementation(implementation, tmp_path, files=None, finalize=_ABSEN
     }
     if implementation is not _ABSENT:
         story["implementation"] = implementation
+    if project is not _ABSENT:
+        story["project"] = project
     metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
     if finalize is not _ABSENT:
         metadata["finalize"] = finalize
@@ -2234,6 +2238,88 @@ def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(t
         "nao/existe/de/jeito/nenhum/x.py"
         " — the file may be new, the directory it lands in may not\n"
     )
+
+
+_MISSING_DIR_WARNING = (
+    "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+    "implementation.files names a directory that does not exist: %s"
+    " — the file may be new, the directory it lands in may not\n"
+)
+
+
+def _impl(*files):
+    return {"files": list(files), "approach": "a", "verify": "true"}
+
+
+def test_implementation_files_resolve_against_story_project_existing_directory_is_silent(tmp_path):
+    """Multi-repo: the directory exists under the story's own child repository."""
+    seeded = {"api/src/existente.py": "# vizinho\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_implementation_files_resolve_against_story_project_missing_directory_warns(tmp_path):
+    """The same child, a directory that is not there: still a warning, still valid.
+
+    The root carries `nao/existe/` so a rule that resolved against the root
+    would stay silent here -- the warning can only come from the child base.
+    """
+    seeded = {"api/src/existente.py": "# vizinho\n", "nao/existe/outro.py": "#\n"}
+    actual = _replay_implementation(
+        _impl("nao/existe/x.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "nao/existe/x.py"
+
+
+def test_implementation_files_resolve_against_story_project_unchanged_for_root_projects(tmp_path):
+    """Absent and "." projects keep resolving against the project root."""
+    seeded = {"src/existente.py": "# vizinho\n"}
+    for project in (_ABSENT, None, ".", ""):
+        quiet = _replay_implementation(
+            _impl("src/novo.py"), tmp_path, seeded, project=project
+        )
+        assert quiet["exit"] == 0 and quiet["stderr"] == ""
+        loud = _replay_implementation(
+            _impl("nao/existe/x.py"), tmp_path, seeded, project=project
+        )
+        assert loud["exit"] == 0
+        assert loud["stderr"] == _MISSING_DIR_WARNING % "nao/existe/x.py"
+
+
+def test_implementation_files_resolve_against_story_project_not_the_root(tmp_path):
+    """A directory present only at the root does not satisfy a child's entry."""
+    seeded = {"src/existente.py": "# so na raiz\n", "api/README.md": "x\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "src/novo.py"
+
+
+def test_implementation_files_project_escape_dotdot_warns_and_stays_valid(tmp_path):
+    seeded = {"src/existente.py": "# vizinho\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py", "src/outro.py"), tmp_path, seeded, project="../outside"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "one warning line per story"
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "src/novo.py, src/outro.py"
+
+
+def test_implementation_files_project_escape_absolute_project_warns_and_stays_valid(tmp_path):
+    actual = _replay_implementation(
+        _impl("passwd"), tmp_path, {"src/existente.py": "#\n"}, project="/etc"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "passwd"
 
 
 # The well-formed `metadata.finalize` every R18/R19 case below starts from. One

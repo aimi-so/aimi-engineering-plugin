@@ -2406,11 +2406,32 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             files = jq_index(implementation, "files", ".userStories[].implementation")
             if not isinstance(files, list):
                 continue
+            # A story's entries are relative to ITS project, not to the
+            # layout root: in a multi-repo layout `project` names the child
+            # repository the story's files live in. Absent, non-string, "" or
+            # "." keeps the root as the base (the single-repo behaviour, byte
+            # for byte). A project that escapes the root -- `..` segments or an
+            # absolute path -- is never traversed: every entry is reported
+            # through the same warning. The leading "/" is checked first because
+            # confined_spec_path joins with a string, so `/etc` would become
+            # `<root>//etc` and look lexically inside the root.
+            project = _report_project(story)
+            if project in (None, "", "."):
+                base = project_root
+            elif project.startswith("/"):
+                base = None
+            else:
+                project_path, project_inside = confined_spec_path(project_root, project)
+                base = project_path if project_inside else None
             unopenable = []
             for entry in files:
                 if not isinstance(entry, str):
                     continue
-                path, inside = confined_spec_path(project_root, entry)
+                if base is None:
+                    inside = False
+                    path = entry
+                else:
+                    path, inside = confined_spec_path(base, entry)
                 if inside and os.path.isdir(os.path.dirname(path)):
                     continue
                 if entry not in unopenable:
