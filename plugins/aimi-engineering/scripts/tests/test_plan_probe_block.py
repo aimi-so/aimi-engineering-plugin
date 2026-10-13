@@ -246,3 +246,10 @@ def test_guardrails_mentioned_in_the_three_plan_places_and_the_skill():
     skill = SKILL.read_text(encoding="utf-8")
     assert "implementation.guardRails" in skill
     assert "WARNING and NEVER a block" in skill
+
+
+def test_failure_row_no_longer_anticipates_non_git_root():
+    rows = [l for l in PLAN_TEXT.splitlines() if l.startswith("| Phase 4.5 |") and "baseRef" in l]
+    assert len(rows) == 1
+    assert "`AIMI_ROOT` not a git repository" not in rows[0]
+    assert "non-git parent" in PLAN_TEXT and "in the project repository its stories name" in PLAN_TEXT

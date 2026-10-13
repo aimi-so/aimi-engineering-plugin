@@ -7656,13 +7656,45 @@ def op_probe_plan(argv):
         _emit(_probe_plan_not_probed(ref, "git is not installed or cannot run here"))
         return 0
     if top[0] != 0:
-        _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        grouped = _probe_plan_project_groups(
+            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+        )
+        if grouped is None:
+            _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        else:
+            _emit(grouped)
         return 0
     toplevel = top[1].strip()
+    outcome = _probe_plan_in_repo(
+        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+    )
+    if outcome[0] == "not-probed":
+        _emit(_probe_plan_not_probed(ref, outcome[1]))
+        return 0
+    _emit(_probe_plan_payload(ref, outcome[1], outcome[2], outcome[3]))
+    return 0
+
+
+def _probe_plan_payload(ref, stories_out, unlabelled, unmeasured):
+    return {
+        "baseRef": ref,
+        "probed": True,
+        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
+        "stories": stories_out,
+        "unlabelledNonDiscriminating": unlabelled,
+        "unmeasured": unmeasured,
+    }
+
+
+def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
+    """The resolve-ref / worktree-add / per-story sequence against ONE
+    repository. `toplevel` is its root and `cwd` a directory inside it whose
+    prefix the stories' own relative paths hang from. Returns
+    ("not-probed", reason) or ("ok", stories, unlabelled, unmeasured); the
+    throwaway worktree is gone on every path out."""
     resolved = _probe_plan_git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], toplevel)
     if resolved is None or resolved[0] != 0 or not resolved[1].strip():
-        _emit(_probe_plan_not_probed(ref, "the ref does not resolve to a commit in this repository"))
-        return 0
+        return ("not-probed", "the ref does not resolve to a commit in this repository")
     sha = resolved[1].strip()
     shown = _probe_plan_git(["rev-parse", "--show-prefix"], cwd)
     prefix = shown[1].strip() if shown is not None and shown[0] == 0 else ""
@@ -7670,36 +7702,131 @@ def op_probe_plan(argv):
         scratch_real = os.path.realpath(scratch)
         top_real = os.path.realpath(toplevel)
         if scratch_real == top_real or scratch_real.startswith(top_real + "/"):
-            _emit(_probe_plan_not_probed(
-                ref, "the temporary directory would land inside the repository"
-            ))
-            return 0
+            return ("not-probed", "the temporary directory would land inside the repository")
         git_tree = scratch_real + "/tree"
         added = _probe_plan_git(["worktree", "add", "--detach", git_tree, sha], toplevel)
         if added is None or added[0] != 0:
             _probe_plan_git(["worktree", "prune"], toplevel)
             detail = (added[2].strip().splitlines() or ["no output"])[0] if added else "git cannot run"
-            _emit(_probe_plan_not_probed(ref, "git worktree add failed: " + detail))
-            return 0
+            return ("not-probed", "git worktree add failed: " + detail)
         try:
             stories_out, unlabelled, unmeasured = _probe_plan_stories(
-                docs, path, git_tree, sha, prefix,
-                None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+                docs, path, git_tree, sha, prefix, skip_matching,
             )
         finally:
             removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
             _probe_plan_git(["worktree", "prune"], toplevel)
             if removed is None or removed[0] != 0:
                 sys.stderr.write("probe-plan: could not remove the temporary worktree %s\n" % git_tree)
-    _emit({
-        "baseRef": ref,
-        "probed": True,
-        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
-        "stories": stories_out,
-        "unlabelledNonDiscriminating": unlabelled,
-        "unmeasured": unmeasured,
-    })
-    return 0
+    return ("ok", stories_out, unlabelled, unmeasured)
+
+
+def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
+    """The invocation directory is not inside a git repository, which is the
+    multi-repo layout: AIMI_ROOT is a plain parent holding one repository per
+    project. Each story's own `project` names the repository it is probed in,
+    so the stories are grouped by it and each group goes through the same
+    sequence a single repository does, at the file's own `ref`.
+
+    The `project` is document-sourced, so its directory is confined to
+    PROJECT_ROOT by `confined_spec_path` (never a fresh check); one that
+    escapes, does not exist or is not a repository leaves its stories
+    `unmeasured` by name, and the other groups are still probed. Returns None
+    when no group could be resolved (the caller then answers `probed: false`
+    exactly as before), else the same payload a single repository gives."""
+    project_root = os.environ.get("PROJECT_ROOT") or cwd
+    entries = []  # (project key or None, story)
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("userStories"), list):
+            continue
+        for story in doc["userStories"]:
+            if isinstance(story, dict):
+                project = _report_project(story)
+                entries.append((project if project is not None else ".", story))
+    results = [None] * len(entries)  # per story: (stories_entry, [unlabelled], [unmeasured])
+    order = []
+    for index, (project, _) in enumerate(entries):
+        if project not in order:
+            order.append(project)
+    resolved_any = False
+
+    def _declined(index, story, why):
+        sid = story.get("id")
+        implementation = story.get("implementation")
+        verify = implementation.get("verify") if isinstance(implementation, dict) else None
+        unmeasured = []
+        if verify is not None and not (isinstance(verify, str) and not verify.strip()):
+            unmeasured.append({"id": sid, "segment": None, "why": why})
+        results[index] = ({"id": sid, "segments": []}, [], unmeasured)
+
+    for project in order:
+        members = [i for i, (key, _) in enumerate(entries) if key == project]
+        reason = None
+        group_dir = None
+        if project == ".":
+            reason = "project . is the invocation directory, which is not inside a git repository"
+        elif _invalid_project(project):
+            reason = "project %r is not a routable project path" % project
+        else:
+            group_dir, inside = confined_spec_path(project_root, project)
+            if not inside:
+                reason = "project %s escapes the project root" % project
+        toplevel = None
+        if reason is None:
+            top = _probe_plan_git(["rev-parse", "--show-toplevel"], group_dir)
+            if top is None:
+                # git could not even start in it: the directory is not there
+                # (or is not a directory), git itself having run above.
+                reason = "project %s: the directory does not exist" % project
+            elif top[0] != 0:
+                reason = "project %s is not a git repository" % project
+            else:
+                toplevel = top[1].strip()
+        if reason is None:
+            # The group's stories lose their own `project`: the repository is
+            # already the group, so the per-story path logic must not add it
+            # to the prefix a second time.
+            stripped = [
+                {k: v for k, v in entries[i][1].items() if k != "project"}
+                for i in members
+            ]
+            outcome = _probe_plan_in_repo(
+                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching
+            )
+            if outcome[0] == "not-probed":
+                reason = "project %s could not be probed: %s" % (project, outcome[1])
+        if reason is not None:
+            for i in members:
+                _declined(i, entries[i][1], reason)
+            continue
+        resolved_any = True
+        _, stories_out, unlabelled, unmeasured = outcome
+        # every dict story yields exactly one stories entry, in order; the
+        # unlabelled/unmeasured lists are attributed to a story by its id.
+        for position, i in enumerate(members):
+            sid = entries[i][1].get("id")
+            results[i] = (
+                stories_out[position],
+                [u for u in unlabelled if u["id"] == sid and position == _first_with_id(entries, members, sid)],
+                [u for u in unmeasured if u["id"] == sid and position == _first_with_id(entries, members, sid)],
+            )
+    if not resolved_any:
+        return None
+    stories_out, unlabelled, unmeasured = [], [], []
+    for entry, rows_u, rows_m in results:
+        stories_out.append(entry)
+        unlabelled.extend(rows_u)
+        unmeasured.extend(rows_m)
+    return _probe_plan_payload(ref, stories_out, unlabelled, unmeasured)
+
+
+def _first_with_id(entries, members, sid):
+    """Position within `members` of the first story carrying `sid`, so a
+    duplicated id's rows are attributed once rather than once per twin."""
+    for position, i in enumerate(members):
+        if entries[i][1].get("id") == sid:
+            return position
+    return -1
 
 
 # ---------------------------------------------------------------------------

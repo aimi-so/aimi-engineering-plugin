@@ -10600,6 +10600,101 @@ def test_probe_plan_is_not_probed_when_the_baseref_is_absent_unknown_or_the_repo
           _plan_git(root4, "rev-parse", "HEAD~1"), "git is not installed")
 
 
+def _plan_multi_repo(tmp_path, stories):
+    """A NON-git parent holding `.aimi/` and child repositories: `a` has
+    `marker.txt` at the base tag, `b` does not, `c` is not a repository.
+    Returns (parent, tasks_file)."""
+    parent = os.path.join(os.path.realpath(str(tmp_path)), "multi")
+    os.makedirs(os.path.join(parent, ".aimi", "tasks"))
+    for name, files in (("a", ["README", "marker.txt"]), ("b", ["README"])):
+        child = os.path.join(parent, name)
+        os.makedirs(child)
+        _plan_git(child, "init", "-q")
+        for fname in files:
+            with open(os.path.join(child, fname), "w", encoding="utf-8") as handle:
+                handle.write(name + "\n")
+            _plan_git(child, "add", fname)
+        _plan_git(child, "commit", "-q", "-m", "first")
+        _plan_git(child, "tag", "base")
+        with open(os.path.join(child, "later.txt"), "w", encoding="utf-8") as handle:
+            handle.write("later\n")
+        _plan_git(child, "add", "later.txt")
+        _plan_git(child, "commit", "-q", "-m", "second")
+    os.makedirs(os.path.join(parent, "c"))
+    built = []
+    for index, spec in enumerate(stories, start=1):
+        story = {
+            "id": "US-%03d" % index, "title": "s", "description": "d",
+            "acceptanceCriteria": ["x"], "priority": 1, "status": "pending",
+            "dependsOn": [],
+        }
+        story.update(spec)
+        built.append(story)
+    tasks_file = os.path.join(parent, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3",
+                   "metadata": {"title": "t", "branchName": "b", "baseRef": "base"},
+                   "userStories": built}, handle)
+    return parent, tasks_file
+
+
+def test_probe_plan_roots_each_project_group_in_its_own_repository_under_a_non_git_parent(tmp_path):
+    verify = {"verify": "test -f marker.txt"}
+    stories = [
+        {"project": "a", "implementation": dict(verify)},
+        {"project": "b", "implementation": dict(verify)},
+        {"project": "c", "implementation": dict(verify)},
+        {"project": "../outside", "implementation": dict(verify)},
+        {"project": "gone", "implementation": dict(verify)},
+    ]
+    parent, tasks_file = _plan_multi_repo(tmp_path, stories)
+    out = _plan_ok(parent, tasks_file,
+                   env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(parent)})
+    assert out["probed"] is True and out["baseRef"] == "base"
+    by_id = {s["id"]: s["segments"] for s in out["stories"]}
+    assert [s["id"] for s in out["stories"]] == ["US-00%d" % n for n in range(1, 6)]
+    # `a` has marker.txt at the base tag: the segment already passes there
+    assert by_id["US-001"][0]["discriminates"] is False
+    # `b` does not: the same text fails at the base, so it discriminates
+    assert by_id["US-002"][0]["discriminates"] is True
+    assert {"id": "US-001", "segment": "test -f marker.txt"} in out["unlabelledNonDiscriminating"]
+    # c is not a repository, the escape and the missing directory are named
+    why = {u["id"]: u["why"] for u in out["unmeasured"]}
+    assert "project c is not a git repository" in why["US-003"]
+    assert "not a routable project path" in why["US-004"]
+    assert "project gone" in why["US-005"] and "does not exist" in why["US-005"]
+    for sid in ("US-003", "US-004", "US-005"):
+        assert by_id[sid] == []
+    # no probe worktree is left behind in either child
+    for name in ("a", "b"):
+        listing = _plan_git(os.path.join(parent, name), "worktree", "list", "--porcelain")
+        assert listing.count("worktree ") == 1
+
+
+def test_probe_plan_reports_probed_false_when_no_project_group_resolves(tmp_path):
+    stories = [{"project": "c", "implementation": {"verify": "test -f x"}},
+               {"implementation": {"verify": "test -f y"}}]
+    parent, tasks_file = _plan_multi_repo(tmp_path, stories)
+    out = _plan_ok(parent, tasks_file,
+                   env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(parent)})
+    assert out["probed"] is False
+    assert "not inside a git repository" in out["reason"]
+    assert "stories" not in out
+
+
+def test_probe_plan_single_repo_cwd_result_is_unchanged(tmp_path):
+    root, tasks_file, first, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert list(out) == ["baseRef", "probed", "policy", "stories",
+                         "unlabelledNonDiscriminating", "unmeasured"]
+    assert out["baseRef"] == first and out["probed"] is True
+    assert out["policy"] == "report"
+    assert [s["id"] for s in out["stories"]] == ["US-001"]
+    assert out["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}]
+    assert out["unmeasured"] == []
+
+
 def test_probe_plan_skips_suites_by_default_and_lists_them_unmeasured(tmp_path):
     verify = "python3 -m pytest tests/ -q\npytest tests/ -q -k name\nbash scripts/test-x.sh\ntrue\n"
     root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
