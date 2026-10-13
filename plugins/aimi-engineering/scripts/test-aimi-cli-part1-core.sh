@@ -1204,6 +1204,58 @@ EOF
   rm -f "$file_a"
 }
 
+test_acknowledge_evidence() {
+  echo ""
+  echo "=== Testing acknowledge-evidence ==="
+
+  local rc err_out output before at_value at_ok="no"
+  local file_a="$TASKS_DIR/9999-99-88-acknowledge-evidence-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""},
+    {"id": "US-901", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "completed", "dependsOn": [], "notes": ""},
+    {"id": "US-902", "title": "Story three", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 3, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+
+  # --- refusal: agent mode (AIMI_AGENT_MODE and CI both resolve to agent) ---
+  before=$(cat "$file_a")
+  err_out=$(AIMI_AGENT_MODE=true "$CLI" acknowledge-evidence --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: AIMI_AGENT_MODE=true exits non-zero"
+  assert_contains "human decision" "$err_out" "acknowledge-evidence: agent-mode refusal names the reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: agent-mode refusal leaves the file unchanged"
+  err_out=$(CI=true "$CLI" acknowledge-evidence --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: CI=true exits non-zero"
+
+  # --- refusal: whitespace-only --reason ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason '   ' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: whitespace-only --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "acknowledge-evidence: empty-reason refusal names --reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: refusals leave the file unchanged"
+
+  # --- success: record carries the reason, a UTC stamp and the completed count ---
+  output=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason 'reviewed by hand' --tasks-file "$file_a") && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-evidence: success exits 0"
+  assert_eq "reviewed by hand" "$(printf '%s' "$output" | jq -r '.reason')" "acknowledge-evidence: prints the written record"
+  assert_eq "reviewed by hand" "$(jq -r '.metadata.evidenceAcknowledged.reason' "$file_a")" "acknowledge-evidence: on disk, reason recorded"
+  assert_eq "2" "$(jq '.metadata.evidenceAcknowledged.completed' "$file_a")" "acknowledge-evidence: on disk, completed is the completed-story count"
+  at_value=$(jq -r '.metadata.evidenceAcknowledged.acknowledgedAt' "$file_a")
+  if printf '%s' "$at_value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then at_ok="yes"; fi
+  assert_eq "yes" "$at_ok" "acknowledge-evidence: acknowledgedAt is ISO-8601 UTC"
+
+  # --- idempotent: same call again writes nothing ---
+  before=$(cat "$file_a")
+  env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason 'reviewed by hand' --tasks-file "$file_a" >/dev/null && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-evidence: repeat call exits 0"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: repeat call leaves the file byte-identical"
+
+  rm -f "$file_a"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -11670,6 +11722,7 @@ main() {
   test_remove_story
   test_set_verification
   test_acknowledge_smell
+  test_acknowledge_evidence
   test_validate_deps_circular
   test_validate_deps
   test_status

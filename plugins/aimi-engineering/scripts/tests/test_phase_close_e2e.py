@@ -445,7 +445,11 @@ def test_a_split_phase_closes_only_once_every_member_is_judged(tmp_path):
 
     for member_path in (alpha_path, beta_path):
         _assert_ok(
-            _run(project, env, ["mark-complete", "US-001", "--tasks-file", member_path]),
+            _run(project, env, [
+                "mark-complete", "US-001",
+                "--evidence", json.dumps({"exit": 0, "preExit": 1, "segments": 2, "discriminating": 1}),
+                "--tasks-file", member_path,
+            ]),
             "mark-complete US-001 (" + os.path.basename(member_path) + ")",
         )
         _assert_ok(
@@ -506,7 +510,11 @@ def test_a_ui_phase_refuses_to_close_until_its_visual_gate_is_recorded(tmp_path)
     )
     _init_phase(project, env, feature)
     _assert_ok(
-        _run(project, env, ["mark-complete", "US-001", "--tasks-file", tasks_path]),
+        _run(project, env, [
+            "mark-complete", "US-001",
+            "--evidence", json.dumps({"exit": 0, "discriminating": 1}),
+            "--tasks-file", tasks_path,
+        ]),
         "mark-complete US-001",
     )
     _assert_ok(
@@ -535,4 +543,69 @@ def test_a_ui_phase_refuses_to_close_until_its_visual_gate_is_recorded(tmp_path)
         "status": "accepted", "reason": "known and tolerated", "review": None,
         "recordedAt": "2020-01-01T00:00:00Z",
     })
+    _assert_ok(_set_status_completed(project, env, feature), "roadmap-set-status --status completed")
+
+
+# ---------------------------------------------------------------------------
+# The evidence gate -- closing a phase that proved nothing needs a human reason
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_gate_refuses_then_acknowledge_evidence_lets_the_phase_close(tmp_path):
+    """A story completed with a bare exit 0 (no discriminating count) is
+    judged `passed` by judge-verification, and the close still refuses until
+    acknowledge-evidence records why; the acknowledgement lapses when a
+    further story completes."""
+    root = str(tmp_path)
+    project, env = _build_root(root)
+    feature = "e2e-evidence"
+    tasks_path = _phase_tasks_path(project, feature, 1, "fixture")
+
+    def _story(story_id):
+        return {
+            "id": story_id,
+            "title": "Self-reported exit 0",
+            "description": "Completes with an exit 0 and nothing discriminating.",
+            "acceptanceCriteria": ["verify exits 0"],
+            "status": "pending",
+            "dependsOn": [],
+            "implementation": {"verify": "true"},
+            "verification": {"strategy": "test", "status": "pending"},
+        }
+
+    _write_tasks_file(tasks_path, [_story("US-001"), _story("US-002")])
+    _init_phase(project, env, feature)
+    for story_id in ("US-001",):
+        _assert_ok(
+            _run(project, env, [
+                "mark-complete", story_id, "--evidence", json.dumps({"exit": 0}),
+                "--tasks-file", tasks_path,
+            ]),
+            "mark-complete " + story_id,
+        )
+        _assert_ok(
+            _run(project, env, ["judge-verification", story_id, "--tasks-file", tasks_path]),
+            "judge-verification " + story_id,
+        )
+    _assert_ok(_write_handoff(project, env, feature), "roadmap-write-handoff")
+
+    refused = _set_status_completed(project, env, feature)
+    assert refused.returncode != 0
+    assert "acknowledge-evidence" in refused.stderr
+    assert "discriminating=0 completed=1" in refused.stderr
+
+    # An agent session cannot acknowledge: the verb refuses before the lock.
+    agent_env = dict(env, AIMI_AGENT_MODE="true")
+    agent = _run(project, agent_env, ["acknowledge-evidence", "--reason", "x", "--tasks-file", tasks_path])
+    assert agent.returncode != 0
+    assert "human decision" in agent.stderr
+
+    human_env = {k: v for k, v in env.items() if k not in ("CI", "AIMI_AGENT_MODE")}
+    _assert_ok(
+        _run(project, human_env, [
+            "acknowledge-evidence", "--reason", "single-story phase, exit 0 reviewed",
+            "--tasks-file", tasks_path,
+        ]),
+        "acknowledge-evidence",
+    )
     _assert_ok(_set_status_completed(project, env, feature), "roadmap-set-status --status completed")

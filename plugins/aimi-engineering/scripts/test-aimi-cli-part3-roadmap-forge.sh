@@ -7072,7 +7072,7 @@ test_list_archivable_nested_roadmap_completed_unit() {
 {
   "schemaVersion": "3.3",
   "metadata": {"title": "p1", "type": "feat", "branchName": "feat/archfeat-phase-1", "maxConcurrency": 4},
-  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""}]
+  "userStories": [{"id": "US-001", "title": "a", "description": "a", "acceptanceCriteria": ["x"], "priority": 1, "status": "completed", "dependsOn": [], "notes": "", "verification": {"strategy": "test", "status": "passed", "evidence": {"exit": 0, "discriminating": 1}}}]
 }
 EOF
   cat > .aimi/tasks/archfeat/phase-2-beta/archfeat-phase-2-tasks.json << 'EOF'

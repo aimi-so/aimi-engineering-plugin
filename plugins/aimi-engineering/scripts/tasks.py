@@ -156,7 +156,15 @@ import time
 # If a third module ever needs these, they follow rm_sanitize into a module of
 # their own -- that is what sanitize.py is, and why it was extracted in its own
 # commit rather than being imported out of whichever file happened to hold it.
-from roadmap import TERMINAL_STORY_STATUSES, _json_type, ground_truth, jq_numbers, jq_sort_key
+from roadmap import (
+    TERMINAL_STORY_STATUSES,
+    _completed_gate_has_marker,
+    _completed_story_ids,
+    _json_type,
+    ground_truth,
+    jq_numbers,
+    jq_sort_key,
+)
 
 # compute_waves is the WRITER's own rule -- roots at 1, everyone else at
 # max(dependency waves) + 1. normalize_waves (below) recomputes a stale
@@ -1076,6 +1084,10 @@ VERIFICATION_SKIP_REASON_MAXLEN = 500
 # set-verification's -- its own name rather than a reuse of the verification
 # constant, because the two are different fields that merely agree today.
 SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
+
+# acknowledge-evidence's own cap on --reason, through rm_sanitize. Its own
+# name for the same reason: a different field that merely agrees today.
+EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -5263,6 +5275,112 @@ def op_acknowledge_smell(argv):
     return 0
 
 
+def _evidence_phase_members(path, docs):
+    """The tasks file paths whose completed stories make up THIS file's
+    phase: itself, plus the siblings a well-formed `metadata.splitGroup`
+    names (resolved by basename in this file's own directory, so a
+    traversal-shaped sibling never escapes it), or the counterpart of a
+    legacy -frontend-/-backend-tasks.json pair. Mirrors the member discipline
+    `roadmap._completed_gate_resolve_members` applies to the same phase, so
+    the count recorded here is the count the gate measures against."""
+    members = [path]
+    directory = os.path.dirname(path) or "."
+    first = docs[0] if docs and isinstance(docs[0], dict) else None
+    if _completed_gate_has_marker(first):
+        for sibling in first["metadata"]["splitGroup"].get("siblings") or []:
+            if not isinstance(sibling, str):
+                continue
+            candidate = os.path.join(directory, os.path.basename(sibling))
+            if os.path.isfile(candidate) and candidate not in members:
+                members.append(candidate)
+        return members
+    base = os.path.basename(path)
+    for suffix, other in (("-frontend-tasks.json", "-backend-tasks.json"),
+                          ("-backend-tasks.json", "-frontend-tasks.json")):
+        if base.endswith(suffix):
+            candidate = os.path.join(directory, base[: -len(suffix)] + other)
+            if os.path.isfile(candidate):
+                members.append(candidate)
+            break
+    return members
+
+
+def op_acknowledge_evidence(argv):
+    """acknowledge-evidence: record, on this tasks file's metadata, that a
+    human saw a phase whose completed stories prove nothing discriminating and
+    chose to let it close -- `metadata.evidenceAcknowledged = {reason,
+    acknowledgedAt, completed}`.
+
+    `completed` is the PHASE-AGGREGATE completed-story count (this file plus
+    every split sibling), because that is the number the completed gate
+    compares it against; the verb writes only into the one file it is given,
+    and the gate honors an acknowledgement found in ANY member. The
+    acknowledgement lapses, by the gate's own comparison, the moment that
+    count changes.
+
+    Refusals, decided here inside the single crossing: --reason missing or
+    blank. The wrapper has already refused agent mode before the lock.
+    A repeat call with the same sanitized reason and the same completed count
+    is a no-op that leaves the first acknowledgedAt alone; a different reason
+    or count replaces the whole record.
+    """
+    path = _flag(argv, "--tasks-file")
+    reason = _flag(argv, "--reason")
+    if not path:
+        die("Usage: tasks.py acknowledge-evidence --tasks-file <path> --reason <text>")
+    if not reason or not reason.strip():
+        die("Error: acknowledge-evidence: --reason is required")
+    clean_reason = rm_sanitize(reason, EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN)
+    if not clean_reason.strip():
+        die("Error: acknowledge-evidence: --reason is required")
+
+    docs = read_docs(path, "acknowledge-evidence")
+    # The first document's metadata object; one is created when the document
+    # has none, a metadata that is some other shape is refused rather than
+    # overwritten.
+    target = None
+    first = docs[0] if docs else None
+    if isinstance(first, dict):
+        if first.get("metadata") is None:
+            first["metadata"] = {}
+        if isinstance(first["metadata"], dict):
+            target = first["metadata"]
+    if target is None:
+        die("Error: acknowledge-evidence: no metadata object in " + path)
+
+    completed = 0
+    for member in _evidence_phase_members(path, docs):
+        if member == path:
+            member_docs = docs
+        else:
+            try:
+                member_docs = load_docs(member)
+            except (OSError, ValueError):
+                continue
+        completed += sum(len(_completed_story_ids(doc)) for doc in member_docs)
+
+    existing = target.get("evidenceAcknowledged")
+    if (
+        isinstance(existing, dict)
+        and existing.get("reason") == clean_reason
+        and existing.get("completed") == completed
+        and not isinstance(existing.get("completed"), bool)
+        and isinstance(existing.get("acknowledgedAt"), str)
+    ):
+        _emit(existing)
+        return 0
+
+    record = {
+        "reason": clean_reason,
+        "acknowledgedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "completed": completed,
+    }
+    target["evidenceAcknowledged"] = record
+    write_docs_atomically(path, docs)
+    _emit(record)
+    return 0
+
+
 # skipReason text for judge-verification's "no usable exit" outcome. Two
 # literal strings, not one templated by a boolean, because the two name
 # different facts: the first says a check was declared and ran somewhere the
@@ -8450,6 +8568,7 @@ _OPS = {
     "remove-story": op_remove_story,
     "set-verification": op_set_verification,
     "acknowledge-smell": op_acknowledge_smell,
+    "acknowledge-evidence": op_acknowledge_evidence,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

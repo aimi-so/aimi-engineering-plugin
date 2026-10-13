@@ -5313,8 +5313,17 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # tempfile.TemporaryDirectory's, the second is git's answer, and the
     # worktree path beneath the first is built by string concatenation, so
     # no join() was added. No new root, no leaf this module chose.
-    assert code.count("os.path.") == 48
-    assert code.count("os.path.isfile(") == 9
+    #
+    # The last SEVEN are _evidence_phase_members' (acknowledge-evidence): a
+    # dirname and a basename of --tasks-file, then for each split sibling a
+    # basename, a join onto that same directory and an isfile(), and for the
+    # legacy frontend/backend pair a join and an isfile() -- every one over
+    # the directory bash already confined, reading a sibling file by BASENAME
+    # so a traversal-shaped name cannot leave it. They WRITE nothing: the
+    # verb still writes only the one --tasks-file it was handed. No new root,
+    # and no leaf this module chose.
+    assert code.count("os.path.") == 55
+    assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -5424,6 +5433,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_remove_story",
         "cmd_set_verification",
         "cmd_acknowledge_smell",
+        "cmd_acknowledge_evidence",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
@@ -5848,6 +5858,112 @@ def test_acknowledge_smell_sanitizes_and_caps_the_reason(tmp_path, capsys):
     assert _ack(path, reason="x" * 900) == 0
     saved = _rs_read(path)["metadata"]["smellWarnings"][0]
     assert len(saved["acknowledgedReason"]) <= T.SMELL_ACKNOWLEDGE_REASON_MAXLEN
+
+
+# ---------------------------------------------------------------------------
+# acknowledge-evidence -- metadata.evidenceAcknowledged, phase-aggregate N
+# ---------------------------------------------------------------------------
+
+
+def _ackev_file(tmp_path, name="e.json", completed=2, pending=1, extra_metadata=None):
+    stories = [_rs_story("US-%03d" % (i + 1), "completed") for i in range(completed)]
+    stories += [_rs_story("US-%03d" % (completed + i + 1)) for i in range(pending)]
+    path = _rs_file(tmp_path, name, stories)
+    if extra_metadata:
+        doc = _rs_read(path)
+        doc["metadata"].update(extra_metadata)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+    return path
+
+
+def _ackev(path, reason="reviewed by hand"):
+    argv = ["acknowledge-evidence", "--tasks-file", path]
+    if reason is not None:
+        argv += ["--reason", reason]
+    return T.op_acknowledge_evidence(argv)
+
+
+def test_acknowledge_evidence_writes_reason_timestamp_and_completed_count(tmp_path, capsys):
+    path = _ackev_file(tmp_path, completed=2, pending=1)
+    assert _ackev(path, reason="checked by hand") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["evidenceAcknowledged"]
+    assert out == saved
+    assert saved["reason"] == "checked by hand"
+    assert saved["completed"] == 2
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved["acknowledgedAt"])
+    assert set(saved) == {"reason", "acknowledgedAt", "completed"}
+
+
+def test_acknowledge_evidence_is_idempotent_and_keeps_the_first_timestamp(tmp_path, capsys):
+    path = _ackev_file(tmp_path)
+    assert _ackev(path) == 0
+    first_bytes = open(path, encoding="utf-8").read()
+    assert _ackev(path) == 0
+    assert open(path, encoding="utf-8").read() == first_bytes
+
+
+def test_acknowledge_evidence_with_a_changed_completed_count_replaces_the_record(
+    tmp_path, capsys
+):
+    path = _ackev_file(tmp_path, completed=1, pending=1)
+    assert _ackev(path) == 0
+    assert _rs_read(path)["metadata"]["evidenceAcknowledged"]["completed"] == 1
+    doc = _rs_read(path)
+    doc["userStories"][1]["status"] = "completed"
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    assert _ackev(path) == 0
+    assert _rs_read(path)["metadata"]["evidenceAcknowledged"]["completed"] == 2
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_acknowledge_evidence_refuses_a_missing_or_blank_reason_and_writes_nothing(
+    tmp_path, capsys, reason
+):
+    path = _ackev_file(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ackev(path, reason=reason)
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_acknowledge_evidence_sanitizes_and_caps_the_reason(tmp_path, capsys):
+    path = _ackev_file(tmp_path)
+    assert _ackev(path, reason="x" * 900) == 0
+    saved = _rs_read(path)["metadata"]["evidenceAcknowledged"]
+    assert len(saved["reason"]) <= T.EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN
+
+
+def test_acknowledge_evidence_counts_the_phase_aggregate_across_split_siblings(
+    tmp_path, capsys
+):
+    """N is the count the gate measures against, so a split phase's member
+    counts every sibling's completed stories, and the verb writes only into
+    the file it was given."""
+    alpha = os.path.join(str(tmp_path), "f-phase-1-alpha-tasks.json")
+    beta = os.path.join(str(tmp_path), "f-phase-1-beta-tasks.json")
+
+    def doc(sibling, stories):
+        return {
+            "schemaVersion": "3.3",
+            "metadata": {"title": "t", "splitGroup": {
+                "project": "p", "index": 1, "total": 2, "siblings": [sibling]}},
+            "userStories": stories,
+        }
+
+    with open(alpha, "w", encoding="utf-8") as handle:
+        json.dump(doc("f-phase-1-beta-tasks.json", [_rs_story("US-001", "completed")]), handle)
+    with open(beta, "w", encoding="utf-8") as handle:
+        json.dump(doc("f-phase-1-alpha-tasks.json", [
+            _rs_story("US-001", "completed"), _rs_story("US-002", "completed")]), handle)
+    beta_before = open(beta, encoding="utf-8").read()
+    assert _ackev(alpha) == 0
+    assert _rs_read(alpha)["metadata"]["evidenceAcknowledged"]["completed"] == 3
+    assert open(beta, encoding="utf-8").read() == beta_before
 
 
 # ---------------------------------------------------------------------------
@@ -6986,6 +7102,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "remove-story",
         "set-verification",
         "acknowledge-smell",
+        "acknowledge-evidence",
         "judge-verification",
         "reset-orphaned",
         "archive-task",

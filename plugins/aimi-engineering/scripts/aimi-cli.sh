@@ -2669,6 +2669,62 @@ cmd_acknowledge_smell() {
   printf '%s\n' "$out"
 }
 
+# Record, on a tasks file's metadata, that a human saw a phase whose completed
+# stories carry no discriminating evidence and chose to let it close, so
+# `roadmap-set-status --status completed` can be unblocked by command. Same
+# agent-mode refusal as acknowledge-smell, for the same reason: it needs a
+# human decision and no document, so bash decides it before the lock.
+# Usage: acknowledge-evidence --reason <text> [--tasks-file <path>]
+cmd_acknowledge_evidence() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --reason) i=$((i + 1)); reason="${args[$i]:-}" ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    echo "Usage: aimi-cli.sh acknowledge-evidence --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  if [ "$(cmd_detect_interactivity)" = "agent" ]; then
+    echo "Error: acknowledge-evidence: acknowledging missing evidence needs a human decision, and this session resolved to agent mode (AIMI_AGENT_MODE, CI or --non-interactive); nothing was written" >&2
+    exit 1
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason reaches tasks.py as an absent one, which refuses it by
+  # naming --reason -- the refusal is op_acknowledge_evidence's, not bash's.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" acknowledge-evidence \
+        --tasks-file "$tasks_file" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -17224,6 +17280,13 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
+    acknowledge-evidence --reason <text> [--tasks-file <path>]
+                              Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
+                              completed} in one locked crossing, so a phase whose completed
+                              stories carry no discriminating evidence can close. completed
+                              is the phase-aggregate completed-story count; the gate stops
+                              honoring it when that count changes. Refuses (writes nothing)
+                              in agent mode or with an empty --reason. Idempotent.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -18713,6 +18776,7 @@ main() {
     remove-story)      shift; cmd_remove_story "$@" ;;
     set-verification)  shift; cmd_set_verification "$@" ;;
     acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
+    acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;

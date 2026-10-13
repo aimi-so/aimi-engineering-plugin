@@ -2783,7 +2783,8 @@ def test_a_reconciled_in_progress_phase_can_still_reach_completed(tmp_path):
 
     # The owning session finishes its work and writes the handoff.
     with open(tasks_path, "w", encoding="utf-8") as handle:
-        json.dump({"userStories": [{"status": "completed"}]}, handle)
+        json.dump({"userStories": [{"status": "completed", "verification": {
+            "status": "passed", "evidence": {"discriminating": 1}}}]}, handle)
     with open(os.path.join(phase_dir, "handoff.md"), "w", encoding="utf-8") as handle:
         handle.write("# handoff\n")
 
@@ -4181,8 +4182,15 @@ def _stored_status(root, feature="gate"):
         return json.load(handle)["phases"][0]["status"]
 
 
-def _story(sid, status):
-    return {"id": sid, "status": "completed", "verification": {"strategy": "test", "status": status}}
+def _story(sid, status, evidence=None):
+    """A completed story. It carries one proven discriminating segment by
+    default, so a fixture about some OTHER half of the completed gate is not
+    also refused by the evidence half; pass `evidence=` to say otherwise."""
+    verification = {"strategy": "test", "status": status}
+    verification["evidence"] = {"discriminating": 1} if evidence is None else evidence
+    if verification["evidence"] is False:
+        del verification["evidence"]
+    return {"id": sid, "status": "completed", "verification": verification}
 
 
 def test_a_phase_nobody_judged_is_refused_and_every_pending_story_is_named(tmp_path):
@@ -4235,6 +4243,7 @@ def test_a_story_that_declared_no_verification_never_enters_the_partition(tmp_pa
     root, env, feature = _gate_fixture(tmp_path, [
         {"id": "US-001", "status": "completed"},
         {"id": "US-002", "status": "skipped"},
+        _story("US-003", "passed"),
     ])
     proc = _close(root, env, feature)
     assert proc.returncode == 0, proc.stderr
@@ -4336,6 +4345,197 @@ def test_acknowledge_smell_clears_the_completed_gate_and_the_note_names_the_verb
     assert _stored_status(root, feature) == "completed"
 
 
+# ---------------------------------------------------------------------------
+# evidence gate -- a phase whose completed stories prove nothing discriminating
+# ---------------------------------------------------------------------------
+
+_NO_EVIDENCE = False  # _story's sentinel for "no evidence key at all"
+
+
+def _ev_tasks_path(root, feature="gate", name=None):
+    return os.path.join(
+        root, ".aimi", "tasks", feature, "phase-1", name or feature + "-phase-1-tasks.json"
+    )
+
+
+def _ack_evidence_cli(root, env, tasks_path, reason="reviewed by hand"):
+    ack_env = {k: v for k, v in env.items() if k not in ("CI", "AIMI_AGENT_MODE")}
+    return subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "acknowledge-evidence",
+         "--reason", reason, "--tasks-file", tasks_path],
+        cwd=root, capture_output=True, text=True, timeout=120, env=ack_env,
+    )
+
+
+@pytest.mark.parametrize("evidence", [
+    _NO_EVIDENCE,
+    {"exit": 0},
+    {"exit": 0, "discriminating": 0},
+    {"exit": 0, "discriminating": True},
+    {"discriminating": "3"},
+    {"discriminating": 1.5},
+])
+def test_evidence_gate_refuses_a_phase_with_no_proven_discriminating_story(tmp_path, evidence):
+    """An absent key, `--evidence '{"exit":0}'`, a recorded zero, a boolean and
+    a non-integer all read as "not proven"; a JSON boolean is never a count."""
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed", evidence=evidence),
+        _story("US-002", "passed", evidence=evidence),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 1, proc.stdout
+    assert "discriminating=0 completed=2" in proc.stderr
+    assert "acknowledge-evidence" in proc.stderr
+    assert _stored_status(root, feature) == "in_progress", "a refusal writes nothing"
+
+
+def test_evidence_gate_closes_when_one_story_is_proven(tmp_path):
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed", evidence={"exit": 0}),
+        _story("US-002", "passed", evidence={"exit": 0, "discriminating": 2}),
+    ])
+    proc = _close(root, env, feature)
+    assert proc.returncode == 0, proc.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_evidence_gate_is_not_overridden_by_force(tmp_path):
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "passed", evidence=_NO_EVIDENCE)])
+    proc = _close(root, env, feature, force=True)
+    assert proc.returncode == 1
+    assert "acknowledge-evidence" in proc.stderr
+
+
+def test_evidence_gate_note_names_acknowledge_evidence_beside_acknowledge_smell():
+    assert "acknowledge-evidence" in R.VERIFICATION_GATE_NOTE
+    assert "acknowledge-smell" in R.VERIFICATION_GATE_NOTE
+
+
+def test_evidence_gate_honors_an_acknowledgement_until_the_completed_count_changes(tmp_path):
+    root, env, feature = _gate_fixture(tmp_path, [
+        _story("US-001", "passed", evidence=_NO_EVIDENCE),
+        _story("US-002", "passed", evidence=_NO_EVIDENCE),
+    ])
+    assert _close(root, env, feature).returncode == 1
+    tasks_path = _ev_tasks_path(root, feature)
+    ack = _ack_evidence_cli(root, env, tasks_path)
+    assert ack.returncode == 0, ack.stderr
+    with open(tasks_path, encoding="utf-8") as handle:
+        recorded = json.load(handle)["metadata"]["evidenceAcknowledged"]
+    assert recorded["completed"] == 2 and recorded["reason"] == "reviewed by hand"
+
+    # A third story completes after the acknowledgement: it lapses.
+    with open(tasks_path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    doc["userStories"].append(_story("US-003", "passed", evidence=_NO_EVIDENCE))
+    with open(tasks_path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    lapsed = _close(root, env, feature)
+    assert lapsed.returncode == 1
+    assert "lapsed" in lapsed.stderr
+    assert "acknowledge-evidence" in lapsed.stderr
+    assert _stored_status(root, feature) == "in_progress"
+
+    # Acknowledged again at the new count, it closes.
+    assert _ack_evidence_cli(root, env, tasks_path).returncode == 0
+    closed = _close(root, env, feature)
+    assert closed.returncode == 0, closed.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_evidence_gate_ignores_an_acknowledgement_that_is_not_well_formed(tmp_path):
+    for ack in (
+        {"reason": "ok", "acknowledgedAt": "x", "completed": True},
+        {"reason": "ok", "acknowledgedAt": "x", "completed": "1"},
+        {"reason": "   ", "acknowledgedAt": "x", "completed": 1},
+        "yes",
+    ):
+        root, env, feature = _gate_fixture(
+            tmp_path / str(abs(hash(repr(ack)))),
+            [_story("US-001", "passed", evidence=_NO_EVIDENCE)],
+            metadata_extra={"evidenceAcknowledged": ack},
+        )
+        assert _close(root, env, feature).returncode == 1, repr(ack)
+
+
+def test_evidence_gate_verdict_matches_verification_reports_discriminating_partition(tmp_path):
+    """ONE test pins the gate to verification-report's partition. The gate
+    refuses exactly when `checked` is empty and some story completed, over the
+    boolean, absent, zero and positive shapes."""
+    import tasks as T
+
+    cases = {
+        "boolean": {"exit": 0, "discriminating": True},
+        "absent": {"exit": 0},
+        "zero": {"discriminating": 0},
+        "positive": {"discriminating": 4},
+    }
+    for label, evidence in cases.items():
+        stories = [_story("US-001", "passed", evidence=evidence)]
+        partition = T.verification_report({"userStories": stories})["discriminating"]
+        root, env, feature = _gate_fixture(tmp_path / label, stories)
+        proc = _close(root, env, feature)
+        expect_refused = not partition["checked"] and (
+            partition["checked"] or partition["blind"] or partition["unrecorded"]
+        )
+        assert (proc.returncode == 1) == bool(expect_refused), (label, proc.stderr)
+        # And the helper the gate leans on agrees on the bucket it names.
+        count = T._report_discriminating(stories[0]["verification"], "object")
+        assert (count is not None and count >= 1) == bool(partition["checked"]), label
+
+
+def _split_evidence_fixture(tmp_path, alpha_stories, beta_stories, feature="gate"):
+    root, env, feature = _gate_fixture(tmp_path, [], tasks=False, feature=feature)
+    phase_dir = os.path.join(root, ".aimi", "tasks", feature, "phase-1")
+    names = {"alpha": feature + "-phase-1-alpha-tasks.json",
+             "beta": feature + "-phase-1-beta-tasks.json"}
+    for key, other, stories in (("alpha", "beta", alpha_stories), ("beta", "alpha", beta_stories)):
+        doc = {
+            "schemaVersion": "3.3",
+            "metadata": {"splitGroup": {
+                "project": "apps/" + key, "index": 1, "total": 2, "siblings": [names[other]]}},
+            "userStories": stories,
+        }
+        with open(os.path.join(phase_dir, names[key]), "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+    return root, env, feature, {k: os.path.join(phase_dir, v) for k, v in names.items()}
+
+
+def test_evidence_gate_aggregates_across_split_members_and_honors_any_member(tmp_path):
+    blind = _story("US-001", "passed", evidence=_NO_EVIDENCE)
+    # Refused: neither member proves anything, and the line states the aggregate.
+    root, env, feature, paths = _split_evidence_fixture(tmp_path / "a", [blind], [blind])
+    refused = _close(root, env, feature)
+    assert refused.returncode == 1
+    assert "discriminating=0 completed=2" in refused.stderr
+
+    # One member proving a story clears the whole phase: it is an aggregate.
+    proven = _story("US-001", "passed", evidence={"discriminating": 1})
+    root, env, feature, paths = _split_evidence_fixture(tmp_path / "b", [blind], [proven])
+    assert _close(root, env, feature).returncode == 0
+
+    # Honor: an acknowledgement in ONE member, recorded at the aggregate (2).
+    root, env, feature, paths = _split_evidence_fixture(tmp_path / "c", [blind], [blind])
+    ack = _ack_evidence_cli(root, env, paths["beta"])
+    assert ack.returncode == 0, ack.stderr
+    with open(paths["beta"], encoding="utf-8") as handle:
+        assert json.load(handle)["metadata"]["evidenceAcknowledged"]["completed"] == 2
+    closed = _close(root, env, feature)
+    assert closed.returncode == 0, closed.stderr
+
+    # Lapse: a third completed story in the OTHER member changes the aggregate.
+    root, env, feature, paths = _split_evidence_fixture(tmp_path / "d", [blind], [blind])
+    assert _ack_evidence_cli(root, env, paths["beta"]).returncode == 0
+    with open(paths["alpha"], encoding="utf-8") as handle:
+        doc = json.load(handle)
+    doc["userStories"].append(_story("US-002", "passed", evidence=_NO_EVIDENCE))
+    with open(paths["alpha"], "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    lapsed = _close(root, env, feature)
+    assert lapsed.returncode == 1
+    assert "lapsed" in lapsed.stderr
+
+
 def test_an_acknowledged_smell_lets_the_phase_close(tmp_path):
     """The other side of the same predicate, for the same reason as the pending
     partition's: a gate with no way through is not a gate."""
@@ -4407,6 +4607,9 @@ def test_the_pending_partition_is_tasks_pys_and_is_not_recomputed_here(tmp_path)
         {"id": "US-005", "status": "completed"},
         {"id": "US-006", "status": "completed",
          "verification": {"strategy": "visual", "status": "pending"}},
+        # One proven story, so the evidence half of the gate has nothing to say
+        # and the lines below are the pending partition's alone.
+        _story("US-007", "passed"),
     ]
     assert T.verification_report({"userStories": stories})["pending"] == ["US-001", "US-006"]
 
@@ -4894,7 +5097,8 @@ def test_visual_gate_ops_are_registered_under_the_verb_a_caller_can_run():
 
 
 def _visual_story(sid, status="completed"):
-    return {"id": sid, "status": status, "verification": {"strategy": "visual", "status": "passed"}}
+    return {"id": sid, "status": status, "verification": {
+        "strategy": "visual", "status": "passed", "evidence": {"discriminating": 1}}}
 
 
 def _visual_gate_fixture(tmp_path, required=True, visual_gate=None):

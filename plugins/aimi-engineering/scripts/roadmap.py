@@ -4127,7 +4127,10 @@ VERIFICATION_GATE_NOTE = (
     "<passed|failed|skipped> --reason <text> --tasks-file <the file above>` "
     "-- and acknowledge each smell with `aimi-cli.sh acknowledge-smell "
     "<story-id> --type <smell-type> --reason <text> --tasks-file <the file "
-    "above>`. \"skipped\" is a real answer and passes: "
+    "above>`; a phase whose completed stories carry no discriminating "
+    "evidence closes only after `aimi-cli.sh acknowledge-evidence --reason "
+    "<text> --tasks-file <the file above>`, which lapses when the phase's "
+    "completed-story count changes. \"skipped\" is a real answer and passes: "
     "it records that somebody looked and chose not to verify -- \"skipped\" "
     "requires --reason, \"passed\"/\"failed\" must omit it. \"pending\" "
     "records that nobody looked."
@@ -4201,6 +4204,31 @@ def _unacknowledged_verify_coverage(tasks):
         and entry.get("type") == "verify-coverage"
         and entry.get("acknowledged") is not True
     ]
+
+
+def _evidence_acknowledgement(tasks):
+    """`metadata.evidenceAcknowledged` as `(completed, reason)` when it is a
+    usable acknowledgement, else `None`.
+
+    Usable means an object whose `completed` is a plain integer (a JSON
+    boolean is never a count, the rule `_report_discriminating` applies to the
+    evidence itself) and whose `reason` is a non-blank string -- an
+    acknowledgement that can be produced by accident acknowledges nothing, the
+    same literal-only discipline `_unacknowledged_verify_coverage` applies to
+    `acknowledged`. The value is read here; whether it still HOLDS is the
+    caller's question, because that needs the phase-aggregate completed count.
+    """
+    metadata = tasks.get("metadata") if isinstance(tasks, dict) else None
+    ack = metadata.get("evidenceAcknowledged") if isinstance(metadata, dict) else None
+    if not isinstance(ack, dict):
+        return None
+    completed = ack.get("completed")
+    reason = ack.get("reason")
+    if isinstance(completed, bool) or not isinstance(completed, int):
+        return None
+    if not isinstance(reason, str) or not reason.strip():
+        return None
+    return (completed, reason)
 
 
 def _completed_gate_refusals(roadmap_path, doc, phase_id):
@@ -4311,19 +4339,43 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
         return _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
     lines = []
+    # The evidence half of the gate is a PHASE-AGGREGATE question -- a split
+    # phase's stories live in several files and one file's zero says nothing
+    # about its siblings -- so the per-member loop only accumulates it and the
+    # verdict is taken once, after the loop, over every member that read.
+    evidence_checked = 0
+    evidence_completed = 0
+    evidence_acks = []
+    evidence_measurable = True
     for member_path in members:
         tasks, reason = _read_tasks_with_reason(member_path)
         if tasks is None:
             _completed_gate_advise(phase_id, member_path + " -- " + reason)
+            evidence_measurable = False
             continue
 
         try:
-            pending = verification_report(tasks).get("pending") or []
+            member_report = verification_report(tasks)
+            pending = member_report.get("pending") or []
         except MalformedTasks:
             _completed_gate_advise(
                 phase_id, member_path + " -- malformed document (unexpected shape)"
             )
+            evidence_measurable = False
             continue
+
+        # The discriminating partition is verification-report's own, never a
+        # second copy of its rule: `checked` is exactly the completed stories
+        # whose `_report_discriminating` count is a proven integer >= 1, and
+        # checked + blind + unrecorded is every completed story once.
+        partition = member_report.get("discriminating") or {}
+        evidence_checked += len(partition.get("checked") or [])
+        evidence_completed += sum(
+            len(partition.get(key) or []) for key in ("checked", "blind", "unrecorded")
+        )
+        ack = _evidence_acknowledgement(tasks)
+        if ack is not None:
+            evidence_acks.append(ack)
 
         # jq's ==, not Python's, and not a set: a story id is whatever the
         # document holds, which need not be hashable and need not be a
@@ -4349,6 +4401,37 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
             for entry in _unacknowledged_verify_coverage(tasks)
             if did_work(entry.get("storyId"))
         ]
+
+    # Evidence gate: a phase that completed stories but proved none of them
+    # discriminating is a phase a self-reported exit 0 would otherwise close
+    # as verified. It refuses until a human records acknowledge-evidence, and
+    # the acknowledgement holds only while the phase-aggregate completed
+    # count is the one it was recorded against. A member that could not be
+    # read leaves the aggregate unknown, so the gate does not judge on a
+    # partial count -- the advisory above already said what it could not see.
+    if evidence_measurable and evidence_completed > 0 and evidence_checked == 0:
+        counts = (
+            "discriminating=" + str(evidence_checked)
+            + " completed=" + str(evidence_completed)
+        )
+        if any(done_at == evidence_completed for done_at, _ in evidence_acks):
+            pass
+        elif evidence_acks:
+            recorded = ", ".join(str(done_at) for done_at, _ in evidence_acks)
+            lines.append(
+                "  " + _num(phase_id) + " (" + ", ".join(members) + "): "
+                "evidence acknowledgement lapsed -- it was recorded at completed="
+                + recorded + " and the phase now has " + str(evidence_completed)
+                + " completed (" + counts + "); record a fresh one with"
+                " acknowledge-evidence"
+            )
+        else:
+            lines.append(
+                "  " + _num(phase_id) + " (" + ", ".join(members) + "): no completed"
+                " story carries verification.evidence.discriminating as a proven"
+                " count above zero (" + counts + "); a human records why with"
+                " acknowledge-evidence"
+            )
     return lines + _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
 

@@ -927,6 +927,33 @@ test_acknowledge_smell_races_mark_complete() {
 }
 
 # ============================================================================
+# acknowledge-evidence: one writer against a concurrent mark-complete
+# ============================================================================
+
+race_ev_ack() { env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason "reviewed"; }
+race_ev_mark() { "$CLI" mark-complete US-002; }
+
+test_acknowledge_evidence_races_mark_complete() {
+  echo ""
+  echo "=== acknowledge-evidence vs mark-complete: neither write lost ==="
+
+  local dir="$TEST_DIR/ev-mark-race"
+  local tasks_file
+  tasks_file=$(ack_fixture "$dir")
+  cd "$dir" || return
+
+  run_two_against_a_held_gate "$tasks_file" race_ev_ack race_ev_mark
+
+  assert_eq "1" "$HELD_GATE_QUEUED" "acknowledge-evidence vs mark-complete: both were in flight against the same document"
+  assert_exit_code "0" "$HELD_GATE_RC1" "acknowledge-evidence vs mark-complete: acknowledge-evidence exits 0"
+  assert_exit_code "0" "$HELD_GATE_RC2" "acknowledge-evidence vs mark-complete: mark-complete exits 0"
+  assert_eq "reviewed" "$(jq -r '.metadata.evidenceAcknowledged.reason' "$tasks_file")" \
+    "acknowledge-evidence vs mark-complete: the acknowledgement survived"
+  assert_eq "completed" "$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$tasks_file")" \
+    "acknowledge-evidence vs mark-complete: and so did the completion"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -973,6 +1000,10 @@ main() {
   echo "--- acknowledge-smell Tests ---"
   test_two_acknowledge_smells_both_land
   test_acknowledge_smell_races_mark_complete
+
+  echo ""
+  echo "--- acknowledge-evidence Tests ---"
+  test_acknowledge_evidence_races_mark_complete
 
   echo ""
   echo "================================================"
