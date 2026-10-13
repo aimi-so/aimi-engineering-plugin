@@ -1044,6 +1044,100 @@ def _format_not_evaluated_line(entries):
     return line
 
 
+_SCRIPT_EXPANSION_DEPTH_CAP = 5
+_SCRIPT_NAME_CHARS = r"A-Za-z0-9_:.@/\-"
+_RUNNER_INVOCATION_RE = re.compile(
+    r"(?<![" + _SCRIPT_NAME_CHARS + r"])(?:npm|bun|pnpm|yarn)[ \t]+(?:"
+    r"(?:run-script|run)[ \t]+(?:-{1,2}[A-Za-z0-9][A-Za-z0-9_-]*(?:=\S+)?[ \t]+)*"
+    r"(?P<name>[" + _SCRIPT_NAME_CHARS + r"]+)"
+    r"|(?P<test>test)(?![" + _SCRIPT_NAME_CHARS + r"])"
+    r")"
+)
+
+
+def _runner_script_names(text):
+    """Script names `text` invokes through a package manager, in order:
+    `npm|bun|pnpm|yarn run <name>`, `npm run-script <name>` and `<pm> test`
+    (script `test`). The name is a whole token, so `check:foo` and
+    `check:foo-extra` are different names."""
+    names = []
+    for match in _RUNNER_INVOCATION_RE.finditer(text):
+        names.append(match.group("name") or "test")
+    return names
+
+
+def _package_scripts(root):
+    """`root`'s package.json `scripts` object, or None when the file is
+    missing, unreadable, malformed or carries no scripts object."""
+    text = _read_repo_text(root, "package.json")
+    if text is None:
+        return None
+    try:
+        scripts = json.loads(text).get("scripts")
+    except (ValueError, AttributeError):
+        return None
+    return scripts if isinstance(scripts, dict) else None
+
+
+def _expand_script_runs(text, scripts):
+    """Follow package-manager script runs in `text` through `scripts`,
+    transitively. Returns (reached_names, bodies, problems): every script name
+    invoked anywhere along the chain, the body text of each script that was
+    expanded, and one line per reason the expansion is incomplete (empty
+    list == complete). A visited set stops re-expansion; a script already on
+    the current path is a cycle; a chain deeper than the depth cap, a script
+    absent from `scripts`, or `scripts` None are all incomplete."""
+    reached = set()
+    bodies = []
+    problems = []
+    expanded = set()
+
+    def walk(body, path):
+        for name in _runner_script_names(body):
+            reached.add(name)
+            if name in path:
+                problems.append("cycle: " + " -> ".join(path + (name,)))
+                continue
+            if name in expanded:
+                continue
+            if scripts is None:
+                problems.append(
+                    "script '" + name + "' cannot be read: package.json is missing,"
+                    " unreadable or has no scripts"
+                )
+                continue
+            if name not in scripts or not isinstance(scripts[name], str):
+                problems.append("script '" + name + "' is not defined in package.json")
+                continue
+            if len(path) + 1 > _SCRIPT_EXPANSION_DEPTH_CAP:
+                problems.append(
+                    "chain deeper than "
+                    + str(_SCRIPT_EXPANSION_DEPTH_CAP)
+                    + " at '"
+                    + name
+                    + "': "
+                    + " -> ".join(path + (name,))
+                )
+                continue
+            expanded.add(name)
+            bodies.append(scripts[name])
+            walk(scripts[name], path + (name,))
+
+    walk(text, ())
+    return reached, bodies, problems
+
+
+def _token_in_text(command, text):
+    """`command` as a whole token of `text`, case-insensitive -- never a
+    substring of a longer token."""
+    pattern = (
+        r"(?<![" + _SCRIPT_NAME_CHARS + r"])"
+        + re.escape(command.lower())
+        + r"(?![" + _SCRIPT_NAME_CHARS + r"])"
+    )
+    return re.search(pattern, text.lower()) is not None
+
+
 def verify_coverage_findings(stories, project_root):
     """Phase 4.3: a story whose acceptanceCriteria cite (in backticks) a
     repo-vocabulary command that implementation.verify's own text never runs.
@@ -1098,8 +1192,21 @@ def verify_coverage_findings(stories, project_root):
     (_NOT_EVALUATED_MAX_STORIES / _NOT_EVALUATED_MAX_SPANS), listing
     unrecognised spans first, then introduced, then non-command; the full
     classified data stays in this return value.
+
+    A verify that invokes a package-manager script (`bun run verify`,
+    `npm test`, ...) is expanded through the story's OWN project group's
+    package.json `scripts` (see _expand_script_runs): a cited command is
+    covered when the chain reaches it as a whole token. When a cited command
+    is not found AND the expansion was incomplete (a cycle, a chain deeper
+    than _SCRIPT_EXPANSION_DEPTH_CAP, a script absent from package.json, or
+    an unreadable package.json), the story lands in `not_evaluated` with a
+    reason naming the unexpandable chain and no `spanClasses` -- never in
+    `findings`, since the chain that would have covered it could not be
+    followed, and never in `clean_story_ids`. A verify that invokes no
+    package manager is judged exactly as before.
     """
     vocabulary_cache = {}
+    scripts_cache = {}
     findings = []
     undetermined_story_ids = []
     clean_story_ids = []
@@ -1130,8 +1237,20 @@ def verify_coverage_findings(stories, project_root):
             undetermined_story_ids.append(story["id"])
             continue
 
+        if group not in scripts_cache:
+            group_root = project_root if group is None else os.path.join(project_root, group)
+            scripts_cache[group] = _package_scripts(group_root)
+        scripts = scripts_cache[group]
+
         lowered_vocabulary = {v.lower() for v in vocabulary}
-        asserted = sorted(cmd for cmd in cited if cmd.lower() in lowered_vocabulary)
+
+        def _asserted(cmd):
+            if cmd.lower() in lowered_vocabulary:
+                return True
+            names = _runner_script_names(cmd)
+            return bool(names) and scripts is not None and all(n in scripts for n in names)
+
+        asserted = sorted(cmd for cmd in cited if _asserted(cmd))
         if not asserted:
             # Reason (b), the more dangerous of the two: the story NAMED
             # something and the gate walked past it. `asserted` is empty
@@ -1149,9 +1268,30 @@ def verify_coverage_findings(stories, project_root):
             )
             continue
 
-        verify_text = _cat(_implementation_verify(story)).lower()
-        missing = [cmd for cmd in asserted if cmd.lower() not in verify_text]
-        if missing:
+        verify_raw = _cat(_implementation_verify(story))
+        verify_text = verify_raw.lower()
+        reached, bodies, problems = _expand_script_runs(verify_raw, scripts)
+
+        def _covered(cmd):
+            if cmd.lower() in verify_text:
+                return True
+            names = _runner_script_names(cmd)
+            if names:
+                return all(n in reached for n in names)
+            return any(_token_in_text(cmd, body) for body in bodies)
+
+        missing = [cmd for cmd in asserted if not _covered(cmd)]
+        if missing and problems:
+            not_evaluated.append(
+                {
+                    "id": story["id"],
+                    "reason": "verify script expansion is incomplete, so "
+                    + _join(", ", missing)
+                    + " could not be confirmed: "
+                    + _join("; ", problems),
+                }
+            )
+        elif missing:
             findings.append({"id": story["id"], "commands": missing})
         else:
             clean_story_ids.append(story["id"])

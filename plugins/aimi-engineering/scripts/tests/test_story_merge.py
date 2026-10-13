@@ -1016,6 +1016,206 @@ def test_verify_coverage_records_a_story_whose_citations_are_not_in_the_vocabula
     )
 
 
+def _write_package_json(directory, scripts):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": scripts}), encoding="utf-8"
+    )
+
+
+def _expands_story(story_id, cited, verify, project=None):
+    story = {
+        "id": story_id,
+        "acceptanceCriteria": ["Running `" + cited + "` must be green."],
+        "implementation": {"verify": verify},
+    }
+    if project is not None:
+        story["project"] = project
+    return story
+
+
+def _assert_partition(stories, result):
+    findings, undetermined, clean, not_evaluated = result
+    ids = (
+        [f["id"] for f in findings]
+        + list(undetermined)
+        + list(clean)
+        + [n["id"] for n in not_evaluated]
+    )
+    assert len(ids) == len(stories)
+    assert sorted(ids) == sorted(s["id"] for s in stories)
+
+
+def test_verify_coverage_expands_a_chain_through_bun_run_verify_clean(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run lint && bun run check:foo", "lint": "eslint .", "check:foo": "node foo.js"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert clean == ["US-001"]
+    assert findings == undetermined == not_evaluated == []
+
+
+def test_verify_coverage_expands_a_chain_that_never_reaches_the_command_is_a_finding(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run lint", "lint": "eslint .", "check:foo": "node foo.js"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert findings == [{"id": "US-001", "commands": ["npm run check:foo"]}]
+    assert undetermined == clean == not_evaluated == []
+
+
+def test_verify_coverage_expands_matches_a_whole_token_never_a_substring(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "bun run check:foo-extra",
+            "check:foo-extra": "node extra.js",
+            "check:foo": "node foo.js",
+        },
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings([story], str(tmp_path))
+    assert findings == [{"id": "US-001", "commands": ["npm run check:foo"]}]
+    assert clean == not_evaluated == []
+
+    # A non-runner command is matched as a whole token over the expanded bodies too.
+    _write_package_json(
+        tmp_path, {"verify": "tsc --noEmit-strict", "other": "tsc --noEmit"}
+    )
+    (tmp_path / "CLAUDE.md").write_text("```bash\ntsc --noEmit\n```\n", encoding="utf-8")
+    story = _expands_story("US-002", "tsc --noEmit", "bun run verify")
+    findings, _, clean, _ = SM.verify_coverage_findings([story], str(tmp_path))
+    assert findings == [{"id": "US-002", "commands": ["tsc --noEmit"]}]
+    _write_package_json(tmp_path, {"verify": "tsc --noEmit && echo done"})
+    findings, _, clean, _ = SM.verify_coverage_findings([story], str(tmp_path))
+    assert clean == ["US-002"] and findings == []
+
+
+def test_verify_coverage_expands_a_cycle_is_cannot_determine(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run a", "a": "bun run b", "b": "bun run a", "check:foo": "x"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert findings == undetermined == clean == []
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "cycle" in not_evaluated[0]["reason"]
+    assert "spanClasses" not in not_evaluated[0]
+    _assert_partition([story], result)
+
+
+def test_verify_coverage_expands_a_chain_deeper_than_five_is_cannot_determine(tmp_path):
+    scripts = {"verify": "bun run s1", "check:foo": "node foo.js"}
+    for index in range(1, 7):
+        scripts["s%d" % index] = "bun run s%d" % (index + 1)
+    scripts["s7"] = "bun run check:foo"
+    _write_package_json(tmp_path, scripts)
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, _, clean, not_evaluated = result
+    assert findings == clean == []
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "deeper than 5" in not_evaluated[0]["reason"]
+
+    # Control: a chain of exactly five scripts is still followed.
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "bun run s1",
+            "s1": "bun run s2",
+            "s2": "bun run s3",
+            "s3": "bun run s4",
+            "s4": "bun run check:foo",
+            "check:foo": "node foo.js",
+        },
+    )
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings([story], str(tmp_path))
+    assert clean == ["US-001"] and findings == not_evaluated == []
+
+
+def test_verify_coverage_expands_a_missing_package_json_is_cannot_determine(tmp_path):
+    (tmp_path / "Makefile").write_text("lint:\n\techo hi\n", encoding="utf-8")
+    stories = [
+        _expands_story("US-001", "make lint", "bun run verify"),
+        _expands_story("US-002", "make lint", "make lint"),
+        _expands_story("US-003", "make lint", "echo nothing"),
+    ]
+    result = SM.verify_coverage_findings(stories, str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "package.json" in not_evaluated[0]["reason"]
+    assert clean == ["US-002"]
+    assert findings == [{"id": "US-003", "commands": ["make lint"]}]
+    assert undetermined == []
+    _assert_partition(stories, result)
+    assert SM.repo_command_vocabulary(str(tmp_path / "nowhere")) is None
+
+    # A script the verify names that package.json does not define.
+    _write_package_json(tmp_path, {"lint": "eslint ."})
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings(
+        [_expands_story("US-004", "npm run lint", "bun run verify")], str(tmp_path)
+    )
+    assert findings == clean == []
+    assert "'verify' is not defined" in not_evaluated[0]["reason"]
+
+
+def test_verify_coverage_expands_each_story_against_its_own_projects_package_json(tmp_path):
+    _write_package_json(
+        tmp_path / "apps" / "web", {"verify": "bun run check:foo", "check:foo": "node w.js"}
+    )
+    _write_package_json(
+        tmp_path / "apps" / "api", {"verify": "bun run lint", "lint": "x", "check:foo": "node a.js"}
+    )
+    stories = [
+        _expands_story("US-001", "npm run check:foo", "bun run verify", project="apps/web"),
+        _expands_story("US-002", "npm run check:foo", "bun run verify", project="apps/api"),
+    ]
+    result = SM.verify_coverage_findings(stories, str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert clean == ["US-001"]
+    assert findings == [{"id": "US-002", "commands": ["npm run check:foo"]}]
+    assert undetermined == not_evaluated == []
+    _assert_partition(stories, result)
+
+
+@pytest.mark.parametrize(
+    "cited, verify",
+    [
+        ("npm test", "pnpm test"),
+        ("npm test", "yarn run test"),
+        ("npm run check:foo", "npm run-script check:foo"),
+        ("npm run check:foo", "pnpm run check:foo"),
+        ("npm run check:foo", "yarn run check:foo"),
+        ("npm run check:foo", "bun run verify"),
+        ("npm test", "npm run verify"),
+    ],
+)
+def test_verify_coverage_expands_runner_equivalence(tmp_path, cited, verify):
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "yarn test && pnpm run check:foo",
+            "test": "vitest run",
+            "check:foo": "node foo.js",
+        },
+    )
+    story = _expands_story("US-001", cited, verify)
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert clean == ["US-001"], (findings, not_evaluated)
+    assert findings == undetermined == not_evaluated == []
+
+
 def test_verify_coverage_da_veredicto_a_toda_story_que_entrou(tmp_path):
     """The invariant this story delivers: the four lists PARTITION the input.
 
