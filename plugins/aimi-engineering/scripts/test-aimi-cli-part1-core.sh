@@ -1135,6 +1135,75 @@ EOF
   rm -f "$file_a" "$file_b"
 }
 
+test_acknowledge_smell() {
+  echo ""
+  echo "=== Testing acknowledge-smell ==="
+
+  local rc err_out output before
+  local file_a="$TASKS_DIR/9999-99-88-acknowledge-smell-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2,
+    "smellWarnings": [
+      {"type": "verify-coverage", "storyId": "US-900", "commands": ["npm test"], "message": "m1"},
+      {"type": "verify-coverage", "storyId": "US-901", "commands": ["npm run lint"], "message": "m2"},
+      {"type": "orphan-symbol", "storyId": "US-900", "symbols": ["foo"], "message": "m3"}
+    ]},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""},
+    {"id": "US-901", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+
+  # --- refusal: agent mode (AIMI_AGENT_MODE and CI both resolve to agent) ---
+  before=$(cat "$file_a")
+  err_out=$(AIMI_AGENT_MODE=true "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: AIMI_AGENT_MODE=true exits non-zero"
+  assert_contains "human decision" "$err_out" "acknowledge-smell: agent-mode refusal names the reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: agent-mode refusal leaves the file unchanged"
+  err_out=$(CI=true "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: CI=true exits non-zero"
+
+  # --- refusal: malformed story id ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell 'bad id' --type verify-coverage --reason 'x' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: malformed story id exits non-zero"
+
+  # --- refusal: no matching entry names the id and the type ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-902 --type verify-coverage --reason 'x' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: no matching entry exits non-zero"
+  assert_contains "US-902" "$err_out" "acknowledge-smell: no-match refusal names the story id"
+  assert_contains "verify-coverage" "$err_out" "acknowledge-smell: no-match refusal names the type"
+
+  # --- refusal: empty / whitespace-only --reason ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason '   ' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: whitespace-only --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "acknowledge-smell: empty-reason refusal names --reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: refusals leave the file unchanged"
+
+  # --- success: matched by storyId + type, sibling entries untouched ---
+  local sibling_before at_value at_ok="no"
+  sibling_before=$(jq -c '[.metadata.smellWarnings[1], .metadata.smellWarnings[2]]' "$file_a")
+  output=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'reviewed by hand' --tasks-file "$file_a") && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-smell: success exits 0"
+  assert_eq "true" "$(printf '%s' "$output" | jq '.acknowledged')" "acknowledge-smell: prints the post-write entry"
+  assert_eq "true" "$(jq '.metadata.smellWarnings[0].acknowledged' "$file_a")" "acknowledge-smell: on disk, acknowledged is the JSON literal true"
+  assert_eq "reviewed by hand" "$(jq -r '.metadata.smellWarnings[0].acknowledgedReason' "$file_a")" "acknowledge-smell: on disk, reason recorded"
+  at_value=$(jq -r '.metadata.smellWarnings[0].acknowledgedAt' "$file_a")
+  if printf '%s' "$at_value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then at_ok="yes"; fi
+  assert_eq "yes" "$at_ok" "acknowledge-smell: acknowledgedAt is ISO-8601 UTC"
+  assert_eq "$sibling_before" "$(jq -c '[.metadata.smellWarnings[1], .metadata.smellWarnings[2]]' "$file_a")" "acknowledge-smell: other story and other type entries are unchanged"
+
+  # --- idempotent: same call again writes nothing ---
+  before=$(cat "$file_a")
+  env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'reviewed by hand' --tasks-file "$file_a" >/dev/null && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-smell: repeat call exits 0"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: repeat call leaves the file byte-identical"
+
+  rm -f "$file_a"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -11600,6 +11669,7 @@ main() {
   test_mark_skipped
   test_remove_story
   test_set_verification
+  test_acknowledge_smell
   test_validate_deps_circular
   test_validate_deps
   test_status

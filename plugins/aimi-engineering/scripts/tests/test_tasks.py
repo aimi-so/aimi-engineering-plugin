@@ -5423,6 +5423,7 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_update_field",
         "cmd_remove_story",
         "cmd_set_verification",
+        "cmd_acknowledge_smell",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
@@ -5749,6 +5750,104 @@ def test_remove_story_refuses_a_whitespace_only_reason(tmp_path, capsys):
         )
     assert raised.value.code == 1
     assert "--reason" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# acknowledge-smell -- a reasoned acknowledgement on a smellWarnings entry
+# ---------------------------------------------------------------------------
+
+
+def _ack_file(tmp_path, smells):
+    path = _rs_file(tmp_path, "a.json", [_rs_story("US-001"), _rs_story("US-002")])
+    doc = _rs_read(path)
+    doc["metadata"]["smellWarnings"] = smells
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    return path
+
+
+def _ack_smells():
+    return [
+        {"type": "verify-coverage", "storyId": "US-001", "commands": ["a"], "message": "m1"},
+        {"type": "verify-coverage", "storyId": "US-002", "commands": ["b"], "message": "m2"},
+        {"type": "orphan-symbol", "storyId": "US-001", "symbols": ["s"], "message": "m3"},
+    ]
+
+
+def _ack(path, story_id="US-001", smell_type="verify-coverage", reason="reviewed"):
+    argv = ["acknowledge-smell", "--tasks-file", path, "--story-id", story_id, "--type", smell_type]
+    if reason is not None:
+        argv += ["--reason", reason]
+    return T.op_acknowledge_smell(argv)
+
+
+def test_acknowledge_smell_sets_the_three_keys_by_story_and_type_and_echoes_the_entry(
+    tmp_path, capsys
+):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path, reason="checked by hand") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["smellWarnings"]
+    assert out == saved[0]
+    assert saved[0]["acknowledged"] is True
+    assert saved[0]["acknowledgedReason"] == "checked by hand"
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved[0]["acknowledgedAt"])
+    # Sibling entries (another story, another type) are untouched.
+    assert saved[1] == _ack_smells()[1]
+    assert saved[2] == _ack_smells()[2]
+
+
+def test_acknowledge_smell_acknowledges_every_matching_entry(tmp_path, capsys):
+    smells = _ack_smells() + [
+        {"type": "verify-coverage", "storyId": "US-001", "commands": ["c"], "message": "m4"}
+    ]
+    path = _ack_file(tmp_path, smells)
+    assert _ack(path) == 0
+    saved = _rs_read(path)["metadata"]["smellWarnings"]
+    assert saved[0]["acknowledged"] is True and saved[3]["acknowledged"] is True
+    assert "acknowledged" not in saved[1] and "acknowledged" not in saved[2]
+
+
+def test_acknowledge_smell_is_idempotent_and_keeps_the_first_timestamp(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path) == 0
+    first_bytes = open(path, encoding="utf-8").read()
+    first_at = _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledgedAt"]
+    assert _ack(path) == 0
+    assert open(path, encoding="utf-8").read() == first_bytes
+    assert _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledgedAt"] == first_at
+    assert _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledged"] is True
+
+
+def test_acknowledge_smell_refuses_an_unknown_entry_naming_id_and_type(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ack(path, story_id="US-002", smell_type="orphan-symbol")
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "US-002" in err and "orphan-symbol" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_acknowledge_smell_refuses_a_missing_or_blank_reason_and_writes_nothing(
+    tmp_path, capsys, reason
+):
+    path = _ack_file(tmp_path, _ack_smells())
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ack(path, reason=reason)
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_acknowledge_smell_sanitizes_and_caps_the_reason(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path, reason="x" * 900) == 0
+    saved = _rs_read(path)["metadata"]["smellWarnings"][0]
+    assert len(saved["acknowledgedReason"]) <= T.SMELL_ACKNOWLEDGE_REASON_MAXLEN
 
 
 # ---------------------------------------------------------------------------
@@ -6886,6 +6985,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "cascade-skip",
         "remove-story",
         "set-verification",
+        "acknowledge-smell",
         "judge-verification",
         "reset-orphaned",
         "archive-task",

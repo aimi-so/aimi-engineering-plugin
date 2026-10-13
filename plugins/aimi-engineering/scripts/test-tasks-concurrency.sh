@@ -856,6 +856,77 @@ EOF
 }
 
 # ============================================================================
+# acknowledge-smell: two writers, different entries
+# ============================================================================
+
+# Both writes go through one locked read-modify-write of the same document, so
+# the property owed is that neither acknowledgement is lost and the file still
+# parses. The success path refuses in agent mode, so CI and AIMI_AGENT_MODE are
+# unset for the launched verbs.
+ack_fixture() {
+  build_small_fixture "$1" <<'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref: ack race", "type": "ref", "branchName": "ref/ack-race", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 4,
+    "smellWarnings": [
+      {"type": "verify-coverage", "storyId": "US-001", "commands": ["a"], "message": "m1"},
+      {"type": "verify-coverage", "storyId": "US-002", "commands": ["b"], "message": "m2"}
+    ]},
+  "userStories": [
+    {"id": "US-001", "title": "Story one", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "in_progress", "dependsOn": [], "notes": ""},
+    {"id": "US-002", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "in_progress", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+}
+
+race_ack_first() { env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-001 --type verify-coverage --reason "first reviewer"; }
+race_ack_second() { env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-002 --type verify-coverage --reason "second reviewer"; }
+
+test_two_acknowledge_smells_both_land() {
+  echo ""
+  echo "=== acknowledge-smell: two stories acknowledged at once, neither write lost ==="
+
+  local dir="$TEST_DIR/ack-ack-race"
+  local tasks_file
+  tasks_file=$(ack_fixture "$dir")
+  cd "$dir" || return
+
+  run_two_against_a_held_gate "$tasks_file" race_ack_first race_ack_second
+
+  assert_eq "1" "$HELD_GATE_QUEUED" "acknowledge-smell race: both calls were in flight against the same document"
+  assert_exit_code "0" "$HELD_GATE_RC1" "acknowledge-smell race: the first call exits 0"
+  assert_exit_code "0" "$HELD_GATE_RC2" "acknowledge-smell race: the second call exits 0"
+  assert_eq "true" "$(jq '.metadata.smellWarnings[] | select(.storyId == "US-001") | .acknowledged' "$tasks_file")" \
+    "acknowledge-smell race: the first acknowledgement is on disk"
+  assert_eq "true" "$(jq '.metadata.smellWarnings[] | select(.storyId == "US-002") | .acknowledged' "$tasks_file")" \
+    "acknowledge-smell race: and so is the second"
+}
+
+race_ack_vs_complete_ack() { env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-001 --type verify-coverage --reason "reviewed"; }
+race_ack_vs_complete_mark() { "$CLI" mark-complete US-002; }
+
+test_acknowledge_smell_races_mark_complete() {
+  echo ""
+  echo "=== acknowledge-smell vs mark-complete: neither write lost ==="
+
+  local dir="$TEST_DIR/ack-mark-race"
+  local tasks_file
+  tasks_file=$(ack_fixture "$dir")
+  cd "$dir" || return
+
+  run_two_against_a_held_gate "$tasks_file" race_ack_vs_complete_ack race_ack_vs_complete_mark
+
+  assert_eq "1" "$HELD_GATE_QUEUED" "acknowledge-smell vs mark-complete: both were in flight against the same document"
+  assert_exit_code "0" "$HELD_GATE_RC1" "acknowledge-smell vs mark-complete: acknowledge-smell exits 0"
+  assert_exit_code "0" "$HELD_GATE_RC2" "acknowledge-smell vs mark-complete: mark-complete exits 0"
+  assert_eq "true" "$(jq '.metadata.smellWarnings[] | select(.storyId == "US-001") | .acknowledged' "$tasks_file")" \
+    "acknowledge-smell vs mark-complete: the acknowledgement survived"
+  assert_eq "completed" "$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$tasks_file")" \
+    "acknowledge-smell vs mark-complete: and so did the completion"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -897,6 +968,11 @@ main() {
   echo ""
   echo "--- remove-story Tests ---"
   test_remove_story_refuses_a_dependent_added_under_it
+
+  echo ""
+  echo "--- acknowledge-smell Tests ---"
+  test_two_acknowledge_smells_both_land
+  test_acknowledge_smell_races_mark_complete
 
   echo ""
   echo "================================================"

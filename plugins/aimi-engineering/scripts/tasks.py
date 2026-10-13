@@ -1072,6 +1072,11 @@ VERIFICATION_STATUSES = ("pending", "passed", "failed", "skipped")
 # what a skipped verdict can carry into the document.
 VERIFICATION_SKIP_REASON_MAXLEN = 500
 
+# acknowledge-smell's own cap on --reason, through rm_sanitize like
+# set-verification's -- its own name rather than a reuse of the verification
+# constant, because the two are different fields that merely agree today.
+SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
+
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
 # minus "pending", DERIVED rather than re-literalled: the cross-story contract
@@ -5196,6 +5201,68 @@ def op_set_verification(argv):
     return 0
 
 
+def op_acknowledge_smell(argv):
+    """acknowledge-smell: record a reasoned acknowledgement on a
+    metadata.smellWarnings entry, matched by storyId + type (never by index).
+
+    Every refusal is decided here, inside the single crossing, in this fixed
+    order: --reason missing or blank, then no matching entry. The wrapper has
+    already refused a malformed id and agent mode before the lock.
+
+    Every matching entry is acknowledged (a story can carry two entries of one
+    type). An entry already acknowledged with the literal true and the same
+    sanitized reason is a no-op: nothing is written and the first call's
+    acknowledgedAt survives. `acknowledged` is read with `is True`, the same
+    literal-only discipline the completed gate applies.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    smell_type = _flag(argv, "--type")
+    reason = _flag(argv, "--reason")
+    if not path or story_id is None or not smell_type:
+        die(
+            "Usage: tasks.py acknowledge-smell --tasks-file <path> --story-id <id> "
+            "--type <smell-type> --reason <text>"
+        )
+    if not reason or not reason.strip():
+        die("Error: acknowledge-smell: --reason is required")
+    clean_reason = rm_sanitize(reason, SMELL_ACKNOWLEDGE_REASON_MAXLEN)
+
+    docs = read_docs(path, "acknowledge-smell")
+    matches = []
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc, dict) else None
+        warnings = metadata.get("smellWarnings") if isinstance(metadata, dict) else None
+        if not isinstance(warnings, list):
+            continue
+        for entry in warnings:
+            if (
+                isinstance(entry, dict)
+                and entry.get("storyId") == story_id
+                and entry.get("type") == smell_type
+            ):
+                matches.append(entry)
+    if not matches:
+        die(
+            "Error: acknowledge-smell: no smellWarnings entry for story " + story_id
+            + " of type " + smell_type + " in " + path
+        )
+
+    changed = False
+    for entry in matches:
+        if entry.get("acknowledged") is True and entry.get("acknowledgedReason") == clean_reason:
+            continue
+        entry["acknowledged"] = True
+        entry["acknowledgedReason"] = clean_reason
+        entry["acknowledgedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed = True
+
+    if changed:
+        write_docs_atomically(path, docs)
+    _emit(matches[0])
+    return 0
+
+
 # skipReason text for judge-verification's "no usable exit" outcome. Two
 # literal strings, not one templated by a boolean, because the two name
 # different facts: the first says a check was declared and ran somewhere the
@@ -8382,6 +8449,7 @@ _OPS = {
     "cascade-skip": op_cascade_skip,
     "remove-story": op_remove_story,
     "set-verification": op_set_verification,
+    "acknowledge-smell": op_acknowledge_smell,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

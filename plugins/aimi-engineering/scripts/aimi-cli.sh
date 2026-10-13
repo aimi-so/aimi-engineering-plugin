@@ -2608,6 +2608,67 @@ cmd_set_verification() {
   printf '%s\n' "$out"
 }
 
+# Record a reasoned acknowledgement on a metadata.smellWarnings entry, so
+# `roadmap-set-status --status completed` can be unblocked by command rather
+# than by a hand edit of tasks.json. A confirmation needs a human decision, so
+# it refuses when detect-interactivity resolves to agent -- checked here, in
+# bash, before the lock, because it needs no document.
+# Usage: acknowledge-smell <story-id> --type <smell-type> --reason <text> [--tasks-file <path>]
+cmd_acknowledge_smell() {
+  local tasks_file positional=() reason="" smell_type="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --reason) i=$((i + 1)); reason="${args[$i]:-}" ;;
+      --type) i=$((i + 1)); smell_type="${args[$i]:-}" ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ] || [ -z "$smell_type" ]; then
+    echo "Usage: aimi-cli.sh acknowledge-smell <story-id> --type <smell-type> --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ "$(cmd_detect_interactivity)" = "agent" ]; then
+    echo "Error: acknowledge-smell: acknowledging a smell needs a human decision, and this session resolved to agent mode (AIMI_AGENT_MODE, CI or --non-interactive); nothing was written" >&2
+    exit 1
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason reaches tasks.py as an absent one, which refuses it by
+  # naming --reason -- the refusal is op_acknowledge_smell's, not bash's.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. No pre-lock validate_story_exists: whether a
+  # smellWarnings entry matches is a document-dependent refusal the op owns.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" acknowledge-smell \
+        --tasks-file "$tasks_file" --story-id "$story_id" --type "$smell_type" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -17156,6 +17217,13 @@ COMMANDS:
                               object. A skipped write replaces any stale skipReason
                               left by an earlier verdict; passed/failed removes it.
                               Prefer this over update-field for a verification verdict.
+    acknowledge-smell <id> --type <smell-type> --reason <text> [--tasks-file <path>]
+                              Acknowledge a metadata.smellWarnings entry (matched by
+                              story id + type) in one locked crossing; sets
+                              acknowledged, acknowledgedReason and acknowledgedAt and
+                              prints the entry. Refuses (writes nothing) in agent
+                              mode, on a malformed id, with no matching entry, or with
+                              an empty --reason. Idempotent: a repeat call is a no-op.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -18644,6 +18712,7 @@ main() {
     update-field)      shift; cmd_update_field "$@" ;;
     remove-story)      shift; cmd_remove_story "$@" ;;
     set-verification)  shift; cmd_set_verification "$@" ;;
+    acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;

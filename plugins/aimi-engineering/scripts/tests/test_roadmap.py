@@ -4308,6 +4308,34 @@ def test_only_the_json_literal_true_acknowledges_a_smell(tmp_path):
         assert R._unacknowledged_verify_coverage(doc) == []
 
 
+def test_acknowledge_smell_clears_the_completed_gate_and_the_note_names_the_verb(tmp_path):
+    """The refusal's own remedy is a command, not a hand edit: the note names
+    acknowledge-smell, and running it is what lets the phase close."""
+    smell = {"type": "verify-coverage", "storyId": "US-001", "commands": ["bun run typecheck"],
+             "message": "asserts a command implementation.verify does not run"}
+    root, env, feature = _gate_fixture(tmp_path, [_story("US-001", "passed")], smells=[smell])
+    refused = _close(root, env, feature)
+    assert refused.returncode == 1
+    assert "acknowledge-smell" in refused.stderr
+    assert "acknowledge-smell" in R.VERIFICATION_GATE_NOTE
+    assert 'adding "acknowledged": true' not in R.VERIFICATION_GATE_NOTE
+
+    tasks_path = os.path.join(
+        root, ".aimi", "tasks", feature, "phase-1", feature + "-phase-1-tasks.json"
+    )
+    ack_env = {k: v for k, v in env.items() if k not in ("CI", "AIMI_AGENT_MODE")}
+    ack = subprocess.run(
+        ["bash", os.path.join(SCRIPTS, "aimi-cli.sh"), "acknowledge-smell", "US-001",
+         "--type", "verify-coverage", "--reason", "reviewed", "--tasks-file", tasks_path],
+        cwd=root, capture_output=True, text=True, timeout=120, env=ack_env,
+    )
+    assert ack.returncode == 0, ack.stderr
+
+    closed = _close(root, env, feature)
+    assert closed.returncode == 0, closed.stderr
+    assert _stored_status(root, feature) == "completed"
+
+
 def test_an_acknowledged_smell_lets_the_phase_close(tmp_path):
     """The other side of the same predicate, for the same reason as the pending
     partition's: a gate with no way through is not a gate."""

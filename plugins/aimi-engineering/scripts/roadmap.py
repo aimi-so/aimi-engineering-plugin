@@ -4125,8 +4125,9 @@ def op_list_archivable_phases(argv):
 VERIFICATION_GATE_NOTE = (
     "Record a judgment for each story -- `aimi-cli.sh set-verification <id> "
     "<passed|failed|skipped> --reason <text> --tasks-file <the file above>` "
-    "-- and acknowledge each smell by adding \"acknowledged\": true beside its "
-    "entry in metadata.smellWarnings. \"skipped\" is a real answer and passes: "
+    "-- and acknowledge each smell with `aimi-cli.sh acknowledge-smell "
+    "<story-id> --type <smell-type> --reason <text> --tasks-file <the file "
+    "above>`. \"skipped\" is a real answer and passes: "
     "it records that somebody looked and chose not to verify -- \"skipped\" "
     "requires --reason, \"passed\"/\"failed\" must omit it. \"pending\" "
     "records that nobody looked."
