@@ -94,26 +94,196 @@ case "$ARGUMENTS" in
 esac
 ```
 
-Run detection (failure is silent and non-blocking):
+Run detection, capturing stdout and the exit status separately from stderr —
+never merged, and never swallowed into an empty default the way this call
+used to be:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BUNDLE_ERR_FILE=$(mktemp)
 if [ -n "$BUNDLE_ARG" ]; then
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>/dev/null) || BUNDLE_RESULT=""
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_ARG" 2>"$BUNDLE_ERR_FILE")
 else
-  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_RESULT=""
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle 2>"$BUNDLE_ERR_FILE")
 fi
+BUNDLE_STATUS=$?
+BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+rm -f "$BUNDLE_ERR_FILE"
 ```
 
 Derive working-memory values from the result:
 
-- `bundleDetected` — `true` if `BUNDLE_RESULT` is non-empty and contains `"detected":true`; otherwise `false`.
+- `bundleDetected` — `true` only when `BUNDLE_STATUS` is `0` and `BUNDLE_RESULT` is non-empty and is not the literal string `null`; otherwise `false`. A `BUNDLE_STATUS` of `3` carries the ambiguity payload (`{"ambiguous":true,...}`) in `BUNDLE_RESULT`, never a real bundle — that case is resolved by the "Step 0.7 Ambiguous Bundle Resolution" section below, not by this bullet.
 - `bundlePayload` — the full JSON string from `BUNDLE_RESULT` when `bundleDetected=true`; empty string otherwise.
-- `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; the value of `BUNDLE_ARG` if set and detection succeeded; empty string otherwise.
+- `bundlePath` — the `path` field extracted from `bundlePayload` when `bundleDetected=true`; empty string otherwise.
 
 When `bundleDetected=false`, all downstream phases degrade gracefully — no
 error, no warning, no change to existing behavior.
+
+### Step 0.7 Ambiguous Bundle Resolution
+
+Branches on `BUNDLE_STATUS` from the detection call above. When `BUNDLE_STATUS`
+is `0` (whether `bundleDetected` ended up `true`, or `false` from a literal
+`null`), this section does not fire at all — proceed straight to Step 0.7
+Design Handoff Offer below exactly as if this section did not exist. The three
+subsections below are mutually exclusive on `BUNDLE_STATUS` and
+`INTERACTIVE_MODE`, and brainstorm never aborts over a bundle in any of them
+(D9).
+
+#### Interactive Picker (status 3)
+
+Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=picker`. `BUNDLE_RESULT`
+parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in
+`.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null`
+when that spec is absent).
+
+Present exactly one AskUserQuestion, naming the count and listing the first 4
+entries of `.candidates[]` in their own path order, escape hatch last per
+`commands/references/interactivity.md`'s Option Format. Compose the question
+and option text in the same language `$FEATURE_DESCRIPTION` is written in,
+per the Adaptive Language Rule (`commands/references/user-communication.md`
+§ Adaptive Language Rule) — the English wording below is an illustration for
+a reader of this file, not a fixed string to emit verbatim:
+
+```
+Design Bundle Detection found <N> bundles and none was named. Which one should this brainstorm use?
+A — <candidates[0].path> (<"BusinessSpec, DesignSpec" | "BusinessSpec only" | "DesignSpec only" | "no specs", from that candidate's own businessSpec/designSpec>)
+B — <candidates[1].path> (...)
+...
+None — proceed without a bundle
+```
+
+- **[None, the escape option]:** `bundleDetected` stays `false`
+  (already derived above). Proceed to Step 0.7 Design Handoff Offer below.
+- **[A pick]:** set `CHOSEN_BUNDLE_PATH` to the selected candidate's own
+  `.path`, then re-detect directly against it — a candidate the CLI's own scan
+  already returned is already inside `AIMI_ROOT`, so no realpath/import
+  resolution is needed:
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  BUNDLE_ERR_FILE=$(mktemp)
+  BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle "$CHOSEN_BUNDLE_PATH" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STATUS=$?
+  BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+  rm -f "$BUNDLE_ERR_FILE"
+  ```
+
+  Re-derive `bundleDetected`, `bundlePayload` and `bundlePath` from this fresh
+  result using the exact same rule stated above (`BUNDLE_STATUS=0` and
+  non-null is required for `bundleDetected=true`) — no second test is written
+  here. A second ambiguity is structurally impossible: `--bundle` names
+  exactly one directory. Proceed to Step 0.7 Design Handoff Offer below.
+
+#### Agent Mode (status 3)
+
+Fires when `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=agent`. There is no user to
+ask, so do not guess: log exactly one line to the brainstorm document's
+working memory naming every candidate, leave `bundleDetected` as `false`
+(already derived above), and proceed:
+
+```
+agent-mode: design-bundle-ambiguous — <N> bundles found and none was named (<candidates[0].path>, <candidates[1].path>, ...); re-run with --bundle <path> to choose one.
+```
+
+#### Other Detection Failure (status neither 0 nor 3)
+
+Fires when `BUNDLE_STATUS` is neither `0` nor `3`, in either picker or agent
+mode. Log one warning line carrying the CLI's own stderr and proceed without a
+bundle:
+
+```
+bundle detection failed (exit <BUNDLE_STATUS>): <BUNDLE_STDERR>
+```
+
+Leave `bundleDetected` as `false` (already derived above) and continue to
+Step 0.7 Design Handoff Offer below.
+
+### Step 0.7 Design Handoff Offer
+
+Offers to generate a BusinessSpec/DesignSpec bundle now, for a UI-bearing
+feature with no bundle on hand, and re-enters bundle detection on
+acceptance — so the bundle-aware branches below (the Post-Processing
+prototype-generation gate immediately following, and every other
+`bundleDetected`-gated branch downstream) run against the bundle just
+written, in this same brainstorm invocation, instead of the session ending
+with `bundleDetected` permanently `false`.
+
+#### Step 1: Fire-Condition Check
+
+The gate fires only when **both** of the following hold:
+
+1. **`bundleDetected` is `false`** — the result derived above.
+2. **The feature description matches a UI signal.** Scan `$FEATURE_DESCRIPTION` against the "Keyword Signals" section of `${CLAUDE_PLUGIN_ROOT}/commands/references/ui-signals.md` — read that file and apply its keyword list, its case-insensitive whole-word matching rule (regex word boundaries `\b`), and its "design" co-occurrence rule, as written; do not restate them here. **Structural Signals do not apply here** — no `creates`/`areas`/`phases[]` array exists yet at this point in the flow, since Phase 3.5 has not run. This matches ui-signals.md's own "How to Combine" section, which names exactly this case as valid: the keyword signal "can flag a plain-text feature description ... as UI-relevant before a structural artifact list exists."
+
+Phase 1.7 (UI Feature Detection) applies the identical keyword scan to the identical `$FEATURE_DESCRIPTION` text later in this same session. The two calls necessarily agree — this is expected redundancy, not a second, diverging detector; this gate reads and writes no Phase-1.7-owned variable.
+
+If either condition is false, skip this entire gate silently: no log line, no offer, proceed straight to Step 0.7 Post-Processing below exactly as if this gate did not exist.
+
+#### Step 2: Non-Interactive Fast Path (Agent Mode)
+
+When `INTERACTIVE_MODE=agent`, skip AskUserQuestion entirely — there is no user to generate a bundle with. Log exactly one line to the brainstorm document's working memory:
+
+```
+agent-mode: design-handoff-offer skipped (no bundle to generate without a user)
+```
+
+Proceed to Step 0.7 Post-Processing with `bundleDetected` unchanged (still `false`).
+
+#### Step 3: Interactive Offer
+
+When `INTERACTIVE_MODE=picker`, present via **AskUserQuestion** (picker mode) with exactly two options, the escape hatch (`Skip`) last, per `commands/references/interactivity.md`'s Option Format. Compose the question and option text in the same language `$FEATURE_DESCRIPTION` is written in, per the Adaptive Language Rule (`commands/references/user-communication.md` § Adaptive Language Rule) — the English wording below is an illustration for a reader of this file, not a fixed string to emit verbatim:
+
+```
+No design bundle was found for this UI-bearing feature — want to generate a BusinessSpec/DesignSpec now?
+
+Generate now — run the design handoff interview and write a bundle
+Skip — proceed without a bundle
+```
+
+- **[Skip]:** Proceed to Step 0.7 Post-Processing with `bundleDetected` unchanged (still `false`). No artifact is produced.
+- **[Generate now]:** Follow Step 4 below.
+
+#### Step 4: Accept — Run Design Handoff and Re-Detect
+
+1. **Derive the topic slug.** From `$FEATURE_DESCRIPTION`, derive a topic slug using the five-step algorithm in `${CLAUDE_PLUGIN_ROOT}/commands/references/topic-slug.md`. Phase 1's own topic-slug derivation (Step 1b below) has not run yet at this point in the flow, so this gate derives it here; the same deterministic algorithm applied to the same `$FEATURE_DESCRIPTION` necessarily produces the same slug, so Step 1b's later derivation is expected redundancy, not a conflict.
+
+2. **Run the skill.** Read `${CLAUDE_PLUGIN_ROOT}/skills/aimi-design-handoff/SKILL.md` and follow its instructions exactly — the same inline read-and-follow idiom `commands/learnings.md` already uses for `skills/aimi-learnings/SKILL.md`, never a Task-spawned sub-agent. Pass the feature description (`$FEATURE_DESCRIPTION`), the topic slug just derived, and an explicit `outputRoot: .aimi/design-bundles/<topic-slug>` so the bundle it writes lands exactly where this gate re-detects it in the next step. This story does not re-derive the skill's own `README.md`/`BusinessSpec.md`/`DesignSpec.md` authoring or the spec-section contract's numbering — that is the skill's own job.
+
+3. **Re-detect.** After the skill returns, re-resolve `$AIMI_CLI` with the same per-call cache-read boilerplate already used three times in Step 0.7 above, then run:
+
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   BUNDLE_ERR_FILE=$(mktemp)
+   BUNDLE_RESULT=$($AIMI_CLI detect-design-bundle --bundle ".aimi/design-bundles/<topic-slug>" 2>"$BUNDLE_ERR_FILE")
+   BUNDLE_STATUS=$?
+   BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+   rm -f "$BUNDLE_ERR_FILE"
+   ```
+
+   `--bundle` is mandatory here — never a bare `detect-design-bundle` call,
+   and never `--root`: `--bundle` reads the named path directly as the bundle
+   itself (per `outline:01`/D4's "fails loudly if it is not a bundle"), which
+   is simpler than `--root`'s former child-scan workaround (that scan used to
+   skip any directory literally named `.aimi`, so pointing `--root` at the
+   parent directory was needed to reach a pre-check that treated the
+   generated directory itself as a candidate before any child-scan ran) and
+   needs no explanation tied to that `.aimi`-skip case at all.
+
+4. **Re-derive.** Re-derive `bundleDetected`, `bundlePayload`, and `bundlePath` from this fresh result using the exact same rule stated in the bullet list above (`BUNDLE_STATUS` must be `0` and `BUNDLE_RESULT` non-null for `bundleDetected=true`) — no second test is written here, and no branch reads the generated `BusinessSpec.md`/`DesignSpec.md` directly outside this re-detection path. `--bundle` never produces its own ambiguity (it names exactly one directory), so any non-zero `BUNDLE_STATUS` here is simply "no detectable bundle", the same as step 5 below.
+
+5. **When `bundleDetected` is still `false`** after re-detection (the skill did not produce a detectable bundle), log exactly one warning line to the brainstorm document's working memory:
+
+   ```
+   design-handoff skill did not produce a detectable bundle — proceeding without one
+   ```
+
+   and continue exactly as if the offer had been declined — never abort the brainstorm session.
+
+Whether accepted or skipped, this gate runs to completion before Step 0.7 Post-Processing below, so a bundle generated here is seen by the Post-Processing prototype-generation gate and by every other `bundleDetected`-gated branch downstream, in the same brainstorm invocation.
 
 ### Step 0.7 Post-Processing: Bundle Prototype Generation Gate
 
@@ -138,6 +308,7 @@ error, no warning, no change to existing behavior.
 
 2. **When `view_source` is `"none"`:** Emit exactly:
    `bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6`
+   This is `cmd_bundle_prototype_status`'s own hardcoded fallback probe order (DesignSpec § 4, then BusinessSpec § 5, then § 6) for placeholder-prototype generation — distinct from `BusinessSpec § 2` (Screens), the canonical screen-list section `commands/references/spec-section-contract.md` documents for story decomposition.
    Then proceed without generation. Do not set `bundleGeneratedPrototypePath`. Skip the remaining sub-steps.
 
 3. **When `needs_generation` is `true`:** Create the output directory and spawn the author agent:
@@ -454,7 +625,7 @@ Determine whether the target repository is greenfield using the "Structural Sign
 
 Brainstorm does **not** spawn any dedicated foundation-synthesis agent to perform this detection or to act on it — that stays exclusive to `/aimi:plan`'s Phase 1.9 Greenfield Foundation Gate. When this phase detects greenfield structural signals, brainstorm captures the user's stack, architecture, folder-convention, and lint/format decisions through its own batched-question machinery instead (Phase 2's Foundation category, below).
 
-If the repository is greenfield-relevant, Phase 2 generates additional questions targeting the Foundation category (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) alongside the standard topic categories. These Foundation questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
+If the repository is greenfield-relevant, Phase 2 generates additional questions targeting the Foundation category (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language) alongside the standard topic categories. These Foundation questions follow the same format rules: 3-4 options, under 20 words question text, under 15 words per option, "Other" escape hatch.
 
 When structural signals do not classify the repository as greenfield, brainstorm proceeds unchanged — Phase 2 covers only the standard topic categories (plus any UI categories from Phase 1.7) with no mention of Foundation.
 
@@ -511,7 +682,7 @@ N. What should make this interface memorable?
 
 #### Foundation Questions (When Greenfield Structural Signals Detected in Phase 1.8)
 
-When Phase 1.8 detected greenfield structural signals, include Foundation-category questions in the batch alongside standard topic questions. These follow the same format rules. Foundation spans up to four sub-topics — ask one question per sub-topic that is still relevant, but treat Foundation as a single topic category for coverage-tracking purposes (see Adaptive Rounds below), not four separate categories.
+When Phase 1.8 detected greenfield structural signals, include Foundation-category questions in the batch alongside standard topic questions. These follow the same format rules. Foundation spans up to five sub-topics — ask one question per sub-topic that is still relevant, but treat Foundation as a single topic category for coverage-tracking purposes (see Adaptive Rounds below), not five separate categories.
 
 **Example stack/runtime question:**
 
@@ -550,6 +721,16 @@ N. What lint and format tooling should the project use?
    A. ESLint + Prettier — widely adopted, strong defaults
    B. Biome — single fast tool, less config
    C. None yet — decide later
+   D. Other: [please specify]
+```
+
+**Example language question:**
+
+```
+N. What language should this project's own files be written in?
+   A. English
+   B. Portuguese
+   C. Spanish
    D. Other: [please specify]
 ```
 
@@ -855,7 +1036,7 @@ After each response, assess which topic categories remain unaddressed:
 | Approach | At least one approach preference expressed by user via selection or free-form response |
 | Aesthetic Direction | User expresses an aesthetic preference, tone, or visual direction |
 | Differentiation | User identifies a memorable or distinguishing visual aspect |
-| Foundation | User expresses a stack/runtime, architecture, folder-convention, or lint/tooling preference |
+| Foundation | User expresses a stack/runtime, architecture, folder-convention, lint/tooling, or language preference |
 
 - **If all key topics covered (7 standard, plus 2 when UI features detected, plus 1 when Foundation detected in Phase 1.8)** OR **user says "proceed"/"let's move on"** → advance to Phase 3
 - **If topics remain uncovered** AND **under 4 rounds** → generate follow-up batch targeting uncovered topics
@@ -957,6 +1138,8 @@ For each identified scope context, draft one phase entry in an in-memory `phases
   "areas": ["app/checkout/**"]
 }
 ```
+
+`name`, `goal`, and `successCriteria` are persisted into `roadmap.json`, a plugin-owned artifact — per the artifact-language rule (`commands/references/user-communication.md`), author them in English.
 
 - `id` — plain number, 1-based in cut order. Kept as a plain number (never a zero-padded string) so a later insertion can use a decimal value (e.g. `2.1`) without renumbering every phase — see `outline:07` for where that matters.
 - `name` — short phase name.
@@ -1077,7 +1260,7 @@ Loop until the user selects **Approve** and the coverage check passes with zero 
 
 Before Approve can be accepted, verify that every accumulated session decision or requirement is covered by the current `phases` array.
 
-**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory. **Foundation answers are EXEMPT** from this set and from the orphan hard-block below: stack, architecture, folder-convention, and lint/format decisions captured when Phase 1.8 detected greenfield structural signals describe the repository itself, not a slice of feature work, so they never belong in any phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields — Foundation answers are therefore never checked for orphans in this step.
+**Session requirements set:** every distinct requirement or decision the user has stated so far this session — the per-topic-category answers gathered across Phase 2 rounds (Purpose, Users, Constraints, Success, Edge Cases, Existing Patterns, Approach, and Aesthetic Direction/Differentiation when Phase 1.7 detected UI features), the Phase 3 approach resolution (if it ran), and any explicit Key Decision already accumulated in working memory. **Foundation answers are EXEMPT** from this set and from the orphan hard-block below: stack, architecture, folder-convention, lint/format, and language decisions captured when Phase 1.8 detected greenfield structural signals describe the repository itself, not a slice of feature work, so they never belong in any phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields — Foundation answers are therefore never checked for orphans in this step.
 
 For each item in the session requirements set, check whether it is referenced — verbatim or as a clear restatement — in some phase's `goal`, `successCriteria`, `creates`, `needs`, or `areas` fields, across the **whole current `phases` array**. An item with no match in any phase is an **orphan**.
 
@@ -1190,7 +1373,7 @@ This is a **gate**, not a roadmap phase. It produces at most one artifact under 
 The gate fires only when **both** of the following hold:
 
 1. **Phase 1.8 (Greenfield Foundation Detection) marked the session greenfield-relevant.** If Structural Signals did not classify the repository as greenfield, this condition is false.
-2. **Phase 2 gathered answers for both load-bearing Foundation sub-topics.** "Answered" means the user (or agent-mode auto-pick) actually selected an option — including an "Other: ..." free-text pick — and this condition requires answers for **at least** the two sub-topics Step 5's validation gate hard-checks: **folder/convention structure** (Step 5 check 3 requires a real multi-line folder tree) and **lint/format tooling** (check 4 requires a concrete tool or config filename). Answers to stack/runtime and architecture pattern contribute to the synthesis when present but do not substitute for the two required ones. Merely being eligible for the category is not enough; if Adaptive Rounds never reached those Foundation questions this session, this condition is false.
+2. **Phase 2 gathered answers for both load-bearing Foundation sub-topics.** "Answered" means the user (or agent-mode auto-pick) actually selected an option — including an "Other: ..." free-text pick — and this condition requires answers for **at least** the two sub-topics Step 5's validation gate hard-checks: **folder/convention structure** (Step 5 check 3 requires a real multi-line folder tree) and **lint/format tooling** (check 4 requires a concrete tool or config filename). Answers to stack/runtime, architecture pattern, and language contribute to the synthesis when present but do not substitute for the two required ones. Merely being eligible for the category is not enough; if Adaptive Rounds never reached those Foundation questions this session, this condition is false.
    - **Why these two are mandatory:** Step 5's gate cannot pass without concrete content for them, so firing with fewer answers would force the synthesis to either fail routinely or fabricate folder/lint decisions the user never made — and a fabricated `## Folder Layout`/`## Lint and Format Config` becomes real files and acceptance criteria via `aimi-story-expander`'s `foundationEntry` handling. Partial Foundation answers are not lost: they remain in the brainstorm document's `## Key Decisions`, which `/aimi:plan` loads as context, and `/aimi:plan`'s `aimi-foundation-architect` — the prescriptive owner of defaults — proposes the rest.
 
 If either condition is false, skip this entire phase silently: no log line, no artifact, no picker prompt. Proceed straight to Phase 4 exactly as if this phase did not exist.
@@ -1247,11 +1430,11 @@ Compose the sanitized Foundation answers into exactly these four `##` sections, 
 
 These headings are verbatim matches (case and punctuation) of 4 of the 9 `## Output Contract` sections defined in `agents/research/aimi-foundation-architect.md`, so `aimi-story-expander.md`'s `foundationEntry` special case (~L145) can consume either authoring path's artifact interchangeably. Do not add a `## Stack`, `## Layering`, `## Module Template`, `## Naming Conventions`, or `## Open Questions` section here — those five belong to the architect agent's own nine-section contract and have no consumer on this path.
 
-Draft each section from the sanitized answers to the four Foundation sub-topics (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) gathered in Phase 2:
+Draft each section from the sanitized answers to the Foundation sub-topics gathered in Phase 2 (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language):
 
 - **`## Folder Layout`** — a concrete, real directory tree reflecting the chosen folder/convention structure — not a description of one.
 - **`## Lint and Format Config`** — the specific linter/formatter the user picked (or its "Other" free-text equivalent), naming a real tool or config filename.
-- **`## CLAUDE.md Draft`** — human-facing project conventions: the chosen stack, architecture pattern, and folder/convention structure, stated as decisions the way `aimi-foundation-architect.md`'s own `## CLAUDE.md Draft` section does.
+- **`## CLAUDE.md Draft`** — human-facing project conventions: the chosen stack, architecture pattern, and folder/convention structure, stated as decisions the way `aimi-foundation-architect.md`'s own `## CLAUDE.md Draft` section does. When the language sub-topic was answered, add one further line naming the project's own prose language as a decision. Per the artifact-language rule (`commands/references/user-communication.md`), that line governs only files the project owns — its own `CLAUDE.md`/`AGENTS.md`, `README`, `CHANGELOG`, source comments, and product copy — and every artifact under `.aimi/` stays English regardless of it.
 - **`## AGENTS.md Draft`** — the same conventions restated for a spawned-agent audience, distinct from CLAUDE.md's human-facing scope, exactly as `aimi-foundation-architect.md`'s Output Contract distinguishes the two.
 
 For the architectural reasoning behind `## CLAUDE.md Draft` and `## Folder Layout`, cite `agents/research/aimi-foundation-architect.md`'s `## Decision Rules` subsections — **Layering**, **Module Boundaries**, **Naming** — by reference (e.g., "per Layering: dependencies point inward") to keep this authoring path aligned with the architect agent's. Do not restate those rules' text here. This step never spawns `aimi-foundation-architect` or any other sub-agent — the synthesis is inline reasoning by `/aimi:brainstorm` itself, using only the sanitized Foundation answers already in hand.
@@ -1297,6 +1480,48 @@ All three gates in this file reach their own fire-condition check on every singl
 
 This line carries only the three gate-name=token pairs above — no free-text classification content, scope-context names, phase names or goals, and no `reason:` detail. The five `[brainstorm-debug]` lines above remain the only place that detail is carried, unchanged and still opt-in behind `AIMI_BRAINSTORM_DEBUG`; this line is an always-on summary above them, not a replacement.
 
+## Phase 3.9: Business Contract Authoring
+
+This is a **gate** that authors the feature's `BusinessSpec.md` so `/aimi:plan` always has a business contract to decompose against, with or without a detected Claude Design bundle. The questionnaire, propose-then-correct flow, absent-vs-unchecked rules and write procedure live in `${CLAUDE_PLUGIN_ROOT}/commands/references/business-spec-authoring.md`; read it on demand when the gate fires and follow it, rather than restating it here.
+
+### Step 1: Fire/Skip Conditions
+
+Evaluate in order; the first match decides. Set the `phase39Verdict` working-memory variable to `fired` or `skipped` (parity with the other gates; Phase 3.8's line does not read it).
+
+1. **Non-app feature:** `$FEATURE_DESCRIPTION` matches the non-app keyword rule in `commands/plan.md` § Implementation Scope Detection with no app signal present. Skip silently: no log line, no artifact.
+2. **Bundle already has a BusinessSpec:** `bundleDetected=true` and the `businessSpec` field of `bundlePayload` is non-null. Skip with exactly one log line naming that path: `business-contract-authoring skipped (bundle already carries a BusinessSpec: <path>)`. No directory is created.
+3. **Ambiguous bundle in agent mode:** `BUNDLE_STATUS=3` and `INTERACTIVE_MODE=agent`. Skip with exactly one line: `agent-mode: business-contract-authoring skipped (ambiguous bundle detection unresolved — re-run with --bundle <path> to choose one)`.
+
+Otherwise the gate fires.
+
+### Step 2: Derive Repository Facts
+
+Spawn the deriver with the entity and endpoint names the description mentions as `targets`:
+
+```
+Task subagent_type="aimi-engineering:research:aimi-spec-deriver"
+  [model: <AGENT_MODELS.research when not "inherit">]
+  prompt: "repoRoot: <absolute project root>
+           targets: <entity and endpoint names from the feature description>
+           context: <one-paragraph summary of the feature>"
+```
+
+Save the returned `spec_derivation` JSON to `.aimi/design-bundles/<topic-slug>/spec-derivation.json`, then render it:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI spec-derivation --input ".aimi/design-bundles/<topic-slug>/spec-derivation.json"
+```
+
+### Step 3: Author the Bundle
+
+Follow the reference's questionnaire and propose-then-correct flow. Core vs per-phase: when Phase 3.5 settled a phase cut (`phase35Verdict=fired`), the per-phase sections carry only the reference's deferred marker line; otherwise they are authored in full. Write `project/BusinessSpec.md` under `.aimi/design-bundles/<topic-slug>/` and a `README.md` carrying `AIMI_GENERATED_MARKER` at the bundle root (the reference's write procedure says how the marker is read; never retype it). Set `businessContractBundlePath` to `.aimi/design-bundles/<topic-slug>` and `businessContractBusinessSpecPath` to `.aimi/design-bundles/<topic-slug>/project/BusinessSpec.md`.
+
+Artifact language: see `commands/references/user-communication.md` (§ Artifact Language Rule).
+
+*Agent mode:* log exactly one line, `agent-mode: business-contract-authoring wrote <path> (<N> open questions)`.
+
 ## Phase 4: Capture the Design
 
 ### Derive Filename
@@ -1324,6 +1549,8 @@ mkdir -p .aimi/brainstorms
 ```
 
 ### Write Document
+
+This document is a plugin-owned artifact under `.aimi/brainstorms/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
 
 Use the design document template:
 
@@ -1410,7 +1637,7 @@ phases:
 - [Decision 1]: [Rationale]
 - [Decision 2]: [Rationale]
 
-When Phase 1.8 detected greenfield structural signals and Foundation questions were answered, add at least one further bullet per answered sub-topic (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling) here, naming the user's choice and the rationale — this lightweight trace lives in the document body itself and is distinct from the full synthesized foundation proposal artifact written separately.
+When Phase 1.8 detected greenfield structural signals and Foundation questions were answered, add at least one further bullet per answered sub-topic (stack/runtime, architecture pattern, folder/convention structure, lint/format tooling, language) here, naming the user's choice and the rationale — this lightweight trace lives in the document body itself and is distinct from the full synthesized foundation proposal artifact written separately.
 
 When UI features were detected in Phase 1.7, include this section:
 
@@ -1480,14 +1707,11 @@ If neither variant prototypes were saved nor bundle prototypes are available (ne
 - Tag-breakout sanitization: before writing any path string to the frontmatter YAML, replace `</prototype_html` with `&lt;/prototype_html` and `<prototype_html` with `&lt;prototype_html`. This prevents malicious path values from breaking out of the tag context used by plan at parse time.
 - Also add a `Source: generated-bundle` row in the `## Prototypes` table for any entry sourced from `bundleGeneratedPrototypePath`.
 
-**designBundle frontmatter rules:**
-- Emit the `designBundle:` key only when `bundleDetected=true`.
-- `root` — value of `bundlePath`.
-- `readme` — path to the bundle's README or primary index file as returned by the design-bundle researcher; `null` if absent.
-- `chats` — YAML sequence of chat transcript paths returned by the researcher; empty sequence `[]` if none.
-- `businessSpec` — path string when the researcher found a BusinessSpec file; `null` otherwise. Always emit (with `null`) so consumers can branch deterministically.
-- `designSpec` — path string when the researcher found a DesignSpec file; `null` otherwise. Always emit (with `null`) so consumers can branch deterministically.
-- When `bundleDetected=false`, omit the entire `designBundle:` key.
+**designBundle frontmatter rules:** the five fields come from exactly one of two mutually exclusive sources.
+- **Detected bundle** (`bundleDetected=true`): emit the key with `root` = `bundlePath`, `readme` = the bundle's README or primary index path from the design-bundle researcher (`null` if absent), `chats` = the researcher's chat transcript paths (`[]` if none), `businessSpec`/`designSpec` = the researcher's paths.
+- **Phase 3.9-authored bundle** (`businessContractBundlePath` set; Phase 3.9 only fires when no detected bundle carries a BusinessSpec): `root` = `businessContractBundlePath`, `readme` = `<businessContractBundlePath>/README.md`, `chats` = `[]`, `businessSpec` = `businessContractBusinessSpecPath`, `designSpec` = `null`.
+- Always emit `businessSpec` and `designSpec`, with `null` when absent from either source, so consumers can branch deterministically.
+- When neither source applies, omit the entire `designBundle:` key.
 
 ### phases frontmatter rules
 

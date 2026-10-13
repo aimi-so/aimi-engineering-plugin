@@ -11648,7 +11648,7 @@ test_forge_verb_stray_help_flag_parity() {
   assert_exit_code "1" "$exit_code" "forge-repo-info --help: exits non-zero (no longer intercepted by the universal --help loop)"
   assert_contains "unknown flag: --help" "$out" "forge-repo-info --help: surfaces the verb's own unknown-flag error"
 
-  if printf '%s' "$out" | grep -q 'aimi-cli.sh - Deterministic'; then
+  if [ "$(printf '%s' "$out" | grep -c 'aimi-cli.sh - Deterministic')" -gt 0 ]; then
     echo -e "${RED}✗${NC} forge-repo-info --help: must NOT print the general help banner"
     ((TESTS_FAILED++))
   else

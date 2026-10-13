@@ -165,6 +165,8 @@ Record the resolved path as `research_path_for_story[story.id]` for use in Step 
 
 ## Step 4: Enrich Stories
 
+Every field this step writes into a story — `acceptanceCriteria`, `notes`, `implementation.approach`, `implementation.verify` — is a plugin-owned artifact under `.aimi/tasks/`, so per the artifact-language rule (`commands/references/user-communication.md`) it is written in English.
+
 For each pending story, **Read** the full research file at `research_path_for_story[story.id]` (resolved in Step 3d) using the Read tool. Use both the returned agent summary and the full file content for richer enrichment. When no research path was recorded for a story (all attempts failed), enrich from story text alone and note the missing research in the story's `notes`.
 
 For each pending story, using the research results:
@@ -213,6 +215,8 @@ If both are empty (no bundle, or bundle without specs), skip Step 4e entirely �
 
 #### BusinessSpec cross-reference (when `biz_spec` is non-empty)
 
+See `commands/references/spec-section-contract.md` for the canonical section map; the screen-matching rule below reads `BusinessSpec § 2` (Screens).
+
 Read the BusinessSpec file at the path stored in `biz_spec`.
 
 Parse section headings using the patterns:
@@ -240,11 +244,13 @@ Append to (do not overwrite) any existing `notes` content. If `notes` is absent,
 
 #### DesignSpec cross-reference (when `design_spec` is non-empty)
 
+See `commands/references/spec-section-contract.md` for the canonical section map.
+
 Read the DesignSpec file at the path stored in `design_spec`.
 
 **Component-mapping conflict detection (§ 6):**
 
-Parse DesignSpec § 6 (Mapeamento para `@/components/ui`) — this section contains a table mapping component names to existing project component paths.
+Parse `DesignSpec § 6` — this section contains a table mapping component names to existing project component paths, each read from the project's own component-library alias or import convention (e.g. a tsconfig.json/jsconfig.json path alias or an existing import statement), never a fixed path.
 
 For each pending story whose `implementation.files` references a component path:
 1. Check whether any referenced component is listed in the § 6 mapping table as one that already exists in the project.

@@ -2,13 +2,15 @@
 
 Shared reference for the wording, tone, and density of text a plugin command sends directly to the person running it — completion reports, chat explanations, and `AskUserQuestion` prompts. Apply the rules in this file wherever a command emits text meant for a human reader, not another agent.
 
-**Consumed by:** `execute.md`, `plan.md`, `brainstorm.md`, `next.md`, `setup-models.md`, `learnings.md`, `commands/design/shape.md`, and `commands/design/polish.md` — every command file with an `AskUserQuestion` call site or a completion-report block.
+**Consumed by:** `brainstorm.md`, `deepen.md`, `execute.md`, `open-pr.md`, `plan.md`, `references/interactivity.md`, `references/publish-confirmation.md`, and `references/visual-variants.md` — the command files that currently cite this reference. That list is a separate statement from what this file governs: any command with an `AskUserQuestion` call site or a completion-report block, whether or not it is named above.
 
 ## Scope
 
 In scope: completion reports, chat explanations, and `AskUserQuestion` prompts — any text a human reads and acts on.
 
 Out of scope: text sent to subagents (Task spawn prompts). A spawn prompt optimizes for **sufficiency to a fresh-context agent** — a complete objective, output format, tool guidance, and stop condition an agent can act on without follow-up — not for human readability. Applying this file's density and jargon rules to a spawn prompt would strip context an agent needs, causing it to guess and redo work, which costs more than the words saved. Spawn prompts are governed by neither this file nor `AGENTS.md` (see Boundaries below) — see the Performance Guidelines in `plugins/aimi-engineering/CLAUDE.md` for prompt-construction rules instead.
+
+A third category, neither in scope nor out of scope above: persisted artifacts — text written to disk that outlives the conversation (a brainstorm document, a `tasks.json` story, `handoff.md`, a roadmap phase field, a research document, and so on). Their language is decided by ownership, not by who is reading — see the `## Artifact Language Rule` section below.
 
 ### What Counts as a Real Example Source
 
@@ -19,6 +21,8 @@ Every "Before:" half below is real, quoted text — but not everything in a comm
 **Format vs. wording.** This file governs wording, tone, and density — never `AskUserQuestion` *format* (lettered A/B/C options, escape-hatch-last, 2-6 option count). Format is owned by `commands/references/interactivity.md`. When both apply to the same picker: the option letters, order, and count come from `interactivity.md`; the words inside each option come from here.
 
 **Clarity vs. compression.** `AGENTS.md` governs a different, non-overlapping category: text an agent returns to its orchestrator (status updates, summary returns, progress reports, task confirmations). Its axis is token economy — shorter is better, fragments over sentences. This file's axis is human clarity, and the two sometimes pull in opposite directions: a compressed fragment that saves tokens for an orchestrator can read as a wall of jargon to a person. Neither file overrides the other — they govern different senders and different readers, and a command body can be correct under both at once only because they never apply to the same span of text.
+
+**Spoken vs. stored.** The Adaptive Language Rule (above) follows the reader and governs spoken text — chat explanations, completion reports, and `AskUserQuestion` prompts. The Artifact Language Rule (below) follows ownership and governs stored text — what language a persisted file is written in. The two never collide: a completion report *about* a story is written in the person's language while the story text it describes stays in English, so both rules hold of the same moment at once.
 
 ## Jargon Carve-Out
 
@@ -50,6 +54,24 @@ The dividing question for any ALL-CAPS symbol: would a person outside this codeb
 The plugin's user-facing output language follows whatever language the person is writing in — Portuguese in, Portuguese out; English in, English out. A command that hardcodes a single language into a completion report or an `AskUserQuestion` prompt is a defect under this rule, regardless of which language is hardcoded.
 
 This file does not fix any existing hardcoded-language call site — that is separate, follow-up work. It states the rule here so future text, and future fixes, have something to point at.
+
+## Artifact Language Rule
+
+The rule above covers spoken text. A persisted artifact — anything this plugin or its host project writes to disk — follows a different rule: ownership decides, not the reader.
+
+- An artifact the plugin owns — everything under `.aimi/`, including `tasks.json` story prose, research documents, `handoff.md`, and the roadmap's own phase `name`, `goal`, and `successCriteria` — is **written in English**.
+- A file the project owns — source, `README`, `CHANGELOG`, product copy, and the `CLAUDE.md`/`AGENTS.md` a greenfield foundation story writes — follows **the project's own language**.
+- Text addressed to a person follows **the person's language** — this is the Adaptive Language Rule above, restated as the third leg of this same split rather than replaced by it.
+
+**English is a rule, not a resolved value.** No `configuration file` is read, no CLI verb is called, and nothing infers a language from the repository tree — English for a plugin-owned artifact is stated here and applied, never derived. A `multi-repo` layout takes one language for the whole layout, never one language per repository.
+
+**Quoted content keeps its own language.** An acceptance criterion citing a screen's visible text carries that text verbatim, in whatever language the screen shows it in — quoting is not translating.
+
+**Commit subjects, pull request titles, and pull request bodies inherit English transitively** — each is composed from the story text it derives from, and that story text is written in English. A project that declares its own commit-language convention in its own `CLAUDE.md` keeps that convention; this rule yields to a project's explicit choice about its own commit history.
+
+**Some text is a contract, not prose, and is never translated in any language.** The five `handoff.md` section headings (`## Decisions Made`, `## Artifacts Created`, `## Deviations`, `## Deferred Items`, `## Contracts Delivered`), the research documents' `## Verified` heading, the artifact identity copied verbatim from `roadmap.json` into `## Artifacts Created`, the `verification-evidence:` line, the `verification-skipped:` line, every JSON key, every status token, and every derived slug, directory, and branch name stay exactly as written, whatever language surrounds them, because something downstream greps for the literal string. The cost of getting this wrong is concrete: `roadmap.py` refuses a handoff write outright when `## Artifacts Created` is absent.
+
+**Retroactive migration is out of scope.** An artifact already written in another language before this rule existed is not rewritten because of it; readers already tolerate both — `tasks.py`'s `DECISIONS_HEADING_RE` matches a decisions heading in English or in Portuguese for exactly this reason.
 
 ## Before/After Pairs
 

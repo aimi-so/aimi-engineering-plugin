@@ -26,6 +26,7 @@ utilize→use, in order to→to, at this point in time→now, implement→add, a
 Compression applies to: spawned-agent status updates, summary returns, progress reports, task confirmations.
 Compression does NOT apply to: CHANGELOG.md, README.md, commit messages, PR descriptions, user-facing chat to the human running /aimi:execute.
 For the last of those — user-facing chat to the human running /aimi:execute — see `commands/references/user-communication.md` for what to write instead.
+This block decides compression only, never language. Which language a persisted artifact is written in is decided by ownership, per the Artifact Language Rule in `commands/references/user-communication.md`.
 </scope>
 
 <safety_escapes>

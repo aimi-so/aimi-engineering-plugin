@@ -114,6 +114,7 @@ Write exactly one JSON object to `outputPath`. Fields:
     "files": ["<concrete file paths from research>"],
     "approach": "<actionable strategy, referencing codebase patterns by file:line where possible>",
     "verify": "<executable command or checkable assertion>",
+    "guardRails": ["<optional: verbatim verify segments that pass by design>"],
     "prototypeAnchor": "<optional, relative path to the single prototype most relevant>"
   },
   "verification": {
@@ -134,6 +135,18 @@ Write exactly one JSON object to `outputPath`. Fields:
 ```
 
 `gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
+
+## Artifact language
+
+Every prose field you write — `title`, `description`, every `acceptanceCriteria` entry, `notes`, `implementation.approach`, and every `tasks[]` entry — is **written in English**, whatever language the feature description, the research excerpts, or the conversation this run started from were in. This is the plugin's Artifact Language Rule; its home is `commands/references/user-communication.md` (§ Artifact Language Rule), and it is restated here in full rather than pointed to, because "## What you do NOT do" below permits you to read only research and prototype files — nothing here authorizes opening a reference file at runtime to look this rule up.
+
+**Quoted content keeps its own language.** An acceptance criterion citing a screen's visible text, or a `DesignSpec § N.N` / `BusinessSpec § 9` literal, carries that text verbatim, in whichever language the screen or spec shows it — the "## Spec-driven content (when present)" section's own `Do NOT paraphrase` and `extract literals verbatim` rules are this rule applied to that content; quoting was never translating.
+
+**Commit subjects, pull request titles, and pull request bodies inherit English transitively, and none of them is yours to edit.** A story's `title` becomes the commit subject (`skills/story-executor/SKILL.md` step 5b, `git commit -m "type(scope): Story title"`), and `commands/open-pr.md` derives the PR body from those commits and prefers `metadata.title` for the PR title. Writing `title` in English is what carries English all the way to both; you write no line of either file.
+
+**A project's own declared commit-language convention wins over this default.** When the target project's own `CLAUDE.md` states a commit-language convention, that convention governs the commit subject `title` becomes there — this rule is about artifacts the plugin owns, never about overriding a convention a project has written down for itself.
+
+**Derived identifiers stay ASCII and are never translated.** `featureSlug`, the phase slug and its `dir`, and `branchName` are identifiers, not prose: the five-step algorithm in `commands/references/topic-slug.md` has no transliteration step, so a title carrying accents silently loses them and a non-Latin-script title slugs to empty, then fails the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` validation `plan.md` applies to `featureSlug`. Never translate a slug, a phase dir, or a branch name, into or out of any language.
 
 ## Verify working directory
 
@@ -176,6 +189,10 @@ Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fix
 **A story's own `implementation.verify` must NEVER name the `verify-probe` verb.** The executor probes a story by RUNNING that story's own verify segments (`skills/story-executor/SKILL.md` step 1.5), so a verify that calls the verb back re-enters the probe: the CLI refuses instead of answering, and the story then fails for a reason that has nothing to do with its own code. The same loop closes between two stories — A's verify probing B while B's probes A, two ids and neither equal to the other — so write neither shape.
 
 A story that must exercise the verb has two ways out: probe from a verify that does not itself call it (a sibling story's, or a throwaway fixture's), or call `probe_verify()` in `tasks.py` directly, which is not guarded. Point at the refusal rather than restating it — `_VERIFY_PROBE_REENTRY` in `plugins/aimi-engineering/scripts/tasks.py` is the one place that states the problem in full and names both exits, and it is the text whoever trips this actually reads.
+
+## Guard-rail segments
+
+List in `implementation.guardRails` every `verify` segment that passes by design, such as a full suite or a regression check. Each entry is the segment's text verbatim, exactly as `verify_segments` cuts it: split on `;`, `&&`, `||` and newlines, with a heredoc counted as one segment. Leave every segment that discriminates the before-state from the after-state out of the list; an unlabelled segment that already passes is then visible as a real finding. Omit the key when nothing passes by design.
 
 ## Verify coverage
 
@@ -288,9 +305,11 @@ Note: `story-merge` runs Rule 22 (cross-story mock-sync routing) after merge —
 
 ## Spec-driven content (when present)
 
+**Container and placement terms.** Name containers and placement terms verbatim from the DesignSpec or prototype. A "bottom sheet" is never rewritten as a "dialog" (nor a drawer as a modal, nor a popover as a tooltip), so your AC literals stay in the vocabulary the design used and the `structural-vocabulary` check finds nothing missing or unsourced.
+
 When `businessSpecContent` is non-null and the outline entry corresponds to a screen/entity/endpoint/persona that the spec describes:
 
-- Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Critérios de aceite). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.
+- Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Acceptance Criteria). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.
 - Cite the spec line in AC anchors: `(BusinessSpec § N[.N] L<line>)`.
 
 When `designSpecContent` is non-null and the story includes UI work:

@@ -1,0 +1,45 @@
+# spec-section-contract-baseline.txt — declarations and exemptions for
+# test-spec-section-contract.sh.
+#
+# Format, tab-separated, one of two kinds per line:
+#
+#   contract-path	<path>				# <reason (optional)>
+#   exempt		<relpath>#<citation>		# <reason (REQUIRED)>
+#
+# `contract-path` is declared ONCE, here, and names the file every citation
+# below is checked against — resolved relative to the plugin directory on the
+# real tree (`commands/references/spec-section-contract.md`), and relative to
+# a `--corpus-root` fixture root in fixture mode. The suite fails when the
+# declared path does not resolve to an existing file. A caller pointed at a
+# throwaway fixture overrides it with --contract-path and the suite skips
+# that existence cross-check's real-tree framing entirely.
+#
+# `exempt`'s value is a single tab-separated field, `<relpath>#<citation>`:
+# `relpath` follows the same two-root rule every other baseline here uses
+# (bare and relative to commands/, or `skills/`-/`agents/`-prefixed and
+# relative to the plugin directory), and `citation` is the exact
+# `BusinessSpec § N[.N]` / `DesignSpec § N[.N]` string as it appears in that
+# file. This mirrors artifact-language-baseline.txt's three-column
+# (kind, value, reason) shape rather than inventing a fourth column.
+#
+# The reason field is REQUIRED for `exempt` — the suite fails loudly on an
+# exempt entry carrying none, the same rule command-blocks-baseline.txt
+# states for its own per-line reason: it is the suite's own promise that
+# someone looked, made per-line instead of per-section so a paragraph above a
+# list stays true of an entry appended to the bottom of it later.
+#
+# This baseline is a ratchet in both directions, the same rule
+# command-size-baseline.txt applies to its own byte budgets: an `exempt`
+# entry naming a (file, citation) pair whose citation string no longer
+# appears in that file, or whose citation the contract now enumerates, fails
+# as stale. An exemption can never be forgotten silently; it can only be
+# un-earned visibly, in a diff someone reviews.
+contract-path	commands/references/spec-section-contract.md	# the section-citation contract this suite enforces
+
+# --- exemptions --------------------------------------------------------------
+#
+# Every citation the corpus scan derives is checked against the contract
+# above by literal substring match. None needs an exemption on the swept
+# tree (post outline:01's contract and outline:06's citation sweep) — this
+# section is left empty on purpose, ready for the next citation that
+# genuinely cannot be covered by the contract's own table.

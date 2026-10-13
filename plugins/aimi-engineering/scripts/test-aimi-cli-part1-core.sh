@@ -1041,6 +1041,100 @@ EOF
   rm -f "$file_a" "$file_b" "$file_c" "$file_d"
 }
 
+test_set_verification() {
+  echo ""
+  echo "=== Testing set-verification ==="
+
+  local rc err_out
+
+  local file_a="$TASKS_DIR/9999-99-88-set-verification-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": "", "verification": {"strategy": "test", "status": "pending", "url": null, "expect": null}}
+  ]
+}
+EOF
+
+  # --- refusal: skipped with no --reason exits non-zero and writes nothing ---
+  local before_a
+  before_a=$(cat "$file_a")
+  err_out=$("$CLI" set-verification US-900 skipped --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: skipped with no --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "set-verification: skipped with no --reason names the required flag"
+  assert_eq "$before_a" "$(cat "$file_a")" "set-verification: skipped with no --reason leaves the file unchanged"
+
+  # --- success: skipped WITH --reason writes status+skipReason and echoes both back ---
+  local output
+  output=$("$CLI" set-verification US-900 skipped --reason 'agent-browser not installed' --tasks-file "$file_a")
+  # Key order is NOT sorted here on purpose: write_verification_verdict keeps
+  # status/strategy/url/expect exactly where they already sat (an existing
+  # key keeps its position, matching jq's own `.k = v`) and appends
+  # skipReason at the end as a genuinely new key -- so the natural order this
+  # asserts against IS the contract, not an artifact of jq -S.
+  assert_eq '{"id":"US-900","verification":{"strategy":"test","status":"skipped","url":null,"expect":null,"skipReason":"agent-browser not installed"}}' \
+    "$(printf '%s' "$output" | jq -c '.')" \
+    "set-verification: skipped success echoes {id, verification} carrying the reason"
+  assert_eq "skipped" "$(jq -r '.userStories[0].verification.status' "$file_a")" \
+    "set-verification: on disk, status is skipped"
+  assert_eq "agent-browser not installed" "$(jq -r '.userStories[0].verification.skipReason' "$file_a")" \
+    "set-verification: on disk, skipReason carries the reason"
+
+  # --- success: a later passed (no --reason) drops the now-stale skipReason ---
+  output=$("$CLI" set-verification US-900 passed --tasks-file "$file_a")
+  assert_eq "passed" "$(jq -r '.userStories[0].verification.status' "$file_a")" \
+    "set-verification: passed after skipped updates status"
+  local post_verification
+  post_verification=$(jq -c '.userStories[0].verification' "$file_a")
+  assert_eq "false" "$(printf '%s' "$post_verification" | jq 'has("skipReason")')" \
+    "set-verification: passed after skipped removes the stale skipReason key entirely"
+
+  # --- refusal: pending exits non-zero naming the allowed values ---
+  err_out=$("$CLI" set-verification US-900 pending --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: pending exits non-zero"
+  assert_contains "passed" "$err_out" "set-verification: pending refusal names passed as allowed"
+  assert_contains "failed" "$err_out" "set-verification: pending refusal names failed as allowed"
+  assert_contains "skipped" "$err_out" "set-verification: pending refusal names skipped as allowed"
+
+  # --- refusal: an unknown status exits non-zero naming the allowed values ---
+  err_out=$("$CLI" set-verification US-900 bogus-status --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: an unknown status exits non-zero"
+  assert_contains "passed" "$err_out" "set-verification: unknown-status refusal names the allowed values"
+
+  # --- refusal: passed with --reason exits non-zero (reason only for skipped) ---
+  local before_reason_guard
+  before_reason_guard=$(cat "$file_a")
+  err_out=$("$CLI" set-verification US-900 passed --reason 'why' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: passed with --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "set-verification: passed-with-reason refusal names --reason"
+  assert_eq "$before_reason_guard" "$(cat "$file_a")" "set-verification: passed-with-reason refusal leaves the file unchanged"
+
+  # --- refusal: unknown id ---
+  err_out=$("$CLI" set-verification US-999 passed --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: unknown id exits non-zero"
+  assert_contains "US-999" "$err_out" "set-verification: unknown id names the id in stderr"
+  assert_contains "not found" "$err_out" "set-verification: unknown id says it was not found"
+
+  # --- refusal: a story with no verification object at all ---
+  local file_b="$TASKS_DIR/9999-99-88-set-verification-b-tasks.json"
+  cat > "$file_b" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-901", "title": "No verification", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+  err_out=$("$CLI" set-verification US-901 passed --tasks-file "$file_b" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "set-verification: a story with no verification object exits non-zero"
+  assert_contains "no verification object" "$err_out" "set-verification: names the missing verification object"
+
+  rm -f "$file_a" "$file_b"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -1693,7 +1787,7 @@ TASKSEOF
 
 test_get_story_context_skills_dropped() {
   echo ""
-  echo "=== Testing get-story-context skillsDropped: always present, and what it names ==="
+  echo "=== Testing get-story-context dropped: always present, and what it names ==="
 
   # The eviction warnings go to stderr and always did, because stdout is piped
   # straight into a JSON parse by every consumer there is. A caller running this
@@ -1706,8 +1800,8 @@ test_get_story_context_skills_dropped() {
   "$CLI" init-session > /dev/null
   local output
   output=$("$CLI" get-story-context US-001 2>/dev/null)
-  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
-    "skills_dropped: the key is an empty array when nothing was dropped"
+  assert_eq "[]" "$(printf '%s' "$output" | jq -c '.dropped')" \
+    "dropped: the key is an empty array when nothing was dropped"
 
   # (2) An individually oversized skill is dropped BEFORE the aggregate loop, so
   # the two small siblings declared after it survive. The pre-port loop popped
@@ -1757,14 +1851,14 @@ TASKSEOF
   stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
   rm -f "$stderr_file"
 
-  assert_exit_code "0" "$exit_code" "skills_dropped: an oversized skill does not sink the payload"
+  assert_exit_code "0" "$exit_code" "dropped: an oversized skill does not sink the payload"
   assert_eq '["alpha","beta"]' "$(printf '%s' "$output" | jq -c '[.skills[].name]')" \
-    "skills_dropped: both small siblings survive an oversized skill declared first"
-  assert_eq '[{"name":"gigante","bytes":102401,"reason":"oversized"}]' \
-    "$(printf '%s' "$output" | jq -c '.skillsDropped')" \
-    "skills_dropped: the oversized skill is reported with its own size and reason"
+    "dropped: both small siblings survive an oversized skill declared first"
+  assert_eq '[{"kind":"skill","name":"gigante","path":null,"section":null,"reason":"oversized","bytes":102401,"deferred":false}]' \
+    "$(printf '%s' "$output" | jq -c '.dropped')" \
+    "dropped: the oversized skill is reported with kind, its own size and reason"
   assert_stderr_contains "exceeds the 100KB skills cap on its own" "$stderr_output" \
-    "skills_dropped: the oversized drop has its own warning, distinct from the aggregate one"
+    "dropped: the oversized drop has its own warning, distinct from the aggregate one"
 
   rm -rf "$tmp_dir"
 }
@@ -1832,8 +1926,11 @@ BRAINSTORMEOF
 TASKSEOF
 
   # cd to $tmp_dir so find_aimi_root() picks up $tmp_dir/.aimi/
+  # Stdout only, not 2>&1: this designBundle's two spec files do not exist on
+  # disk (US-003's specFile check now warns about that on stderr), and this
+  # test's own JSON parse below must not have those warning lines mixed in.
   local output exit_code
-  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>&1)
+  output=$(cd "$tmp_dir" && unset CLAUDECODE; AIMI_PLUGIN_DIR="$tmp_dir" "$CLI" get-story-context US-001 2>/dev/null)
   exit_code=$?
 
   assert_exit_code "0" "$exit_code" "design_context: exits 0"
@@ -6120,17 +6217,23 @@ test_tasks_file_flag_honored_by_update_field() {
   echo ""
   echo "=== Testing update-field honors --tasks-file, and a value starting with -- passes through unaltered ==="
 
+  # notes rather than verification.status: the latter now carries a value-set
+  # guard of its own (see test_update_field_verification_value_guard), and
+  # "--not-a-flag" is not one of the documented statuses. notes has no such
+  # guard, so it stays the field this test's actual subject -- --tasks-file
+  # honoring and unaltered pass-through of a value starting with -- -- can
+  # exercise without tripping on an unrelated one.
   local second_file="$TASKS_DIR/9999-99-81-tasks-file-flag-uf.json"
   _write_tasks_file_flag_fixture "$second_file"
   local pre_pointer
   pre_pointer=$(jq -S '.' "$TASKS_FILE")
 
   local output exit_code=0
-  output=$("$CLI" update-field US-900 verification.status "--not-a-flag" --tasks-file "$second_file") || exit_code=$?
+  output=$("$CLI" update-field US-900 notes "--not-a-flag" --tasks-file "$second_file") || exit_code=$?
   assert_exit_code "0" "$exit_code" "update-field --tasks-file: exits 0"
-  assert_eq '{"id":"US-900","verification":{"status":"--not-a-flag"}}' "$(printf '%s' "$output" | jq -Sc '.')" \
+  assert_eq '{"id":"US-900","notes":"--not-a-flag"}' "$(printf '%s' "$output" | jq -Sc '.')" \
     "update-field --tasks-file: echoes back the named file's story, value unaltered despite starting with --"
-  assert_eq "--not-a-flag" "$(jq -r '.userStories[] | select(.id == "US-900") | .verification.status' "$second_file")" \
+  assert_eq "--not-a-flag" "$(jq -r '.userStories[] | select(.id == "US-900") | .notes' "$second_file")" \
     "update-field --tasks-file: on disk, the named file's story carries the literal value"
 
   local post_pointer
@@ -11262,6 +11365,185 @@ test_update_field_refuses_non_identifier_path() {
     "update-field: path containing a space is refused by name on stderr"
 }
 
+test_spec_derivation() {
+  echo ""
+  echo "=== Testing spec-derivation: validation, relabel of evidence-less absences, markdown rows, confinement ==="
+
+  local input="$TEST_DIR/spec-derivation-input.json"
+  local output stderr_output exit_code
+
+  cat > "$input" << 'SPECEOF'
+{"records":[
+ {"kind":"entity","name":"Invoice","status":"absent","evidence":[]},
+ {"kind":"entity","name":"Customer","status":"unchecked","evidence":[]},
+ {"kind":"entity","name":"Order","status":"present","evidence":["app/models/order.rb:1","db/schema.rb:40"]},
+ {"kind":"endpoint","name":"POST /invoices","status":"absent"},
+ {"kind":"endpoint","name":"GET /orders","status":"absent","evidence":["config/routes.rb:12"]}
+]}
+SPECEOF
+
+  exit_code=0
+  output=$("$CLI" spec-derivation --input "$input" 2> "$TEST_DIR/spec-derivation.err") || exit_code=$?
+  stderr_output=$(cat "$TEST_DIR/spec-derivation.err")
+  assert_exit_code "0" "$exit_code" "spec-derivation: valid input exits 0"
+  assert_eq '["entity:Invoice","endpoint:POST /invoices"]' "$(echo "$output" | jq -c '.relabeled')" \
+    "spec-derivation: only evidence-less absent records are listed as relabeled"
+  assert_eq "unchecked" "$(echo "$output" | jq -r '.records[0].status')" \
+    "spec-derivation: an evidence-less absent record is relabeled unchecked in records"
+  assert_eq "unchecked" "$(echo "$output" | jq -r '.records[1].status')" \
+    "spec-derivation: a genuine unchecked record passes through unchanged"
+  assert_eq "absent" "$(echo "$output" | jq -r '.records[4].status')" \
+    "spec-derivation: an absent record WITH evidence stays absent"
+  assert_eq "[]" "$(echo "$output" | jq -c '.records[3].evidence')" \
+    "spec-derivation: a missing evidence key normalizes to an empty list"
+  assert_eq "| Invoice | unchecked (claimed absent, no evidence) | — |
+| Customer | unchecked | — |
+| Order | present | app/models/order.rb:1; db/schema.rb:40 |" "$(echo "$output" | jq -r '.markdown.entities')" \
+    "spec-derivation: entity rows render in input order with the relabeled label only on relabeled records"
+  assert_eq "| POST /invoices | unchecked (claimed absent, no evidence) | — |
+| GET /orders | absent | config/routes.rb:12 |" "$(echo "$output" | jq -r '.markdown.endpoints')" \
+    "spec-derivation: endpoint rows render in input order"
+  assert_contains "spec-derivation: entity 'Invoice' claimed absent with no evidence - relabeled unchecked" "$stderr_output" \
+    "spec-derivation: stderr names the relabeled entity"
+  assert_contains "spec-derivation: endpoint 'POST /invoices' claimed absent with no evidence - relabeled unchecked" "$stderr_output" \
+    "spec-derivation: stderr names the relabeled endpoint"
+  case "$stderr_output" in
+    *"'Customer'"*) assert_eq "quiet" "noisy" "spec-derivation: a genuine unchecked record draws no stderr line" ;;
+    *) assert_eq "quiet" "quiet" "spec-derivation: a genuine unchecked record draws no stderr line" ;;
+  esac
+
+  # Refusals: each asserts the exit status AND the exact text.
+  local bad="$TEST_DIR/spec-derivation-bad.json"
+  _spec_derivation_refusal() {
+    local label="$1" body="$2" expected="$3"
+    printf '%s' "$body" > "$bad"
+    exit_code=0
+    stderr_output=$("$CLI" spec-derivation --input "$bad" 2>&1 >/dev/null) || exit_code=$?
+    assert_exit_code "1" "$exit_code" "spec-derivation: $label exits 1"
+    assert_contains "$expected" "$stderr_output" "spec-derivation: $label refusal text"
+  }
+  _spec_derivation_refusal "invalid JSON" '{not json' \
+    "Error: spec-derivation: input is not valid JSON:"
+  _spec_derivation_refusal "records not a list" '{"records":{}}' \
+    "Error: spec-derivation: 'records' must be a list"
+  _spec_derivation_refusal "invalid kind" '{"records":[{"kind":"widget","name":"X","status":"present"}]}' \
+    "Error: spec-derivation: records[0].kind must be 'entity' or 'endpoint' (got \"widget\")"
+  _spec_derivation_refusal "invalid status" '{"records":[{"kind":"entity","name":"A","status":"present"},{"kind":"entity","name":"X","status":"maybe"}]}' \
+    "Error: spec-derivation: records[1].status must be 'present', 'absent' or 'unchecked' (got \"maybe\")"
+  _spec_derivation_refusal "missing name" '{"records":[{"kind":"entity","status":"present"}]}' \
+    "Error: spec-derivation: records[0].name must be a non-empty string"
+  _spec_derivation_refusal "empty name" '{"records":[{"kind":"entity","name":"  ","status":"present"}]}' \
+    "Error: spec-derivation: records[0].name must be a non-empty string"
+  _spec_derivation_refusal "evidence not a list" '{"records":[{"kind":"entity","name":"X","status":"present","evidence":"a.rb"}]}' \
+    "Error: spec-derivation: records[0].evidence must be a list of strings"
+  _spec_derivation_refusal "evidence with a non-string" '{"records":[{"kind":"entity","name":"X","status":"present","evidence":["a",1]}]}' \
+    "Error: spec-derivation: records[0].evidence must be a list of strings"
+
+  # Confinement of the CLI-argument path happens in bash, before python3.
+  exit_code=0
+  stderr_output=$("$CLI" spec-derivation --input /etc/hostname 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "spec-derivation: --input outside the project root exits 1"
+  assert_contains "Error: Path escapes project root — access denied" "$stderr_output" \
+    "spec-derivation: --input outside the project root is refused by validate_path_in_project"
+
+  rm -f "$input" "$bad" "$TEST_DIR/spec-derivation.err"
+  unset -f _spec_derivation_refusal
+}
+
+test_structural_vocabulary() {
+  echo ""
+  echo "=== Testing structural-vocabulary: missing/unsourced terms, whole-phrase matching, measured:false degrade, refusals ==="
+
+  local spec="$TEST_DIR/structural-vocabulary-spec.md"
+  local tasks="$TEST_DIR/structural-vocabulary-tasks.json"
+  local playlist="$TEST_DIR/structural-vocabulary-playlist.json"
+  local output stderr_output exit_code
+
+  printf 'The filter panel opens as a bottom sheet on mobile.\n' > "$spec"
+  cat > "$tasks" << 'SVEOF'
+{"schemaVersion":"3.3","metadata":{},"userStories":[{"id":"US-001","title":"Filter panel","description":"As a shopper, I want filters","acceptanceCriteria":["Tapping Filter opens a Dialog with filter controls"],"status":"pending","dependsOn":[]}]}
+SVEOF
+  cat > "$playlist" << 'SVEOF'
+{"schemaVersion":"3.3","metadata":{},"userStories":[{"id":"US-001","title":"Playlist","description":"As a listener, I want a playlist","acceptanceCriteria":["The playlist screen shows tracks"],"status":"pending","dependsOn":[]}]}
+SVEOF
+
+  exit_code=0
+  output=$("$CLI" structural-vocabulary --tasks "$tasks" --spec "$spec") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "structural-vocabulary: valid input exits 0"
+  assert_eq "true" "$(echo "$output" | jq -r '.measured')" \
+    "structural-vocabulary: measured is true when terms occur"
+  assert_eq '["bottom sheet"]' "$(echo "$output" | jq -c '.missing')" \
+    "structural-vocabulary: a spec term no story mentions is missing"
+  assert_eq '["dialog"]' "$(echo "$output" | jq -c '.unsourced')" \
+    "structural-vocabulary: a story term no source names is unsourced (case-insensitive)"
+
+  exit_code=0
+  output=$("$CLI" structural-vocabulary --tasks "$playlist") || exit_code=$?
+  assert_exit_code "0" "$exit_code" "structural-vocabulary: playlist-only tasks exit 0"
+  assert_eq '{"measured":false,"terms":[],"missing":[],"unsourced":[]}' "$(echo "$output" | jq -c '.')" \
+    "structural-vocabulary: 'playlist' is not an occurrence of 'list' (measured:false degrade)"
+
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$TEST_DIR/structural-vocabulary-absent.json" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: a missing --tasks file exits 1"
+  assert_contains "structural-vocabulary-absent.json" "$stderr_output" \
+    "structural-vocabulary: the refusal names the unreadable file"
+
+  printf '{not json' > "$TEST_DIR/structural-vocabulary-bad.json"
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$TEST_DIR/structural-vocabulary-bad.json" 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: an invalid-JSON --tasks file exits 1"
+  assert_contains "structural-vocabulary-bad.json" "$stderr_output" \
+    "structural-vocabulary: the invalid-JSON refusal names the file"
+  case "$stderr_output" in
+    *Traceback*) assert_eq "clean" "traceback" "structural-vocabulary: no Python traceback on invalid JSON" ;;
+    *) assert_eq "clean" "clean" "structural-vocabulary: no Python traceback on invalid JSON" ;;
+  esac
+
+  exit_code=0
+  stderr_output=$("$CLI" structural-vocabulary --tasks "$tasks" --spec /etc/hostname 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "structural-vocabulary: --spec outside the project root exits 1"
+  assert_contains "Error: Path escapes project root — access denied" "$stderr_output" \
+    "structural-vocabulary: --spec outside the project root is refused by validate_path_in_project"
+
+  rm -f "$spec" "$tasks" "$playlist" "$TEST_DIR/structural-vocabulary-bad.json"
+}
+
+test_update_field_verification_value_guard() {
+  echo ""
+  echo "=== Testing update-field: verification.status/.strategy are constrained to their documented value sets ==="
+
+  reset_fixture
+
+  local stderr_output exit_code
+
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 verification.status bogus-status 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: verification.status outside the allowed set exits 1"
+  assert_stderr_contains "not one of" "$stderr_output" \
+    "update-field: verification.status refusal names the documented value set"
+
+  exit_code=0
+  stderr_output=$("$CLI" update-field US-001 verification.strategy bogus-strategy 2>&1) || exit_code=$?
+  assert_exit_code "1" "$exit_code" "update-field: verification.strategy outside the allowed set exits 1"
+  assert_stderr_contains "not one of" "$stderr_output" \
+    "update-field: verification.strategy refusal names the documented value set"
+
+  # The legitimate values on both leaves still succeed exactly as before --
+  # the guard narrows what is accepted, it does not touch what already worked.
+  local output exit_code2=0
+  output=$("$CLI" update-field US-001 verification.status passed) || exit_code2=$?
+  assert_exit_code "0" "$exit_code2" "update-field: verification.status passed still succeeds"
+  assert_eq "passed" "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.status' "$TASKS_FILE")" \
+    "update-field: verification.status passed lands on disk"
+
+  local exit_code3=0
+  output=$("$CLI" update-field US-001 verification.strategy visual) || exit_code3=$?
+  assert_exit_code "0" "$exit_code3" "update-field: verification.strategy visual still succeeds"
+  assert_eq "visual" "$(jq -r '.userStories[] | select(.id == "US-001") | .verification.strategy' "$TASKS_FILE")" \
+    "update-field: verification.strategy visual lands on disk"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -11317,6 +11599,7 @@ main() {
   test_cascade_skip
   test_mark_skipped
   test_remove_story
+  test_set_verification
   test_validate_deps_circular
   test_validate_deps
   test_status
@@ -11621,6 +11904,7 @@ main() {
   test_update_field_nested_path
   test_update_field_single_segment
   test_update_field_refuses_non_identifier_path
+  test_update_field_verification_value_guard
 
   # CLI output optimization tests — run with fresh fixture each time
   echo ""
@@ -11644,6 +11928,16 @@ main() {
   test_find_tasks_all_empty_dir_with_decoy
   test_init_session_file_flag
   test_init_session_file_flag_validation
+
+  # spec-derivation tests
+  echo ""
+  echo "--- Spec Derivation Tests ---"
+  test_spec_derivation
+
+  # structural-vocabulary tests
+  echo ""
+  echo "--- Structural Vocabulary Tests ---"
+  test_structural_vocabulary
 
   # Setup-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""

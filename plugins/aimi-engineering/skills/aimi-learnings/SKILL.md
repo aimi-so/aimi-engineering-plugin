@@ -122,6 +122,12 @@ For each group:
    Where `<slug>` is derived from the first 6 words of the proposed rule,
    lowercased, spaces replaced with hyphens, non-alphanumeric characters stripped.
 
+   The draft file is a plugin-owned artifact under `~/.aimi/learnings/`, so
+   per the artifact-language rule (`commands/references/user-communication.md`)
+   every field is written in English except `## Rationale`, which quotes the
+   person's own proposed-rule wording verbatim in whichever language they
+   wrote it — quoting is not translating.
+
    Use the draft template at
    `plugins/aimi-engineering/skills/aimi-learnings/references/draft-template.md`
    as the structure for the file. Populate:

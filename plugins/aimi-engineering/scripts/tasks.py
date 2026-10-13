@@ -332,6 +332,23 @@ def jq_tostring(value):
     return json.dumps(jq_numbers(value), separators=(",", ":"), ensure_ascii=False)
 
 
+def jq_quoted(value):
+    """`tostring`'s own JSON-encode branch, applied unconditionally.
+
+    jq_tostring above deliberately leaves a STRING unquoted, because every
+    existing caller interpolates the result inline next to prose that already
+    marks where it sits (an id before a colon, a skill name inside brackets).
+    validate-stories' verification.strategy/status refusal is the first
+    caller that needs the opposite: the found value has to stand out as a
+    literal inside a sentence that also names the allowed set, so a string
+    renders through its own JSON quotes here -- `"vizual"`, not `vizual` --
+    rather than dropping them the way interpolation does. Anything that is
+    not a string already renders identically to jq_tostring, because this
+    IS jq_tostring's own non-string branch, reused rather than duplicated.
+    """
+    return json.dumps(jq_numbers(value), separators=(",", ":"), ensure_ascii=False)
+
+
 def jq_raw(value):
     """One line of `jq -r` output, which is NOT jq_tostring.
 
@@ -1039,6 +1056,29 @@ VALID_PROJECT = "^[a-zA-Z0-9_.][a-zA-Z0-9_./@-]*$"
 PATH_COMPONENT = ("\\.\\.", "/", "[\\$`;|&]")
 GATE_KEYS = ("type", "status", "prompt")
 
+# The ONLY place either tuple is written as a literal. A later verb that needs
+# the documented value set (set-verification, judge-verification, the
+# completed gate) imports these two rather than restating them -- the same
+# discipline GATE_KEYS above already keeps. See
+# plugins/aimi-engineering/skills/task-planner/references/task-format-v3.md's
+# Verification Object table for the schema-level statement of the same set.
+VERIFICATION_STRATEGIES = ("test", "visual", "api")
+VERIFICATION_STATUSES = ("pending", "passed", "failed", "skipped")
+
+# set-verification's own cap on --reason, applied through rm_sanitize the same
+# way remove-story caps its own --reason at 2000 -- picked and documented here
+# rather than left as a bare literal at the call site. 500 is generous for a
+# one-line explanation ("agent-browser not installed") while still bounding
+# what a skipped verdict can carry into the document.
+VERIFICATION_SKIP_REASON_MAXLEN = 500
+
+# set-verification never writes "pending" -- recording a verdict is the
+# opposite of "nobody looked yet" -- so its own allowed set is this tuple
+# minus "pending", DERIVED rather than re-literalled: the cross-story contract
+# is one home for the value set, and a second tuple typed out by hand would be
+# the second list that contract forbids.
+_SET_VERIFICATION_STATUSES = tuple(s for s in VERIFICATION_STATUSES if s != "pending")
+
 
 def _verdict(errors):
     """`if length == 0 then {valid: true, errors: []} else {valid: false, errors: .}`.
@@ -1249,10 +1289,66 @@ def _story_errors(story):
             story_id + ": verification must be an object {strategy, status, url, expect}; "
             "found bare string — run normalize-verification to fix"
         )
+    elif jq_type(verification) == "object":
+        # Guarding on the object type first is load-bearing, not defensive
+        # style: jq_index raises MalformedTasks on a non-null, non-dict value,
+        # so a hand-edited verification that is e.g. a number or array must
+        # never reach jq_index(verification, "strategy", ...) below -- that
+        # would abort the whole run instead of reporting a per-story error,
+        # same as the .implementation guard a few rules above this one.
+        owner = STORY + ".verification"
+        strategy = jq_index(verification, "strategy", owner)
+        if strategy is not None and strategy not in VERIFICATION_STRATEGIES:
+            errors.append(
+                story_id + ": verification.strategy " + jq_quoted(strategy)
+                + " is not one of: " + ", ".join(VERIFICATION_STRATEGIES)
+            )
+        status = jq_index(verification, "status", owner)
+        if status is not None and status not in VERIFICATION_STATUSES:
+            errors.append(
+                story_id + ": verification.status " + jq_quoted(status)
+                + " is not one of: " + ", ".join(VERIFICATION_STATUSES)
+            )
+        # No skipReason presence check here on purpose: a legacy
+        # status: "skipped" with no skipReason key at all is the on-disk
+        # shape this phase's own research found, and it stays valid at this
+        # verb. Requiring the field belongs to set-verification, which WRITES
+        # it, never to this read-only validator.
     if not jq_has(story, "status", STORY):
         errors.append(
             story_id + ": missing required field: status — run normalize-status to fix"
         )
+    errors += _guard_rail_errors(story_id, story)
+    return errors
+
+
+def _guard_rail_errors(story_id, story):
+    """The implementation.guardRails rule, run last so no earlier error moves.
+
+    A guard-rail label is the EXACT text of one segment `verify_segments` cuts
+    from the story's own implementation.verify -- the splitter probe_verify
+    walks, reused rather than re-implemented. The object-type guard comes
+    first for the reason the note above gives: a bare jq_index on a scalar
+    implementation would abort the whole run. An absent guardRails is no rule
+    at all, so a document without the key validates byte for byte as before.
+    """
+    implementation = jq_index(story, "implementation", STORY)
+    if jq_type(implementation) != "object":
+        return []
+    rails = jq_index(implementation, "guardRails", STORY + ".implementation")
+    if rails is None:
+        return []
+    if jq_type(rails) != "array":
+        return [story_id + ": implementation.guardRails must be an array"]
+    verify = jq_index(implementation, "verify", STORY + ".implementation")
+    known = {segment for _, segment in verify_segments(verify)} if isinstance(verify, str) else set()
+    errors = []
+    for index, entry in enumerate(rails):
+        label = story_id + ": implementation.guardRails[" + str(index) + "]"
+        if not isinstance(entry, str) or entry == "":
+            errors.append(label + " must be a non-empty string")
+        elif entry not in known:
+            errors.append(label + " matches no segment of implementation.verify")
     return errors
 
 
@@ -1699,15 +1795,24 @@ def subsection_body(spec_bytes, section, normalize):
     interpolated it, so the `.` in "2.1" is a wildcard and matches a heading
     reading "2X1" -- ds-secao-ponto-curinga-sozinha records that.
 
+    The boundary after `section` accepts an optional literal '.' before the
+    space-or-end-of-line it already required, so a heading written
+    `## <n>. <title>` -- the only shape skills/aimi-design-handoff/references/
+    spec-output-shape.md documents that skill as writing -- matches the same as
+    the pre-existing period-less `## <n> <title>` form every golden fixture
+    uses. The added `\.?` sits strictly after the existing literal match, so
+    the digit-dot-as-wildcard behaviour above is unaffected: a period in
+    "2.1" is still consumed by the section literal itself, never by this group.
+
     Returns b"" for a section that is not there, which the callers read as "not
     found" -- the same conflation `[ -z "$subsection_body" ]` made, so a section
     that exists but holds only blank lines is reported as missing too.
     """
     heading_matches = re.compile(
-        rb"^(?:\xc2\xa7" + _AWK_SPACE + rb"*)?" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+        rb"^(?:\xc2\xa7" + _AWK_SPACE + rb"*)?" + section + rb"\.?(?:" + _AWK_SPACE + rb"|\Z)"
     )
     heading_anywhere = re.compile(
-        rb"\xc2\xa7" + _AWK_SPACE + rb"*" + section + rb"(?:" + _AWK_SPACE + rb"|\Z)"
+        rb"\xc2\xa7" + _AWK_SPACE + rb"*" + section + rb"\.?(?:" + _AWK_SPACE + rb"|\Z)"
     )
     lines = spec_bytes.split(b"\n")
     if lines and lines[-1] == b"":
@@ -2633,6 +2738,15 @@ SKILLS_CAP = 102400
 # size compared against this cap today is still `len()` on a bytes object.
 DECISIONS_CAP = 65536
 
+# A dedicated budget for the spec content a story's payload embeds (see
+# capped_spec_sections() below), independent of both caps above by operator
+# decision at the phase 2.5 gate: sized on DECISIONS_CAP's own order of
+# magnitude, never reused from SKILLS_CAP, and never reused from the
+# unrelated 200KB plan-time per-file spec truncation cap elsewhere in this
+# module -- that cap is paid once per plan run, this one is paid on every
+# story spawn.
+SPEC_CAP = 65536
+
 # The shape rule a `## ` heading's own text is tested against, from US-001's
 # corpus measurement (`.aimi/research/design-decisions-section-shapes.md`):
 # case-insensitive, matches a word starting `Decis` continuing `ion` (covers
@@ -2752,6 +2866,13 @@ def skills_payload(names, base_dir, warn):
     what a story lists first is what survives -- which is precisely what the
     single reverse-pop loop could not offer once an oversized entry was in the
     array ahead of the others.
+
+    `dropped` entries carry the seven-key shape every kind of drop in this
+    module now shares (see op_get_story_context's own `dropped[]` assembly):
+    `kind:"skill"`, `name` set, `path`/`section` null (a skill has neither),
+    `reason` unchanged ("oversized"/"aggregate"), `bytes` the measured size,
+    `deferred:false` -- a dropped skill is gone from this payload entirely,
+    with nowhere left for the executor to read it on demand.
     """
     kept = []
     dropped = []
@@ -2766,7 +2887,10 @@ def skills_payload(names, base_dir, warn):
                 "skill " + name + " dropped — " + str(size)
                 + " bytes exceeds the 100KB skills cap on its own"
             )
-            dropped.append({"name": name, "bytes": size, "reason": "oversized"})
+            dropped.append({
+                "kind": "skill", "name": name, "path": None, "section": None,
+                "reason": "oversized", "bytes": size, "deferred": False,
+            })
             continue
         kept.append(({"name": name, "path": relative, "content": content}, size))
 
@@ -2774,7 +2898,10 @@ def skills_payload(names, base_dir, warn):
     while aggregate > SKILLS_CAP and kept:
         entry, size = kept.pop()
         warn("skill " + entry["name"] + " dropped — aggregate skills context exceeded 100KB")
-        dropped.append({"name": entry["name"], "bytes": size, "reason": "aggregate"})
+        dropped.append({
+            "kind": "skill", "name": entry["name"], "path": None, "section": None,
+            "reason": "aggregate", "bytes": size, "deferred": False,
+        })
         aggregate -= size
 
     return [entry for entry, _ in kept], dropped
@@ -2834,6 +2961,276 @@ def _decisions_dropped_marker(dropped):
         for entry_heading, entry_size in dropped
     ]
     return ("[design decisions dropped — cap exceeded: " + "; ".join(parts) + "]").encode("utf-8")
+
+
+# The spec-section-contract's own two tables (commands/references/spec-
+# section-contract.md), copied verbatim in the table's own row order.
+# BusinessSpec has 11 rows -- § 6 is not one of them; that file's own
+# "No Project-Specific Assumption" prose calls § 6 nonexistent. Re-read the
+# contract file rather than trust this copy if it has since changed.
+BUSINESS_SPEC_SECTIONS = ("1", "2", "3", "4", "4.1", "5", "5.1", "5.3", "7", "9", "11")
+DESIGN_SPEC_SECTIONS = ("1", "2.2", "3", "4", "6", "8")
+
+
+def spec_sections(docs, project_root, file_facts=None):
+    """Slice BusinessSpec.md/DesignSpec.md content by the contract's own §
+    number, for the two spec paths `metadata.designBundle` names on docs[0].
+
+    BINDS TO docs[0] ALONE -- the same story/metadata scope
+    op_get_story_context already uses for `story`/`metadata` -- and never
+    folds over the whole document stream the way bundle_guidance() does.
+    bundle_guidance()'s own docstring calls that whole-stream fold "faithful
+    rather than sensible" for prose nobody parses; this function returns
+    structured content a story executor reads, so the same shortcut is wrong
+    here on purpose.
+
+    Each of businessSpec/designSpec is resolved through confined_spec_path()
+    UNCONDITIONALLY -- no frontend_only/prototype_count gate, unlike
+    validate_tasks' two guarded call sites -- using its soft (path, inside)
+    return, never require_in_project()'s hard exit: get-story-context is a
+    no-lock, always-must-succeed read every spawned executor's first action
+    depends on. A path absent from metadata, not a non-empty string, escaping
+    --project-root, or naming a file absent on disk contributes no pairs for
+    that spec and raises nothing -- it is skipped silently and the other spec
+    is unaffected.
+
+    THE RETURN ORDER IS A DECLARED CONTRACT, not contract-table order. Plain
+    table order (every BusinessSpec row, then every DesignSpec row) composed
+    with a FIFO-from-the-end eviction cap would drop every DesignSpec section
+    before any BusinessSpec one -- backwards for a phase whose whole goal is
+    delivering the design contract to a UI-implementing executor. Instead the
+    two tuples are interleaved position by position -- BUSINESS_SPEC_SECTIONS[i]
+    paired with DESIGN_SPEC_SECTIONS[i] for each i, BusinessSpec first at each
+    position -- and once the shorter tuple is exhausted the longer one
+    continues alone, in its own table order. With 11 BusinessSpec rows and 6
+    DesignSpec rows that reads B§1, D§1, B§2, D§2.2, B§3, D§3, B§4, D§4,
+    B§4.1, D§6, B§5, D§8, then the remaining B§5.1, B§5.3, B§7, B§9, B§11. A
+    section absent from either tuple's slot (the tuples are already the same
+    length as each other's contract, so this only happens past the shorter
+    tuple's end) is simply not offered that turn. Eviction from the end (see
+    the story that caps this list) therefore removes the lowest-priority
+    sections of BOTH specs before it reaches a high-priority section of
+    either.
+
+    A contract-listed section with no heading matching it anywhere in the
+    resolved spec produces NO entry -- never an entry with empty content.
+    Returns `list[(label, content)]`, never a dict.
+
+    A section number that is a strict prefix of another in the same spec
+    (BusinessSpec § 4 and § 4.1; § 5, § 5.1 and § 5.3) means the boundary
+    scanner's own nesting rule -- a deeper heading is collected along with its
+    body -- makes a parent section's sliced text legitimately CONTAIN its
+    child section's text too. Both pairs are still emitted separately; this is
+    expected duplication, not a bug.
+
+    design_context() is the one caller (via op_get_story_context), and it
+    needs one fact this function's own return cannot carry: WHY a spec
+    produced no pairs at all -- absent from metadata, escaping --project-root,
+    or missing on disk are three different `dropped[]` reasons (or no drop at
+    all), and confined_spec_path() is only ever called here, once per label,
+    to answer it. `file_facts`, when passed a dict, is populated in place with
+    one entry per label -- {"relative": <declared path or None>, "inside":
+    <bool or None>, "isfile": <bool or None>} -- reusing the exact
+    confined_spec_path()/os.path.isfile() results this function already
+    computes for slicing, so a caller that wants both the sliced pairs and the
+    confinement facts resolves each spec path through confined_spec_path()
+    exactly ONCE rather than calling it a second time of its own. Every
+    existing caller (the pairs-only signature) is unaffected: the default
+    `None` skips the extra bookkeeping and the return value is unchanged.
+    """
+    first = docs[0] if docs else None
+    bundle = jq_index(jq_index(first, "metadata"), "designBundle")
+
+    spec_bytes = {}
+    for label, key in (("BusinessSpec", "businessSpec"), ("DesignSpec", "designSpec")):
+        relative = jq_index(bundle, key)
+        declared = relative if isinstance(relative, str) and relative else None
+        content = None
+        inside = None
+        isfile = None
+        if declared is not None:
+            path, inside = confined_spec_path(project_root, declared)
+            isfile = inside and os.path.isfile(path)
+            if isfile:
+                with open(path, "rb") as handle:
+                    content = handle.read()
+        spec_bytes[label] = content
+        if file_facts is not None:
+            file_facts[label] = {
+                "relative": declared,
+                "inside": inside,
+                "isfile": bool(isfile) if isfile is not None else None,
+            }
+
+    width = max(len(BUSINESS_SPEC_SECTIONS), len(DESIGN_SPEC_SECTIONS))
+    pairs = []
+    for index in range(width):
+        for label, sections in (
+            ("BusinessSpec", BUSINESS_SPEC_SECTIONS),
+            ("DesignSpec", DESIGN_SPEC_SECTIONS),
+        ):
+            if index >= len(sections) or spec_bytes[label] is None:
+                continue
+            section = sections[index]
+            body = subsection_body(spec_bytes[label], section.encode("utf-8"), normalize=False)
+            if body:
+                pairs.append((label + " § " + section, body.decode("utf-8", "replace")))
+    return pairs
+
+
+SPEC_RECORD_KINDS = ("entity", "endpoint")
+SPEC_RECORD_STATUSES = ("present", "absent", "unchecked")
+SPEC_RELABELED_LABEL = "unchecked (claimed absent, no evidence)"
+
+
+def derive_spec_records(payload):
+    """Validate a research agent's entity/endpoint presence findings, relabel
+    every `absent` claim that carries no evidence to `unchecked`, and render the
+    BusinessSpec section 4 / section 5 markdown rows.
+
+    `absent` is a positive claim ("I looked and it is not there") and an empty
+    `evidence` array says nothing was looked at, so the claim is downgraded to
+    the honest answer. A record that arrived as `unchecked` with no evidence is
+    the genuine never-checked case and passes through untouched -- it is NOT
+    added to `relabeled`, which lists only the records this function changed.
+
+    Raises ValueError naming the record's index and the invalid field.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("input must be a JSON object with a 'records' list")
+    raw = payload.get("records")
+    if not isinstance(raw, list):
+        raise ValueError("'records' must be a list")
+    records = []
+    relabeled = []
+    labels = []
+    for index, item in enumerate(raw):
+        where = "records[%d]" % index
+        if not isinstance(item, dict):
+            raise ValueError(where + " must be an object")
+        kind = item.get("kind")
+        if kind not in SPEC_RECORD_KINDS:
+            raise ValueError(
+                where + ".kind must be 'entity' or 'endpoint' (got %s)" % json.dumps(kind)
+            )
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(where + ".name must be a non-empty string")
+        status = item.get("status")
+        if status not in SPEC_RECORD_STATUSES:
+            raise ValueError(
+                where
+                + ".status must be 'present', 'absent' or 'unchecked' (got %s)"
+                % json.dumps(status)
+            )
+        evidence = item.get("evidence", [])
+        if not isinstance(evidence, list) or not all(isinstance(e, str) for e in evidence):
+            raise ValueError(where + ".evidence must be a list of strings")
+        relabel = status == "absent" and not evidence
+        if relabel:
+            status = "unchecked"
+            relabeled.append(kind + ":" + name)
+            sys.stderr.write(
+                "spec-derivation: %s '%s' claimed absent with no evidence - relabeled unchecked\n"
+                % (kind, name)
+            )
+        records.append(
+            {"kind": kind, "name": name, "status": status, "evidence": list(evidence)}
+        )
+        labels.append(SPEC_RELABELED_LABEL if relabel else status)
+    rows = {"entity": [], "endpoint": []}
+    for record, label in zip(records, labels):
+        rows[record["kind"]].append(
+            "| %s | %s | %s |"
+            % (record["name"], label, "; ".join(record["evidence"]) or "\u2014")
+        )
+    return {
+        "records": records,
+        "relabeled": relabeled,
+        "markdown": {
+            "entities": "\n".join(rows["entity"]),
+            "endpoints": "\n".join(rows["endpoint"]),
+        },
+    }
+
+
+STRUCTURAL_LEXICON = (
+    "bottom sheet",
+    "dialog",
+    "modal",
+    "drawer",
+    "sidebar",
+    "side panel",
+    "header",
+    "footer",
+    "tab bar",
+    "toolbar",
+    "stepper",
+    "step indicator",
+    "card",
+    "list",
+    "grid",
+    "popover",
+    "tooltip",
+    "toast",
+    "banner",
+    "accordion",
+    "carousel",
+    "full-screen",
+    "overlay",
+    "split view",
+)
+
+
+def _story_text(story):
+    """One story's text for structural-vocabulary: title, description, every
+    acceptanceCriteria entry, implementation.approach, every tasks[] entry and
+    notes -- and no other field. A missing or mistyped field is empty text."""
+    if not isinstance(story, dict):
+        return ""
+    implementation = story.get("implementation")
+    parts = [story.get("title"), story.get("description")]
+    criteria = story.get("acceptanceCriteria")
+    parts.extend(criteria if isinstance(criteria, list) else [criteria])
+    parts.append(implementation.get("approach") if isinstance(implementation, dict) else None)
+    tasks = story.get("tasks")
+    parts.extend(tasks if isinstance(tasks, list) else [tasks])
+    parts.append(story.get("notes"))
+    return "\n".join(part for part in parts if isinstance(part, str))
+
+
+def measure_structural_vocabulary(stories, source_texts):
+    """Count each STRUCTURAL_LEXICON term, verbatim, case-insensitive and as a
+    whole phrase (a word-boundary match, so "playlist" is not "list"), in the
+    spec/prototype texts and in the stories' text.
+
+    `terms` lists only terms that occur somewhere, as {term, sourceCount,
+    storyCount}. `missing` holds terms a source names that no story mentions;
+    `unsourced` holds terms stories use that no source names. `measured` is
+    false when no term occurs anywhere -- there was nothing to measure.
+    """
+    story_blob = "\n".join(_story_text(story) for story in stories)
+    source_blob = "\n".join(source_texts)
+    terms = []
+    missing = []
+    unsourced = []
+    for term in STRUCTURAL_LEXICON:
+        pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.IGNORECASE)
+        source_count = len(pattern.findall(source_blob))
+        story_count = len(pattern.findall(story_blob))
+        if not (source_count or story_count):
+            continue
+        terms.append({"term": term, "sourceCount": source_count, "storyCount": story_count})
+        if source_count and not story_count:
+            missing.append(term)
+        if story_count and not source_count:
+            unsourced.append(term)
+    return {
+        "measured": bool(terms),
+        "terms": terms,
+        "missing": missing,
+        "unsourced": unsourced,
+    }
 
 
 def design_decisions(brainstorm_bytes):
@@ -2909,6 +3306,53 @@ def design_decisions(brainstorm_bytes):
     return result.decode("utf-8", "replace")
 
 
+def capped_spec_sections(sections):
+    """Whole-section eviction over an already-sliced spec section list, the
+    same two-pass shape skills_payload() and design_decisions() already use:
+    drop any section whose own content alone exceeds SPEC_CAP first, then
+    evict whole sections from the end of what remains while the aggregate is
+    still over cap. No section is ever partially included -- this is a lazy-
+    loading optimisation over what a payload carries inline, never a hard
+    information cap: a section dropped here is deferred, not lost, since the
+    bundle root and spec paths it was sliced from stay in the payload
+    unconditionally via bundle_guidance() and can still be read on demand.
+
+    `sections` is the caller's DECLARED PRIORITY ORDER, highest priority
+    first -- the same declaration-order-is-priority-order rule
+    skills_payload()'s own docstring states. Every section list this
+    function receives is already sliced by contract section number (see the
+    § N[.N] extractor, spec_sections() above); this function does no
+    markdown heading-shape detection of its own and reuses none of
+    design_decisions()'s DECISIONS_HEADING_RE / _split_top_sections
+    machinery, which exists to find a section inside a raw brainstorm
+    document -- a shape this input has already had removed before it
+    arrives here.
+
+    Returns (kept, dropped): `kept` is the surviving (label, content) pairs,
+    in their original order; `dropped` is a list of
+    {"section": label, "bytes": size, "reason": "oversized"|"aggregate"}
+    dicts, one per evicted section, in the order each was evicted, reusing
+    skills_payload()'s own reason vocabulary.
+    """
+    sized = [(label, content, len(content.encode("utf-8"))) for label, content in sections]
+
+    kept = []
+    dropped = []
+    for label, content, size in sized:
+        if size > SPEC_CAP:
+            dropped.append({"section": label, "bytes": size, "reason": "oversized"})
+            continue
+        kept.append((label, content, size))
+
+    aggregate = sum(size for _, _, size in kept)
+    while aggregate > SPEC_CAP and kept:
+        label, content, size = kept.pop()
+        dropped.append({"section": label, "bytes": size, "reason": "aggregate"})
+        aggregate -= size
+
+    return [(label, content) for label, content, _ in kept], dropped
+
+
 BUNDLE_GUIDANCE = (
     "Apply design bundle fidelity rules. Read the spec files cited below using "
     "the Read tool before authoring implementation code.\n"
@@ -2952,11 +3396,16 @@ def bundle_guidance(docs):
     )
 
 
-def design_context(docs, project_root):
-    """`{decisions, bundleGuidance}`, both always present and both always
-    strings -- never null, never absent. The story-executor prompt interpolates
-    them directly, so an absent key and an empty one are not the same thing to
-    the only consumer there is.
+def design_context(docs, project_root, warn):
+    """`{decisions, bundleGuidance, specSections}`, all three always present
+    and always the right empty value when there is nothing to say -- never
+    null, never absent. The story-executor prompt interpolates them directly,
+    so an absent key and an empty one are not the same thing to the only
+    consumer there is. Returns `(context, dropped)`: `context` is the dict
+    above, `dropped` is this function's own contribution to
+    op_get_story_context's unified `dropped[]` list (skills_payload()
+    contributes the rest) -- kept apart from `context` because `dropped` is a
+    TOP-LEVEL payload key, not a `designContext` one.
 
     The brainstorm path is NOT confined to the project root, and that is the
     pre-port rule reproduced rather than an oversight: an absolute
@@ -2964,6 +3413,14 @@ def design_context(docs, project_root):
     PROJECT_ROOT with no traversal check. validate-tasks' spec paths were
     confined in their own commit, with their own diff; doing the same here on
     the way past would hide a rule change inside a port.
+
+    `specSections` and the spec-shaped `dropped` entries are this function's
+    own wiring of spec_sections()/capped_spec_sections() into the live
+    payload (see their own docstrings for the slicing and cap rules). Both
+    spec paths are resolved through confined_spec_path() exactly ONCE for the
+    whole payload build -- spec_sections()'s own `file_facts` out-parameter
+    hands back the confinement/existence facts it already computed for
+    slicing, so this function never re-resolves either path itself.
     """
     relative = _raw_lines(
         value
@@ -2977,7 +3434,49 @@ def design_context(docs, project_root):
         if os.path.isfile(path):
             with open(path, "rb") as handle:
                 decisions = design_decisions(handle.read())
-    return {"decisions": decisions, "bundleGuidance": bundle_guidance(docs)}
+
+    file_facts = {}
+    pairs = spec_sections(docs, project_root, file_facts)
+    kept, capped_dropped = capped_spec_sections(pairs)
+    spec_sections_payload = {label: content for label, content in kept}
+
+    dropped = []
+    for label in ("BusinessSpec", "DesignSpec"):
+        facts = file_facts.get(label) or {}
+        if facts.get("relative") is None:
+            continue
+        if not facts["inside"]:
+            reason = "escapes-project-root"
+        elif not facts["isfile"]:
+            reason = "missing-on-disk"
+        else:
+            continue
+        warn("spec file " + facts["relative"] + " dropped — " + reason)
+        dropped.append({
+            "kind": "specFile", "name": None, "path": facts["relative"],
+            "section": None, "reason": reason, "bytes": None, "deferred": False,
+        })
+
+    for entry in capped_dropped:
+        section_label = entry["section"]
+        spec_label = section_label.split(" § ", 1)[0]
+        relative_path = (file_facts.get(spec_label) or {}).get("relative")
+        warn(
+            "spec section " + section_label + " dropped — "
+            + entry["reason"] + " (" + str(entry["bytes"]) + " bytes)"
+        )
+        dropped.append({
+            "kind": "specSection", "name": None, "path": relative_path,
+            "section": section_label, "reason": entry["reason"],
+            "bytes": entry["bytes"], "deferred": True,
+        })
+
+    context = {
+        "decisions": decisions,
+        "bundleGuidance": bundle_guidance(docs),
+        "specSections": spec_sections_payload,
+    }
+    return context, dropped
 
 
 # ---------------------------------------------------------------------------
@@ -3044,6 +3543,38 @@ def field_payload(doc, story_id, top):
         {"id": jq_index(story, "id", STORY), top: jq_index(story, top, STORY)}
         for story in stories_with_id(doc, story_id)
     ]
+
+
+def write_verification_verdict(story, status, reason):
+    """The ONE mutation point a verification verdict is ever written through.
+
+    `op_set_verification` below calls this directly, and outline:03's
+    `judge-verification` is documented to call it too, so an evidence-derived
+    verdict and an operator-typed one share exactly one path rather than two
+    that could drift apart -- the same reasoning that keeps VERIFICATION_
+    STRATEGIES/STATUSES to one definition instead of a second list per caller.
+
+    Copies the story's existing verification object, sets `status`, and --
+    for `status == "skipped"` only -- sets `skipReason` to the reason,
+    sanitized through `rm_sanitize` at `VERIFICATION_SKIP_REASON_MAXLEN`.
+    `rm_sanitize` already collapses \\r\\n/\\r/\\n to a space, so this does not
+    hand-roll a second collapse. Every OTHER status pops any stale
+    `skipReason` key instead: a passed/failed verdict recorded after an
+    earlier skip must not leave that reason sitting beside the new one.
+
+    Returns a new story dict -- never mutates `story` in place, the same
+    discipline `jq_setpath` already keeps -- so a caller still holding the
+    old object sees the old verification untouched.
+    """
+    verification = dict(story.get("verification") or {})
+    verification["status"] = status
+    if status == "skipped":
+        verification["skipReason"] = rm_sanitize(reason, VERIFICATION_SKIP_REASON_MAXLEN)
+    else:
+        verification.pop("skipReason", None)
+    updated = dict(story)
+    updated["verification"] = verification
+    return updated
 
 
 def _status_defaulted(story):
@@ -3217,6 +3748,24 @@ def _report_status(verification):
     return status if isinstance(status, str) else None
 
 
+def _report_skip_reason(verification):
+    """The `reason` a skipped verification reports through verification-report
+    -- `.verification.skipReason` when it is a non-empty STRING, `None` for
+    every other shape (absent, null, empty, or any non-string).
+
+    Collapses like `_report_status` immediately above, not like `_report_url`:
+    a legacy skip written before `skipReason` existed (the specFlow:Gap2/
+    Gap3-era shape) carries no such key at all, and `None` is the honest
+    answer for that story. "no reason recorded" is completion-report and
+    handoff-line WORDING, chosen by the reader that renders this value --
+    inventing that string, or any other, at THIS layer would fabricate
+    evidence for a run that recorded none, which is the exact defect this
+    report exists to refuse.
+    """
+    reason = jq_index(verification, "skipReason", STORY + ".verification")
+    return reason if isinstance(reason, str) and reason else None
+
+
 def _report_discriminating(verification, vtype):
     """The count at `.verification.evidence.discriminating` -- how many of a
     story's verify segments behaved differently before its work than after --
@@ -3254,6 +3803,37 @@ def _report_discriminating(verification, vtype):
     return count
 
 
+def _evidence_exit(verification, vtype):
+    """The verify exit code at `.verification.evidence.exit`, or `None` when
+    nothing usable was recorded there -- the same three-way shape
+    `_report_discriminating` above already uses for `.evidence.discriminating`,
+    reused here rather than re-derived, over the sibling field `op_judge_
+    verification` actually judges.
+
+    `None` covers every shape that is not a real exit code: a non-object
+    `verification`, an `evidence` that is not an object, an absent `exit` key
+    (including the story that recorded only `preExit`), and a value that is
+    not a plain integer. The caller reads `None` as "no usable exit" and
+    falls through to a skipped verdict; this function only answers whether an
+    integer WAS recorded, never what to do about its absence.
+
+    THE BOOL TEST COMES FIRST AND IS NOT OPTIONAL, for the identical reason
+    `_report_discriminating`'s docstring gives: Python's `isinstance(True,
+    int)` is `True`, so `{"evidence": {"exit": true}}` would otherwise read as
+    the passing code 0 on the strength of a boolean nobody meant as an exit
+    status. A float or a string is rejected the same way, in a milder form.
+    """
+    if vtype != "object":
+        return None
+    evidence = jq_index(verification, "evidence", STORY + ".verification")
+    if jq_type(evidence) != "object":
+        return None
+    exit_code = jq_index(evidence, "exit", STORY + ".verification.evidence")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return exit_code
+
+
 def verification_report(doc):
     """One document read answering the three questions ten separate jq
     programs used to open the tasks file for: which stories carry a visual
@@ -3261,9 +3841,12 @@ def verification_report(doc):
     `url` and `status`, see `_report_project`/`_report_url`/`_report_status`
     above), and how the old `type != "object"` malformed scan partitions into
     the shapes normalize-verification actually repairs and the shapes it does
-    not -- plus two questions no jq program ever asked: which stories declared
-    a verification nobody has looked at yet, and which FINISHED stories left
-    evidence that their verification discriminated anything at all.
+    not -- plus four questions no jq program ever asked: which stories
+    declared a verification nobody has looked at yet, which FINISHED stories
+    left evidence that their verification discriminated anything at all,
+    which FINISHED stories short-circuited their own verdict with a skip --
+    and why -- and how the whole declared-and-finished population's verdicts
+    are distributed across the value set.
 
     The `visual` list is exactly the old `select(.verification | type ==
     "object" and .strategy == "visual")` scan, order preserved -- a caller
@@ -3308,6 +3891,29 @@ def verification_report(doc):
     `type == "object"` arm below, because a completed story with NO
     verification is precisely the case `unrecorded` exists to name.
 
+    `skipped` is the fifth key, and unlike the four above it is not a
+    partition of anything -- it is a flat list of `{id, reason}`, one entry
+    per COMPLETED story whose `verification.status` is the literal
+    "skipped". Its scope is the identical completed-only boundary
+    `discriminating` draws two paragraphs up, and for the identical reason:
+    a verification judges work that was DONE, and a story `cascade-skip`
+    marked `status: "skipped"` (never touching `verification`) has no
+    verdict to report here. The read that decides membership is computed
+    once, in a single `is_completed` local the loop below shares with the
+    `discriminating` partition immediately after it, rather than asked
+    twice of the same field. specFlow:Gap3 and CriticalQ1 are why this key
+    exists at all: the operator chose "skipped, with a reason" over the
+    silent blanket-pass a completion report used to give a story nobody
+    actually verified, and `skipped` is what lets the completion report and
+    the phase handoff say WHY a verdict was short-circuited instead of
+    staying quiet about it. `reason` is `_report_skip_reason`'s answer, and
+    it is `None` -- never a fallback string this layer invents -- for a
+    legacy skip that predates `skipReason` (the specFlow:Gap2/Gap3-era
+    shape written before this field existed): the same honest-null
+    discipline `_report_discriminating`'s own docstring states for its
+    `None`, because fabricating a reason here would be exactly the
+    fabricated evidence this whole report exists to refuse.
+
     `unrecorded` and `blind` are different answers and conflating them would
     be worse than the silence this key replaces. `blind` says we looked and
     found nothing that discriminated; `unrecorded` says nothing was ever
@@ -3318,6 +3924,24 @@ def verification_report(doc):
     so it answers `None`, while a run that recorded honest zeros answers `0`.
     Those two numbers are what make this the first pipeline metric that MOVES
     when verification actually improves.
+
+    `verdicts` is the sixth key, and it is a DISTRIBUTION rather than a
+    partition of ids: one count per `VERIFICATION_STATUSES` literal, plus
+    `other`, over exactly the population `pending` above already reads from
+    -- a completed story (the same `is_completed` local the `skipped` and
+    `discriminating` scopes already share) whose verification is an object.
+    Where `pending` answers "how many are still unjudged" and `skipped`
+    answers "which ones were short-circuited and why", `verdicts` answers the
+    whole question at once: how many completed-and-declared stories landed on
+    each of the judged states. A completed story whose `verification.status`
+    is a non-string, or a string outside `VERIFICATION_STATUSES`, still counts
+    -- under `other` -- rather than being silently dropped or aborting the
+    report; a document a future change adds a fifth status literal to degrades
+    to a visible `other` count instead of a `KeyError`. A completed story with
+    no verification object at all (the `unrecorded` case above) never reaches
+    this count either, the identical object-only boundary `pending` draws for
+    the identical reason: a distribution over declarations nobody made would
+    answer a question nobody asked.
 
     AND THE NUMBER STILL READS HIGH -- a ceiling on what was verified, never a
     measurement of it. The count originates in `verify-probe`'s
@@ -3344,19 +3968,35 @@ def verification_report(doc):
     """
     visual = []
     pending = []
+    skipped = []
     repairable = []
     unrepairable = []
     checked = []
     blind = []
     unrecorded = []
+    # One count per VERIFICATION_STATUSES literal, plus the catch-all `other`
+    # -- see verdicts' own docstring paragraph above for its scope.
+    verdicts = {status: 0 for status in VERIFICATION_STATUSES}
+    verdicts["other"] = 0
     for story in _stories(doc):
         story_id = jq_index(story, "id", STORY)
         verification = jq_index(story, "verification", STORY)
         vtype = jq_type(verification)
+        # Read once, shared by the `skipped` membership test below and by
+        # the `discriminating` partition a few lines down -- the same field
+        # asked twice is the drift this hoist exists to close.
+        is_completed = jq_equal(jq_index(story, "status", STORY), "completed")
         if vtype == "object":
             status = _report_status(verification)
             if jq_equal(status, "pending"):
                 pending.append(story_id)
+            if jq_equal(status, "skipped") and is_completed:
+                skipped.append({"id": story_id, "reason": _report_skip_reason(verification)})
+            if is_completed:
+                if status in VERIFICATION_STATUSES:
+                    verdicts[status] += 1
+                else:
+                    verdicts["other"] += 1
             strategy = jq_index(verification, "strategy", STORY + ".verification")
             if jq_equal(strategy, "visual"):
                 visual.append(
@@ -3372,7 +4012,7 @@ def verification_report(doc):
         # Outside the arm above on purpose: a completed story whose
         # verification is absent or null never reaches it, and that story is
         # exactly what `unrecorded` is for.
-        if jq_equal(jq_index(story, "status", STORY), "completed"):
+        if is_completed:
             count = _report_discriminating(verification, vtype)
             if count is None:
                 unrecorded.append(story_id)
@@ -3384,6 +4024,7 @@ def verification_report(doc):
     return {
         "visual": visual,
         "pending": pending,
+        "skipped": skipped,
         "malformed": {"repairable": repairable, "unrepairable": unrepairable},
         "discriminating": {
             "checked": checked,
@@ -3391,6 +4032,7 @@ def verification_report(doc):
             "unrecorded": unrecorded,
             "fraction": len(checked) / denominator if denominator else None,
         },
+        "verdicts": verdicts,
     }
 
 
@@ -3966,11 +4608,15 @@ def op_validate_tasks(argv):
 #     grep -rhoE 'metadata\.[a-zA-Z]+' \
 #         plugins/aimi-engineering/skills/story-executor/ | sort -u
 #
-# On 3 September 2026, over SKILL.md and both files under references/, that
-# printed exactly three -- metadata.designBundle (2 occurrences),
-# metadata.designTokens (1) and metadata.prototypePaths (9). Re-run it rather
-# than trusting this comment; a key that gains a reader has to gain a line here
-# in the same commit, or the reader silently gets null.
+# On 28 September 2026, over SKILL.md and both files under references/, that
+# printed five distinct matches -- metadata.designBundle (2 occurrences),
+# metadata.designTokens (1), metadata.prototypePaths (10) and
+# metadata.prototypeDropped (3), plus one metadata.baseRef that names a
+# DIFFERENT document's field entirely (step 1.5's own prose about a verify
+# resolving baseRef from the full tasks file it reads directly, never from
+# this payload) and is excluded from the tuple below for that reason. Re-run
+# it rather than trusting this comment; a key that gains a reader has to gain
+# a line here in the same commit, or the reader silently gets null.
 #
 # The story-executor skill is the whole consumer list, and that is measured too:
 # commands/execute.md and commands/next.md read metadata from the tasks FILE
@@ -3980,7 +4626,7 @@ def op_validate_tasks(argv):
 # writes -- one object per resolved question, each carrying the question's own
 # prose -- and nothing in the executor has ever read it, so it travelled in
 # every spawn of every story for nothing.
-STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths")
+STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths", "prototypeDropped")
 
 
 def projected_metadata(metadata):
@@ -4050,10 +4696,11 @@ def op_get_story_context(argv):
     with the BRAINSTORM read's message because the skills read never touches
     `.metadata`, and bundle-string with the bundle's for the same reason.
 
-    A pure reader: no lock, no temp file, nothing opened for writing. The two
-    files it does open -- a SKILL.md and a brainstorm -- are read-only and are
-    named by the document, which is why they are opened here rather than in
-    bash.
+    A pure reader: no lock, no temp file, nothing opened for writing. Every
+    file it does open -- a SKILL.md, a brainstorm, and (since US-003 wired
+    spec_sections() in) up to two spec files named by metadata.designBundle --
+    is read-only and named by the document, which is why they are opened here
+    rather than in bash.
     """
     path = _flag(argv, "--tasks-file")
     story_id = _flag(argv, "--story-id")
@@ -4070,10 +4717,11 @@ def op_get_story_context(argv):
     def warn(message):
         sys.stderr.write(message + "\n")
 
-    skills, dropped = skills_payload(
+    skills, skills_dropped = skills_payload(
         declared_skill_names(docs, story_id), skills_base_dir, warn
     )
-    context = design_context(docs, project_root)
+    context, spec_dropped = design_context(docs, project_root, warn)
+    dropped = skills_dropped + spec_dropped
 
     # `--slurpfile tf` then `$tf[0]`: the story and the metadata come from the
     # FIRST document alone, however many the file holds. `select` is a filter
@@ -4087,7 +4735,7 @@ def op_get_story_context(argv):
                 "metadata": projected_metadata(jq_index(first, "metadata")),
                 "skills": skills,
                 "designContext": context,
-                "skillsDropped": dropped,
+                "dropped": dropped,
             }
         )
     return 0
@@ -4220,6 +4868,23 @@ def op_update_field(argv):
         die(
             "Usage: tasks.py update-field --tasks-file <path> --story-id <id> "
             "--field-path <a.b> --value <text>"
+        )
+    # The value-set guard on the two verification leaves -- exact string
+    # equality on the WHOLE dotted path, checked before any document is read,
+    # so `verification` alone (the golden update-field-sobrescreve-objeto
+    # case, which replaces the whole object with the string "manual") is
+    # untouched and update-field stays a general nested writer everywhere
+    # else. Reads VERIFICATION_STATUSES/STRATEGIES rather than a second
+    # literal list, per the cross-story contract.
+    if field_path == "verification.status" and value not in VERIFICATION_STATUSES:
+        die(
+            "Error: update-field: verification.status " + jq_quoted(value)
+            + " is not one of: " + ", ".join(VERIFICATION_STATUSES)
+        )
+    if field_path == "verification.strategy" and value not in VERIFICATION_STRATEGIES:
+        die(
+            "Error: update-field: verification.strategy " + jq_quoted(value)
+            + " is not one of: " + ", ".join(VERIFICATION_STRATEGIES)
         )
     segments = field_path.split(".")
     docs = read_docs(path, "update-field")
@@ -4435,6 +5100,206 @@ def op_remove_story(argv):
 
     write_docs_atomically(path, docs)
     _emit({"id": story_id, "removed": True, "remaining": len(remaining)})
+    return 0
+
+
+def op_set_verification(argv):
+    """set-verification: record an explicit verification verdict, never a raw
+    update-field write.
+
+    Modeled on op_remove_story rather than on _mark_op: every refusal is
+    decided here, inside the single crossing, in this fixed order -- status
+    outside the allowed set (which excludes "pending" -- recording a verdict
+    is the opposite of "nobody looked yet"), a --reason mismatched to the
+    status (missing for skipped, present for passed/failed), not found, and
+    "no verification object to update" for a story whose own verification
+    field is absent or not an object. The first two need no document at all
+    and are checked before read_docs; the last two do, and are checked after.
+
+    Mirrors op_update_field's own shape for a multi-document stream and a
+    duplicated id: _selected_slots is walked over EVERY doc, so every
+    matching story is updated (mark_stories/assign_field's "every match, not
+    the first" semantics), "not found" fires only when no doc has the id at
+    all, and the verification-object check runs over every match BEFORE any
+    write, so a duplicate id where only one copy lacks a verification object
+    still refuses and writes nothing rather than partially updating the
+    other.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    status = _flag(argv, "--status")
+    reason = _flag(argv, "--reason")
+    if not path or story_id is None or not status:
+        die(
+            "Usage: tasks.py set-verification --tasks-file <path> --story-id <id> "
+            "--status <passed|failed|skipped> [--reason <text>]"
+        )
+    if status not in _SET_VERIFICATION_STATUSES:
+        die(
+            "Error: set-verification: status " + jq_quoted(status)
+            + " is not one of: " + ", ".join(_SET_VERIFICATION_STATUSES)
+        )
+    if status == "skipped":
+        if not reason or not reason.strip():
+            die("Error: set-verification: --reason is required when status is skipped")
+    elif reason:
+        die(
+            "Error: set-verification: --reason is only accepted when status is "
+            "skipped (status: " + status + ")"
+        )
+
+    docs = read_docs(path, "set-verification")
+    matches = []
+    for doc in docs:
+        container, selected = _selected_slots(doc, story_id)
+        for key in selected:
+            matches.append((container, key))
+    if not matches:
+        die("Error: set-verification: story " + story_id + " not found in " + path)
+
+    for container, key in matches:
+        verification = jq_index(container[key], "verification", STORY)
+        if not isinstance(verification, dict):
+            die(
+                "Error: set-verification: story " + story_id + " has no verification "
+                "object to update"
+            )
+
+    for container, key in matches:
+        container[key] = write_verification_verdict(container[key], status, reason)
+
+    write_docs_atomically(path, docs)
+    for doc in docs:
+        for payload in field_payload(doc, story_id, "verification"):
+            _emit(payload)
+    return 0
+
+
+# skipReason text for judge-verification's "no usable exit" outcome. Two
+# literal strings, not one templated by a boolean, because the two name
+# different facts: the first says a check was declared and ran somewhere the
+# executor's own evidence never reached this document, the second says no
+# check was ever declared at all. Module-level constants so op_judge_
+# verification and its own pytest coverage read the identical text rather
+# than one recomputing what the other already asserts.
+JUDGE_VERIFICATION_NO_EVIDENCE_REASON = (
+    "implementation.verify was declared but the executor recorded no verify evidence"
+)
+JUDGE_VERIFICATION_NO_VERIFY_REASON = "no implementation.verify was declared, so no check ran"
+
+
+def _judge_verification_verdict(story):
+    """Decide judge-verification's outcome for one story.
+
+    Returns `(None, reason)` when nothing should be written, and `(status,
+    reason)` when a verdict should be written -- `status` is one of "passed",
+    "failed" or "skipped", and `reason` is the skipReason text for "skipped"
+    and `None` for "passed"/"failed" (write_verification_verdict ignores
+    `reason` for every other status, so `None` here is never rendered).
+
+    Checked in this order, each assuming the ones before it already passed:
+
+      1. `verification` is not an object at all -- nothing to judge.
+      2. `verification.strategy` is "visual" -- judged by execute.md's own
+         visual writers (outline:04), never by this op.
+      3. `verification.status` is not the literal "pending" -- already
+         judged, by this op or by set-verification, and a second verdict
+         here would overwrite a real one with a stale re-derivation.
+      4. Otherwise: `.verification.evidence.exit` decides. A usable integer
+         gives "passed" (0) or "failed" (anything else); no usable integer
+         gives "skipped", with the reason picked by whether
+         `story.implementation.verify` is a non-empty string -- the same
+         evidence-shape test `_evidence_exit` already applies to the exit
+         code, but the story's OWN implementation.verify, not its evidence,
+         decides which skipReason applies.
+    """
+    verification = jq_index(story, "verification", STORY)
+    vtype = jq_type(verification)
+    if vtype != "object":
+        return None, "no verification object declared"
+    if jq_equal(jq_index(verification, "strategy", STORY + ".verification"), "visual"):
+        return None, (
+            "verification.strategy is visual -- judged by execute.md's own visual writers"
+        )
+    status = _report_status(verification)
+    if status != "pending":
+        return None, "verification.status is already " + jq_quoted(status) + ", not pending"
+    exit_code = _evidence_exit(verification, vtype)
+    if exit_code is not None:
+        return ("passed" if exit_code == 0 else "failed"), None
+    implementation = jq_index(story, "implementation", STORY)
+    verify_cmd = jq_index(implementation, "verify", STORY + ".implementation")
+    if isinstance(verify_cmd, str) and verify_cmd:
+        reason = JUDGE_VERIFICATION_NO_EVIDENCE_REASON
+    else:
+        reason = JUDGE_VERIFICATION_NO_VERIFY_REASON
+    return "skipped", reason
+
+
+def op_judge_verification(argv):
+    """judge-verification: derive a verdict from the verify evidence
+    mark-complete already persisted, instead of stamping "passed" blind.
+
+    Replaces execute.md's old blanket rewrite (`elif ... status == "pending":
+    update-field ... verification.status passed`), which recorded a passing
+    verdict whether or not the story's own check ever ran. This op writes a
+    verdict only when there is honest evidence to derive one from -- see
+    `_judge_verification_verdict` for the four-way decision.
+
+    Every writing case goes through write_verification_verdict, the SAME
+    mutation point op_set_verification above uses, so an evidence-derived
+    verdict and an operator-typed one can never disagree about how a verdict
+    lands on disk -- only about how it is derived.
+
+    cmd_judge_verification already ran validate_story_exists before the lock
+    (cmd_update_field's own shape, not op_set_verification's), so a missing
+    id is bash's refusal and this op never dies on "not found" -- it reports
+    a `judged: false` no-op instead, the same as every other reason nothing
+    was written. The one case that reaches this without a prior bash check is
+    the race where the story is removed between that check and this crossing;
+    treating it as an ordinary no-op rather than a die() is deliberate,
+    because the alternative is a second document read outside the lock.
+
+    Mirrors op_set_verification's "every match, not the first" semantics for
+    a duplicated id: each matching slot is judged independently, only the
+    slots that get a real verdict are written, and one result object is
+    emitted per match -- so a duplicate id where one copy is already judged
+    and the other is still pending reports one `judged: true` and one
+    `judged: false` line rather than picking one arbitrarily.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    if not path or story_id is None:
+        die("Usage: tasks.py judge-verification --tasks-file <path> --story-id <id>")
+
+    docs = read_docs(path, "judge-verification")
+    matches = []
+    for doc in docs:
+        container, selected = _selected_slots(doc, story_id)
+        for key in selected:
+            matches.append((container, key))
+
+    if not matches:
+        _emit({"id": story_id, "judged": False, "reason": "story " + story_id + " not found"})
+        return 0
+
+    results = []
+    changed = False
+    for container, key in matches:
+        status, reason = _judge_verification_verdict(container[key])
+        if status is None:
+            results.append({"id": story_id, "judged": False, "reason": reason})
+            continue
+        container[key] = write_verification_verdict(container[key], status, reason)
+        changed = True
+        results.append(
+            {"id": story_id, "judged": True, "verification": container[key]["verification"]}
+        )
+
+    if changed:
+        write_docs_atomically(path, docs)
+    for result in results:
+        _emit(result)
     return 0
 
 
@@ -5162,6 +6027,28 @@ _VERIFY_PROBE_REENTRY = (
     "  Two ways out: probe from a verify that does not itself call "
     "verify-probe (a sibling story's, or a throwaway fixture's), or call "
     "probe_verify() in tasks.py directly, which is not guarded."
+)
+
+# probe-plan's refusal is the same sentence with the verb's own name, so the
+# two exits are stated once (above) and cannot drift apart.
+_PROBE_PLAN_REENTRY = _VERIFY_PROBE_REENTRY.replace(
+    "verify-probe: refusing to run inside another verify-probe",
+    "probe-plan: refusing to run inside another probe",
+    1,
+)
+
+# What probe-plan does with a segment that passes at baseRef and is not marked
+# as a guard rail. "report" lists it; "refuse" is the only other valid value.
+# A later outline entry decides the final value; callers read it from the
+# `policy` key of the probed:true payload and never parse prose for it.
+PROBE_PLAN_NONDISCRIMINATING_POLICY = "report"
+
+# Segments probe-plan does not run unless --run-suites is given: a pytest run
+# naming neither `-k` nor a `::` node selector, and any test-*.sh suite
+# script. probe_verify tests it only against segments that survived its own
+# `||`, `cd` and assignment branches, so it can never drop a context segment.
+_PROBE_PLAN_SUITE_PATTERN = (
+    r"(?s)(?:^(?!.*(?:\s-k\s|::)).*\bpytest\b|\btest-[A-Za-z0-9_.-]+\.sh\b)"
 )
 
 # What the refusal says when `implementation.verify` is PRESENT and is not a
@@ -6453,6 +7340,21 @@ def verify_text_for_story(path, story_id):
     return ""
 
 
+def guard_rails_for_story(path, story_id):
+    """The implementation.guardRails list of the story `verify_text_for_story`
+    would read, or `[]`. Same walk: the first matching story carrying a
+    non-empty string verify wins. A malformed value is an empty list here --
+    validate-stories is the place that refuses it."""
+    for doc in read_docs(path, "verify-probe"):
+        for story in stories_with_id(doc, story_id):
+            implementation = jq_index(story, "implementation", STORY)
+            verify = jq_index(implementation, "verify", STORY + ".implementation")
+            if isinstance(verify, str) and verify.strip():
+                rails = jq_index(implementation, "guardRails", STORY + ".implementation")
+                return [r for r in rails if isinstance(r, str)] if isinstance(rails, list) else []
+    return []
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -6511,6 +7413,10 @@ def op_verify_probe(argv):
     to write degrades silently to `None` and leaves the cycle open with nobody
     told.
 
+    EVERY ENTRY CARRIES `guardRail` (true/false), set after `_match_previous`
+    from the story's `implementation.guardRails`; `probe_verify` itself still
+    returns entries without the key.
+
     `--previous-file` PRESENT MEANS `-post.json`, and it has to: writing the
     recomparison to the same path would overwrite the artifact it just read,
     destroying the comparison in the act of making it. It also puts under a
@@ -6559,6 +7465,13 @@ def op_verify_probe(argv):
     text = verify_text_for_story(path, story_id)
     results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
     _match_previous(_read_previous_probe(previous_file), results)
+    # `guardRail` is added HERE and not in probe_verify: the label is the
+    # story's own declaration, read from the document, while probe_verify
+    # measures a script it was handed. Present on every entry, true only for
+    # an entry whose segment text a guardRails label names exactly.
+    rails = set(guard_rails_for_story(path, story_id))
+    for entry in results:
+        entry["guardRail"] = entry["segment"] in rails
     # The artifact lands in the TASKS FILE'S OWN directory, and the argument
     # for that used to live in the skill prose that composed the name:
     # `find_aimi_root` stops at the first `.aimi/` it finds walking up from the
@@ -6585,6 +7498,207 @@ def op_verify_probe(argv):
     else:
         sys.stderr.write("verify-probe: wrote %s\n" % artifact)
     _emit(results)
+    return 0
+
+
+_GIT_ENV_DROPPED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+
+
+def _probe_plan_git(args, cwd):
+    """`git <args>` in `cwd` as (returncode, stdout, stderr), or None when git
+    cannot be run at all (not installed, or `cwd` is gone). The three variables
+    that pin git to one repository are removed from the environment it gets, so
+    a caller running inside a hook probes the repository `cwd` names."""
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_ENV_DROPPED}
+    try:
+        proc = subprocess.run(
+            ["git"] + list(args), cwd=cwd, env=env, capture_output=True, text=True
+        )
+    except OSError:
+        return None
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _probe_plan_not_probed(ref, reason):
+    """The answer for a baseRef that cannot be probed. The result arrays are
+    OMITTED, not empty: no reader can mistake emptiness for a clean bill."""
+    return {"baseRef": ref, "probed": False, "reason": reason}
+
+
+def _probe_plan_why(entry):
+    """Why a probe entry carries no verdict, named by its own cause."""
+    if entry.get("skipped"):
+        return (
+            "skipped as a full-suite segment; pass --run-suites to measure it"
+        )
+    if entry.get("timedOut"):
+        return "timed out before a verdict"
+    if entry.get("unresolvedState"):
+        return "reads shell state nothing provides: %s" % ", ".join(
+            str(name) for name in entry["unresolvedState"]
+        )
+    if entry.get("unterminated"):
+        return "the verify is unterminated (%s), so it would not run as written" % (
+            entry["unterminated"],
+        )
+    return "no verdict could be reached"
+
+
+def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
+    """The per-story loop. Returns (stories, unlabelled, unmeasured)."""
+    stories_out, unlabelled, unmeasured = [], [], []
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("userStories"), list):
+            continue
+        for story in doc["userStories"]:
+            if not isinstance(story, dict):
+                continue
+            sid = story.get("id")
+            implementation = story.get("implementation")
+            verify = implementation.get("verify") if isinstance(implementation, dict) else None
+            if verify is None or (isinstance(verify, str) and not verify.strip()):
+                stories_out.append({"id": sid, "segments": []})
+                continue
+            if not isinstance(verify, str):
+                stories_out.append({"id": sid, "segments": []})
+                unmeasured.append({
+                    "id": sid, "segment": None,
+                    "why": "implementation.verify is %s, not a string"
+                    % _verify_probe_type_name(verify),
+                })
+                continue
+            project = _report_project(story)
+            if project is not None and _invalid_project(project):
+                stories_out.append({"id": sid, "segments": []})
+                unmeasured.append({
+                    "id": sid, "segment": None,
+                    "why": "project %r is not a routable project path" % project,
+                })
+                continue
+            rel = prefix + (project if project not in (None, ".") else "")
+            probe_dir = rel.rstrip("/")
+            if probe_dir:
+                found = _probe_plan_git(["cat-file", "-e", sha + ":" + probe_dir], git_tree)
+                if found is None or found[0] != 0:
+                    stories_out.append({"id": sid, "segments": []})
+                    unmeasured.append({
+                        "id": sid, "segment": None,
+                        "why": "project directory %s does not exist at the base commit" % probe_dir,
+                    })
+                    continue
+            results = probe_verify(
+                verify, git_tree + "/" + rel, skip_matching=skip_matching
+            )
+            rails = set(guard_rails_for_story(path, sid)) if isinstance(sid, str) else set()
+            for entry in results:
+                entry["guardRail"] = entry["segment"] in rails
+                if entry["discriminates"] is False and not entry["guardRail"]:
+                    unlabelled.append({"id": sid, "segment": entry["segment"]})
+                elif entry["discriminates"] is None:
+                    unmeasured.append({
+                        "id": sid, "segment": entry["segment"],
+                        "why": _probe_plan_why(entry),
+                    })
+            stories_out.append({"id": sid, "segments": results})
+    return stories_out, unlabelled, unmeasured
+
+
+def op_probe_plan(argv):
+    """Every story's verify, run at the tasks file's own `metadata.baseRef` in
+    ONE throwaway detached worktree, so a segment that already passes before
+    any story is built is named before the plan reaches /aimi:execute.
+
+    THE RE-ENTRANCY GUARD IS THE FIRST STATEMENT, for the reason
+    `op_verify_probe` gives: this verb runs verify segments, so a verify that
+    calls it back would recurse.
+
+    `probed` IS DECIDED BEFORE ANYTHING IS CREATED. Every baseRef that cannot be
+    used (absent, option-shaped, no git, not a repository, an unknown commit, a
+    scratch directory inside the repository, a failed `worktree add`) answers
+    `{baseRef, probed: false, reason}` at exit 0 with the result arrays
+    OMITTED -- emptiness must never read as a clean bill of health.
+
+    THE TREE LIVES UNDER A `TemporaryDirectory` OUTSIDE THE REPOSITORY and is
+    removed with `git worktree remove --force` then `git worktree prune` in a
+    `finally`, so the caller's `git worktree list` is unchanged on every exit
+    path. The base tree carries no gitignored state: a segment that fails there
+    only because the tree is unprepared reads as discriminating, the safe
+    direction. This verb REPORTS; the refuse-or-report decision is `policy`.
+    """
+    if os.environ.get(VERIFY_PROBE_ACTIVE_ENV):
+        die(_PROBE_PLAN_REENTRY)
+    path = _flag(argv, "--tasks-file")
+    cwd = _flag(argv, "--cwd") or os.getcwd()
+    ref = _flag(argv, "--ref")
+    run_suites = "--run-suites" in argv
+    if not path:
+        die(
+            "Usage: tasks.py probe-plan --tasks-file <path> [--cwd <dir>] "
+            "[--ref <sha>] [--run-suites]"
+        )
+    docs = read_docs(path, "probe-plan")
+    if not ref:
+        ref = None
+        for doc in docs:
+            meta = doc.get("metadata") if isinstance(doc, dict) else None
+            candidate = meta.get("baseRef") if isinstance(meta, dict) else None
+            if isinstance(candidate, str) and candidate.strip():
+                ref = candidate
+                break
+    if ref is None:
+        _emit(_probe_plan_not_probed(None, "metadata.baseRef is absent and no --ref was given"))
+        return 0
+    if ref.startswith("-"):
+        _emit(_probe_plan_not_probed(ref, "the ref begins with '-' and is not a commit name"))
+        return 0
+    top = _probe_plan_git(["rev-parse", "--show-toplevel"], cwd)
+    if top is None:
+        _emit(_probe_plan_not_probed(ref, "git is not installed or cannot run here"))
+        return 0
+    if top[0] != 0:
+        _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        return 0
+    toplevel = top[1].strip()
+    resolved = _probe_plan_git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], toplevel)
+    if resolved is None or resolved[0] != 0 or not resolved[1].strip():
+        _emit(_probe_plan_not_probed(ref, "the ref does not resolve to a commit in this repository"))
+        return 0
+    sha = resolved[1].strip()
+    shown = _probe_plan_git(["rev-parse", "--show-prefix"], cwd)
+    prefix = shown[1].strip() if shown is not None and shown[0] == 0 else ""
+    with tempfile.TemporaryDirectory(prefix="aimi-probe-plan-") as scratch:
+        scratch_real = os.path.realpath(scratch)
+        top_real = os.path.realpath(toplevel)
+        if scratch_real == top_real or scratch_real.startswith(top_real + "/"):
+            _emit(_probe_plan_not_probed(
+                ref, "the temporary directory would land inside the repository"
+            ))
+            return 0
+        git_tree = scratch_real + "/tree"
+        added = _probe_plan_git(["worktree", "add", "--detach", git_tree, sha], toplevel)
+        if added is None or added[0] != 0:
+            _probe_plan_git(["worktree", "prune"], toplevel)
+            detail = (added[2].strip().splitlines() or ["no output"])[0] if added else "git cannot run"
+            _emit(_probe_plan_not_probed(ref, "git worktree add failed: " + detail))
+            return 0
+        try:
+            stories_out, unlabelled, unmeasured = _probe_plan_stories(
+                docs, path, git_tree, sha, prefix,
+                None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+            )
+        finally:
+            removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
+            _probe_plan_git(["worktree", "prune"], toplevel)
+            if removed is None or removed[0] != 0:
+                sys.stderr.write("probe-plan: could not remove the temporary worktree %s\n" % git_tree)
+    _emit({
+        "baseRef": ref,
+        "probed": True,
+        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
+        "stories": stories_out,
+        "unlabelledNonDiscriminating": unlabelled,
+        "unmeasured": unmeasured,
+    })
     return 0
 
 
@@ -7031,6 +8145,63 @@ def op_design_decisions(argv):
     return 0
 
 
+def op_spec_derivation(argv):
+    """The validated, relabeled, rendered form of a research agent's
+    entity/endpoint findings, read from the file named by --input.
+
+    --input already crossed aimi-cli.sh's validate_path_in_project by the time
+    this runs -- confinement of a CLI-ARGUMENT path is that function's job, the
+    same split op_design_decisions documents. Nothing here re-checks it.
+    """
+    input_path = _flag(argv, "--input")
+    if not input_path:
+        die("Usage: tasks.py spec-derivation --input <path>")
+    try:
+        with open(input_path, "rb") as handle:
+            payload = json.loads(handle.read())
+    except OSError as err:
+        die("Error: spec-derivation: cannot read input: %s" % err.strerror)
+    except ValueError as err:
+        die("Error: spec-derivation: input is not valid JSON: %s" % err)
+    try:
+        result = derive_spec_records(payload)
+    except ValueError as err:
+        die("Error: spec-derivation: " + str(err))
+    _emit(result)
+    return 0
+
+
+def op_structural_vocabulary(argv):
+    """The structural-vocabulary measurement of the tasks file named by
+    --tasks-file against every --spec and --prototype text (both repeatable).
+
+    Every path already crossed aimi-cli.sh's validate_path_in_project by the
+    time this runs -- confinement of a CLI-ARGUMENT path is that function's
+    job, the same split op_design_decisions documents. Nothing here re-checks
+    it. Advisory only: a consumer decides what to do with the answer.
+    """
+    tasks_path = _flag(argv, "--tasks-file")
+    if not tasks_path:
+        die("Usage: tasks.py structural-vocabulary --tasks-file <path> [--spec <path>]... [--prototype <path>]...")
+    docs = read_docs(tasks_path, "structural-vocabulary")
+    stories = []
+    for doc in docs:
+        if isinstance(doc, dict) and isinstance(doc.get("userStories"), list):
+            stories.extend(doc["userStories"])
+    texts = []
+    for index, arg in enumerate(argv):
+        if arg in ("--spec", "--prototype") and index + 1 < len(argv):
+            source_path = argv[index + 1]
+            try:
+                with open(source_path, "rb") as handle:
+                    texts.append(handle.read().decode("utf-8", "replace"))
+            except OSError as err:
+                die("Error: structural-vocabulary: cannot read %s %s: %s"
+                    % (arg[2:], source_path, err.strerror))
+    _emit(measure_structural_vocabulary(stories, texts))
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -7062,6 +8233,8 @@ _OPS = {
     "normalize-waves": _normalize_op("normalize-waves", normalize_waves),
     "cascade-skip": op_cascade_skip,
     "remove-story": op_remove_story,
+    "set-verification": op_set_verification,
+    "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),
     "gate-fail": _gate_op("gate-fail", "failed"),
@@ -7069,8 +8242,11 @@ _OPS = {
     "init-session": op_init_session,
     "get-branch": op_get_branch,
     "verify-probe": op_verify_probe,
+    "probe-plan": op_probe_plan,
     "list-known-gaps": op_list_known_gaps,
     "design-decisions": op_design_decisions,
+    "spec-derivation": op_spec_derivation,
+    "structural-vocabulary": op_structural_vocabulary,
     "research-paths": op_research_paths,
     "archivable-file-is-terminal": op_archivable_file_is_terminal,
 }

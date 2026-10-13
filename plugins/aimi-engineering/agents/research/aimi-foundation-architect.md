@@ -175,6 +175,8 @@ When no stack has been decided anywhere in `resolvedDecisions` or `stackHints`, 
 
 ## Output Contract
 
+This proposal document is a plugin-owned artifact — per the artifact-language rule (`commands/references/user-communication.md`), it is written in English. The nine `##` section names in step 2 below are locked tokens, never translated, regardless of that same rule: `commands/brainstorm.md:1248` calls four of them "verbatim matches (case and punctuation)" of this contract, `commands/brainstorm.md:1267` gates the artifact on the exact names, and `agents/workflow/aimi-story-expander.md:305-312` reads `## Folder Layout`, `## Lint and Format Config`, `## CLAUDE.md Draft`, and `## AGENTS.md Draft` by name to derive a foundation story's files. Translate one and either the brainstorm validation gate fails the artifact or the expander silently finds nothing.
+
 1. A file must exist at the caller-supplied `outputPath`, written exactly once, when you return — never derive your own path or filename; the `YYYY-MM-DD-<topicSlug>-<RUN_TS>-foundation.md` convention under `.aimi/research/` is the caller's responsibility. Any tool that leaves the file there — the Write tool, a Bash heredoc, or anything else — satisfies this; if none is available, use `unwritten_findings:` in the Return Contract below instead.
 2. The file body must contain exactly these nine `##` sections, in this order:
    - `## Stack` — the named/inferred stack, or the single proposed default with its rationale.
@@ -183,10 +185,11 @@ When no stack has been decided anywhere in `resolvedDecisions` or `stackHints`, 
    - `## Module Template` — a worked example of one feature/use-case module following the proposed layout.
    - `## Naming Conventions` — file, type, and function naming rules for this repository.
    - `## Lint and Format Config` — the specific linter/formatter and starter config for the resolved stack.
-   - `## CLAUDE.md Draft` — a ready-to-save draft capturing the above as project conventions.
+   - `## CLAUDE.md Draft` — a ready-to-save draft capturing the above as project conventions, plus one further line stating the project's own prose language as a Decision/Rationale pair — default **English** when nothing in `featureDescription`, `researchSummary`, or `resolvedDecisions` names another language. Per the artifact-language rule (`commands/references/user-communication.md`), that line governs only files the project owns; every artifact under `.aimi/` stays English regardless of it, and the choice is always a stated default, never a question.
    - `## AGENTS.md Draft` — a ready-to-save draft for spawned-agent-facing conventions, distinct from CLAUDE.md's human-facing scope.
    - `## Open Questions` — reserved for genuine unknowns only (see Reviewable-Defaults Framing).
 3. Do not write to any path other than `outputPath`. No sidecars, no temp files.
+4. **Heading English and locked, drafted content project-language.** `## CLAUDE.md Draft` and `## AGENTS.md Draft` keep the English, locked headings named in step 2 — but the content drafted under each follows the *project's* own language, not English: both sections are drafts of files the project owns and will save as its own (step 1's caller saves them into the target repository), so their content sits on the project side of the artifact-language rule's ownership boundary while the document carrying them sits on the plugin side. Container English, heading locked, drafted content project-language — all three hold of this one document at once.
 
 ## Reviewable-Defaults Framing
 

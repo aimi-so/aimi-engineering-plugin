@@ -44,7 +44,9 @@ pins its total, over a hundred of those assertions drive these verbs as black
 boxes through the CLI, and a faithful port does not move a single one of them.
 """
 
+import contextlib
 import fcntl
+import io
 import json
 import os
 import re
@@ -3458,6 +3460,204 @@ def _phase_tasks_path(roadmap_path, doc, phase):
     )
 
 
+def _phase_dir_path(roadmap_path, phase):
+    """<feature_dir>/<dir> -- the directory half of _phase_tasks_path's own
+    formula, usable even when the roadmap carries no feature slug (unlike
+    _phase_tasks_path itself, this reads only `phase.get("dir")`, never
+    `doc.get("feature")`). The completed-gate resolver below needs a directory
+    to list candidates in before it knows whether a main file exists at all."""
+    return os.path.dirname(roadmap_path) + "/" + _tsv(phase.get("dir"))
+
+
+def _completed_gate_list_dir(directory):
+    """*-tasks.json files directly inside <directory> (depth 1 only), newest
+    mtime first, ties broken by name.
+
+    Mirrors _split_detect_list_dir's depth-1-find-then-newest-first discipline
+    in aimi-cli.sh (see the drift-note comment on _completed_gate_resolve_members
+    below), ported to os.listdir + os.path.getmtime rather than a `find`+`ls -t`
+    pipeline. Never glob.glob("**"), which would walk into phase subdirectories
+    -- there are none here, but a recursive glob is the mistake this docstring
+    exists to rule out before someone reaches for one.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return []
+    candidates = [
+        os.path.join(directory, name)
+        for name in names
+        if name.endswith("-tasks.json")
+        and os.path.isfile(os.path.join(directory, name))
+    ]
+
+    def _sort_key(path):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0
+        return (-mtime, os.path.basename(path))
+
+    candidates.sort(key=_sort_key)
+    return candidates
+
+
+def _completed_gate_has_marker(tasks_doc):
+    """Well-formed metadata.splitGroup: total a number, siblings a list.
+
+    Mirrors _SPLIT_DETECT_DESCRIBE_JQ's `hasMarker` test in aimi-cli.sh --
+    `($sg.total | type) == "number" and ($sg.siblings | type) == "array"` --
+    not merely "a splitGroup key exists". A dict with the right shape but the
+    wrong types (a string total, an object siblings) is the same "no marker"
+    answer split-detect gives it.
+    """
+    if not isinstance(tasks_doc, dict):
+        return False
+    metadata = tasks_doc.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    split_group = metadata.get("splitGroup")
+    if not isinstance(split_group, dict):
+        return False
+    total = split_group.get("total")
+    siblings = split_group.get("siblings")
+    return (
+        isinstance(total, (int, float))
+        and not isinstance(total, bool)
+        and isinstance(siblings, list)
+    )
+
+
+def _read_tasks_with_reason(path):
+    """Like _read_tasks, but names WHY a path could not be read instead of
+    folding every failure into one silent None. _completed_gate_refusals puts
+    the reason on its could-not-judge advisory line; _read_tasks's other
+    callers (_phase_declared_files, has_work_map, ...) keep using the plain
+    None they always got, since none of them report per-file reasons today.
+    """
+    if not os.path.isfile(path):
+        return None, "not found"
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return None, "malformed JSON"
+    if doc is None or doc is False:
+        return None, "null/false document"
+    return doc, None
+
+
+def _completed_gate_advise(phase_id, detail):
+    """One stderr line saying the completed gate could not READ or RESOLVE
+    some part of a split phase, in the same "Advisory: <verb>: ..." shape
+    every other non-fatal diagnostic in this file uses. Never added to the
+    refusal list and never exits: an unreadable or unresolved member has not
+    been MEASURED as carrying an unjudged verification, only failed to be
+    read at all, and _completed_gate_refusals' own docstring says that
+    direction degrades AUDIBLY now rather than silently.
+    """
+    sys.stderr.write(
+        "Advisory: roadmap-set-status: phase " + _num(phase_id)
+        + " completed-gate could not judge " + detail + "\n"
+    )
+
+
+# A DIFFERENT one-rule-many-copies hazard from TERMINAL_STORY_STATUSES' own
+# (above, ~line 705-724, "Three literal copies is what the tree had before,
+# and they DID drift") -- that one tracks which STORY STATUSES count as
+# finished; this one is about how a phase's own SPLIT SCOPE is discovered and
+# walked. Named beside it anyway, because it is the same shape of hazard and
+# this resolver is a fourth copy of it: cmd_split_detect in aimi-cli.sh
+# (main-file-first, then a marker-carrying anchor plus its declared siblings
+# resolved by BASENAME against the anchor's own directory, then the legacy
+# -frontend-/-backend-tasks.json pair, then nothing) is the shape this
+# resolver mirrors -- not byte-for-byte (this gate only needs to know which
+# files to READ, never split-detect's own execution-routing validation), but
+# the same four-stage discipline in the same order. A change to either must
+# be checked against the other, the way TERMINAL_STORY_STATUSES' own comment
+# already asks of its three.
+def _completed_gate_resolve_members(roadmap_path, doc, phase):
+    """The tasks file path(s) a completed-phase judgment must read: one for an
+    un-split phase, several for a split one, empty when nothing resolves.
+
+    Returns PATHS ONLY. Reading each one, and deciding what it says, is
+    _completed_gate_refusals' job -- a member that exists but will not parse
+    still gets its OWN could-not-judge advisory there rather than silently
+    vanishing here, which is the whole point of this story.
+
+    (1) The phase's own main file, from _phase_tasks_path, when it exists on
+        disk -- the un-split case, unchanged.
+    (2) Otherwise, candidates in the phase directory (minus the main file's
+        own basename, mirroring _split_detect_phase_main_file's exclusion):
+        the first candidate whose metadata.splitGroup is well-formed becomes
+        the anchor, and the members are the anchor plus each declared
+        sibling, resolved as os.path.join(anchor_dir, os.path.basename(sib))
+        -- basename-only, so a traversal-shaped sibling ("../../etc/passwd")
+        resolves to a path that does not exist under the anchor's own
+        directory and is silently dropped: it never escapes that directory
+        and never becomes a member.
+    (3) When no candidate carries a marker, the legacy frontend/backend pair:
+        the NEWEST candidate's basename, when it ends in -frontend-tasks.json
+        or -backend-tasks.json, names a prefix; when that prefix's counterpart
+        suffix exists as a file in the same directory, the two (frontend
+        first) become the members.
+    (4) Otherwise, empty.
+    """
+    main_file = _phase_tasks_path(roadmap_path, doc, phase)
+    if main_file is not None and os.path.isfile(main_file):
+        return [main_file]
+
+    phase_dir = _phase_dir_path(roadmap_path, phase)
+    candidates = _completed_gate_list_dir(phase_dir)
+    if main_file is not None:
+        main_base = os.path.basename(main_file)
+        candidates = [c for c in candidates if os.path.basename(c) != main_base]
+    if not candidates:
+        return []
+
+    anchor_path = None
+    anchor_doc = None
+    for candidate in candidates:
+        candidate_doc = _read_tasks(candidate)
+        if _completed_gate_has_marker(candidate_doc):
+            anchor_path = candidate
+            anchor_doc = candidate_doc
+            break
+
+    if anchor_path is not None:
+        anchor_dir = os.path.dirname(anchor_path)
+        siblings = anchor_doc["metadata"]["splitGroup"].get("siblings") or []
+        members = [anchor_path]
+        for sibling in siblings:
+            sib_path = os.path.join(anchor_dir, os.path.basename(_jq_raw(sibling)))
+            if os.path.isfile(sib_path) and sib_path not in members:
+                members.append(sib_path)
+        return members
+
+    # No candidate carries a marker -- try the legacy pair, over the NEWEST
+    # candidate only (cmd_split_detect's own "newest wins" rule for this
+    # branch too).
+    newest = candidates[0]
+    newest_base = os.path.basename(newest)
+    newest_dir = os.path.dirname(newest)
+    fe_path = be_path = None
+    if newest_base.endswith("-frontend-tasks.json"):
+        prefix = newest_base[: -len("-frontend-tasks.json")]
+        fe_path = newest
+        be_path = os.path.join(newest_dir, prefix + "-backend-tasks.json")
+    elif newest_base.endswith("-backend-tasks.json"):
+        prefix = newest_base[: -len("-backend-tasks.json")]
+        be_path = newest
+        fe_path = os.path.join(newest_dir, prefix + "-frontend-tasks.json")
+
+    if fe_path is not None and be_path is not None:
+        counterpart = be_path if newest == fe_path else fe_path
+        if os.path.isfile(counterpart):
+            return [fe_path, be_path]
+
+    return []
+
+
 def _phase_declared_files(roadmap_path, doc, phase):
     """The implementation.files[] this phase's own stories declared, normalized.
 
@@ -3923,11 +4123,12 @@ def op_list_archivable_phases(argv):
 
 
 VERIFICATION_GATE_NOTE = (
-    "Record a judgment for each story -- `aimi-cli.sh update-field <id> "
-    "verification.status <passed|failed|skipped> --tasks-file <the file above>` "
+    "Record a judgment for each story -- `aimi-cli.sh set-verification <id> "
+    "<passed|failed|skipped> --reason <text> --tasks-file <the file above>` "
     "-- and acknowledge each smell by adding \"acknowledged\": true beside its "
     "entry in metadata.smellWarnings. \"skipped\" is a real answer and passes: "
-    "it records that somebody looked and chose not to verify. \"pending\" "
+    "it records that somebody looked and chose not to verify -- \"skipped\" "
+    "requires --reason, \"passed\"/\"failed\" must omit it. \"pending\" "
     "records that nobody looked."
 )
 
@@ -4002,13 +4203,16 @@ def _unacknowledged_verify_coverage(tasks):
 
 
 def _completed_gate_refusals(roadmap_path, doc, phase_id):
-    """(tasks file, why a phase may not close yet) -- one line per offending
-    story, and an empty list when it may close.
+    """The lines saying why a phase may not close yet -- one per offending
+    story, prefixed with the member file it was found in, and an empty list
+    when it may close.
 
-    The path comes back beside the lines rather than being re-derived by the
-    caller: it is the file this verdict was measured against, the reader needs
-    it to act on any of the lines, and deriving it twice is how the two spellings
-    of a path drift apart.
+    A split phase's stories live in more than one tasks file (see
+    _completed_gate_resolve_members), so there is no longer one path to hand
+    back beside the lines the way a single-file phase has -- each line names
+    its OWN member's path instead, which is what lets Gap4 hold even when a
+    phase has more than one file. op_set_status names the PHASE in its own
+    header rather than a path for the same reason.
 
     THE DEFECT THIS CLOSES, which this very roadmap reproduced in itself:
     pipeline-audit's phase 1 reached `completed` with all five of its stories
@@ -4058,14 +4262,22 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
     would close that cycle and leave whichever module loaded second reading a
     half-initialized first. By the time a verb runs, both are fully loaded.
 
-    EVERY unreadable shape degrades to "no refusal", and that direction is
-    deliberate. A phase /aimi:plan has not expanded, a split phase whose stories
-    live in sibling files this name does not reach, a document that will not
-    parse, a tasks file this verb cannot make sense of -- in none of them has
-    anybody MEASURED that a verification went unjudged, and a gate that refuses
-    on an unknown is a gate people learn to route around with --force. The
-    refusal fires only on a partition that is non-empty, which is the same
-    reason _phase_declared_files returns an empty set rather than raising.
+    EVERY unreadable shape degrades audibly, and that direction is deliberate.
+    A phase /aimi:plan has not expanded, a document that will not parse, a
+    tasks file this verb cannot make sense of -- in none of them has anybody
+    MEASURED that a verification went unjudged, and a gate that refuses on an
+    unknown is a gate people learn to route around with --force. The refusal
+    fires only on a partition that is non-empty, which is the same reason
+    _phase_declared_files returns an empty set rather than raising. But
+    "degrades" no longer means "says nothing": _completed_gate_resolve_members
+    now reaches every member of a SPLIT phase too (the "sibling files this
+    name does not reach" case above is the defect this story fixes), and a
+    member that resolves but will not read -- or an empty resolved-member
+    list -- draws its own one-line Advisory on stderr via
+    _completed_gate_advise, naming what could not be judged rather than
+    silently passing it. The refusal policy itself is unchanged: an unreadable
+    shape still never REFUSES the transition on its own, only says it could
+    not look.
 
     THE TASKS FILE IS READ WITHOUT ITS OWN LOCK, ON PURPOSE. bash already holds
     roadmap.json's; taking a second one here would be the first place in this
@@ -4083,44 +4295,60 @@ def _completed_gate_refusals(roadmap_path, doc, phase_id):
         (p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None
     )
     if phase is None:
-        return None, []
-    tasks_path = _phase_tasks_path(roadmap_path, doc, phase)
-    if tasks_path is None:
-        return None, []
-    tasks = _read_tasks(tasks_path)
-    if tasks is None:
-        return tasks_path, []
+        return []
 
     from tasks import MalformedTasks, jq_equal, verification_report
 
-    try:
-        pending = verification_report(tasks).get("pending") or []
-    except MalformedTasks:
-        return tasks_path, []
+    members = _completed_gate_resolve_members(roadmap_path, doc, phase)
+    if not members:
+        main_file = _phase_tasks_path(roadmap_path, doc, phase)
+        tried = main_file if main_file is not None else "<no feature configured for this roadmap>"
+        _completed_gate_advise(
+            phase_id,
+            "no tasks file resolved (tried " + tried + " and " + _phase_dir_path(roadmap_path, phase) + ")",
+        )
+        return _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
-    # jq's ==, not Python's, and not a set: a story id is whatever the document
-    # holds, which need not be hashable and need not be a string. This is the
-    # same comparison verification_report matched the "pending" literal with,
-    # so the two halves of one verdict cannot disagree about what an id is.
-    done = _completed_story_ids(tasks)
+    lines = []
+    for member_path in members:
+        tasks, reason = _read_tasks_with_reason(member_path)
+        if tasks is None:
+            _completed_gate_advise(phase_id, member_path + " -- " + reason)
+            continue
 
-    def did_work(story_id):
-        return any(jq_equal(story_id, finished) for finished in done)
+        try:
+            pending = verification_report(tasks).get("pending") or []
+        except MalformedTasks:
+            _completed_gate_advise(
+                phase_id, member_path + " -- malformed document (unexpected shape)"
+            )
+            continue
 
-    lines = [
-        "  " + _tsv(story_id) + ': verification.status is still the literal "pending"'
-        for story_id in pending
-        if did_work(story_id)
-    ]
-    lines += [
-        "  "
-        + _tsv(entry.get("storyId"))
-        + ": verify-coverage smell is not acknowledged -- "
-        + _tsv(entry.get("message") or "asserts a command implementation.verify does not run")
-        for entry in _unacknowledged_verify_coverage(tasks)
-        if did_work(entry.get("storyId"))
-    ]
-    return tasks_path, lines
+        # jq's ==, not Python's, and not a set: a story id is whatever the
+        # document holds, which need not be hashable and need not be a
+        # string. This is the same comparison verification_report matched
+        # the "pending" literal with, so the two halves of one verdict cannot
+        # disagree about what an id is.
+        done = _completed_story_ids(tasks)
+
+        def did_work(story_id, done=done):
+            return any(jq_equal(story_id, finished) for finished in done)
+
+        lines += [
+            "  " + _tsv(story_id) + " (" + member_path
+            + '): verification.status is still the literal "pending"'
+            for story_id in pending
+            if did_work(story_id)
+        ]
+        lines += [
+            "  "
+            + _tsv(entry.get("storyId"))
+            + " (" + member_path + "): verify-coverage smell is not acknowledged -- "
+            + _tsv(entry.get("message") or "asserts a command implementation.verify does not run")
+            for entry in _unacknowledged_verify_coverage(tasks)
+            if did_work(entry.get("storyId"))
+        ]
+    return lines + _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase)
 
 
 def op_set_status(argv):
@@ -4218,14 +4446,13 @@ def op_set_status(argv):
         # it silence this gate would reopen the blind close through the side
         # door, because --force is the flag people already reach for when a
         # phase is stuck for an unrelated reason.
-        tasks_path, refusals = _completed_gate_refusals(path, doc, phase_id)
+        refusals = _completed_gate_refusals(path, doc, phase_id)
         if refusals:
             _die_list(
                 "Error: roadmap-set-status: phase "
                 + phase_raw
-                + " cannot transition to completed -- "
-                + tasks_path
-                + " declares a verification nobody has judged:",
+                + " cannot transition to completed -- declares a verification"
+                " nobody has judged:",
                 refusals + ["", VERIFICATION_GATE_NOTE],
             )
 
@@ -4240,6 +4467,221 @@ def op_set_status(argv):
 
     write_doc_atomically(path, doc)
     _emit({"phase": phase_id, "from": current, "to": new_status})
+    return 0
+
+
+VISUAL_GATE_STATUSES = ("passed", "diverges", "skipped", "accepted")
+# A verdict other than "passed" is a decision somebody took against a
+# comparison that did not come out clean, so it must say why.
+VISUAL_GATE_REASON_REQUIRED = ("diverges", "skipped", "accepted")
+VISUAL_GATE_REASON_MAXLEN = 2000
+
+
+def _visual_gate_requirement(roadmap_path, doc, phase):
+    """Does this phase owe a visual comparison, derived from its own tasks
+    file(s) and nothing else.
+
+    required is the AND of two signals, never either alone: a non-empty
+    metadata.prototypePaths (there is a reference to compare against) AND at
+    least one COMPLETED story carrying verification.strategy == "visual" (the
+    plan declared a visual check and the work was done). metadata.designBundle
+    carries no prototype list of its own anywhere in this codebase, so its
+    "bundle with prototypes" case is the same prototypePaths signal.
+
+    ONE PREDICATE, ONE OWNER: this is the function a completed-phase gate must
+    call to decide whether a UI phase may close, so the partition rule lives
+    here once rather than in each caller. Member resolution is
+    _completed_gate_resolve_members and the did-work filter is
+    _completed_story_ids -- both reused, neither restated.
+
+    Returns {required, reason, prototypePaths, designSpec, visualStories,
+    groups}. An unreadable member draws the same audible advisory the
+    completed gate gives and contributes nothing.
+    """
+    # Deferred for the same reason _completed_gate_refusals defers it: tasks.py
+    # imports this module at its own module scope.
+    from tasks import MalformedTasks, jq_equal, verification_report
+
+    phase_id = phase.get("id")
+    members = _completed_gate_resolve_members(roadmap_path, doc, phase)
+    if not members:
+        main_file = _phase_tasks_path(roadmap_path, doc, phase)
+        tried = main_file if main_file is not None else "<no feature configured for this roadmap>"
+        return {
+            "required": False,
+            "reason": "no tasks file resolved for phase " + _num(phase_id)
+            + " (tried " + tried + " and " + _phase_dir_path(roadmap_path, phase) + ")",
+            "prototypePaths": [],
+            "designSpec": None,
+            "visualStories": [],
+            "groups": 0,
+        }
+
+    prototype_paths = []
+    design_spec = None
+    visual_stories = []
+    for member_path in members:
+        tasks, reason = _read_tasks_with_reason(member_path)
+        if tasks is None:
+            _completed_gate_advise(phase_id, member_path + " -- " + reason)
+            continue
+        try:
+            visual = verification_report(tasks).get("visual") or []
+        except MalformedTasks:
+            _completed_gate_advise(
+                phase_id, member_path + " -- malformed document (unexpected shape)"
+            )
+            continue
+
+        metadata = tasks.get("metadata") if isinstance(tasks, dict) else None
+        if isinstance(metadata, dict):
+            declared = metadata.get("prototypePaths")
+            if isinstance(declared, list):
+                for entry in declared:
+                    if isinstance(entry, str) and entry != "" and entry not in prototype_paths:
+                        prototype_paths.append(entry)
+            bundle = metadata.get("designBundle")
+            if design_spec is None and isinstance(bundle, dict):
+                spec = bundle.get("designSpec")
+                if isinstance(spec, str) and spec != "":
+                    design_spec = spec
+
+        done = _completed_story_ids(tasks)
+        for entry in visual:
+            if any(jq_equal(entry.get("id"), finished) for finished in done):
+                visual_stories.append({"id": entry.get("id"), "url": entry.get("url")})
+
+    if not prototype_paths:
+        reason = (
+            "no prototype paths declared (metadata.prototypePaths is empty or absent across "
+            + str(len(members)) + " tasks file(s)); " + str(len(visual_stories))
+            + " completed visual stor(ies) -- nothing to compare against"
+        )
+    elif not visual_stories:
+        reason = (
+            str(len(prototype_paths)) + " prototype path(s) declared but no completed story "
+            'carries verification.strategy == "visual" across ' + str(len(members))
+            + " tasks file(s) -- nothing was built to compare"
+        )
+    else:
+        reason = (
+            str(len(prototype_paths)) + " prototype path(s) and "
+            + str(len(visual_stories)) + " completed visual stor(ies) across "
+            + str(len(members)) + " tasks file(s) -- a visual comparison is owed"
+        )
+    return {
+        "required": bool(prototype_paths) and bool(visual_stories),
+        "reason": reason,
+        "prototypePaths": prototype_paths,
+        "designSpec": design_spec,
+        "visualStories": visual_stories,
+        "groups": len(members),
+    }
+
+
+def _completed_gate_visual_refusal(roadmap_path, doc, phase_id, phase):
+    """The phase-level visual-gate line(s) for the completed gate: one line
+    when the phase owes a visual comparison (per _visual_gate_requirement, the
+    one predicate that decides it) and phase.visualGate.status is not one of
+    passed/skipped/accepted, an empty list otherwise.
+
+    Called ONCE per phase, never per member -- visualGate is one record per
+    phase. Any failure to read or compute the requirement degrades to the
+    completed gate's own advisory and an empty list, never a refusal and never
+    an uncaught exception held under the roadmap lock.
+    """
+    try:
+        # The predicate advises about every unreadable member itself; this
+        # gate's own per-member loop has already said so for the same files,
+        # so its stderr is discarded rather than doubled.
+        with contextlib.redirect_stderr(io.StringIO()):
+            requirement = _visual_gate_requirement(roadmap_path, doc, phase)
+        required = bool(requirement.get("required"))
+    except Exception as exc:  # noqa: BLE001 -- degrade audibly, never refuse on an unknown
+        _completed_gate_advise(
+            phase_id, "the visual-gate requirement -- " + type(exc).__name__
+        )
+        return []
+    if not required:
+        return []
+
+    record = phase.get("visualGate")
+    status = record.get("status") if isinstance(record, dict) else None
+    if status in ("passed", "skipped", "accepted"):
+        return []
+    if status == "diverges":
+        return [
+            "  phase " + _num(phase_id) + ": visual gate recorded diverges -- the live "
+            "implementation was compared against its prototype and differs; resolve it and "
+            "re-record with roadmap-record-visual-gate (passed, or accepted with a reason)"
+        ]
+    return [
+        "  phase " + _num(phase_id) + ": owes a visual comparison of the live implementation "
+        "against its prototype and none is recorded -- record one with roadmap-record-visual-gate"
+    ]
+
+
+def op_visual_gate_required(argv):
+    """Read-only: whether the phase owes a visual comparison. Bash takes no
+    lock for it -- nothing here writes."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    if not path or phase_raw is None:
+        die("Usage: roadmap.py visual-gate-required --roadmap <path> --phase <id>")
+    doc = read_doc(path, "roadmap-visual-gate-required")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    phase = next(
+        (p for p in (doc.get("phases") or []) if p.get("id") == phase_id), None
+    )
+    if phase is None:
+        die("Error: roadmap-visual-gate-required: phase " + phase_raw + " not found in " + path)
+    _emit(_visual_gate_requirement(path, doc, phase))
+    return 0
+
+
+def op_record_visual_gate(argv):
+    """The locked write of a phase's visual-gate verdict. Always overwrites the
+    whole object -- no read-old-merge-new -- which is what makes a resumed or
+    re-verified phase idempotent: one record per phase, never a second one."""
+    path = _flag(argv, "--roadmap")
+    phase_raw = _flag(argv, "--phase")
+    status = _flag(argv, "--status")
+    reason = _flag(argv, "--reason")
+    review = _flag(argv, "--review")
+    if not path or phase_raw is None or status is None:
+        die(
+            "Usage: roadmap.py record-visual-gate --roadmap <path> --phase <id> "
+            "--status <passed|diverges|skipped|accepted> [--reason <text>] [--review <path>]"
+        )
+    # Fixed order, mirroring op_set_verification: vocabulary, then the
+    # status/reason pairing, then the document.
+    if status not in VISUAL_GATE_STATUSES:
+        die(
+            "Error: roadmap-record-visual-gate: --status must be one of "
+            + "|".join(VISUAL_GATE_STATUSES) + ", got: " + status
+        )
+    if status in VISUAL_GATE_REASON_REQUIRED and (reason is None or reason.strip() == ""):
+        die(
+            "Error: roadmap-record-visual-gate: --reason is required when --status is "
+            + status
+        )
+    doc = read_doc(path, "roadmap-record-visual-gate")
+    phase_id = jq_numbers(json.loads(phase_raw))
+    matches = [p for p in (doc.get("phases") or []) if p.get("id") == phase_id]
+    if not matches:
+        die("Error: roadmap-record-visual-gate: phase " + phase_raw + " not found in " + path)
+
+    cleaned = rm_sanitize(reason, VISUAL_GATE_REASON_MAXLEN) if reason else None
+    record = {
+        "status": status,
+        "reason": cleaned if cleaned else None,
+        "review": review if review else None,
+        "recordedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    for phase in matches:
+        phase["visualGate"] = dict(record)
+    write_doc_atomically(path, doc)
+    _emit({"phase": phase_id, "visualGate": record})
     return 0
 
 
@@ -4527,6 +4969,8 @@ _OPS = {
     "sweep": op_sweep,
     "write-handoff": op_write_handoff,
     "phase-overlap": op_phase_overlap,
+    "record-visual-gate": op_record_visual_gate,
+    "visual-gate-required": op_visual_gate_required,
 }
 
 # The aimi-cli.sh verb each op serves, for the ops whose names differ. Every
@@ -4543,6 +4987,8 @@ _VERB_FOR_OP = {
     "release-claim": "roadmap-release-claim",
     "reconcile": "roadmap-reconcile",
     "write-handoff": "roadmap-write-handoff",
+    "record-visual-gate": "roadmap-record-visual-gate",
+    "visual-gate-required": "roadmap-visual-gate-required",
     "init-validate": "roadmap-init",
     "init-write": "roadmap-init",
     "amend-validate": "roadmap-amend-phase",

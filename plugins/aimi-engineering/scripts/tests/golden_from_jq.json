@@ -7688,7 +7688,7 @@
         "from": "in_progress",
         "to": "completed"
       },
-      "stderr": "",
+      "stderr": "Advisory: roadmap-set-status: phase 1 completed-gate could not judge no tasks file resolved (tried /TMP/ss-in-progress-completed-com-handoff/.aimi/tasks/f/phase-1/f-phase-1-tasks.json and /TMP/ss-in-progress-completed-com-handoff/.aimi/tasks/f/phase-1)",
       "file": {
         "roadmapVersion": "1.0",
         "feature": "f",
@@ -7798,7 +7798,7 @@
         "from": "verification_failed",
         "to": "completed"
       },
-      "stderr": "",
+      "stderr": "Advisory: roadmap-set-status: phase 1 completed-gate could not judge no tasks file resolved (tried /TMP/ss-vf-completed-com-handoff/.aimi/tasks/f/phase-1/f-phase-1-tasks.json and /TMP/ss-vf-completed-com-handoff/.aimi/tasks/f/phase-1)",
       "file": {
         "roadmapVersion": "1.0",
         "feature": "f",
@@ -7874,7 +7874,7 @@
         "from": "pending",
         "to": "completed"
       },
-      "stderr": "",
+      "stderr": "Advisory: roadmap-set-status: phase 1 completed-gate could not judge no tasks file resolved (tried /TMP/ss-pending-completed-com-force/.aimi/tasks/f/phase-1/f-phase-1-tasks.json and /TMP/ss-pending-completed-com-force/.aimi/tasks/f/phase-1)",
       "file": {
         "roadmapVersion": "1.0",
         "feature": "f",
@@ -12344,7 +12344,7 @@
       ]
     }
   ],
-  "_comment_lifecycle": "The five lifecycle verbs -- roadmap-get, roadmap-set-status, roadmap-claim, roadmap-release-claim and roadmap-reconcile -- captured the same way, before their jq was deleted: 149 cases over one adversarial corpus, recording exit code, stdout, stderr, the roadmap.json left on disk, and the whole feature directory listing so a refusal that wrote something as a side effect could not hide. Temp roots normalize to /TMP/<label>; a claimedAt this run wrote is FROZEN while fixture timestamps are dated 2020 and survive verbatim, so an untouched claim stays distinguishable from a rewritten one; the two pids are <LIVEPID> (a process alive for the whole run) and <DEADPID> (one that had already exited). 736 of 745 field comparisons identical after the port -- every stdout, every written file and every directory listing matched in all 149 cases. The nine that differ are stderr and two exit codes, every one of them from jq aborting mid-expression, and they are named here so nobody has to rediscover them. (1) get-next-tasks-sem-userstories, cl-tasks-sem-userstories, re-tasks-sem-userstories, ss-sem-chave-phases and re-sem-chave-phases: jq printed 'Cannot iterate over null' and the bash carried on with the empty capture. The Python reaches the same answer without the engine line. re-tasks-sem-userstories is the one that shows what the empty capture COSTS: reconcile compares \"\" against the stored status, finds them different, and writes status: \"\" into roadmap.json. ground_truth() reproduces that on purpose -- it is a defect, and a port is not where a defect is fixed. (2) get-next-sem-chave-phases (exit 5 -> 1) and cl-sem-chave-phases (exit 3 -> 4): a roadmap.json carrying no phases key at all. jq aborted before the verb's own diagnostic could run, so the exit status was the engine's and the message the code was written to print was unreachable; the Python prints it. Both remain refusals that write nothing, which the file and tree fields confirm. Recorded rather than reproduced: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose. Same shape as dependson-nao-array in the init capture.",
+  "_comment_lifecycle": "The five lifecycle verbs -- roadmap-get, roadmap-set-status, roadmap-claim, roadmap-release-claim and roadmap-reconcile -- captured the same way, before their jq was deleted: 149 cases over one adversarial corpus, recording exit code, stdout, stderr, the roadmap.json left on disk, and the whole feature directory listing so a refusal that wrote something as a side effect could not hide. Temp roots normalize to /TMP/<label>; a claimedAt this run wrote is FROZEN while fixture timestamps are dated 2020 and survive verbatim, so an untouched claim stays distinguishable from a rewritten one; the two pids are <LIVEPID> (a process alive for the whole run) and <DEADPID> (one that had already exited). 736 of 745 field comparisons identical after the port -- every stdout, every written file and every directory listing matched in all 149 cases. The nine that differ are stderr and two exit codes, every one of them from jq aborting mid-expression, and they are named here so nobody has to rediscover them. (1) get-next-tasks-sem-userstories, cl-tasks-sem-userstories, re-tasks-sem-userstories, ss-sem-chave-phases and re-sem-chave-phases: jq printed 'Cannot iterate over null' and the bash carried on with the empty capture. The Python reaches the same answer without the engine line. re-tasks-sem-userstories is the one that shows what the empty capture COSTS: reconcile compares \"\" against the stored status, finds them different, and writes status: \"\" into roadmap.json. ground_truth() reproduces that on purpose -- it is a defect, and a port is not where a defect is fixed. (2) get-next-sem-chave-phases (exit 5 -> 1) and cl-sem-chave-phases (exit 3 -> 4): a roadmap.json carrying no phases key at all. jq aborted before the verb's own diagnostic could run, so the exit status was the engine's and the message the code was written to print was unreachable; the Python prints it. Both remain refusals that write nothing, which the file and tree fields confirm. Recorded rather than reproduced: synthesizing an engine error would be the only way to match, and that is not a thing to write on purpose. Same shape as dependson-nao-array in the init capture. US-006 (honest split-phase verification judgment) touched exactly three of these 149 recordings on purpose, all sharing one fixture shape: a handoff.md on disk and NO tasks file at phase 1 at all. Before US-006 the completed gate opened only _phase_tasks_path's single derived name, found nothing there, and closed in silence -- these three cases' stderr was recorded empty because that silence was the real, correct behavior of the code being captured. After US-006 the gate resolves every member of a phase's own tasks file(s), and an empty resolved-member list is no longer silent: it draws exactly one \"Advisory: roadmap-set-status: phase 1 completed-gate could not judge ...\" line naming both paths the resolver tried, on stderr, at exit 0 -- the phase still closes, it now SAYS it could not judge instead of saying nothing. ss-in-progress-completed-com-handoff, ss-vf-completed-com-handoff and ss-pending-completed-com-force are updated to carry that line; every other lifecycle_cases entry, including every other completed-transition case in this corpus, is untouched -- none of them shares this fixture's empty-phase-directory shape, so none of them gains the phrase \"could not judge\".",
   "story_merge_cases": [
     {
       "label": "flag-desconhecida",

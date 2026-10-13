@@ -3377,7 +3377,7 @@ while true:
                                 # the two split servers — see Split Container Dev Server
                                 # Bootstrap). mark-complete already ran above; this never
                                 # blocks it, never blocks the wave, and never retries.
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server running for [PHASE_BRANCH]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
                                 SKIP_VISUAL=true
                         else:
@@ -3390,7 +3390,7 @@ while true:
                                 # No dev server ever resolved a port for this group (see Container
                                 # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
                                 # already ran above; this never blocks it or the wave loop.
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server resolved for project group [group_key]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                                 SKIP_VISUAL=true
                             else:
@@ -3430,10 +3430,10 @@ while true:
                             )
 
                             if visual matches expectations:
-                                $AIMI_CLI update-field [full_story.id] verification.status passed
+                                $AIMI_CLI set-verification [full_story.id] passed --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification passed."
                             else:
-                                $AIMI_CLI update-field [full_story.id] verification.status failed
+                                $AIMI_CLI set-verification [full_story.id] failed --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification failed — [reason]. (advisory, not blocking)"
 
                             # Report attribution lines as advisory (do NOT toggle verification.status)
@@ -3460,9 +3460,9 @@ while true:
                                 )
 
                                 if visual matches expectations:
-                                    $AIMI_CLI update-field [full_story.id] verification.status passed
+                                    $AIMI_CLI set-verification [full_story.id] passed --tasks-file [WAVE_TASKS_FILE]
                                 else:
-                                    $AIMI_CLI update-field [full_story.id] verification.status failed
+                                    $AIMI_CLI set-verification [full_story.id] failed --tasks-file [WAVE_TASKS_FILE]
                                     Report: "[full_story.id] visual verification failed — [reason]. (advisory)"
 
                                 if ATTRIBUTION.has_errors:
@@ -3471,12 +3471,18 @@ while true:
 
                                 agent-browser close
                             else:
-                                $AIMI_CLI update-field [full_story.id] verification.status skipped
+                                $AIMI_CLI set-verification [full_story.id] skipped --reason "agent-browser not installed" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — agent-browser not installed."
 
-                # Non-visual stories: keep existing behavior
+                # Non-visual stories: the verdict now comes from the verify evidence
+                # mark-complete already persisted above (see VERIFY_EVIDENCE_JSON) —
+                # a blanket rewrite to "passed" here claimed success whether or not
+                # this story's own check ever ran, which is exactly the dishonesty
+                # judge-verification exists to close. It is a safe no-op (writes
+                # nothing, reports why) for a story already judged, so the pending
+                # check below is an optimization, not a correctness requirement.
                 elif full_story.verification and full_story.verification.status == "pending":
-                    $AIMI_CLI update-field [full_story.id] verification.status passed
+                    $AIMI_CLI judge-verification [full_story.id] --tasks-file [WAVE_TASKS_FILE]
 
                 Report: "[full_story.id] merged successfully."
 
@@ -4140,17 +4146,221 @@ way pending/in_progress are).
 
 Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5 (which still reports this phase's own story-level completion, unaffected by the roadmap-level failure).
 
+### Phase Visual Gate
+
+Reached only when Creates Verification's `branch=ok`. It runs here, before Write Handoff and before Mark Phase Completed's dev-server stop, because the comparison needs the phase's own dev server still up. A phase that shipped UI must never reach `completed` with an unjudged visual comparison; the completed-phase gate refuses one whose `visualGate` is absent or unjudged, and this section is what records it. It never writes `handoff.md` itself and never sets the phase to `completed`.
+
+#### Is a comparison owed
+
+One `roadmap-visual-gate-required` call, read-only. `.required` is true only when the phase's tasks file(s) carry a prototype **and** at least one completed visual story. `.groups` counts resolved tasks-file members (1 for any non-split phase) — it is **not** the participating-project-group count the checks below derive.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VG_JSON=$($AIMI_CLI roadmap-visual-gate-required --feature "$FEATURE" --phase "$PHASE_ID") || {
+  echo "visual-gate: tooling-failed — roadmap-visual-gate-required exited non-zero" >&2
+  $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+  exit 1
+}
+VG_REQUIRED=$(printf '%s' "$VG_JSON" | jq -r '.required')
+VG_REASON=$(printf '%s' "$VG_JSON" | jq -r '.reason')
+if [ "$VG_REQUIRED" = "true" ]; then
+  printf 'visual-gate-required: required=true groups=%s\n' "$(printf '%s' "$VG_JSON" | jq -r '.groups')"
+else
+  printf 'visual-gate: not-required — %s\n' "$VG_REASON"
+fi
+```
+
+**`.required` false:** record nothing — no `roadmap-record-visual-gate` call — and keep the printed `visual-gate: not-required — <reason>` line verbatim for Write Handoff's deviations. Fall through to Write Handoff. If the call itself failed, the claim is released and the phase's status stays `in_progress`; report the tooling failure the way Verification tooling failed above does and skip directly to Step 5 — `handoff.md` is not written.
+
+#### Environment checks and the live URLs
+
+When `.required` is true, three deterministic checks run in this fixed order. Each one that fails records its own `skipped` verdict and the phase still reaches `completed`; none of them spawns the reviewer or calls `write-review`:
+
+1. **More than one participating project group, or a split phase** — reason names "per-repository servers": each repository serves its own phase branch, so one comparison cannot cover them. A split phase is `PHASE_SPLIT_MODE=true`; the group count is `project-groups` over `$PHASE_TASKS_PATH`, the same derivation Mark Phase Completed uses, not `.groups`.
+2. **`agent-browser` not installed.**
+3. **No dev server resolved for that group's own `$PHASE_BRANCH`** — any visual story URL whose `serve url` comes back `rewritten:false`.
+
+When all three pass, every completed visual story's URL is rewritten through `$WORKTREE_MGR serve url`, following `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Rewrite a Verification URL Origin: `EXEC_ROOT` is the one group's own resolved toplevel — the same `EXEC_ROOT` Phase Container Dev Server Bootstrap `cd`s to before its `serve start` — and `EXEC_BRANCH="$PHASE_BRANCH"`, re-queried here and never a value cached from the bootstrap.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VG_JSON=$($AIMI_CLI roadmap-visual-gate-required --feature "$FEATURE" --phase "$PHASE_ID") || exit 1
+VG_STORY_LINES=""
+VG_CONTAINER=""
+VG_MULTI=false
+VG_GROUP_PROJECTS=""
+if [ "$PHASE_SPLIT_MODE" = true ]; then
+  VG_MULTI=true
+else
+  VG_GROUPS_JSON=$($AIMI_CLI project-groups --tasks-file "$PHASE_TASKS_PATH") || exit 1
+  VG_GROUP_PROJECTS=$(printf '%s' "$VG_GROUPS_JSON" | jq -r '.groups[]')
+  [ "$(printf '%s\n' "$VG_GROUP_PROJECTS" | grep -c .)" -gt 1 ] && VG_MULTI=true
+fi
+VG_STATE=compare
+if [ "$VG_MULTI" = true ]; then
+  VG_STATE=skipped
+  VG_SKIP_REASON="split phase or more than one participating project group: each repository serves its own phase branch (per-repository servers), so one comparison cannot cover them"
+  $AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --reason "$VG_SKIP_REASON"
+elif ! command -v agent-browser >/dev/null 2>&1; then
+  VG_STATE=skipped
+  VG_SKIP_REASON="agent-browser is not installed"
+  $AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --reason "$VG_SKIP_REASON"
+else
+  WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+  : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
+  VG_PROJECT=$(printf '%s\n' "$VG_GROUP_PROJECTS" | grep -v '^$' | head -1)
+  if [ -z "$VG_PROJECT" ] || [ "$VG_PROJECT" = "." ]; then
+    VG_ROOT="$AIMI_ROOT"
+  else
+    VG_ROOT="$AIMI_ROOT/$VG_PROJECT"
+  fi
+  EXEC_ROOT=$(git -C "$VG_ROOT" rev-parse --show-toplevel 2>/dev/null) || EXEC_ROOT="$VG_ROOT"
+  EXEC_BRANCH="$PHASE_BRANCH"
+  VG_CONTAINER="$EXEC_ROOT/.worktrees/$EXEC_BRANCH"
+  cd "$EXEC_ROOT"
+  VG_UNREWRITTEN=0
+  while IFS= read -r VG_STORY; do
+    [ -n "$VG_STORY" ] || continue
+    VG_STORY_ID=$(printf '%s' "$VG_STORY" | jq -r '.id')
+    VG_RAW_URL=$(printf '%s' "$VG_STORY" | jq -r '.url // ""')
+    SERVE_URL_JSON=$($WORKTREE_MGR serve url "$EXEC_BRANCH" "$VG_RAW_URL")
+    VG_REWRITTEN=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.rewritten')
+    [ "$VG_REWRITTEN" = "true" ] || VG_UNREWRITTEN=$((VG_UNREWRITTEN + 1))
+    # roadmap-visual-gate-required emits {id, url}; the reviewer takes {storyId, url}.
+    VG_STORY_ENTRY=$(printf '%s' "$SERVE_URL_JSON" | jq -c --arg id "$VG_STORY_ID" '{storyId: $id, url: .url}')
+    VG_STORY_LINES="${VG_STORY_LINES}${VG_STORY_ENTRY}"$'\n'
+  done <<< "$(printf '%s' "$VG_JSON" | jq -c '.visualStories[]')"
+  cd "$AIMI_ROOT"
+  if [ "$VG_UNREWRITTEN" -gt 0 ]; then
+    VG_STATE=skipped
+    VG_SKIP_REASON="no dev server resolved for $PHASE_BRANCH"
+    $AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --reason "$VG_SKIP_REASON"
+  fi
+fi
+if [ "$VG_STATE" = skipped ]; then
+  printf 'visual-gate: skipped — %s\n' "$VG_SKIP_REASON"
+else
+  VG_STORIES_JSON=$(printf '%s' "$VG_STORY_LINES" | jq -s -c '.')
+  VG_INPUT=$(printf '%s' "$VG_JSON" | jq -c --arg root "$AIMI_ROOT" --arg container "$VG_CONTAINER" --argjson stories "$VG_STORIES_JSON" '{prototypePaths: [.prototypePaths[] | "\($root)/\(.)"], designSpecPath: (if .designSpec then "\($root)/\(.designSpec)" else null end), stories: $stories, containerPath: $container}')
+  printf 'visual-gate-input: %s\n' "$VG_INPUT"
+fi
+```
+
+A `visual-gate: skipped — <reason>` line means the gate recorded its `skipped` verdict and the phase continues to Write Handoff unchanged; keep that line verbatim for its deviations. A `visual-gate-input:` line means the environment can compare: continue below.
+
+#### Run the comparison
+
+Spawn `aimi-engineering:design:aimi-design-implementation-reviewer` via the Task tool **exactly once for the whole phase** — never once per story, unlike Step 4's per-story design review. The prompt's **first line is the literal `MODE: phase-close-visual-gate`**; without it the agent falls back to per-story mode and never emits a `visual_gate_verdict` block. After it, give the agent the parsed `visual-gate-input:` object's fields: `prototypePaths` (every prototype path), `designSpecPath` (only when non-null), `stories` (the full `{storyId, url}` list) and `containerPath`.
+
+Persist the reviewer's raw final response with `write-review --kind visual-gate` **before** the verdict is parsed — the suffix gives this review its own file, `.aimi/reviews/<feature>-phase-<N>-visual-gate.md`, so Step 5's design review, which names the same feature and phase, cannot overwrite the file `--review` points at — so a malformed verdict still leaves the transcript on disk, then parse **only the LAST** fenced `visual_gate_verdict` block, strictly. The fence is built with `printf` rather than typed, so this block carries no literal fence line of its own:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VG_REVIEW_BODY=$(cat <<'VG_REVIEW_EOF'
+[paste the reviewer's raw final response here, verbatim]
+VG_REVIEW_EOF
+)
+VG_REVIEW_JSON=$(printf '%s\n' "$VG_REVIEW_BODY" | $AIMI_CLI write-review --feature "$FEATURE" --phase "$PHASE_ID" --kind visual-gate) || VG_REVIEW_JSON=""
+REVIEW_PATH=$(printf '%s' "$VG_REVIEW_JSON" | jq -r '.review // empty' 2>/dev/null)
+VG_FENCE=$(printf '\140\140\140')
+VG_VERDICT_JSON=$(printf '%s\n' "$VG_REVIEW_BODY" | awk -v fence="$VG_FENCE" 'BEGIN { open = fence "visual_gate_verdict" } $0 == open { inb = 1; buf = ""; next } inb && $0 == fence { inb = 0; last = buf; have = 1; next } inb { buf = buf $0 "\n" } END { if (have) printf "%s", last }')
+VG_VERDICT=$(printf '%s' "$VG_VERDICT_JSON" | jq -r '.verdict' 2>/dev/null) || VG_VERDICT=""
+VG_SUMMARY=$(printf '%s' "$VG_VERDICT_JSON" | jq -r '.summary // ""' 2>/dev/null)
+case "$VG_VERDICT" in
+  pass)
+    $AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status passed --review "$REVIEW_PATH"
+    printf 'visual-gate: passed — %s\n' "$VG_SUMMARY"
+    ;;
+  diverges)
+    printf 'visual-gate-verdict: diverges review=%s\n' "${REVIEW_PATH:-<not written>}"
+    printf '%s' "$VG_VERDICT_JSON" | jq -r '.divergences[]? | "  - \(.storyId): \(.element) — expected \(.expected), observed \(.observed) [\(.source)]"'
+    ;;
+  *)
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    printf 'visual-gate: tooling-failed — no parseable visual_gate_verdict block with a pass or diverges verdict (review=%s)\n' "${REVIEW_PATH:-<not written>}"
+    ;;
+esac
+```
+
+- **`visual-gate: passed — <summary>`** — recorded; the phase falls through to Write Handoff.
+- **`visual-gate-verdict: diverges`** — see below.
+- **`visual-gate: tooling-failed`** — a missing block, a JSON parse failure, or a `.verdict` outside `pass`/`diverges`. Nothing was recorded via `roadmap-record-visual-gate` and the claim is released (the call above did it); the phase's status is left exactly where it was (`in_progress`), the same shape as Verification tooling failed above. Report:
+
+  ```
+  ## Phase [PHASE_ID] Visual Gate Could Not Run
+
+  The design reviewer did not return a usable visual_gate_verdict block. This is
+  NOT a finding that the UI diverges — nothing was proven either way.
+
+  Raw review: [REVIEW_PATH, or "not written"]
+
+  Phase status is unchanged (in_progress) and the claim is released. Re-run
+  /aimi:execute -- the visual gate re-runs on the next pass.
+  ```
+
+  Do **not** write `handoff.md`, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5.
+
+#### On a diverges verdict
+
+Resolve interactivity fresh — each Bash call is an isolated shell (Step 0):
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+echo "visual-gate: interactivity=$INTERACTIVE_MODE"
+```
+
+- **`INTERACTIVE_MODE=picker`:** ask exactly one `AskUserQuestion`, showing the reviewer's `divergences[]`. Option A, the default and least disruptive, is **Leave the phase failing**; the trailing "Other" option is **Accept the divergences**, answered with a typed reason. Anything that is not an explicit Other answer carrying a reason — a decline, silence, any other option — leaves the phase failing. A typed reason is sanitized per `${CLAUDE_PLUGIN_ROOT}/commands/references/sanitization.md`'s Base Rules before it reaches `--reason`.
+- **`INTERACTIVE_MODE=agent`:** never ask this question and never record `accepted` — an unattended run cannot own an acceptance. The phase is left failing unconditionally.
+
+**Accepting** records the verdict, satisfies the gate and falls through to Write Handoff. Compose the sanitized reason in the quoted heredoc so its bytes reach the verb unexpanded:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VG_ACCEPT_REASON=$(cat <<'VG_ACCEPT_EOF'
+[the typed reason, sanitized per sanitization.md Base Rules]
+VG_ACCEPT_EOF
+)
+$AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status accepted --reason "$VG_ACCEPT_REASON" --review "$REVIEW_PATH"
+printf 'visual-gate: accepted — %s\n' "$VG_ACCEPT_REASON"
+```
+
+**Leaving it failing** (every decline, and unconditionally in agent mode) records `diverges`, transitions the phase to `verification_failed` and releases the claim, so re-running `/aimi:execute` re-enters Phase Completion and re-runs this gate:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VG_DIVERGE_REASON=$(cat <<'VG_DIVERGE_EOF'
+[the reviewer's one-line summary, sanitized per sanitization.md Base Rules]
+VG_DIVERGE_EOF
+)
+$AIMI_CLI roadmap-record-visual-gate --feature "$FEATURE" --phase "$PHASE_ID" --status diverges --reason "$VG_DIVERGE_REASON" --review "$REVIEW_PATH"
+$AIMI_CLI roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status verification_failed
+$AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+```
+
+Report the reviewer's `divergences[]` (the lines the verdict block printed) and the raw review path, and say the phase is `verification_failed` and that re-running `/aimi:execute` re-runs the gate. Do **not** write `handoff.md`, do **not** run Mark Phase Completed, do **not** offer a PR, do **not** run the Next Phase step below. Skip directly to Step 5.
+
 ### Write Handoff
 
-Only reached when `verify-creates` exited 0 and returned neither a `missing` nor an `error` entry — i.e. every `creates` entry verified. Build the five-section payload:
+Only reached when `verify-creates` exited 0 and returned neither a `missing` nor an `error` entry — i.e. every `creates` entry verified. This payload is written to `handoff.md`, a plugin-owned artifact — per the artifact-language rule (`commands/references/user-communication.md`), author all five sections below in English. Build the five-section payload:
 
 - **Decisions Made** — one bullet per notable implementation decision surfaced by this phase's stories (their `implementation.approach` text, gate resolutions, or explicit deviations the story-executor agents reported). Empty array if nothing stood out.
 - **Artifacts Created** — exactly `VERIFIED_ARTIFACTS` from Creates Verification above, unmodified. This is the section `validate-contracts`'s `handoff_lists_artifact` (in `roadmap.py`) searches when a downstream phase's `needs` references this phase — every identity must appear verbatim.
 - **Deviations** — one bullet per `.aimi/known-gaps/*.md` file belonging to this phase's stories (same source Step 5's "Known Gaps" aggregation reads), summarizing the story id and gap, **plus exactly one line carrying this phase's verification-evidence fraction**, spelled the way Step 5 prints it: `verification-evidence: discriminating=<n> completed=<m>`. That line is present on **every** run — full, partial or zero — for the same reason Step 5's own `## Verification Evidence` section is unconditional, and `handoff.md` is where it matters most: the handoff is the durable per-phase record a later phase reads, and a record that only mentions evidence when there was some cannot tell a checked phase from an unchecked one. One line, never a table, and never omitted at zero. So this array is no longer empty when no gap file exists — it holds that one line alone.
   - **It rides in `deviations` rather than in a key of its own because a sixth key would be silently dropped.** `roadmap.py`'s `HANDOFF_FIELDS` is a fixed five — `decisions`, `artifacts`, `deviations`, `deferred`, `contracts` — and a payload carrying a sixth writes successfully while the number simply never reaches `handoff.md`. Widening that tuple is `roadmap.py`'s change to make, not this command's.
   - **The two counts come from the payloads this run already has, not from a second CLI call.** Sum the per-story `VERIFY_EVIDENCE_JSON` values Step 4 read off each worker's `result_json`: `m` is the number of this phase's stories marked complete this run, and `n` is how many of them carried a `verify` object whose `discriminating` is 1 or more (an empty `VERIFY_EVIDENCE_JSON` counts toward `m` only — it is unrecorded evidence, not a recorded zero). This step runs **before** Step 5 captures `COMPLETION_VERIF_REPORT`, and it deliberately does not open a `verification-report` call of its own to fetch a number already in hand. The consequence is worth knowing when the two lines differ: the handoff counts what THIS run completed, Step 5's section counts every completed story in the file, so a resumed phase legitimately reports a smaller `m` here than the report prints below.
+  - **One `verification-skipped: <id> — <reason or "no reason recorded">` line per this phase's own skipped verification** — every entry of `verification-report --tasks-file "$PHASE_TASKS_PATH"`'s `.skipped` array, read via a **dedicated call made at this point in the flow**, scoped to every COMPLETED story in this phase's own tasks file whose `verification.status` is literally `skipped` (`verification_report`'s own `skipped` key already carries exactly that scope). This is the one divergence from the `verification-evidence:` line immediately above, and it runs the opposite way on purpose: Step 4 accumulated `VERIFY_EVIDENCE_JSON`'s `{exit, preExit, segments, discriminating}` per completed story and nothing about skip status or reason, so there is no run-scoped accumulator here for this call to be a redundant second read of — it is the FIRST read of this data, not a second one, and the reason a fresh `verification-report` call is warranted here where the evidence line's own comment warns against exactly that. Its scope is `verification_report`'s own completed-story definition (every completed story in this phase's tasks file), not Step 4's THIS-RUN accumulation, since no incremental per-run tracking of skip status exists to restrict it to — a resumed phase's handoff can legitimately report a skip an EARLIER run of this same phase recorded, which the `m`/`n` evidence counts above never can. Present only when at least one such story exists: zero skipped means zero lines, never an empty placeholder — unlike the evidence fraction, which always prints its one line whatever the numbers are.
+  - **Exactly one `visual-gate: <status> — <reason>` line, present on every run that reaches Write Handoff** — the Phase Visual Gate section above always leaves one printed line: `visual-gate: not-required — <reason>` when no comparison was owed, or the required branch's own line (`visual-gate: skipped — <reason>`, `visual-gate: passed — <summary>`, `visual-gate: accepted — <sanitized reason>`). Copy that line verbatim. A phase left failing never reaches Write Handoff, so `diverges` never appears here.
 - **Deferred Items** — one bullet per this phase's own story left in `skipped` status, if any. Empty array if none.
 - **Contracts Delivered** — one bullet per `creates` entry restating the identity now available to dependent phases (`"<identity> — contract fulfilled, available to phases depending on [PHASE_ID]"`), mirroring Artifacts Created's identities but phrased for downstream `needs` resolution.
+
+**Nine tokens in this payload are locked tokens, never translated, regardless of the English mandate above — because something downstream greps for the literal string.** The five heading labels above (`Decisions Made`, `Artifacts Created`, `Deviations`, `Deferred Items`, `Contracts Delivered`) are hard-locked in `scripts/roadmap.py`'s `HANDOFF_FIELDS`/`HANDOFF_SECTIONS` tuples (`scripts/roadmap.py:2055-2064`), and `roadmap-write-handoff` refuses the entire write when one breaks (`scripts/roadmap.py:3589-3597`). The artifact identity copied verbatim into `## Artifacts Created` is the sixth: `handoff_lists_artifact`'s fixed-substring lookup (`scripts/roadmap.py:3048`) is what `validate-contracts` uses to resolve a downstream phase's `needs`, so translating that identity makes the contract report not-delivered and blocks the dependent phase. A seventh, the `verification-evidence: discriminating=<n> completed=<m>` line two bullets above, is a locked LINE sitting inside this otherwise-prose `deviations` array — the surrounding bullets are free prose, only that one line is not. An eighth, the `verification-skipped: <id> — <reason or "no reason recorded">` line the bullet immediately above describes, is a second locked line inside that same array, for the identical reason: a skip an operator or a later phase greps for by this exact prefix must find it spelled the same way every time. A ninth, the `visual-gate: <status> — <reason>` line the bullet below describes, is a third locked line inside that same array, for the same reason: the visual-gate verdict an operator or a later phase greps for by this prefix must read the same way every time.
 
 Write via the guard-protected CLI call only — **never** a direct Write or Edit tool call on `handoff.md`'s path (`guard-runtime-state.py` blocks that and points back at this verb):
 
@@ -4648,6 +4858,31 @@ printf 'verification-evidence: discriminating=%s completed=%s\n' "${EVIDENCE_CHE
 if [ "${EVIDENCE_CHECKED:-0}" -eq 0 ] && [ "${EVIDENCE_COMPLETED:-0}" -gt 0 ]; then
   printf 'verification-evidence: closed unchecked — %s completed stor(y|ies), not one of them carrying a discriminating assertion\n' "${EVIDENCE_COMPLETED:-0}"
 fi
+# `skipped` is read off the SAME captured payload too, for the identical
+# one-read-cannot-disagree-with-itself reason the discriminating comment
+# above gives. `// []` carries the same meaning `.pending // []` carries —
+# a CLI predating this key answers {visual, pending, malformed,
+# discriminating} with no `skipped` key at all, and it must report zero
+# rather than abort a completion report over an additive section.
+SKIPPED_VERIF_COUNT=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.skipped // [] | length' 2>/dev/null)
+SKIPPED_VERIF_LINES=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq -r '.skipped // [] | map("  " + .id + " — " + (.reason // "no reason recorded")) | join("\n")' 2>/dev/null)
+printf 'skipped-verification: count=%s\n' "${SKIPPED_VERIF_COUNT:-0}"
+# `verdicts` is read off the SAME captured payload too, for the identical
+# one-read-cannot-disagree-with-itself reason the two comments above give.
+# Each `// 0` carries the same meaning every other default on this payload
+# carries — a CLI predating this key answers {visual, pending, malformed,
+# discriminating, skipped} with no `verdicts` key at all, and each of its
+# five counts must report zero rather than abort a completion report over
+# an additive section.
+VERDICT_PASSED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.passed // 0' 2>/dev/null)
+VERDICT_FAILED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.failed // 0' 2>/dev/null)
+VERDICT_SKIPPED=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.skipped // 0' 2>/dev/null)
+VERDICT_PENDING=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.pending // 0' 2>/dev/null)
+VERDICT_OTHER=$(printf '%s' "$COMPLETION_VERIF_REPORT" | jq '.verdicts.other // 0' 2>/dev/null)
+# Unconditional, like `verification-evidence:` above and for the identical
+# reason — see that printf's own comment.
+printf 'verdicts: passed=%s failed=%s skipped=%s pending=%s other=%s\n' \
+  "${VERDICT_PASSED:-0}" "${VERDICT_FAILED:-0}" "${VERDICT_SKIPPED:-0}" "${VERDICT_PENDING:-0}" "${VERDICT_OTHER:-0}"
 ```
 
 In phase mode the file named is this phase's own tasks file, the same one Step 5 already scopes its story-level reporting to. In flat mode the flag is omitted so the wrapper resolves the session-bound file itself — the one case in this command where `verification-report`'s `get_tasks_file` fallback is the right answer, because by Step 5 `init-session` has long since pointed session state at the file this run executed.
@@ -4699,11 +4934,30 @@ that closes with its checks unlooked-at and says nothing about it.
 
 If `PENDING_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `pending` partition reads as zero), omit the `## Pending Verification` section entirely.
 
+If `SKIPPED_VERIF_COUNT` > 0, append:
+```
+## Skipped Verification
+
+[SKIPPED_VERIF_COUNT] completed stor(y|ies) recorded a verification that was
+short-circuited rather than judged — not passed, not failed, deliberately
+`skipped`:
+
+[SKIPPED_VERIF_LINES]
+
+Each line is the story id and the reason recorded for skipping it, or the
+literal "no reason recorded" for a legacy skip that predates this field.
+Nothing here blocks the branch or the PR; it is named so a skip is never
+silent about why it happened.
+```
+
+If `SKIPPED_VERIF_COUNT` is 0 (or the section's own command produced nothing — an older CLI with no `skipped` key reads as zero), omit the `## Skipped Verification` section entirely — the identical omit-at-zero rule `## Pending Verification` takes immediately above, and for the identical reason: both report a POSITIVE fact (a story did something worth naming), so zero of either is genuinely nothing to report, no story declared-and-unjudged, no story short-circuited its own verdict. This is deliberately the SAME rule `## Verification Evidence` immediately below refuses to take — see the reasoned paragraph beside that section for why zero *discriminating* evidence is the one silence this report must never allow, unlike zero pending or zero skipped, which are both silences this report is glad to have nothing to say about.
+
 Append, on **every** run — never omitted, never conditional on the numbers being good:
 ```
 ## Verification Evidence
 
 discriminating=[EVIDENCE_CHECKED] completed=[EVIDENCE_COMPLETED]
+verdicts: passed=[VERDICT_PASSED] failed=[VERDICT_FAILED] skipped=[VERDICT_SKIPPED] pending=[VERDICT_PENDING] other=[VERDICT_OTHER]
 
 [EVIDENCE_CHECKED] of [EVIDENCE_COMPLETED] completed stor(y|ies) recorded a
 verify that discriminated — at least one assertion that behaved differently
@@ -4718,6 +4972,8 @@ evidence that anything was actually verified.
 ```
 
 **This section deliberately does NOT take `## Pending Verification`'s omit-at-zero rule, and a later edit must not tidy the two into consistency.** They look like neighbours and they are opposites. Zero pending verifications is genuinely nothing to report — nobody declared a check that nobody judged, so the section has no subject. Zero *discriminating* verifications is the single loudest thing this report can say: it means the phase closed with no evidence that anything was checked, and that is exactly the run a silent report makes indistinguishable from a flawless one. "33/33 completed, 0 unmet" is equally compatible with both, which is the defect this section exists to remove; a line that only prints when the number is good would rebuild it. The absence has to be as visible as the presence, so the numbers print whatever they are.
+
+**The `verdicts:` line beside it is deliberately kept OUT of `handoff.md`'s `## Deviations` array and out of the locked-token list two bullets above it (Write Handoff, `verification-evidence:`/`verification-skipped:`), and a later edit must not "complete the set" by adding it there — and not for the reason it first looks like.** Write Handoff already makes its own dedicated `verification-report` call at that point in the flow (the one that reads `.skipped` for the `verification-skipped:` line) and that same response already carries `.verdicts` too, at no extra cost — so "it would take a second, possibly-disagreeing call" is not why this stays out; that call already exists. The real reason is what a handoff exists to preserve. `verification-evidence:`'s `m`/`n` counts THIS RUN's own contribution, computed from Step 4's own per-run accumulator — a fact no later read of the tasks file can recover, because nothing in the document records which run completed which story, so the handoff is the only place that fact survives at all. `verdicts` carries no such unrecoverable fact: it is a pure function of the finished tasks file, answerable by re-running `verification-report` for as long as that file exists — forever, for a completed phase. The one piece of the distribution worth writing down permanently — WHY a story was short-circuited — is already itemized, one line per story, in `verification-skipped:` above; the rest is a summary a later reader can always ask for again, never information that would otherwise be gone.
 
 Append, on **every** run, immediately after `## Verification Evidence` above — the **Finalize Step** (Step 4, after Post-Loop Cleanup) always leaves `FINALIZE_STATUS` set, so there is always something to say:
 ```

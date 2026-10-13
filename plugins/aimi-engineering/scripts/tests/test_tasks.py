@@ -31,8 +31,10 @@ hand-written tests beside it carry the fidelity argument. It is also the one
 block whose port changed rules on purpose: four of them, named in
 CONTEXT_DECISIONS and asserted in full, kept deliberately apart from the six
 engine aborts in CONTEXT_ABORTS because a decision is not an excuse. Its
-comparison strips one key (`skillsDropped`) from the actual stdout before
-comparing, and everything else still has to match the recording byte for byte.
+comparison strips one key (`dropped`, renamed from `skillsDropped` by US-003,
+and, since the same story, `designContext.specSections`, a key that did not
+exist at capture time either) from the actual stdout before comparing, and
+everything else still has to match the recording byte for byte.
 The fourth, brainstorm-secao-duplicada, differs from the first three in one
 way: its recorded value WAS updated to the new output (US-002's shape rule and
 provenance line), rather than kept as pre-port evidence the way
@@ -85,8 +87,12 @@ import tasks as T  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
+TASKS_PY = os.path.join(SCRIPTS, "tasks.py")
 
-with open(os.path.join(HERE, "golden_from_jq.json"), encoding="utf-8") as _handle:
+_GOLDEN_PATH = os.path.join(HERE, "golden_from_jq.json")
+_GOLDEN_MTIME_AT_IMPORT = os.path.getmtime(_GOLDEN_PATH)
+
+with open(_GOLDEN_PATH, encoding="utf-8") as _handle:
     GOLDEN = json.load(_handle)
 
 CASES = {c["label"]: c for c in GOLDEN["tasks_read_cases"]}
@@ -1699,6 +1705,77 @@ def test_a_tasks_entry_may_name_the_shell_operator_it_describes(tmp_path):
     assert json.loads(proc.stdout) == {"valid": True, "errors": []}
 
 
+def _one_verification_doc(verification):
+    """`_one_task_doc`'s sibling: a minimal valid document whose single story
+    carries one `verification` value instead of one `tasks[]` entry."""
+    return {
+        "schemaVersion": "3.3",
+        "metadata": {
+            "title": "ref: p", "type": "ref", "branchName": "ref/p",
+            "createdAt": "2020-01-01", "planPath": None,
+        },
+        "userStories": [{
+            "id": "US-001",
+            "title": "Story US-001",
+            "description": "As an author, I want US-001.",
+            "acceptanceCriteria": ["Typecheck passes"],
+            "status": "pending",
+            "priority": 1,
+            "dependsOn": [],
+            "wave": 1,
+            "verification": verification,
+        }],
+    }
+
+
+def test_validate_stories_refuses_a_verification_strategy_or_status_outside_the_documented_value_set():
+    """AC1/AC2: an unknown strategy or status is refused by name, quoting the
+    value found; a known pair passes; the legacy `skipped` shape with no
+    `skipReason` at all stays valid, because that presence check belongs to
+    set-verification (a later story), never to this read-only validator."""
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "vizual", "status": "pending"})
+    ) == {
+        "valid": False,
+        "errors": ["US-001: verification.strategy \"vizual\" is not one of: test, visual, api"],
+    }
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "test", "status": "done"})
+    ) == {
+        "valid": False,
+        "errors": ["US-001: verification.status \"done\" is not one of: pending, passed, failed, skipped"],
+    }
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "visual", "status": "passed"})
+    ) == {"valid": True, "errors": []}
+    # The legacy on-disk shape: status: "skipped" with no skipReason key at
+    # all. This phase's own research measured zero skipped-with-reason
+    # stories on disk today, and AC2 says validate-stories must not be the
+    # verb that starts requiring one.
+    assert T.validate_stories(
+        _one_verification_doc({"strategy": "api", "status": "skipped"})
+    ) == {"valid": True, "errors": []}
+
+
+def test_normalize_verification_then_validate_stories_refuses_a_migrated_bare_string():
+    """AC4: commands/plan.md (~3553) runs normalize-verification immediately
+    before validate-stories -- Phase 4.5's own ordering -- so this proves the
+    CHAIN rather than the two calls in isolation. `_verification_migrated`
+    turns a bare `"passed"` into `{"strategy": "passed", "status": "pending",
+    "url": None, "expect": None}`, and "passed" is a member of
+    VERIFICATION_STATUSES but not of VERIFICATION_STRATEGIES, so the migrated
+    document is refused on the strategy field specifically."""
+    doc = _one_verification_doc("passed")
+    T.normalize_verification(doc)
+    assert doc["userStories"][0]["verification"] == {
+        "strategy": "passed", "status": "pending", "url": None, "expect": None,
+    }
+    assert T.validate_stories(doc) == {
+        "valid": False,
+        "errors": ["US-001: verification.strategy \"passed\" is not one of: test, visual, api"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # validate-tasks: fifteen rules, and the scaffolding that did not survive
 # ---------------------------------------------------------------------------
@@ -2696,9 +2773,8 @@ def test_prototypedropped_acquired_no_consumer():
     tuple is the cleanup loop that MOVES and DELETES the paths it names.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
     )
-    assert "prototypeDropped" not in T.STORY_CONTEXT_METADATA_KEYS
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
     assert "prototypeDropped" not in cleanup
@@ -2917,13 +2993,227 @@ def test_the_three_pieces_of_scaffolding_are_gone_from_the_shell():
 
     source = _source()
     assert len(re.findall(r"^def validate_tasks_metadata\(", source, re.M)) == 1
-    # ONE scanner for both specs, where bash had the awk program twice.
+    # ONE scanner for both specs, where bash had the awk program twice. US-001
+    # gave it a second legitimate caller (spec_sections), so the count moved
+    # from 2 to 3 -- one def plus two call sites (spec_contains, spec_sections)
+    # -- and this assertion is updated deliberately in the same diff rather
+    # than left to break silently.
     assert len(re.findall(r"^def subsection_body\(", source, re.M)) == 1
-    assert source.count("subsection_body(") == 2, "one def plus the single call site"
+    assert source.count("subsection_body(") == 3, "one def plus two callers (spec_contains, spec_sections)"
 
     wrapper = dict(_wrappers())["cmd_validate_tasks"]
     assert wrapper.count(_TASKS_CROSSING) == 1
     assert "_lock" not in wrapper and "jq " not in wrapper
+
+
+def test_subsection_body_matches_a_numbered_heading_with_a_trailing_period():
+    """The `## <n>. <title>` shape skills/aimi-design-handoff/references/
+    spec-output-shape.md documents as the ONLY heading format that skill
+    writes was unreadable before this widening: the pre-existing regex
+    required a space or end-of-line directly after the section number, and a
+    literal '.' satisfied neither. Proven both ways -- the new period form
+    matches, and the pre-existing period-less form and the pre-existing
+    digit-dot-as-wildcard behaviour (ds-secao-ponto-curinga-sozinha) are
+    unaffected, since the added group sits strictly after the existing
+    literal match.
+    """
+    period = b"## 2. Screens\nPeriod-heading body.\n"
+    assert T.subsection_body(period, b"2", normalize=False) == b"Period-heading body."
+
+    periodless = b"## 5.3 Portfolio\nO resumo carrega portfolio.\n"
+    assert T.subsection_body(periodless, b"5.3", normalize=False) == b"O resumo carrega portfolio."
+
+    wildcard = b"## 5X3 Portfolio\nWildcard body.\n"
+    assert T.subsection_body(wildcard, b"5.3", normalize=False) == b"Wildcard body."
+
+
+def test_spec_sections_binds_to_the_first_document_only(tmp_path):
+    """A two-document stream carries a different designBundle in each
+    document; only the first is ever consulted -- the same story/metadata
+    scope op_get_story_context already uses for `story`/`metadata` -- never
+    bundle_guidance()'s own whole-stream fold, which its own docstring calls
+    "faithful rather than sensible" for prose nobody parses.
+    """
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "First.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nFirst document content.\n")
+    # The second document names a spec file that does not exist. If it were
+    # consulted at all, spec_sections would contribute nothing for it -- so
+    # the meaningful assertion is that the FIRST document's real content is
+    # what comes back, not merely that nothing broke.
+    doc_a = {"metadata": {"designBundle": {"businessSpec": "specs/First.md"}}}
+    doc_b = {"metadata": {"designBundle": {"businessSpec": "specs/Second.md"}}}
+    pairs = T.spec_sections([doc_a, doc_b], root)
+    assert pairs == [("BusinessSpec § 1", "First document content.")]
+
+
+def test_spec_sections_degrades_silently_on_a_missing_or_escaping_spec_path(tmp_path):
+    """No exception and no entry -- for a spec path absent on disk and for one
+    that escapes --project-root via '../' traversal. get-story-context is a
+    no-lock, always-must-succeed read, so a bad spec path in metadata must
+    never abort the whole payload, and confined_spec_path()'s soft
+    (path, inside) return is what makes that possible.
+    """
+    root = os.path.realpath(str(tmp_path / "proj"))
+    os.makedirs(os.path.join(root, "specs"))
+    parent = os.path.dirname(root)
+    os.makedirs(os.path.join(parent, "outside"), exist_ok=True)
+    with open(os.path.join(parent, "outside", "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\n\nShould never be read.\n")
+
+    missing = {"metadata": {"designBundle": {"businessSpec": "specs/DoesNotExist.md"}}}
+    assert T.spec_sections([missing], root) == []
+
+    traversal = {"metadata": {"designBundle": {"designSpec": "../outside/Secret.md"}}}
+    assert T.spec_sections([traversal], root) == []
+
+
+def test_spec_sections_returns_pairs_in_contract_table_order(tmp_path):
+    """Every contract section for both specs, present in a fixture carrying
+    all 17. The order is the declared priority interleave spec_sections()'s
+    own docstring names -- BusinessSpec and DesignSpec alternating position by
+    position, each spec's own slots still in ITS OWN contract-table order --
+    asserted against the exact expected label sequence, never merely a count,
+    since a wrong order returns the right count. Plain table order (every
+    BusinessSpec row, then every DesignSpec row) is deliberately NOT what this
+    asserts: composed with a later FIFO-from-the-end eviction cap, plain table
+    order would drop every DesignSpec section before any BusinessSpec one --
+    backwards for a phase whose whole goal is delivering the design contract
+    to a UI-implementing executor.
+    """
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    business = "\n\n".join(
+        "## " + section + " Section " + section + "\nBody " + section
+        for section in T.BUSINESS_SPEC_SECTIONS
+    )
+    design = "\n\n".join(
+        "## " + section + " Section " + section + "\nBody " + section
+        for section in T.DESIGN_SPEC_SECTIONS
+    )
+    with open(os.path.join(root, "specs", "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(business + "\n")
+    with open(os.path.join(root, "specs", "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(design + "\n")
+
+    doc = {
+        "metadata": {
+            "designBundle": {
+                "businessSpec": "specs/BusinessSpec.md",
+                "designSpec": "specs/DesignSpec.md",
+            }
+        }
+    }
+    pairs = T.spec_sections([doc], root)
+    assert not isinstance(pairs, dict)
+    assert all(isinstance(pair, tuple) and len(pair) == 2 for pair in pairs)
+    assert [label for label, _ in pairs] == [
+        "BusinessSpec § 1", "DesignSpec § 1",
+        "BusinessSpec § 2", "DesignSpec § 2.2",
+        "BusinessSpec § 3", "DesignSpec § 3",
+        "BusinessSpec § 4", "DesignSpec § 4",
+        "BusinessSpec § 4.1", "DesignSpec § 6",
+        "BusinessSpec § 5", "DesignSpec § 8",
+        "BusinessSpec § 5.1",
+        "BusinessSpec § 5.3",
+        "BusinessSpec § 7",
+        "BusinessSpec § 9",
+        "BusinessSpec § 11",
+    ]
+
+
+def test_spec_sections_omits_a_contract_number_absent_from_the_fixture(tmp_path):
+    """A contract-listed section with no matching heading anywhere in the
+    resolved spec produces no entry at all -- never an entry with empty
+    content."""
+    root = os.path.realpath(str(tmp_path))
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nOnly section 1 is here.\n")
+
+    doc = {"metadata": {"designBundle": {"businessSpec": "specs/BusinessSpec.md"}}}
+    pairs = T.spec_sections([doc], root)
+    assert pairs == [("BusinessSpec § 1", "Only section 1 is here.")]
+    assert "BusinessSpec § 2" not in [label for label, _ in pairs]
+
+
+def test_spec_cap_is_a_new_dedicated_constant():
+    """Three separately named budgets, not a renamed reuse of any of the
+    others: SPEC_CAP is sized on DECISIONS_CAP's own order of magnitude by
+    the phase's operator decision, but it is its own constant."""
+    assert T.SPEC_CAP == 65536
+    assert T.SKILLS_CAP == 102400
+    assert T.DECISIONS_CAP == 65536
+
+
+def test_capped_spec_sections_returns_every_section_unchanged_when_comfortably_under_the_cap():
+    """Proving the cap does not fire on ordinary input -- every section comes
+    back in `kept`, unchanged, and `dropped` is empty."""
+    sections = [("BusinessSpec § 1", "primeira"), ("DesignSpec § 1", "segunda")]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == sections
+    assert dropped == []
+
+
+def test_capped_spec_sections_preserves_declaration_order_among_survivors():
+    """Declaration order is priority order and survives untouched when
+    nothing is evicted -- the same rule skills_payload() states for its own
+    declaration order."""
+    sections = [
+        ("BusinessSpec § 1", "um"),
+        ("DesignSpec § 1", "dois"),
+        ("BusinessSpec § 2", "tres"),
+    ]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert [label for label, _ in kept] == [
+        "BusinessSpec § 1", "DesignSpec § 1", "BusinessSpec § 2",
+    ]
+    assert dropped == []
+
+
+def test_capped_spec_sections_evicts_the_lowest_priority_section_when_the_aggregate_exceeds_a_lowered_cap(
+    monkeypatch,
+):
+    """Neither section alone exceeds the cap, but their combined size does.
+    The lowest-priority section -- last in the caller's declared order,
+    mirroring skills_payload()'s and design_decisions()'s own end-of-order
+    eviction -- is dropped whole; the higher-priority section survives
+    intact."""
+    monkeypatch.setattr(T, "SPEC_CAP", 100)
+    sections = [("BusinessSpec § 1", "a" * 60), ("DesignSpec § 1", "b" * 60)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == [("BusinessSpec § 1", "a" * 60)]
+    assert dropped == [{"section": "DesignSpec § 1", "bytes": 60, "reason": "aggregate"}]
+
+
+def test_capped_spec_sections_drops_a_single_oversized_section_whole_never_truncated(monkeypatch):
+    """A section too large on its own is dropped whole, before any aggregate
+    comparison runs, and never truncated into a partial blob."""
+    monkeypatch.setattr(T, "SPEC_CAP", 100)
+    sections = [("BusinessSpec § 1", "d" * 200)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == []
+    assert dropped == [{"section": "BusinessSpec § 1", "bytes": 200, "reason": "oversized"}]
+
+
+def test_capped_spec_sections_evicts_against_the_real_65536_byte_cap_with_no_monkeypatch():
+    """Proving the shipped production constant itself evicts a genuinely
+    oversized section -- not merely a monkeypatched stand-in."""
+    sections = [("BusinessSpec § 1", "e" * 70000)]
+    kept, dropped = T.capped_spec_sections(sections)
+    assert kept == []
+    assert dropped == [{"section": "BusinessSpec § 1", "bytes": 70000, "reason": "oversized"}]
+
+
+def test_capped_spec_sections_does_not_reuse_markdown_heading_shape_detection():
+    """capped_spec_sections() reuses none of design_decisions()'s markdown
+    heading-shape detection machinery -- its input already arrives pre-sliced
+    by contract section number, a different section shape than a raw
+    brainstorm document's `## ` headings."""
+    body = _code().split("def capped_spec_sections", 1)[1].split("\ndef ", 1)[0]
+    assert "DECISIONS_HEADING_RE" not in body
+    assert "_split_top_sections" not in body
 
 
 def test_the_version_gate_is_sort_v_and_not_an_approximation_of_it():
@@ -3003,11 +3293,19 @@ def test_the_subsection_scanner_keeps_the_asymmetry_between_the_two_specs():
 # of a megabyte to the golden file.
 _RUN = re.compile(r"(.)\1{255,}", re.S)
 
-# The one key the payload gained. It is stripped from the ACTUAL stdout before
-# the corpus comparison, so everything else -- key order, indentation, the
+# The top-level key the payload gained (originally `skillsDropped`, renamed to
+# `dropped` by US-003). It is stripped from the ACTUAL stdout before the
+# corpus comparison, so everything else -- key order, indentation, the
 # trailing newline -- still has to match the recording byte for byte rather
 # than merely parse to the same object.
-_DROPPED_KEY = re.compile(r',\n  "skillsDropped": (?:\[\]|\[\n(?:.|\n)*?\n  \])\n\}', re.S)
+_DROPPED_KEY = re.compile(r',\n  "dropped": (?:\[\]|\[\n(?:.|\n)*?\n  \])\n\}', re.S)
+
+# The second key the payload gained, since the same story: `designContext`'s
+# own `specSections`, nested one level deeper than `dropped` and never
+# recorded by any capture -- spec_sections() did not exist yet. Stripped the
+# same way and for the same reason: this key's PRESENCE is new, not its
+# renaming, so it needs a mask of its own rather than reuse of the one above.
+_SPEC_SECTIONS_KEY = re.compile(r',\n    "specSections": (?:\{\}|\{\n(?:.|\n)*?\n    \})\n  \}', re.S)
 
 
 def _rle(text):
@@ -3016,6 +3314,17 @@ def _rle(text):
 
 def _without_dropped(text):
     return _DROPPED_KEY.sub("\n}", text)
+
+
+def _without_spec_sections(text):
+    return _SPEC_SECTIONS_KEY.sub("\n  }", text)
+
+
+def _without_added_keys(text):
+    """Both of US-003's additions stripped in one call -- the shape every
+    corpus-comparison call site below needs, since the payload now carries
+    two keys no recording has ever seen."""
+    return _without_dropped(_without_spec_sections(text))
 
 
 def _replay_context(case, tmp_path):
@@ -3104,6 +3413,15 @@ CONTEXT_DECISIONS = {
     "cap-multibyte-c-utf-8": "the cap counts bytes; under LC_ALL=C.UTF-8 it counted characters",
     "cap-gigante-primeiro": "an individually oversized skill no longer drains its siblings",
     "brainstorm-secao-duplicada": "two matched sections now carry provenance instead of merging bare",
+    # US-003: both cases declare a designBundle whose businessSpec/designSpec
+    # point at files that were never created (files: [] / a brainstorm only).
+    # Before this story nothing checked those paths at all, so the recording
+    # is silent; spec_sections()'s new confinement check now reports each one
+    # missing-on-disk, which is two new stderr lines -- exactly what AC5 asks
+    # for, asserted in full by test_dangling_bundle_paths_are_reported_missing
+    # below rather than by this byte-for-byte comparison.
+    "bundle-completo": "a dangling designBundle path is now reported missing-on-disk",
+    "bundle-e-brainstorm": "a dangling designBundle path is now reported missing-on-disk",
 }
 
 
@@ -3117,7 +3435,7 @@ def test_the_story_context_port_reproduces_the_jq(label, tmp_path):
         pytest.skip(CONTEXT_DECISIONS[label])
     for field in ("exit", "stderr", "state_after"):
         assert actual[field] == case[field], label + " . " + field
-    assert _without_dropped(actual["stdout"]) == case["stdout"], label + " . stdout"
+    assert _without_added_keys(actual["stdout"]) == case["stdout"], label + " . stdout"
 
 
 def test_the_story_context_tables_name_only_cases_that_exist():
@@ -3125,7 +3443,33 @@ def test_the_story_context_tables_name_only_cases_that_exist():
     assert set(CONTEXT_DECISIONS) <= set(CONTEXT)
     assert not set(CONTEXT_ABORTS) & set(CONTEXT_DECISIONS)
     assert len(CONTEXT) == 57
-    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 10, "47 of 57 match; keep this in step"
+    assert len(CONTEXT_ABORTS) + len(CONTEXT_DECISIONS) == 12, "45 of 57 match; keep this in step"
+
+
+def test_dangling_bundle_paths_are_reported_missing_on_disk(tmp_path):
+    """US-003 AC5, asserted against the two CONTEXT_DECISIONS entries that
+    name it: bundle-completo and bundle-e-brainstorm both declare a
+    designBundle whose businessSpec/designSpec point at files nobody ever
+    created. Before this story nothing checked those paths, so the golden
+    recording's stderr is empty for both -- the two new lines are the finding,
+    not a regression, and this is the dedicated assertion CONTEXT_DECISIONS
+    points at rather than the byte-for-byte comparison it skips.
+    """
+    for label in ("bundle-completo", "bundle-e-brainstorm"):
+        actual, payload = _context_stdout(label, tmp_path / label)
+        assert actual["stderr"] == (
+            "spec file .aimi/design/b/business-spec.md dropped — missing-on-disk\n"
+            "spec file .aimi/design/b/design-spec.md dropped — missing-on-disk\n"
+        ), label
+        paths = sorted(entry["path"] for entry in payload["dropped"])
+        assert paths == [
+            ".aimi/design/b/business-spec.md", ".aimi/design/b/design-spec.md",
+        ], label
+        assert all(entry["kind"] == "specFile" for entry in payload["dropped"]), label
+        assert all(entry["reason"] == "missing-on-disk" for entry in payload["dropped"]), label
+        assert all(entry["bytes"] is None for entry in payload["dropped"]), label
+        assert all(entry["deferred"] is False for entry in payload["dropped"]), label
+        assert payload["designContext"]["specSections"] == {}, label
 
 
 def test_get_story_context_writes_nothing_on_any_path_the_corpus_walks():
@@ -3183,7 +3527,7 @@ def test_each_excused_story_context_case_aborted_and_now_answers_instead(label, 
         ), "dropped whole, not truncated"
     else:
         assert [skill["content"] for skill in payload["skills"]][0] == "", "empty, not fatal"
-        assert payload["skillsDropped"] == []
+        assert payload["dropped"] == []
 
 
 def test_no_jq_survives_in_the_wrapper_and_it_crosses_once():
@@ -3215,12 +3559,14 @@ def _context_stdout(label, tmp_path):
 
 def test_the_payload_carries_five_keys_in_the_order_a_consumer_reads_them(tmp_path):
     """The shape IS the contract here: this payload is parsed by an agent, not
-    by a caller who can read a diff. skillsDropped is appended LAST so the four
-    keys that were always there keep their positions."""
+    by a caller who can read a diff. `dropped` (renamed from `skillsDropped`
+    by US-003) is appended LAST so the four keys that were always there keep
+    their positions. `designContext` gained a third key of its own, the same
+    story: `specSections`, always present and last among the three."""
     _, payload = _context_stdout("skills-tres", tmp_path)
-    assert list(payload) == ["story", "metadata", "skills", "designContext", "skillsDropped"]
+    assert list(payload) == ["story", "metadata", "skills", "designContext", "dropped"]
     assert [list(skill) for skill in payload["skills"]] == [["name", "path", "content"]] * 3
-    assert list(payload["designContext"]) == ["decisions", "bundleGuidance"]
+    assert list(payload["designContext"]) == ["decisions", "bundleGuidance", "specSections"]
     assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta", "gama"]
 
 
@@ -3231,20 +3577,157 @@ def test_skills_dropped_is_present_and_empty_when_nothing_was_dropped(tmp_path):
     for label in ("sem-skills", "skills-vazio", "skills-tres", "skill-ausente",
                   "skills-base-nao-resolvida", "cap-fronteira-exata"):
         _, payload = _context_stdout(label, tmp_path / label)
-        assert payload["skillsDropped"] == [], label
+        assert payload["dropped"] == [], label
 
     # and the recordings prove the key is genuinely NEW rather than renamed:
-    # nothing in the pre-port corpus ever printed it.
+    # nothing in the pre-port corpus ever printed it (under either name).
     assert not any("skillsDropped" in case["stdout"] for case in CONTEXT.values())
+    assert not any('"dropped"' in case["stdout"] for case in CONTEXT.values())
 
 
-def test_the_only_added_key_is_the_one_the_comparison_strips(tmp_path):
-    """The corpus comparison removes skillsDropped textually, which is only
-    honest if removing it leaves the recording exactly. Asserted once, in full,
-    against a case that drops nothing."""
+def test_the_only_added_keys_are_the_ones_the_comparison_strips(tmp_path):
+    """The corpus comparison removes `dropped` and `designContext.specSections`
+    textually, which is only honest if removing both leaves the recording
+    exactly. Asserted once, in full, against a case that drops nothing and
+    carries no designBundle."""
     actual, _ = _context_stdout("skills-tres", tmp_path)
-    assert actual["stdout"].endswith(',\n  "skillsDropped": []\n}\n')
-    assert _without_dropped(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+    assert actual["stdout"].endswith(',\n  "dropped": []\n}\n')
+    assert '"specSections": {}' in actual["stdout"]
+    assert _without_added_keys(actual["stdout"]) == CONTEXT["skills-tres"]["stdout"]
+
+
+def test_dropped_is_empty_in_the_clean_case(tmp_path, capsys):
+    """US-003 AC6: a story declaring no skills, no designBundle, and metadata
+    that names no spec paths produces `dropped == []` -- proven directly by a
+    dedicated test rather than incidentally by a case that happens to drop
+    nothing."""
+    root = os.path.realpath(str(tmp_path))
+    path = _rs_file(root, "clean.json", [_rs_story("US-001", title="Plain story")])
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", ""]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dropped"] == []
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_dropped_records_a_skill_a_spec_section_and_a_missing_spec_file(tmp_path, capsys, monkeypatch):
+    """US-003 AC7: one fixture engineered to trigger all three drop kinds at
+    once -- an oversized skill, an evicted spec section, and a designBundle
+    path missing on disk -- produces a `dropped` list with one entry of each
+    kind carrying exactly the fields this story specifies. Checked entry by
+    entry, not merely that the key exists: an assertion that only checks
+    presence proves nothing about the populated shape.
+    """
+    monkeypatch.setattr(T, "SKILLS_CAP", 10)
+    monkeypatch.setattr(T, "SPEC_CAP", 10)
+
+    root = os.path.realpath(str(tmp_path))
+    skills_base = os.path.join(root, "skills")
+    os.makedirs(os.path.join(skills_base, "gigante"))
+    with open(os.path.join(skills_base, "gigante", "SKILL.md"), "w", encoding="utf-8") as handle:
+        handle.write("a body well over the ten-byte cap\n")
+
+    os.makedirs(os.path.join(root, "specs"))
+    with open(os.path.join(root, "specs", "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\nA section body well over the ten-byte cap too.\n")
+
+    story = _rs_story("US-001", title="Story with a skill and a bundle")
+    story["skills"] = ["gigante"]
+    metadata = {
+        "title": "t",
+        "branchName": "b",
+        "designBundle": {
+            "businessSpec": "specs/Missing.md",
+            "designSpec": "specs/DesignSpec.md",
+        },
+    }
+    path = os.path.join(root, "engineered.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}, handle
+        )
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", skills_base]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    dropped = payload["dropped"]
+    assert len(dropped) == 3
+
+    by_kind = {entry["kind"]: entry for entry in dropped}
+    assert set(by_kind) == {"skill", "specSection", "specFile"}
+
+    skill_entry = by_kind["skill"]
+    assert skill_entry == {
+        "kind": "skill", "name": "gigante", "path": None, "section": None,
+        "reason": "oversized", "bytes": skill_entry["bytes"], "deferred": False,
+    }
+    assert skill_entry["bytes"] > 10
+
+    section_entry = by_kind["specSection"]
+    assert section_entry == {
+        "kind": "specSection", "name": None, "path": "specs/DesignSpec.md",
+        "section": "DesignSpec § 1", "reason": "oversized",
+        "bytes": section_entry["bytes"], "deferred": True,
+    }
+    assert section_entry["bytes"] > 10
+
+    file_entry = by_kind["specFile"]
+    assert file_entry == {
+        "kind": "specFile", "name": None, "path": "specs/Missing.md",
+        "section": None, "reason": "missing-on-disk", "bytes": None,
+        "deferred": False,
+    }
+
+    # The oversized section never made it into specSections -- deferred, not
+    # kept -- so the object every UI-implementing executor reads is empty.
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_dropped_reports_a_spec_file_escaping_the_project_root(tmp_path, capsys):
+    """US-003 AC5's other reason: a designBundle path that resolves outside
+    --project-root via '../' traversal produces a `specFile` entry with
+    `reason: "escapes-project-root"`, distinct from `"missing-on-disk"` -- the
+    engineered fixture above never exercises this branch, since its own
+    missing path is merely absent, not escaping."""
+    root = os.path.realpath(str(tmp_path / "proj"))
+    os.makedirs(root)
+    parent = os.path.dirname(root)
+    os.makedirs(os.path.join(parent, "outside"), exist_ok=True)
+    with open(os.path.join(parent, "outside", "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 1 Overview\n\nShould never be read.\n")
+
+    story = _rs_story("US-001", title="Story with an escaping bundle path")
+    metadata = {
+        "title": "t", "branchName": "b",
+        "designBundle": {"designSpec": "../outside/Secret.md"},
+    }
+    path = os.path.join(root, "escaping.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}, handle
+        )
+
+    rc = T.op_get_story_context(
+        ["get-story-context", "--tasks-file", path, "--story-id", "US-001",
+         "--project-root", root, "--skills-base-dir", ""]
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "../outside/Secret.md",
+        "section": None, "reason": "escapes-project-root", "bytes": None,
+        "deferred": False,
+    }]
+    # The escaping file is never opened -- spec_sections() degrades silently,
+    # the same soft (path, inside) rule its own docstring documents.
+    assert payload["designContext"]["specSections"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -3372,7 +3855,7 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     this rule. Re-run the grep the comment records when a reader is added.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 
@@ -3429,8 +3912,9 @@ def test_the_byte_cap_answers_the_same_under_both_locales(tmp_path):
         actual, payload = _context_stdout(label, tmp_path / label)
         answers[label] = actual["stdout"]
         assert [skill["name"] for skill in payload["skills"]] == ["pequeno"]
-        assert payload["skillsDropped"] == [
-            {"name": "mb", "bytes": 102600, "reason": "oversized"}
+        assert payload["dropped"] == [
+            {"kind": "skill", "name": "mb", "path": None, "section": None,
+             "reason": "oversized", "bytes": 102600, "deferred": False}
         ]
         assert "102600 bytes exceeds the 100KB skills cap" in actual["stderr"]
     assert answers["cap-multibyte-c"] == answers["cap-multibyte-c-utf-8"]
@@ -3456,8 +3940,9 @@ def test_an_oversized_skill_is_dropped_without_draining_its_siblings(tmp_path):
 
     actual, payload = _context_stdout("cap-gigante-primeiro", tmp_path)
     assert [skill["name"] for skill in payload["skills"]] == ["alpha", "beta"]
-    assert payload["skillsDropped"] == [
-        {"name": "gigante", "bytes": 102401, "reason": "oversized"}
+    assert payload["dropped"] == [
+        {"kind": "skill", "name": "gigante", "path": None, "section": None,
+         "reason": "oversized", "bytes": 102401, "deferred": False}
     ]
     assert actual["stderr"] == (
         "skill gigante dropped — 102401 bytes exceeds the 100KB skills cap on its own\n"
@@ -3477,7 +3962,8 @@ def test_the_aggregate_cap_and_its_boundary_are_untouched(tmp_path):
     assert [skill["name"] for skill in exact["skills"]] == ["alpha", "beta"]
     actual, over = _context_stdout("cap-fronteira-mais-um", tmp_path / "mais-um")
     assert [skill["name"] for skill in over["skills"]] == ["alpha"]
-    assert over["skillsDropped"] == [{"name": "beta", "bytes": 51201, "reason": "aggregate"}]
+    assert over["dropped"] == [{"kind": "skill", "name": "beta", "path": None, "section": None,
+                                 "reason": "aggregate", "bytes": 51201, "deferred": False}]
     assert actual["stderr"] == CONTEXT["cap-fronteira-mais-um"]["stderr"]
 
 
@@ -3662,6 +4148,329 @@ def test_the_declared_list_is_read_the_way_jq_r_and_mapfile_read_it():
     # stream to iterate rather than an error.
     assert T.declared_skill_names([{"userStories": [{"id": "US-001"}]}], "US-001") == []
     assert T.declared_skill_names([{"userStories": []}], "US-001") == []
+
+
+# ---------------------------------------------------------------------------
+# outline:05 -- a real payload proves the spec-as-data contract [US-005]
+# ---------------------------------------------------------------------------
+#
+# Every test below runs `tasks.py get-story-context` as its own real
+# subprocess -- the exact argv cmd_get_story_context builds at
+# aimi-cli.sh:1945-1947 -- rather than calling op_get_story_context() in
+# process the way the CONTEXT block above does. That distinction is the
+# story: US-005's own job is to prove the contract from a payload that was
+# actually BUILT, RUN and PARSED, not merely asserted against source. Every
+# fixture lives under pytest's own tmp_path, never this repository's .aimi/,
+# and --project-root is always passed explicitly -- never left to
+# find_aimi_root's climb, which would silently retarget which directory the
+# fixture's relative designBundle paths resolve against.
+#
+# KNOWN PLANNING DEFECT, recorded here rather than silently reinterpreted:
+# the story JSON's own AC1 asks for a negative twin where an "uncited"
+# contract section (BusinessSpec § 11) "never appears anywhere in the
+# payload", framed as proof that extraction is "scoped to what the story's
+# own citations call authoritative". That framing does not hold against the
+# real spec_sections(): extraction is scoped to metadata.designBundle and the
+# fixed 17-entry section contract (BUSINESS_SPEC_SECTIONS /
+# DESIGN_SPEC_SECTIONS), read once per FILE (docs[0]) -- there is no
+# citation-scanner anywhere in this path, and a section that really is a
+# heading in the bundle and really is on the contract table surfaces for
+# every story in that tasks file, whether or not that particular story's own
+# acceptanceCriteria happen to mention it. The negative twin below instead
+# proves the real, load-bearing property: a section is extracted only when a
+# real MARKDOWN HEADING for it exists -- plain prose that mentions a number
+# (a numbered list item, a forward reference) is not enough. That is what
+# stands between this payload and "a full-file dump wearing the contract's
+# name", and it is the honest version of what AC1 was reaching for.
+
+_SENTINEL_BUSINESS_3 = "BUSINESS_RULE_SENTINEL_7f3a"
+_SENTINEL_DESIGN_6 = "DESIGN_COMPONENT_SENTINEL_9c2e"
+
+# The exact bodies subsection_body() slices out of the fixture files built by
+# _build_spec_contract_root() below -- computed once here rather than
+# reconstructed per assertion, so every test that reads one of these two
+# sections compares against the identical literal.
+_BUSINESS_SECTION_3_BODY = (
+    "\n" + _SENTINEL_BUSINESS_3 + "\n\n"
+    "See the numbered list below.\n\n"
+    "11. This is a plain list item, not a heading, and must never be "
+    "read as section 11."
+)
+_DESIGN_SECTION_6_BODY = "\n" + _SENTINEL_DESIGN_6
+
+
+def _run_get_story_context(tasks_file, story_id, project_root, skills_base_dir="", cwd=None):
+    """The real subprocess AC1 asks for: the exact argv cmd_get_story_context
+    builds (aimi-cli.sh:1945-1947), invoked directly against tasks.py so
+    --project-root is supplied by the caller rather than discovered by
+    find_aimi_root's climb. Returns the finished subprocess.CompletedProcess
+    untouched -- the caller decides whether stdout is worth parsing as JSON,
+    the same way a refusal's stdout is not.
+    """
+    argv = [
+        sys.executable, TASKS_PY, "get-story-context",
+        "--tasks-file", tasks_file, "--story-id", story_id,
+        "--project-root", project_root, "--skills-base-dir", skills_base_dir,
+    ]
+    return subprocess.run(
+        argv, cwd=cwd or project_root, capture_output=True, text=True, timeout=60
+    )
+
+
+def _build_spec_contract_root(tmp_path):
+    """One fixture tree for every criterion this story proves, laid out so
+    each test opens only the files its own criterion needs:
+
+        root/.aimi/tasks/contract.json      -- criteria 1 and 2 (US-001)
+        root/.aimi/tasks/missing-spec.json  -- criterion 3, missing case
+        root/.aimi/tasks/escaping-spec.json -- criterion 3, escaping case
+        root/.aimi/tasks/proto-dropped.json -- criterion 4, positive
+        root/.aimi/tasks/proto-clean.json   -- criterion 4, negative twin
+        root/project/bundle/BusinessSpec.md -- a real "## 3." heading, plus a
+                                                plain-text "11." list item
+                                                that is NOT a heading
+        root/project/bundle/DesignSpec.md   -- a real "## 6." heading
+
+    `root` sits one level inside tmp_path (tmp_path/proj) so a designBundle
+    path of "../outside/..." resolves to a real sibling directory still under
+    tmp_path, never outside pytest's own temp area -- the same shape
+    test_dropped_reports_a_spec_file_escaping_the_project_root above uses.
+    Every returned path is an absolute string rooted under tmp_path; nothing
+    here is written inside this repository's own .aimi/.
+    """
+    root = os.path.realpath(str(tmp_path / "proj"))
+    tasks_dir = os.path.join(root, ".aimi", "tasks")
+    bundle_dir = os.path.join(root, "project", "bundle")
+    os.makedirs(tasks_dir)
+    os.makedirs(bundle_dir)
+
+    # Carries the SAME heading and sentinel as the real DesignSpec.md below,
+    # so a test that finds the sentinel absent from the payload is proof the
+    # escaping path was never opened -- not merely proof this file is boring.
+    outside_dir = os.path.join(str(tmp_path), "outside")
+    os.makedirs(outside_dir)
+    with open(os.path.join(outside_dir, "Secret.md"), "w", encoding="utf-8") as handle:
+        handle.write("## 6. Components\n\n" + _SENTINEL_DESIGN_6 + "\n")
+
+    with open(os.path.join(bundle_dir, "BusinessSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write(
+            "# BusinessSpec\n\n"
+            "## 3. Business Rules\n\n"
+            + _SENTINEL_BUSINESS_3 + "\n\n"
+            "See the numbered list below.\n\n"
+            "11. This is a plain list item, not a heading, and must never be "
+            "read as section 11.\n"
+        )
+    with open(os.path.join(bundle_dir, "DesignSpec.md"), "w", encoding="utf-8") as handle:
+        handle.write("# DesignSpec\n\n## 6. Components\n\n" + _SENTINEL_DESIGN_6 + "\n")
+
+    def story(story_id, acceptance_criterion):
+        return {
+            "id": story_id, "title": "s", "description": "d",
+            "acceptanceCriteria": [acceptance_criterion], "priority": 1,
+            "status": "pending", "dependsOn": [], "notes": "",
+        }
+
+    def write(name, metadata, stories):
+        path = os.path.join(tasks_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"schemaVersion": "3.3", "metadata": metadata, "userStories": stories}, handle
+            )
+        return path
+
+    contract_path = write(
+        "contract.json",
+        {
+            "title": "t", "branchName": "b",
+            "designBundle": {
+                "businessSpec": "project/bundle/BusinessSpec.md",
+                "designSpec": "project/bundle/DesignSpec.md",
+            },
+        },
+        [story("US-001", "Follows BusinessSpec § 3 and DesignSpec § 6")],
+    )
+    missing_path = write(
+        "missing-spec.json",
+        {
+            "title": "t", "branchName": "b",
+            "designBundle": {
+                "businessSpec": "project/bundle/BusinessSpec.md",
+                "designSpec": "project/bundle/DesignSpec-missing.md",
+            },
+        },
+        [story("US-001", "x")],
+    )
+    escaping_path = write(
+        "escaping-spec.json",
+        {"title": "t", "branchName": "b", "designBundle": {"designSpec": "../outside/Secret.md"}},
+        [story("US-001", "x")],
+    )
+    proto_dropped_path = write(
+        "proto-dropped.json",
+        {
+            "title": "t", "branchName": "b",
+            "prototypeDropped": [
+                {"path": "project/bundle/prototype.html", "reason": "aggregate-cap", "bytes": 123456}
+            ],
+        },
+        [story("US-001", "x")],
+    )
+    proto_clean_path = write(
+        "proto-clean.json", {"title": "t", "branchName": "b"}, [story("US-001", "x")]
+    )
+
+    return {
+        "root": root,
+        "contract": contract_path,
+        "missing_spec": missing_path,
+        "escaping_spec": escaping_path,
+        "proto_dropped": proto_dropped_path,
+        "proto_clean": proto_clean_path,
+    }
+
+
+def test_cited_sentinel_text_arrives_as_data_and_the_uncited_number_does_not(tmp_path):
+    """Criterion 1, proven end to end: a real subprocess payload carries the
+    cited BusinessSpec § 3 / DesignSpec § 6 sentinel text as DATA, reachable
+    under designContext.specSections keyed by label. The negative twin --
+    see the section-header note above for why AC1's own "uncited citation"
+    framing does not hold against the real code -- is that a plain-text "11."
+    list item, never a markdown heading, produces no "BusinessSpec § 11" key
+    at all. Asserted as one exact dict equality so a stray third key would
+    fail this test even if both sentinels were still present.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    proc = _run_get_story_context(fixture["contract"], "US-001", fixture["root"])
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == ""
+    payload = json.loads(proc.stdout)
+
+    assert payload["designContext"]["specSections"] == {
+        "BusinessSpec § 3": _BUSINESS_SECTION_3_BODY,
+        "DesignSpec § 6": _DESIGN_SECTION_6_BODY,
+    }
+    assert payload["dropped"] == []
+
+
+def test_project_root_flag_decides_resolution_not_cwd(tmp_path):
+    """Criterion 2: identical --project-root from two different CWDs returns
+    byte-identical stdout/stderr; a different --project-root (a sibling
+    tmp_path directory with no bundle underneath it at all) reaches
+    criterion 3's missing-file outcome instead of the section content --
+    proving the relative designBundle paths are resolved against the flag's
+    value, never os.getcwd() and never a find_aimi_root climb.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    unrelated_cwd = tmp_path / "unrelated-cwd"
+    unrelated_cwd.mkdir()
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+
+    inside = _run_get_story_context(
+        fixture["contract"], "US-001", fixture["root"], cwd=fixture["root"]
+    )
+    outside = _run_get_story_context(
+        fixture["contract"], "US-001", fixture["root"], cwd=str(unrelated_cwd)
+    )
+    assert inside.returncode == 0 and outside.returncode == 0
+    assert inside.stderr == "" and outside.stderr == ""
+    assert inside.stdout == outside.stdout
+
+    mismatched = _run_get_story_context(
+        fixture["contract"], "US-001", str(other_root), cwd=fixture["root"]
+    )
+    assert mismatched.returncode == 0, mismatched.stderr
+    payload = json.loads(mismatched.stdout)
+    assert payload["designContext"]["specSections"] == {}
+    assert {entry["kind"] for entry in payload["dropped"]} == {"specFile"}
+    assert {entry["reason"] for entry in payload["dropped"]} == {"missing-on-disk"}
+    assert {entry["path"] for entry in payload["dropped"]} == {
+        "project/bundle/BusinessSpec.md", "project/bundle/DesignSpec.md",
+    }
+
+
+def test_a_missing_spec_file_is_recorded_and_a_present_one_is_not(tmp_path):
+    """Criterion 3: a designBundle path that resolves inside --project-root
+    via confined_spec_path but was never written on disk yields exactly one
+    dropped {kind: "specFile", reason: "missing-on-disk", ...} entry -- and
+    the sibling businessSpec path in the SAME fixture file, which does exist,
+    contributes none, so its own section content still reaches the payload.
+    A companion fixture whose designSpec escapes the project root via '../'
+    gets reason: "escapes-project-root" instead -- a second, distinguishable
+    positive case, not a second negative twin.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+
+    missing = _run_get_story_context(fixture["missing_spec"], "US-001", fixture["root"])
+    assert missing.returncode == 0, missing.stderr
+    payload = json.loads(missing.stdout)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "project/bundle/DesignSpec-missing.md",
+        "section": None, "reason": "missing-on-disk", "bytes": None, "deferred": False,
+    }]
+    assert payload["designContext"]["specSections"] == {
+        "BusinessSpec § 3": _BUSINESS_SECTION_3_BODY,
+    }
+
+    escaping = _run_get_story_context(fixture["escaping_spec"], "US-001", fixture["root"])
+    assert escaping.returncode == 0, escaping.stderr
+    payload = json.loads(escaping.stdout)
+    assert payload["dropped"] == [{
+        "kind": "specFile", "name": None, "path": "../outside/Secret.md",
+        "section": None, "reason": "escapes-project-root", "bytes": None, "deferred": False,
+    }]
+    # The escaping file is never opened -- a heading that matches "§ 6" sits
+    # right there in outside/Secret.md, and it must never surface.
+    assert escaping.stdout.count(_SENTINEL_DESIGN_6) == 0
+    assert payload["designContext"]["specSections"] == {}
+
+
+def test_prototype_dropped_surfaces_in_metadata_and_is_absent_when_nothing_was_dropped(tmp_path):
+    """Criterion 4: metadata.prototypeDropped, now that outline:04 added it to
+    STORY_CONTEXT_METADATA_KEYS, arrives byte-identical to what the fixture
+    wrote -- from its own payload alone, the story can tell the prototype its
+    acceptance criteria assumed is gone. The negative twin is presence, not
+    truthiness (projected_metadata's own documented rule): a story with
+    nothing dropped has the key entirely ABSENT from metadata, never null and
+    never [].
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+
+    dropped_run = _run_get_story_context(fixture["proto_dropped"], "US-001", fixture["root"])
+    assert dropped_run.returncode == 0, dropped_run.stderr
+    payload = json.loads(dropped_run.stdout)
+    assert payload["metadata"] == {
+        "prototypeDropped": [
+            {"path": "project/bundle/prototype.html", "reason": "aggregate-cap", "bytes": 123456}
+        ]
+    }
+
+    clean_run = _run_get_story_context(fixture["proto_clean"], "US-001", fixture["root"])
+    assert clean_run.returncode == 0, clean_run.stderr
+    payload = json.loads(clean_run.stdout)
+    assert payload["metadata"] == {}
+    assert "prototypeDropped" not in payload["metadata"]
+
+
+def test_the_spec_contract_fixture_stays_under_tmp_path_and_leaves_the_golden_file_alone(tmp_path):
+    """Fixture hygiene, asserted rather than assumed: every path
+    _build_spec_contract_root() writes lives under tmp_path, never this
+    repository's own .aimi/ -- the same discipline this phase's own
+    known-gaps record names, since a discovered root would silently retarget
+    which directory the fixture's relative bundle paths resolve against.
+    golden_from_jq.json's mtime is unchanged before and after this module's
+    tests run: nothing in this section reads it, writes it, or regenerates
+    it -- the four criteria above are asserted against a payload this proof
+    builds and runs itself, never against the get-story-context golden
+    corpus's existing 57 story_context_cases.
+    """
+    fixture = _build_spec_contract_root(tmp_path)
+    tmp_root = os.path.realpath(str(tmp_path))
+    for key, value in fixture.items():
+        assert value.startswith(tmp_root + os.sep), key
+
+    assert os.path.getmtime(_GOLDEN_PATH) == _GOLDEN_MTIME_AT_IMPORT
 
 
 # ---------------------------------------------------------------------------
@@ -4282,16 +5091,43 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     docstring because its path is document-sourced rather than an argument.
     The variable is named brainstorm_path, not path, so it cannot collide
     with the literal the fourth open's own check above matches.
+
+    THE NINTH open() ARRIVED WITH spec_sections(), and it is a second caller
+    of the CONFINEMENT get-story-context's own metadata.designBundle reads
+    already established, not a new capability: the same confined_spec_path()
+    the second open (validate-tasks' spec read) already calls, the same soft
+    (path, inside) return, the same read mode. What is new is WHERE the
+    result goes: validate-tasks compares the bytes against a citation and
+    discards them, spec_sections() slices them by section number and keeps
+    the slices. The literal is `open(path, "rb")`, identical to the fourth
+    open's own -- a real second occurrence of that exact text, not a new
+    form, which is why the SET of distinct literals below is unchanged while
+    the total count moves.
+
+    THE TENTH open() ARRIVED WITH spec-derivation, and it is a read of a file
+    named by a CLI ARGUMENT (--input) rather than by a document: the same
+    caller-supplied, bash-confined shape as design-decisions' eighth. The
+    literal is `open(input_path, "rb")` -- a new distinct form, because the
+    variable is named for what it is, so the set below gains one member. It
+    is a read, never a write; the verb emits to stdout only.
+
+    THE ELEVENTH open() ARRIVED WITH structural-vocabulary, and it is the same
+    caller-supplied, bash-confined read as the tenth: the --spec and
+    --prototype texts it measures. The literal is `open(source_path, "rb")`, a
+    new distinct form, so the set below gains one member. It is a read, and it
+    adds no os.path call -- an unreadable file is an OSError, not a predicate.
     """
     code = _code()
-    assert code.count("open(") == 8
+    assert code.count("open(") == 11
     assert 'open(path, "r", encoding="utf-8")' in code
     assert 'open(spec_path, "rb")' in code
     assert 'open(path, "r", encoding="utf-8", errors="replace")' in code
     assert 'open(path, "rb")' in code
     assert 'open(full, "r", encoding="utf-8")' in code
     assert 'open(brainstorm_path, "rb")' in code
-    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 8
+    assert 'open(input_path, "rb")' in code
+    assert 'open(source_path, "rb")' in code
+    assert len(re.findall(r'open\([^)]*"[rw]b?"', code)) == 11
     assert not re.search(r'open\([^)]*"[wax]', code), "every open here is a read"
     assert len(re.findall(r"^def write_docs_atomically\(", code, re.M)) == 1
     assert code.count("os.replace(") == 1 and code.count("NamedTemporaryFile(") == 1
@@ -4375,8 +5211,24 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # before this module ever saw it, the same CLI-argument confinement every
     # tasks-file path here already gets. No new root, no new leaf: the rule
     # the other forty-four keep holds for this one too.
-    assert code.count("os.path.") == 45
-    assert code.count("os.path.isfile(") == 8
+    #
+    # The forty-sixth is spec_sections()' own isfile(), over a path
+    # confined_spec_path() already resolved and approved two lines above --
+    # the same "is this really a file" check validate-tasks' own two guarded
+    # call sites already make after their own confined_spec_path() call, not
+    # a new predicate. No new root: the path is PROJECT_ROOT concatenated
+    # with a relative string metadata.designBundle supplied, confined before
+    # this isfile() ever runs.
+    #
+    # The last TWO are op_probe_plan's realpath() calls, over the temporary
+    # directory it just made and over the repository top level git reported,
+    # compared to refuse a scratch directory that would land inside the
+    # repository. Neither names a path of its own: the first is
+    # tempfile.TemporaryDirectory's, the second is git's answer, and the
+    # worktree path beneath the first is built by string concatenation, so
+    # no join() was added. No new root, no leaf this module chose.
+    assert code.count("os.path.") == 48
+    assert code.count("os.path.isfile(") == 9
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -4484,6 +5336,8 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_mark_skipped",
         "cmd_update_field",
         "cmd_remove_story",
+        "cmd_set_verification",
+        "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
         "cmd_normalize_verification",
@@ -4812,6 +5666,375 @@ def test_remove_story_refuses_a_whitespace_only_reason(tmp_path, capsys):
 
 
 # ---------------------------------------------------------------------------
+# set-verification -- an explicit verdict, never a raw update-field write
+# ---------------------------------------------------------------------------
+#
+# Every refusal (status outside the allowed set, a --reason mismatched to the
+# status, not found, no verification object to update) is decided inside
+# op_set_verification itself, in that fixed order -- see its own docstring.
+
+
+_SV_DEFAULT = object()  # sentinel: "use the default verification object"
+
+
+def _sv_verification(status="pending", **extra):
+    verification = {"strategy": "test", "status": status, "url": None, "expect": None}
+    verification.update(extra)
+    return verification
+
+
+def _sv_story(story_id, verification=_SV_DEFAULT):
+    """A remove-story-style story stub, with `verification` set.
+
+    `verification=_SV_DEFAULT` (the common case) gets the four-key pending
+    object; `verification=None` gets NO verification key at all -- the
+    "absent" half of AC2's "absent or not a JSON object"; any other value
+    (a string, for instance) is stored as-is -- the "not an object" half.
+    """
+    story = _rs_story(story_id)
+    if verification is _SV_DEFAULT:
+        story["verification"] = _sv_verification()
+    elif verification is not None:
+        story["verification"] = verification
+    return story
+
+
+def test_set_verification_skipped_writes_status_and_reason_and_echoes_them_back(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    rc = T.op_set_verification(
+        [
+            "set-verification", "--tasks-file", path, "--story-id", "US-900",
+            "--status", "skipped", "--reason", "agent-browser not installed",
+        ]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {
+        "id": "US-900",
+        "verification": {
+            "strategy": "test", "status": "skipped",
+            "skipReason": "agent-browser not installed", "url": None, "expect": None,
+        },
+    }
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "skipped"
+    assert saved["skipReason"] == "agent-browser not installed"
+
+
+def test_set_verification_refuses_skipped_with_no_reason_and_writes_nothing(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "skipped"]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "--reason" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_whitespace_only_reason(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "skipped", "--reason", "   ",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_set_verification_passed_after_skipped_drops_the_stale_reason(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_sv_story("US-900", verification=_sv_verification("skipped", skipReason="old reason"))],
+    )
+    rc = T.op_set_verification(
+        ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "passed"]
+    )
+    assert rc == 0
+    capsys.readouterr()
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "passed"
+    assert "skipReason" not in saved
+
+
+def test_set_verification_refuses_pending_naming_the_allowed_values(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            ["set-verification", "--tasks-file", path, "--story-id", "US-900", "--status", "pending"]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "passed" in err and "failed" in err and "skipped" in err
+
+
+def test_set_verification_refuses_an_unknown_status_naming_the_allowed_values(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "bogus-status",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "passed" in err and "failed" in err and "skipped" in err
+
+
+def test_set_verification_refuses_a_reason_alongside_passed(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed", "--reason", "why",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "--reason" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_reason_alongside_failed(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "failed", "--reason", "why",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+
+
+def test_set_verification_refuses_an_unknown_id(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-999",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "US-999" in err
+    assert "not found" in err
+
+
+def test_set_verification_refuses_a_story_with_no_verification_object(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900", verification=None)])
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "no verification object" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_set_verification_refuses_a_story_whose_verification_is_not_an_object(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_sv_story("US-900", verification="manual")])
+    with pytest.raises(SystemExit) as raised:
+        T.op_set_verification(
+            [
+                "set-verification", "--tasks-file", path, "--story-id", "US-900",
+                "--status", "passed",
+            ]
+        )
+    assert raised.value.code == 1
+    assert "no verification object" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# judge-verification -- a verdict derived from the story's own recorded
+# evidence, never a blanket rewrite. Every case below is one row of the
+# CriticalQ1 mapping in _judge_verification_verdict's own docstring.
+# ---------------------------------------------------------------------------
+
+
+def _jv_story(story_id, verification=_SV_DEFAULT, implementation=None):
+    story = _sv_story(story_id, verification=verification)
+    if implementation is not None:
+        story["implementation"] = implementation
+    return story
+
+
+def test_judge_verification_evidence_exit_zero_writes_passed(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": 0}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "passed"
+    assert "skipReason" not in out["verification"]
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "passed"
+
+
+def test_judge_verification_evidence_exit_nonzero_writes_failed(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": 1}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "failed"
+    saved = _rs_read(path)["userStories"][0]["verification"]
+    assert saved["status"] == "failed"
+
+
+def test_judge_verification_evidence_exit_as_json_boolean_is_never_read_as_zero(tmp_path, capsys):
+    # A boolean exit is not a usable integer -- isinstance(True, int) is True
+    # in Python, so the bool check has to run FIRST or this would wrongly
+    # write "passed". No implementation.verify declared -> the no-check
+    # skipReason, proving it fell all the way through to "no usable exit"
+    # rather than reading True as 0.
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"exit": True}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_evidence_with_only_preexit_is_no_usable_exit(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(evidence={"preExit": 0}))],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_no_evidence_with_verify_declared_names_the_declared_reason(
+    tmp_path, capsys
+):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", implementation={"verify": "pytest -q"})],
+    )
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_EVIDENCE_REASON
+
+
+def test_judge_verification_no_evidence_with_no_verify_names_the_undeclared_reason(
+    tmp_path, capsys
+):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900")])
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is True
+    assert out["verification"]["status"] == "skipped"
+    assert out["verification"]["skipReason"] == T.JUDGE_VERIFICATION_NO_VERIFY_REASON
+
+
+def test_judge_verification_leaves_an_already_judged_story_byte_for_byte_unchanged(
+    tmp_path, capsys
+):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification("passed"))],
+    )
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "passed" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_leaves_a_visual_story_unchanged(tmp_path, capsys):
+    path = _rs_file(
+        tmp_path, "a.json",
+        [_jv_story("US-900", verification=_sv_verification(strategy="visual"))],
+    )
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "visual" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_leaves_a_story_with_no_verification_object_unchanged(
+    tmp_path, capsys
+):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900", verification=None)])
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-900"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["judged"] is False
+    assert "no verification object" in out["reason"]
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_judge_verification_reports_rather_than_dies_on_an_unknown_id(tmp_path, capsys):
+    path = _rs_file(tmp_path, "a.json", [_jv_story("US-900")])
+    before = open(path, encoding="utf-8").read()
+    rc = T.op_judge_verification(
+        ["judge-verification", "--tasks-file", path, "--story-id", "US-999"]
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"id": "US-999", "judged": False, "reason": "story US-999 not found"}
+    assert open(path, encoding="utf-8").read() == before
+
+
+# ---------------------------------------------------------------------------
 # verification-report -- one read answering ten command-layer jq programs
 # ---------------------------------------------------------------------------
 #
@@ -5004,7 +6227,8 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
     The assertion below is WHOLE-DICT on purpose, and it is the only one in
     this file that is: it pins the report's top-level SHAPE, so a new key is
     a deliberate edit here rather than something a key-scoped sibling would
-    let through unnoticed. The `discriminating` entry arrived that way."""
+    let through unnoticed. The `discriminating` and `verdicts` entries both
+    arrived that way."""
     doc = {
         "userStories": [
             {"id": "US-001", "verification": {"strategy": "manual", "status": "pending"}}
@@ -5016,6 +6240,10 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
         # non-visual, but its verification WAS declared and nobody looked at
         # it -- the pending partition is scoped by status, never by strategy.
         "pending": ["US-001"],
+        # this story carries no top-level `status` of its own, so it is not
+        # completed and `skipped` (which is completed-scoped, the same as
+        # `discriminating` below) never enters it either.
+        "skipped": [],
         "malformed": {"repairable": [], "unrepairable": []},
         # this story carries no `status` of its own, so it is not completed
         # and enters none of the three lists -- and with an empty denominator
@@ -5026,6 +6254,9 @@ def test_verification_report_ignores_a_well_formed_non_visual_object():
             "unrecorded": [],
             "fraction": None,
         },
+        # not completed, so this declared-and-unjudged story enters neither
+        # its own bucket nor `other` -- every literal reads zero.
+        "verdicts": {"pending": 0, "passed": 0, "failed": 0, "skipped": 0, "other": 0},
     }
 
 
@@ -5235,6 +6466,180 @@ def test_verification_report_partitions_completed_stories_by_discriminating_evid
     assert report_for({"discriminating": 0})["fraction"] == 0
 
 
+def test_verification_report_partitions_completed_skipped_verifications_with_reason():
+    """The fifth key, `skipped`: a flat `{id, reason}` list, one entry per
+    COMPLETED story whose `verification.status` is the literal "skipped" --
+    US-005's own scope, the same completed-only boundary `discriminating`
+    draws two paragraphs up in the docstring, for the identical reason (a
+    verification judges work that was DONE).
+
+    `reason` is `.verification.skipReason` verbatim when it is a non-empty
+    string, and a story recording one must report it byte for byte -- this
+    is the field the completion report and the phase handoff exist to
+    surface, so a reader collapsing or rewriting it here would defeat the
+    story before it starts.
+    """
+    doc = {
+        "userStories": [
+            {
+                "id": "US-001",
+                "status": "completed",
+                "verification": {"status": "skipped", "skipReason": "no visual harness in CI"},
+            },
+            {
+                "id": "US-002",
+                "status": "completed",
+                "verification": {"status": "passed"},
+            },
+            {
+                "id": "US-003",
+                "status": "completed",
+                "verification": {"status": "skipped", "skipReason": "agent-browser not installed"},
+            },
+        ]
+    }
+    report = T.verification_report(doc)
+    assert report["skipped"] == [
+        {"id": "US-001", "reason": "no visual harness in CI"},
+        {"id": "US-003", "reason": "agent-browser not installed"},
+    ]
+
+
+def test_verification_report_reports_a_legacy_skip_with_no_reason_as_null():
+    """A completed story carrying `verification.status: "skipped"` with no
+    `skipReason` field at all -- the legacy shape specFlow:Gap2/Gap3 name,
+    written before this field existed -- reports `reason: null`, never an
+    invented string. `None` is `_report_skip_reason`'s honest answer for
+    every non-string shape (absent, null, empty), the same discipline
+    `_report_discriminating` already applies to its own `None`: fabricating
+    a reason for a run that recorded none would be worse than the silence
+    this key replaces.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["skipped"] == [{"id": "US-001", "reason": None}]
+
+    # every other non-string skipReason shape collapses to the same null,
+    # not just a wholly absent key
+    for skip_reason in (None, "", 0, False, [], {}):
+        doc = {
+            "userStories": [
+                {
+                    "id": "US-001",
+                    "status": "completed",
+                    "verification": {"status": "skipped", "skipReason": skip_reason},
+                }
+            ]
+        }
+        assert T.verification_report(doc)["skipped"] == [
+            {"id": "US-001", "reason": None}
+        ], skip_reason
+
+
+def test_verification_report_excludes_a_skipped_verification_that_is_not_completed():
+    """A story whose `verification.status` is the literal "skipped" but whose
+    own top-level `status` is NOT "completed" (`in_progress`, `pending`, or
+    any other value) is excluded from `skipped` entirely -- the same
+    completed-only scope `discriminating` draws, applied to this key. A
+    verification judges work that was DONE; a story mid-flight or not yet
+    started has no verdict to short-circuit yet, whatever its own
+    `verification.status` happens to read.
+    """
+    for status in ("in_progress", "pending", "failed"):
+        doc = {
+            "userStories": [
+                {
+                    "id": "US-001",
+                    "status": status,
+                    "verification": {"status": "skipped", "skipReason": "not yet run"},
+                },
+            ]
+        }
+        assert T.verification_report(doc)["skipped"] == [], status
+
+
+def test_verification_report_verdicts_counts_one_of_each_in_set_status():
+    """The sixth key, `verdicts`: one count per `VERIFICATION_STATUSES`
+    literal, plus `other`, over completed stories that declared a
+    verification object -- the identical scope `pending` already reads
+    from. One completed story per literal (including "pending" itself,
+    which a story CAN carry as a completed, unjudged declaration) lands
+    each in its own bucket, and `other` stays at zero when nothing
+    out-of-set was ever seen.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "pending"}},
+            {"id": "US-002", "status": "completed", "verification": {"status": "passed"}},
+            {"id": "US-003", "status": "completed", "verification": {"status": "failed"}},
+            {"id": "US-004", "status": "completed", "verification": {"status": "skipped"}},
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 1,
+        "passed": 1,
+        "failed": 1,
+        "skipped": 1,
+        "other": 0,
+    }
+
+
+def test_verification_report_verdicts_routes_out_of_set_status_to_other():
+    """A completed story whose `verification.status` is a value outside
+    `VERIFICATION_STATUSES` -- a stray string, or a non-string shape --
+    counts under `other` rather than being silently dropped or crashing
+    the report; a document a future change adds a fifth status literal to
+    degrades to a visible `other` count instead of a `KeyError`.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed", "verification": {"status": "invalid"}},
+            {"id": "US-002", "status": "completed", "verification": {"status": 1}},
+            {"id": "US-003", "status": "completed", "verification": {}},
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "other": 3,
+    }
+
+
+def test_verification_report_verdicts_excludes_a_completed_story_with_no_verification_object():
+    """A completed story with no `verification` object at all (absent, null,
+    or a bare string awaiting `normalize-verification`) never enters
+    `verdicts` -- neither its own status bucket nor `other` -- the same
+    object-only boundary `pending` draws two paragraphs up: a distribution
+    over declarations nobody made would answer a question nobody asked.
+    A story that is NOT completed is excluded the same way, whatever its
+    own `verification.status` happens to read.
+    """
+    doc = {
+        "userStories": [
+            {"id": "US-001", "status": "completed"},
+            {"id": "US-002", "status": "completed", "verification": None},
+            {"id": "US-003", "status": "completed", "verification": "manual"},
+            {
+                "id": "US-004",
+                "status": "in_progress",
+                "verification": {"status": "passed"},
+            },
+        ]
+    }
+    assert T.verification_report(doc)["verdicts"] == {
+        "pending": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "other": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # project_groups -- proven against story 01's own recorded corpus
 # (golden_from_jq.json's command_block_jq_cases, site-013 and site-007) below,
@@ -5362,8 +6767,11 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "metadata",
         "verification-report",
         "verify-probe",
+        "probe-plan",
         "list-known-gaps",
         "design-decisions",
+        "spec-derivation",
+        "structural-vocabulary",
         "project-groups",
         "get-story",
         "get-story-context",
@@ -5391,6 +6799,8 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "normalize-waves",
         "cascade-skip",
         "remove-story",
+        "set-verification",
+        "judge-verification",
         "reset-orphaned",
         "archive-task",
         "gate-pass",
@@ -6047,7 +7457,8 @@ def test_a_missing_branchname_is_still_the_word_null():
 # branch is never run.
 
 
-def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=False):
+def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=False,
+           guard_rails=None):
     """A one-story project whose story carries `verify`, probed through the CLI.
 
     `files` are created relative to the project root before the run, and `cwd`
@@ -6085,6 +7496,8 @@ def _probe(tmp_path, verify, files=(), cwd=None, previous=None, flags=(), raw=Fa
     }
     if verify is not None:
         story["implementation"] = {"verify": verify}
+        if guard_rails is not None:
+            story["implementation"]["guardRails"] = guard_rails
     document = {
         "schemaVersion": "3.3",
         "metadata": {"title": "t", "branchName": "b"},
@@ -6737,9 +8150,9 @@ def test_a_verify_with_no_cd_probes_exactly_as_it_did_before(tmp_path):
         files=("existe.txt",),
     )
     assert probed == [
-        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False},
-        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False},
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": 'test -f "$F"', "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
+        {"segment": "test -f ausente.txt", "exit": 1, "discriminates": True, "unsatisfiable": False, "guardRail": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
     ]
 
 
@@ -6883,12 +8296,13 @@ def test_a_segment_reading_no_variable_at_all_keeps_its_verdict(tmp_path):
     same keys in the same order, no `unresolvedState` key at all."""
     _, probed = _probe(tmp_path, "true\ntest -f ausente.txt\n")
     assert probed == [
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False},
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False},
         {
             "segment": "test -f ausente.txt",
             "exit": 1,
             "discriminates": True,
             "unsatisfiable": False,
+            "guardRail": False,
         },
     ]
 
@@ -7070,7 +8484,7 @@ def test_a_segment_passing_both_runs_stays_discriminates_false(tmp_path):
     _, before = _probe(tmp_path, "true\n")
     _, after = _probe(tmp_path, "true\n", previous=before)
     assert after == [
-        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False}
+        {"segment": "true", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False}
     ]
 
 
@@ -7083,12 +8497,12 @@ def test_a_regression_is_not_unsatisfiable_only_a_double_failure_is(tmp_path):
     passing rules it out, whichever side it is."""
     root, before = _probe(tmp_path, "test -f existe.txt\n", files=("existe.txt",))
     assert before == [
-        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False}
+        {"segment": "test -f existe.txt", "exit": 0, "discriminates": False, "unsatisfiable": False, "guardRail": False}
     ]
     os.remove(os.path.join(root, "existe.txt"))
     _, after = _probe(tmp_path, "test -f existe.txt\n", previous=before)
     assert after == [
-        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False}
+        {"segment": "test -f existe.txt", "exit": 1, "discriminates": True, "unsatisfiable": False, "guardRail": False}
     ]
 
 
@@ -7404,9 +8818,9 @@ def test_an_ordinary_non_nested_call_is_unchanged(tmp_path):
     root, tasks_file = _probe_project(tmp_path, {"US-001": "true\nfalse\n"})
     expected = [
         {"segment": "true", "exit": 0, "discriminates": False,
-         "unsatisfiable": False},
+         "unsatisfiable": False, "guardRail": False},
         {"segment": "false", "exit": 1, "discriminates": True,
-         "unsatisfiable": False},
+         "unsatisfiable": False, "guardRail": False},
     ]
     for marker in (None, ""):
         proc = _run_probe_cli(root, tasks_file, "US-001", marker=marker)
@@ -8698,3 +10112,623 @@ def test_every_metadata_key_plan_md_writes_is_named_in_the_plugin_s_schema_doc()
         "-- in the key enumeration, or in a paragraph of its own -- in the same "
         "commit that adds it to plan.md's template."
     )
+
+
+# ---------------------------------------------------------------------------
+# spec-derivation: validation, relabel of evidence-less absences, markdown rows
+# ---------------------------------------------------------------------------
+
+RELABEL_LABEL = "unchecked (claimed absent, no evidence)"
+
+
+def _spec_payload(*records):
+    return {"records": list(records)}
+
+
+def test_spec_derivation_relabels_an_absent_record_with_no_evidence(capsys):
+    result = T.derive_spec_records(
+        _spec_payload({"kind": "entity", "name": "Invoice", "status": "absent", "evidence": []})
+    )
+    assert result["records"] == [
+        {"kind": "entity", "name": "Invoice", "status": "unchecked", "evidence": []}
+    ]
+    assert result["relabeled"] == ["entity:Invoice"]
+    assert capsys.readouterr().err == (
+        "spec-derivation: entity 'Invoice' claimed absent with no evidence - relabeled unchecked\n"
+    )
+    assert result["markdown"]["entities"] == "| Invoice | " + RELABEL_LABEL + " | — |"
+    assert result["markdown"]["endpoints"] == ""
+
+
+def test_spec_derivation_passes_a_genuine_unchecked_record_through(capsys):
+    result = T.derive_spec_records(
+        _spec_payload({"kind": "endpoint", "name": "GET /x", "status": "unchecked", "evidence": []})
+    )
+    assert result["records"][0]["status"] == "unchecked"
+    assert result["relabeled"] == []
+    assert capsys.readouterr().err == ""
+    # The distinct label belongs to relabeled records only.
+    assert result["markdown"]["endpoints"] == "| GET /x | unchecked | — |"
+
+
+def test_spec_derivation_keeps_absent_with_evidence_and_renders_rows_in_order(capsys):
+    result = T.derive_spec_records(
+        _spec_payload(
+            {"kind": "entity", "name": "B", "status": "present", "evidence": ["a.rb:1", "b.rb:2"]},
+            {"kind": "endpoint", "name": "GET /y", "status": "absent", "evidence": ["r.rb:3"]},
+            {"kind": "entity", "name": "A", "status": "absent"},
+        )
+    )
+    assert result["records"][1]["status"] == "absent"
+    assert result["relabeled"] == ["entity:A"]
+    assert result["markdown"]["entities"] == (
+        "| B | present | a.rb:1; b.rb:2 |\n| A | " + RELABEL_LABEL + " | — |"
+    )
+    assert result["markdown"]["endpoints"] == "| GET /y | absent | r.rb:3 |"
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ([], "input must be a JSON object"),
+        ({"records": {}}, "'records' must be a list"),
+        ({}, "'records' must be a list"),
+        ({"records": [5]}, "records[0] must be an object"),
+        (
+            {"records": [{"kind": "widget", "name": "X", "status": "present"}]},
+            "records[0].kind must be 'entity' or 'endpoint' (got \"widget\")",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "maybe"}]},
+            "records[0].status must be 'present', 'absent' or 'unchecked' (got \"maybe\")",
+        ),
+        (
+            {"records": [{"kind": "entity", "status": "present"}]},
+            "records[0].name must be a non-empty string",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": " ", "status": "present"}]},
+            "records[0].name must be a non-empty string",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "present", "evidence": "a"}]},
+            "records[0].evidence must be a list of strings",
+        ),
+        (
+            {"records": [{"kind": "entity", "name": "X", "status": "present", "evidence": [1]}]},
+            "records[0].evidence must be a list of strings",
+        ),
+        (
+            {
+                "records": [
+                    {"kind": "entity", "name": "A", "status": "present"},
+                    {"kind": "nope", "name": "X", "status": "present"},
+                ]
+            },
+            "records[1].kind must be",
+        ),
+    ],
+)
+def test_spec_derivation_refuses_malformed_records_naming_index_and_field(payload, expected):
+    with pytest.raises(ValueError) as refusal:
+        T.derive_spec_records(payload)
+    assert expected in str(refusal.value)
+
+
+def test_spec_derivation_op_reads_the_file_and_refuses_bad_json(tmp_path, capsys):
+    good = tmp_path / "in.json"
+    good.write_text(
+        json.dumps(_spec_payload({"kind": "entity", "name": "E", "status": "absent", "evidence": []})),
+        encoding="utf-8",
+    )
+    assert T.op_spec_derivation(["--input", str(good)]) == 0
+    out = capsys.readouterr()
+    assert json.loads(out.out)["relabeled"] == ["entity:E"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    with pytest.raises(SystemExit) as exited:
+        T.op_spec_derivation(["--input", str(bad)])
+    assert exited.value.code == 1
+    assert "Error: spec-derivation: input is not valid JSON:" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_spec_derivation([])
+
+
+# ---------------------------------------------------------------------------
+# structural-vocabulary: whole-phrase lexicon counts, missing / unsourced
+# ---------------------------------------------------------------------------
+
+
+def _svoc_story(text, **extra):
+    story = {"id": "US-001", "title": text, "description": "", "acceptanceCriteria": []}
+    story.update(extra)
+    return story
+
+
+def test_structural_vocabulary_reproduces_the_bottom_sheet_vs_dialog_incident():
+    result = T.measure_structural_vocabulary(
+        [_svoc_story("Filter", acceptanceCriteria=["Tapping Filter opens a dialog"])],
+        ["The filter panel opens as a bottom sheet on mobile."],
+    )
+    assert result["measured"] is True
+    assert "bottom sheet" in result["missing"]
+    assert "dialog" in result["unsourced"]
+
+
+def test_structural_vocabulary_matches_whole_phrases_only():
+    result = T.measure_structural_vocabulary(
+        [_svoc_story("Playlist", description="a playlist of tracks")], ["A playlist screen."]
+    )
+    assert result == {"measured": False, "terms": [], "missing": [], "unsourced": []}
+    spaced = T.measure_structural_vocabulary([_svoc_story("a list")], ["The List view"])
+    assert [t["term"] for t in spaced["terms"]] == ["list"]
+    assert spaced["missing"] == [] and spaced["unsourced"] == []
+
+
+def test_structural_vocabulary_is_unmeasured_when_nothing_occurs():
+    assert T.measure_structural_vocabulary([_svoc_story("Nothing relevant")], []) == {
+        "measured": False,
+        "terms": [],
+        "missing": [],
+        "unsourced": [],
+    }
+
+
+def test_structural_vocabulary_reads_exactly_the_documented_story_fields():
+    story = {
+        "title": "t",
+        "description": "d",
+        "acceptanceCriteria": ["a modal"],
+        "implementation": {"approach": "a drawer", "files": ["toast.py"], "verify": "banner"},
+        "tasks": ["a carousel"],
+        "notes": "an accordion",
+        "gate": {"prompt": "popover"},
+    }
+    result = T.measure_structural_vocabulary([story], [])
+    assert {t["term"] for t in result["terms"]} == {"modal", "drawer", "carousel", "accordion"}
+    # A story with missing or mistyped fields never raises.
+    assert T.measure_structural_vocabulary([{}, "x", {"tasks": None, "implementation": 3}], [])["measured"] is False
+
+
+def test_structural_vocabulary_lexicon_has_the_required_terms():
+    required = {
+        "bottom sheet", "dialog", "modal", "drawer", "sidebar", "side panel", "header",
+        "footer", "tab bar", "toolbar", "stepper", "step indicator", "card", "list", "grid",
+        "popover", "tooltip", "toast", "banner", "accordion", "carousel", "full-screen",
+        "overlay", "split view",
+    }
+    assert required <= set(T.STRUCTURAL_LEXICON)
+
+
+def test_structural_vocabulary_op_reads_files_and_refuses_unreadable_ones(tmp_path, capsys):
+    tasks = tmp_path / "t.json"
+    tasks.write_text(
+        json.dumps({"userStories": [_svoc_story("x", acceptanceCriteria=["a dialog"])]}),
+        encoding="utf-8",
+    )
+    spec = tmp_path / "s.md"
+    spec.write_text("a bottom sheet", encoding="utf-8")
+    assert T.op_structural_vocabulary(["--tasks-file", str(tasks), "--spec", str(spec)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["missing"] == ["bottom sheet"] and out["unsourced"] == ["dialog"]
+    with pytest.raises(SystemExit) as exited:
+        T.op_structural_vocabulary(["--tasks-file", str(tmp_path / "gone.json")])
+    assert exited.value.code == 1
+    assert "gone.json" in capsys.readouterr().err
+    bad = tmp_path / "bad.json"
+    bad.write_text("{nope", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary(["--tasks-file", str(bad)])
+    assert "bad.json" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary(["--tasks-file", str(tasks), "--spec", str(tmp_path / "no.md")])
+    assert "no.md" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        T.op_structural_vocabulary([])
+
+
+# ---------------------------------------------------------------------------
+# implementation.guardRails -- labelling the segments that pass by design
+# ---------------------------------------------------------------------------
+
+
+def _guard_rails_doc(rails, verify="true\nfalse\n", implementation=None):
+    doc = _one_task_doc("x")
+    story = doc["userStories"][0]
+    del story["tasks"]
+    if implementation is not None:
+        story["implementation"] = implementation
+    else:
+        story["implementation"] = {"verify": verify}
+        if rails is not _NO_IMPLEMENTATION:
+            story["implementation"]["guardRails"] = rails
+    return doc
+
+
+def test_guard_rails_marks_the_listed_segment_and_no_other(tmp_path):
+    verify = "true\nfalse\ngrep -q x /dev/null\n"
+    root, probed = _probe(tmp_path, verify, guard_rails=["true"])
+    assert [e["guardRail"] for e in probed] == [True, False, False]
+    assert all("guardRail" in e for e in probed)
+    artifact = [f for f in os.listdir(os.path.join(root, ".aimi", "tasks")) if f.startswith("verify-probe-")]
+    with open(os.path.join(root, ".aimi", "tasks", artifact[0]), encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert on_disk == probed
+
+
+def test_guard_rails_absent_means_false_everywhere_including_skipped(tmp_path):
+    _, probed = _probe(tmp_path, "true\nfalse\n")
+    assert [e["guardRail"] for e in probed] == [False, False]
+    _, probed = _probe(tmp_path, "true\nfalse\n", flags=["--skip-matching", "false"],
+                       guard_rails=["true"])
+    assert [(e["segment"], e["guardRail"]) for e in probed] == [("true", True), ("false", False)]
+    assert probed[1].get("skipped") is True
+
+
+def test_guard_rails_heredoc_segment_is_one_segment():
+    verify = "cat <<EOF; echo a\nline two\nEOF\ntrue\n"
+    segments = [seg for _, seg in T.verify_segments(verify)]
+    heredoc = [seg for seg in segments if "line two" in seg][0]
+    assert T.validate_stories(_guard_rails_doc([heredoc], verify)) == {"valid": True, "errors": []}
+    result = T.validate_stories(_guard_rails_doc(["line two"], verify))
+    assert result["valid"] is False
+    assert result["errors"] == ["US-001: implementation.guardRails[0] matches no segment of implementation.verify"]
+
+
+def test_guard_rails_validator_accepts_absent_empty_and_matching():
+    ok = {"valid": True, "errors": []}
+    assert T.validate_stories(_guard_rails_doc(_NO_IMPLEMENTATION)) == ok
+    assert T.validate_stories(_guard_rails_doc([])) == ok
+    assert T.validate_stories(_guard_rails_doc(["true", "false"])) == ok
+
+
+def test_guard_rails_validator_refuses_each_defect_once_with_id_and_index():
+    prefix = "US-001: implementation.guardRails"
+    assert T.validate_stories(_guard_rails_doc("true"))["errors"] == [prefix + " must be an array"]
+    assert T.validate_stories(_guard_rails_doc({"a": 1}))["errors"] == [prefix + " must be an array"]
+    assert T.validate_stories(_guard_rails_doc(["true", 5, "", "nope"]))["errors"] == [
+        prefix + "[1] must be a non-empty string",
+        prefix + "[2] must be a non-empty string",
+        prefix + "[3] matches no segment of implementation.verify",
+    ]
+
+
+def test_guard_rails_with_absent_or_non_string_verify_match_nothing():
+    for implementation in ({"guardRails": ["true"]}, {"verify": ["true"], "guardRails": ["true"]}):
+        doc = _guard_rails_doc(None, implementation=implementation)
+        assert T.validate_stories(doc)["errors"] == [
+            "US-001: implementation.guardRails[0] matches no segment of implementation.verify"
+        ]
+
+
+def test_guard_rails_never_aborts_on_a_non_object_implementation():
+    for implementation in ("x", 5, ["a"], True):
+        doc = _guard_rails_doc(None, implementation=implementation)
+        assert T.validate_stories(doc) == {"valid": True, "errors": []}, implementation
+
+
+def test_guard_rails_probe_verify_itself_adds_no_key(tmp_path):
+    results = T.probe_verify("true\n", str(tmp_path))
+    assert all("guardRail" not in entry for entry in results)
+
+
+# ---------------------------------------------------------------------------
+# probe-plan: a tasks file's verifies, measured at its own baseRef
+# ---------------------------------------------------------------------------
+#
+# Every case builds a throwaway git repository with two commits: the first is
+# the baseRef, the second adds `feature.txt`, the file a story's `test -f`
+# asserts. A segment that passes only because the second commit exists must
+# read discriminates:true at the first commit and false at the second.
+
+
+def _plan_git(root, *args):
+    env = dict(os.environ)
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        env.pop(name, None)
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false"] + list(args),
+        cwd=root, env=env, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _plan_repo(tmp_path, stories, metadata=None, base="first"):
+    """(root, tasks_file, first_sha, second_sha). `metadata.baseRef` is the
+    first commit unless `base` says otherwise ('none' omits it)."""
+    base_dir = os.path.realpath(str(tmp_path))
+    root = os.path.join(base_dir, "proj")
+    os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
+    _plan_git(root, "init", "-q")
+    with open(os.path.join(root, "README"), "w", encoding="utf-8") as handle:
+        handle.write("one\n")
+    _plan_git(root, "add", "README")
+    _plan_git(root, "commit", "-q", "-m", "first")
+    first = _plan_git(root, "rev-parse", "HEAD")
+    with open(os.path.join(root, "feature.txt"), "w", encoding="utf-8") as handle:
+        handle.write("two\n")
+    _plan_git(root, "add", "feature.txt")
+    _plan_git(root, "commit", "-q", "-m", "second")
+    second = _plan_git(root, "rev-parse", "HEAD")
+    meta = {"title": "t", "branchName": "b"}
+    if base != "none":
+        meta["baseRef"] = first if base == "first" else base
+    meta.update(metadata or {})
+    built = []
+    for index, spec in enumerate(stories, start=1):
+        story = {
+            "id": "US-%03d" % index, "title": "s", "description": "d",
+            "acceptanceCriteria": ["x"], "priority": 1, "status": "pending",
+            "dependsOn": [],
+        }
+        story.update(spec)
+        built.append(story)
+    tasks_file = os.path.join(root, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3", "metadata": meta, "userStories": built}, handle)
+    return root, tasks_file, first, second
+
+
+def _plan_run(root, tasks_file, *flags, env_extra=None, cwd=None):
+    env = _isolated_env(os.path.dirname(root))
+    env.update(env_extra or {})
+    return subprocess.run(
+        ["bash", CLI, "probe-plan", "--tasks-file", tasks_file] + list(flags),
+        cwd=cwd or root, env=env, capture_output=True, text=True, timeout=120,
+    )
+
+
+def _plan_ok(root, tasks_file, *flags, **kw):
+    proc = _plan_run(root, tasks_file, *flags, **kw)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+_PLAN_VERIFY = {"implementation": {"verify": "test -f feature.txt\ntest -f README\n"}}
+
+
+def test_probe_plan_measures_the_base_commit_not_the_working_tree(tmp_path):
+    root, tasks_file, first, second = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    at_first = _plan_ok(root, tasks_file)
+    segments = {s["segment"]: s for s in at_first["stories"][0]["segments"]}
+    assert segments["test -f feature.txt"]["discriminates"] is True
+    assert segments["test -f README"]["discriminates"] is False
+    # the working tree HAS feature.txt, so a probe of it would say False
+    assert os.path.exists(os.path.join(root, "feature.txt"))
+    at_second = _plan_ok(root, tasks_file, "--ref", second)
+    segments = {s["segment"]: s for s in at_second["stories"][0]["segments"]}
+    assert at_second["baseRef"] == second
+    assert segments["test -f feature.txt"]["discriminates"] is False
+
+
+def test_probe_plan_measures_and_reports_the_payload_shape(tmp_path):
+    root, tasks_file, first, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert list(out) == ["baseRef", "probed", "policy", "stories",
+                         "unlabelledNonDiscriminating", "unmeasured"]
+    assert out["baseRef"] == first and out["probed"] is True
+    assert out["policy"] == T.PROBE_PLAN_NONDISCRIMINATING_POLICY
+    assert out["stories"][0]["id"] == "US-001"
+    for segment in out["stories"][0]["segments"]:
+        assert {"segment", "exit", "discriminates", "guardRail"} <= set(segment)
+
+
+def test_probe_plan_reports_unlabelled_non_discriminating_segments(tmp_path):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert out["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}
+    ]
+    assert out["unmeasured"] == []
+
+
+def test_probe_plan_reports_the_policy_constant(tmp_path):
+    assert T.PROBE_PLAN_NONDISCRIMINATING_POLICY in ("report", "refuse")
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    assert _plan_ok(root, tasks_file)["policy"] == T.PROBE_PLAN_NONDISCRIMINATING_POLICY
+    not_probed = _plan_ok(*_plan_repo(tmp_path / "np", [_PLAN_VERIFY], base="none")[:2])
+    assert "policy" not in not_probed
+
+
+def test_probe_plan_leaves_the_worktree_list_and_the_caller_tree_untouched(tmp_path, monkeypatch):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    listing = lambda: _plan_git(root, "worktree", "list", "--porcelain")
+    status = lambda: _plan_git(root, "status", "--porcelain", "--ignored")
+    before_list, before_status = listing(), status()
+    seen = {}
+    _plan_ok(root, tasks_file)
+    assert listing() == before_list and status() == before_status
+    assert not os.path.exists(os.path.join(root, ".worktrees"))
+    # the failure exit path: a segment run that raises still cleans up
+    monkeypatch.delenv(T.VERIFY_PROBE_ACTIVE_ENV, raising=False)
+
+    def boom(text, cwd, skip_matching=None, timeout=None):
+        seen["cwd"] = cwd
+        assert os.path.isdir(cwd)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(T, "probe_verify", boom)
+    with pytest.raises(RuntimeError):
+        T.op_probe_plan(["--tasks-file", tasks_file, "--cwd", root])
+    assert listing() == before_list and status() == before_status
+    assert not os.path.exists(seen["cwd"])
+    assert not os.path.exists(os.path.dirname(seen["cwd"]))
+
+
+def test_probe_plan_is_not_probed_when_the_baseref_is_absent_unknown_or_the_repo_is_not_git(tmp_path):
+    keys_omitted = ("stories", "unlabelledNonDiscriminating", "unmeasured")
+
+    def check(out, ref, reason_part):
+        assert out["probed"] is False and out["baseRef"] == ref
+        assert reason_part in out["reason"], out
+        assert not any(key in out for key in keys_omitted)
+
+    root, tasks_file, first, _ = _plan_repo(tmp_path / "a", [_PLAN_VERIFY], base="none")
+    check(_plan_ok(root, tasks_file), None, "absent")
+    check(_plan_ok(root, tasks_file, "--ref", "-x"), "-x", "'-'")
+    check(_plan_ok(root, tasks_file, "--ref", "0" * 40), "0" * 40, "does not resolve")
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "b", [_PLAN_VERIFY], base="nosuchref")
+    check(_plan_ok(root2, tasks2), "nosuchref", "does not resolve")
+    # TMPDIR pointed into the repository
+    root3, tasks3, _, _ = _plan_repo(tmp_path / "c", [_PLAN_VERIFY])
+    inside = os.path.join(root3, "scratch")
+    os.makedirs(inside)
+    out = _plan_ok(root3, tasks3, env_extra={"TMPDIR": inside})
+    check(out, _plan_git(root3, "rev-parse", "HEAD~1"), "inside the repository")
+    assert os.listdir(inside) == []
+    # not a git repository at all
+    plain = os.path.join(os.path.realpath(str(tmp_path / "d")), "proj")
+    os.makedirs(os.path.join(plain, ".aimi", "tasks"))
+    plain_tasks = os.path.join(plain, ".aimi", "tasks", "p-tasks.json")
+    with open(plain_tasks, "w", encoding="utf-8") as handle:
+        json.dump({"metadata": {"baseRef": "abc"}, "userStories": []}, handle)
+    check(_plan_ok(plain, plain_tasks, env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(plain)}),
+          "abc", "not inside a git repository")
+    # no git on PATH
+    root4, tasks4, _, _ = _plan_repo(tmp_path / "e", [_PLAN_VERIFY])
+    nogit = os.path.join(os.path.dirname(root4), "bin")
+    os.makedirs(nogit)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not os.path.isdir(directory):
+            continue
+        for tool in os.listdir(directory):
+            link = os.path.join(nogit, tool)
+            if tool != "git" and not os.path.lexists(link):
+                os.symlink(os.path.join(directory, tool), link)
+    check(_plan_ok(root4, tasks4, env_extra={"PATH": nogit}),
+          _plan_git(root4, "rev-parse", "HEAD~1"), "git is not installed")
+
+
+def test_probe_plan_skips_suites_by_default_and_lists_them_unmeasured(tmp_path):
+    verify = "python3 -m pytest tests/ -q\npytest tests/ -q -k name\nbash scripts/test-x.sh\ntrue\n"
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
+    out = _plan_ok(root, tasks_file)
+    by_segment = {s["segment"]: s for s in out["stories"][0]["segments"]}
+    assert by_segment["python3 -m pytest tests/ -q"]["skipped"] is True
+    assert by_segment["bash scripts/test-x.sh"]["skipped"] is True
+    assert "skipped" not in by_segment["pytest tests/ -q -k name"]
+    assert by_segment["pytest tests/ -q -k name"]["discriminates"] is not None
+    unmeasured = {u["segment"]: u["why"] for u in out["unmeasured"]}
+    assert "python3 -m pytest tests/ -q" in unmeasured and "bash scripts/test-x.sh" in unmeasured
+    for why in (unmeasured["python3 -m pytest tests/ -q"], unmeasured["bash scripts/test-x.sh"]):
+        assert "--run-suites" in why
+    assert {u["segment"] for u in out["unlabelledNonDiscriminating"]} <= {"true"}
+
+
+def test_probe_plan_suite_pattern_matches_only_untargeted_suites():
+    pattern = re.compile(T._PROBE_PLAN_SUITE_PATTERN)
+    assert pattern.search("python3 -m pytest plugins/x/tests/ -q")
+    assert pattern.search("bash plugins/x/scripts/test-aimi-cli.sh")
+    assert not pattern.search("python3 -m pytest plugins/x/tests/t.py -q -k probe_plan")
+    assert not pattern.search("python3 -m pytest plugins/x/tests/t.py::test_one -q")
+    assert not pattern.search("bash -n plugins/x/scripts/aimi-cli.sh")
+
+
+def test_probe_plan_run_suites_measures_what_the_default_skips(tmp_path):
+    verify = "pytest --version\n"
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
+    default = _plan_ok(root, tasks_file)
+    assert default["stories"][0]["segments"][0]["skipped"] is True
+    measured = _plan_ok(root, tasks_file, "--run-suites")
+    entry = measured["stories"][0]["segments"][0]
+    assert "skipped" not in entry and entry["discriminates"] is not None
+    assert not any(u["segment"] == "pytest --version" and "skipped" in u["why"]
+                   for u in measured["unmeasured"])
+
+
+def test_probe_plan_marks_guard_rails_and_excludes_them_from_the_unlabelled_list(tmp_path):
+    labelled = {"implementation": {"verify": "test -f feature.txt\ntest -f README\n",
+                                   "guardRails": ["test -f README"]}}
+    root, tasks_file, _, _ = _plan_repo(tmp_path / "l", [labelled])
+    out = _plan_ok(root, tasks_file)
+    flags = {s["segment"]: s["guardRail"] for s in out["stories"][0]["segments"]}
+    assert flags == {"test -f feature.txt": False, "test -f README": True}
+    assert out["unlabelledNonDiscriminating"] == []
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "u", [_PLAN_VERIFY])
+    assert _plan_ok(root2, tasks2)["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}
+    ]
+
+
+def test_probe_plan_names_stories_it_could_not_probe(tmp_path, monkeypatch):
+    stories = [
+        {},  # no implementation: segments [], nothing unmeasured
+        {"implementation": {"verify": ""}},
+        {"implementation": {"verify": ["a", "b"]}},
+        {"project": "../escape", "implementation": {"verify": "true"}},
+        {"project": "nodir", "implementation": {"verify": "true"}},
+    ]
+    root, tasks_file, _, _ = _plan_repo(tmp_path, stories)
+    out = _plan_ok(root, tasks_file)
+    by_id = {s["id"]: s["segments"] for s in out["stories"]}
+    assert by_id["US-001"] == [] and by_id["US-002"] == []
+    named = {u["id"]: u["why"] for u in out["unmeasured"]}
+    assert set(named) == {"US-003", "US-004", "US-005"}
+    assert "string" in named["US-003"]
+    assert "routable" in named["US-004"]
+    assert "does not exist" in named["US-005"]
+    # a verdict-less entry names its own cause
+    monkeypatch.delenv(T.VERIFY_PROBE_ACTIVE_ENV, raising=False)
+    canned = [
+        {"segment": "a", "exit": None, "discriminates": None, "timedOut": True},
+        {"segment": "b", "exit": None, "discriminates": None, "unresolvedState": ["W", "X"]},
+        {"segment": "c", "exit": None, "discriminates": None, "unterminated": "open quote"},
+    ]
+    monkeypatch.setattr(T, "probe_verify", lambda *a, **k: [dict(e) for e in canned])
+    root2, tasks2, _, _ = _plan_repo(tmp_path / "two", [_PLAN_VERIFY])
+    reasons = T._probe_plan_stories(
+        T.load_docs(tasks2), tasks2, root2, "x", "", None)[2]
+    assert [r["segment"] for r in reasons] == ["a", "b", "c"]
+    assert "timed out" in reasons[0]["why"]
+    assert "W, X" in reasons[1]["why"]
+    assert "unterminated" in reasons[2]["why"]
+
+
+def test_probe_plan_refuses_to_run_inside_a_probe(tmp_path):
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    proc = _plan_run(root, tasks_file, env_extra={T.VERIFY_PROBE_ACTIVE_ENV: "1"})
+    assert proc.returncode != 0 and proc.stdout == ""
+    assert "refusing to run inside another probe" in proc.stderr
+    for way_out in ("does not itself call verify-probe", "probe_verify()"):
+        assert way_out in proc.stderr
+    started = time.time()
+    previous = os.environ.get(T.VERIFY_PROBE_ACTIVE_ENV)
+    os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = "1"
+    try:
+        with pytest.raises(SystemExit):
+            T.op_probe_plan(["--tasks-file", "/nao/existe.json"])
+    finally:
+        if previous is None:
+            os.environ.pop(T.VERIFY_PROBE_ACTIVE_ENV, None)
+        else:
+            os.environ[T.VERIFY_PROBE_ACTIVE_ENV] = previous
+    assert time.time() - started < 1.0
+
+
+def test_probe_plan_wrapper_crosses_once_takes_no_lock_and_confines_the_tasks_file(tmp_path):
+    body = _executable(dict(_wrappers())["cmd_probe_plan"])
+    assert "jq " not in body and "jq(" not in body
+    assert body.count(_TASKS_CROSSING) == 1
+    assert "_lock" not in body, "a reader takes no lock"
+    assert body.count("validate_path_in_project") == 1
+    assert body.index("validate_path_in_project") < body.index("check_python3")
+    assert 'AIMI_INVOCATION_DIR:-$PWD' in body
+    for flag in ("--tasks-file", "--ref", "--run-suites"):
+        assert flag in body
+    root, tasks_file, _, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    refused = _plan_run(root, tasks_file, "--bogus")
+    assert refused.returncode == 1 and "probe-plan --tasks-file <path>" in refused.stderr
+    outside = os.path.join(os.path.dirname(root), "elsewhere-tasks.json")
+    with open(outside, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    escaped = _plan_run(root, outside)
+    assert escaped.returncode != 0 and escaped.stdout == ""
+
+
+def test_probe_plan_op_is_registered_under_the_verb_name():
+    assert T._OPS["probe-plan"] is T.op_probe_plan
+    with open(CLI, encoding="utf-8") as handle:
+        source = handle.read()
+    assert 'shift; cmd_probe_plan "$@"' in source
+    assert "probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" in source

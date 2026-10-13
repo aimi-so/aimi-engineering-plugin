@@ -159,123 +159,6 @@ After reading the brainstorm (if one was found), parse it for referenced prototy
 6. **Aggregate size cap — the aggregate prototype drop cap:** after loading, measure the total byte size of all wrapped blocks. If the total exceeds **200 KB**, drop blocks in reverse label order (Z → A) until the aggregate fits under the cap. The aggregate prototype drop cap **removes whole wrapped blocks and never truncates one** — a block that does not fit is gone in its entirety, so a prototype that survives this step is present in full and one that does not is absent altogether, with no partial block left behind to suggest otherwise. Log one warning line per removed block: `prototype <path> removed entirely — aggregate prototype drop cap of 200KB exceeded`. Alongside that warning line — never in place of it — append one record per removed block to a working-memory list `prototypeDropped`, each entry the object `{path, reason, bytes}`: `path` is the same `AIMI_ROOT`-relative path the warning line names, `reason` is the literal string `aggregate-cap`, and `bytes` is that block's wrapped byte size **as already measured for the aggregate above** — reuse the number that made the drop decision rather than measuring a second time, so the record can never disagree with the cap that produced it. The warning and the record are owed to different readers and neither substitutes for the other: the warning reaches an operator watching this run, the record reaches whoever opens the tasks.json weeks later, by which time the chat log is gone.
 7. Collect all successfully loaded blocks into a variable `prototypeBlocks` (empty string if none loaded). This variable, together with `prototypeTokens`, is threaded into Phase 1 and Pass 2 sub-agent prompts below. Also collect the resolved absolute paths of every successfully loaded prototype HTML file (those not dropped by the size cap and not missing on disk) into a variable `resolvedPrototypePaths` (empty list if none); append the tokens-sidecar JSON path (`.aimi/brainstorms/prototypes/<topic-slug>-tokens.json`) to `resolvedPrototypePaths` when `prototypeTokens` loaded successfully. `prototypeDropped` from step 6 is this list's complement, and the two disagree by design: `resolvedPrototypePaths` deliberately excludes every block the aggregate prototype drop cap removed, which is exactly why the `metadata.prototypePaths` derived from it looks complete for a run that dropped something — only the pair says what the planner actually read.
 
-### Design Bundle Detection
-
-Extract an optional `--root <path>` flag from `$ARGUMENTS` (e.g. `--root .aimi/brainstorms/design-bundles/my-bundle`). Store as `BUNDLE_OVERRIDE` (empty string when absent).
-
-Run bundle detection unconditionally:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-BUNDLE_META=$($AIMI_CLI detect-design-bundle 2>/dev/null) || BUNDLE_META=""
-```
-
-If `BUNDLE_OVERRIDE` is non-empty, pass it as the override flag:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-BUNDLE_META=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>/dev/null) || BUNDLE_META=""
-
-```
-
-Store the JSON output as `designBundleMeta`. When `BUNDLE_META` is empty or the command fails, set `designBundleMeta` to `null` and continue.
-
-### Bundle Prototype Auto-Generation
-
-**Render-bundle override detection:** Scan `$ARGUMENTS` for the case-insensitive substring `render bundle`. If matched:
-- Set `renderBundlePending = true`.
-- Emit exactly one chat line: `render-bundle override active — regenerating prototype from specs`
-
-When `designBundleMeta` is non-null AND (`bundlePayload.prototypes[]` is empty OR `renderBundlePending = true`):
-
-1. **Check generation status:**
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
-  --bundle "<bundlePath>" \
-  --topic "<topicSlug>" \
-  [--force when renderBundlePending=true])
-```
-
-   Extract from the returned JSON:
-   - `needs_generation` (bool)
-   - `view_list` (array of `{name, source_section}`)
-   - `view_source` (`'designSpec'` | `'businessSpec'` | `'none'`)
-   - `output_path` (string — path where agent must write the HTML)
-   - `sidecar_path` (string — path of the sidecar JSON)
-
-2. **When `view_source` is `'none'`:** emit exactly one log line:
-
-   ```
-   bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6
-   ```
-
-   Proceed to the prototypes[] merge below without generation.
-
-3. **When `needs_generation` is `false` (sidecar matches, `view_source` is not `'none'`):** skip generation entirely. The sidecar at `.aimi/brainstorms/prototypes/<topicSlug>-bundle-sidecar.json` already matches all current hashes — reuse the existing file at `output_path`. Push `output_path` into `resolvedPrototypePaths` and proceed.
-
-4. **When `needs_generation` is `true`:** ensure the output directory exists, then spawn the author agent:
-
-```bash
-mkdir -p "$(dirname "<output_path>")"
-```
-
-```
-Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
-  [model: <AGENT_MODELS.research when not "inherit">]
-  prompt: "Generate a self-contained HTML prototype for the bundle.
-           bundlePath: <bundlePath>
-           viewList: <view_list extracted names as JSON array>
-           viewSource: viewList
-           designSpecPath: <designSpecPath or empty string when null>
-           businessSpecPath: <businessSpecPath or empty string when null>
-           chatPaths[]: <designBundleMeta.chats[] as JSON array>
-           outputPath: <output_path>"
-```
-
-   After the agent writes `outputPath`, write the sidecar atomically:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI bundle-prototype-finalize \
-  --topic "<topicSlug>" \
-  --bundle-hash "<bundleHash>" \
-  --design-spec-hash "<designSpecHash>" \
-  --business-spec-hash "<businessSpecHash>" \
-  --view-list "<view_list as JSON string>" \
-  --source-command plan
-```
-
-   Push `output_path` into `resolvedPrototypePaths`.
-
-When `designBundleMeta` is non-null:
-- Extract the `prototypes` array from the bundle metadata (may be empty).
-- For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
-- Stash the full bundle object as `designBundleMeta` for Phase 4 metadata derivation.
-
-### Phase 0.7: Spec Ingestion
-
-When `designBundleMeta` is non-null:
-- Extract `businessSpec` path from `designBundleMeta` (may be `null`). Store as `businessSpecPath`.
-- Extract `designSpec` path from `designBundleMeta` (may be `null`). Store as `designSpecPath`.
-
-When `businessSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
-- Read the file verbatim; enforce the **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
-- Store contents as `businessSpecContent`.
-
-When `designSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
-- Read the file verbatim; enforce the same **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
-- Store contents as `designSpecContent`.
-
-Both bullets name the **same** ceiling: the per-file spec truncation cap is one ceiling applied once per file, not two independent ceilings, and it always shortens an oversized spec in place — it never removes one.
-
-When either spec file is missing from disk, log a warning and set the corresponding content variable to `null`; continue — do not abort plan.
-
 ### Reuse Brainstorm Research
 
 After reading the brainstorm (if one was found), parse its YAML frontmatter for a `researchPaths` key:
@@ -313,6 +196,22 @@ After reading the brainstorm (if one was found), parse its YAML frontmatter for 
 4. **When confinement, existence, and freshness all pass**, populate the working-memory `foundationProposalPath` variable with the validated path and log `foundationProposalPath reuse: <path> (mtime OK)`. This is the **same** working-memory variable that Phase 1.9 below reads, confirms, or resets — not a parallel variable — so a value populated here already counts toward satisfying Phase 1.9 Step 1 condition (d) before that gate runs (see below). **Ownership:** this subsection sets **only** `foundationProposalPath`; `foundationAccepted` is written exclusively by Phase 1.9 (its reuse branch or its gate steps) and is never set here.
 
 If no brainstorm was found, or the loaded brainstorm has no `foundationProposalPath` key, this subsection is a no-op and Phase 1.9's fire-condition check behaves exactly as it did before this feature.
+
+### Reuse Brainstorm Design Bundle
+
+After reading the brainstorm (if one was found), parse its YAML frontmatter for a `designBundle:` object — gated on the **same condition** as `### Reuse Brainstorm Research` above (a brainstorm must have been loaded this session). The object has the five fields `commands/brainstorm.md`'s "designBundle frontmatter rules" emit: `root`, `readme`, `chats`, `businessSpec`, `designSpec` (the last two are always present and `null` when absent).
+
+1. **Parse `designBundle.root`** — a path to the bundle directory, relative to `AIMI_ROOT` (an absolute path is kept as written). If no brainstorm was loaded, or its frontmatter has no `designBundle:` key (legacy brainstorm, or one with no bundle), skip this entire subsection with no error and leave the working-memory `brainstormBundleRoot` variable unset.
+2. **Store it** in working memory as `brainstormBundleRoot` (empty until a `designBundle.root` is parsed):
+
+   ```bash
+   brainstormBundleRoot=""   # replaced by the parsed designBundle.root when present
+   ```
+
+   and log `designBundle reuse: <root>`. This subsection reads and stores only; it resolves, confines and imports nothing — `### Design Bundle Detection` below applies the same `realpath` confinement to it that it applies to a typed `--bundle`.
+3. **Precedence:** `brainstormBundleRoot` feeds `BUNDLE_ARG` in `### Design Bundle Detection` only when no `--bundle <path>` token was typed on the command line. An explicit flag always wins over frontmatter, the same precedence explicit research paths take over `researchPaths`.
+
+If the brainstorm has no `designBundle:` key, behaviour is unchanged (backward-compatible with legacy brainstorms).
 
 ### Roadmap Materialization
 
@@ -777,6 +676,258 @@ PHASE_TOPIC_SLUG="${featureSlug}-phase-${SELECTED_PHASE_ID}${PHASE_SLUG:+-$PHASE
 
 Phase 1's **Derive Topic Slug** step below substitutes `PHASE_TOPIC_SLUG` for a fresh derivation whenever `ROADMAP_MODE=true`. This is what keeps research filenames, `RUN_DIR`, and every other `topicSlug`-keyed artifact phase-scoped automatically, with no further changes needed anywhere else in the pipeline that already references `topicSlug` generically.
 
+### Design Bundle Detection
+
+Parse `--bundle <path>`, `--root <path>` and a bare `--reimport` token out of `$FEATURE_DESCRIPTION` — never raw `$ARGUMENTS`, which by this point in the pipeline no longer carries the feature description at all. Strip every matched token, and the two flags' own values, out of `$FEATURE_DESCRIPTION` in this same block, re-assigning it exactly the way `### Parse --phase Override` and `### Detect Interactivity` strip their own flags above. Validate `--bundle`'s shape in this same block, before any CLI call below uses it: a token that itself starts with `--` is not a path, it is the *next* flag — the sed capture caught it only because `--bundle` was given with no argument of its own before that flag:
+
+```bash
+BUNDLE_ARG=""
+case " $FEATURE_DESCRIPTION " in
+  *" --bundle "*)
+    BUNDLE_ARG=$(echo "$FEATURE_DESCRIPTION" | sed -n 's/.*--bundle[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+    FEATURE_DESCRIPTION=$(echo "$FEATURE_DESCRIPTION" | sed 's/[[:space:]]*--bundle[[:space:]]\+[^[:space:]]\+[[:space:]]*/  /' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ;;
+esac
+BUNDLE_OVERRIDE=""
+case " $FEATURE_DESCRIPTION " in
+  *" --root "*)
+    BUNDLE_OVERRIDE=$(echo "$FEATURE_DESCRIPTION" | sed -n 's/.*--root[[:space:]]\+\([^[:space:]]\+\).*/\1/p')
+    FEATURE_DESCRIPTION=$(echo "$FEATURE_DESCRIPTION" | sed 's/[[:space:]]*--root[[:space:]]\+[^[:space:]]\+[[:space:]]*/  /' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ;;
+esac
+REIMPORT_FLAG=false
+case " $FEATURE_DESCRIPTION " in
+  *" --reimport "*)
+    REIMPORT_FLAG=true
+    FEATURE_DESCRIPTION=$(echo "$FEATURE_DESCRIPTION" | sed 's/[[:space:]]*--reimport[[:space:]]*/  /g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ;;
+esac
+if [ -z "$BUNDLE_ARG" ] && [ -n "${brainstormBundleRoot:-}" ]; then
+  case "$brainstormBundleRoot" in
+    /*) BUNDLE_ARG="$brainstormBundleRoot" ;;
+    *)  BUNDLE_ARG="$AIMI_ROOT/$brainstormBundleRoot" ;;
+  esac
+fi
+BUNDLE_SHAPE_OK=true
+case "$BUNDLE_ARG" in
+  --*) BUNDLE_SHAPE_OK=false ;;
+esac
+```
+
+When `BUNDLE_SHAPE_OK=false`: report `[plan] --bundle requires a path argument` and STOP the entire `/aimi:plan` invocation — nothing below this point runs. An empty `BUNDLE_ARG` is not an error; it just means no `--bundle` was named. When no `--bundle` token was typed, the block above fills `BUNDLE_ARG` from the brainstorm's `designBundle.root` (`### Reuse Brainstorm Design Bundle`); a typed `--bundle` is never overridden by it, and the value then takes the same `realpath` confinement and import path below as a typed one.
+
+**When `BUNDLE_ARG` is non-empty, resolve it before any `detect-design-bundle` call runs — D5's confinement rule applies here exactly as it applies inside the verb itself:**
+
+```bash
+BUNDLE_ARG_REAL=$(realpath "$BUNDLE_ARG" 2>/dev/null || printf '%s' "$BUNDLE_ARG")
+case "$BUNDLE_ARG_REAL" in
+  "$AIMI_ROOT"|"$AIMI_ROOT"/*) BUNDLE_FINAL="$BUNDLE_ARG" ;;
+  *) BUNDLE_FINAL="" ;;
+esac
+```
+
+- **`BUNDLE_FINAL` non-empty (the path, symlinks resolved, already sits inside `AIMI_ROOT`):** use `$BUNDLE_ARG` as-is — no import needed.
+- **`BUNDLE_FINAL` empty (the path resolves outside `AIMI_ROOT`):** bring it into the project first with `import-design-bundle`, then point `BUNDLE_FINAL` at the imported copy. The destination (`BUNDLE_DEST`) depends on `ROADMAP_MODE` (set above, in Rolling-Wave Phase Selection):
+  - `ROADMAP_MODE=true`: `$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle` — D2's fixed phase-scoped location, reusing `$featureSlug`/`$PHASE_DIR` from `#### Extract selected-phase working memory` above; this is the same `<phase-dir>/design-bundle/README.md` layout `_select_design_bundle`'s phase tier already expects.
+  - `ROADMAP_MODE=false`: `$AIMI_ROOT/.aimi/design-bundles/<slug>`, `<slug>` derived from `$FEATURE_DESCRIPTION` via the same five-step algorithm in `commands/references/topic-slug.md` (lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) that Phase 1's own `topicSlug` derivation applies below — that derivation has not run yet for a flat feature at this point in the pipeline, so this is a local, one-off derivation rather than a reuse of it.
+
+  ```bash
+  AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+  : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+  if [ "$ROADMAP_MODE" = true ]; then
+    BUNDLE_DEST="$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle"
+  else
+    BUNDLE_IMPORT_SLUG=$(printf '%s' "$FEATURE_DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | cut -c1-50 | sed 's/-*$//')
+    BUNDLE_DEST="$AIMI_ROOT/.aimi/design-bundles/$BUNDLE_IMPORT_SLUG"
+  fi
+  IMPORT_ERR_FILE=$(mktemp)
+  if [ "$REIMPORT_FLAG" = true ]; then
+    IMPORT_JSON=$($AIMI_CLI import-design-bundle --from "$BUNDLE_ARG" --to "$BUNDLE_DEST" --reimport 2>"$IMPORT_ERR_FILE")
+  else
+    IMPORT_JSON=$($AIMI_CLI import-design-bundle --from "$BUNDLE_ARG" --to "$BUNDLE_DEST" 2>"$IMPORT_ERR_FILE")
+  fi
+  IMPORT_EXIT=$?
+  IMPORT_STDERR=$(cat "$IMPORT_ERR_FILE" 2>/dev/null)
+  rm -f "$IMPORT_ERR_FILE"
+  ```
+
+  **On `IMPORT_EXIT != 0`:** report `$IMPORT_STDERR` as a single warning line — the CLI's own refusal already names both the source and the destination when a different copy already lives there, and names `--reimport` as the way to replace it — and STOP the entire `/aimi:plan` invocation before any `detect-design-bundle` call runs. **On `IMPORT_EXIT = 0`:** `BUNDLE_FINAL="$BUNDLE_DEST"`.
+
+**Build and run the `detect-design-bundle` call, capturing stdout and the exit status separately from stderr — never merged, and never swallowed into an empty default the way this call used to be:**
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BUNDLE_ERR_FILE=$(mktemp)
+if [ -n "$BUNDLE_FINAL" ]; then
+  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_FINAL" 2>"$BUNDLE_ERR_FILE")
+elif [ "$ROADMAP_MODE" = true ] && [ -n "$BUNDLE_OVERRIDE" ]; then
+  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+elif [ "$ROADMAP_MODE" = true ]; then
+  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+elif [ -n "$BUNDLE_OVERRIDE" ]; then
+  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>"$BUNDLE_ERR_FILE")
+else
+  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle 2>"$BUNDLE_ERR_FILE")
+fi
+BUNDLE_EXIT=$?
+BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
+rm -f "$BUNDLE_ERR_FILE"
+```
+
+`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode.
+
+**Branch on `BUNDLE_EXIT`:**
+
+- **`0`, and `BUNDLE_STDOUT` is the literal `null`:** `designBundleMeta=null`. Continue.
+- **`0`, and `BUNDLE_STDOUT` is a JSON object:** `designBundleMeta=<that object>`. Continue.
+- **`3` (ambiguous):** see below.
+- **anything else:** report `$BUNDLE_STDERR` as a single warning line and STOP the entire `/aimi:plan` invocation. This is unlike the Pre-Expansion Contract Gate's and Roadmap Materialization's own "surface the CLI's stderr and continue the rest of the plan pipeline" precedent for an unhandled failure shape: every exit `detect-design-bundle` can produce by design is already one of the three cases above, so a fourth one means something this command does not understand happened, before any planning context exists for the rest of the pipeline to fall back on.
+
+**On exit 3 — ambiguous, two or more same-tier candidates and no bundle was named:** `BUNDLE_STDOUT` parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in `.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null` when that spec is absent).
+
+- **Interactive** (`INTERACTIVE_MODE` is not `agent`): present exactly one AskUserQuestion, naming the count and listing the first 4 entries of `.candidates[]` in its own path order:
+  ```
+  Design Bundle Detection found <N> bundles and none was named. Which one should this plan use?
+  A — <candidates[0].path> (<"BusinessSpec, DesignSpec" | "BusinessSpec only" | "DesignSpec only" | "no specs", from that candidate's own businessSpec/designSpec>)
+  B — <candidates[1].path> (...)
+  ...
+  none — plan without a bundle
+  ```
+  On a pick: set `BUNDLE_FINAL` to the chosen candidate's own `.path` and re-run **Build and run the `detect-design-bundle` call** above — skip the realpath/import resolution step entirely, a candidate the CLI's own scan already returned is already inside `AIMI_ROOT`. On **none — plan without a bundle**: `designBundleMeta=null`, continue.
+- **Agent mode** (`INTERACTIVE_MODE=agent`): do not guess — compose and report one line naming every candidate, then STOP the entire `/aimi:plan` invocation:
+  ```
+  agent-mode: design-bundle-detection ambiguous — <N> bundles found and none was named (<candidates[0].path>, <candidates[1].path>, ...); re-run with --bundle <path> to choose one.
+  ```
+
+Store the resolved JSON object (or `null`) as `designBundleMeta`.
+
+### Bundle Prototype Auto-Generation
+
+**Render-bundle override detection:** Scan `$ARGUMENTS` for the case-insensitive substring `render bundle`. If matched:
+- Set `renderBundlePending = true`.
+- Emit exactly one chat line: `render-bundle override active — regenerating prototype from specs`
+
+When `designBundleMeta` is non-null AND (`designBundleMeta.prototypes` is empty OR `renderBundlePending = true`):
+
+1. **Check generation status:**
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+STATUS_JSON=$($AIMI_CLI bundle-prototype-status \
+  --bundle "<bundlePath>" \
+  --topic "<topicSlug>" \
+  [--force when renderBundlePending=true])
+```
+
+   Extract from the returned JSON:
+   - `needs_generation` (bool)
+   - `view_list` (array of `{name, source_section}`)
+   - `view_source` (`'designSpec'` | `'businessSpec'` | `'none'`)
+   - `output_path` (string — path where agent must write the HTML)
+   - `sidecar_path` (string — path of the sidecar JSON)
+
+2. **When `view_source` is `'none'`:** emit exactly one log line:
+
+   ```
+   bundle prototype generation skipped — no view list in DesignSpec § 4 or BusinessSpec § 5/§ 6
+   ```
+
+   This is `cmd_bundle_prototype_status`'s own hardcoded fallback probe order (DesignSpec § 4, then BusinessSpec § 5, then § 6) for placeholder-prototype generation — distinct from `BusinessSpec § 2` (Screens), the canonical screen-list section `commands/references/spec-section-contract.md` documents for story decomposition.
+
+   Proceed to the prototypes[] merge below without generation.
+
+3. **When `needs_generation` is `false` (sidecar matches, `view_source` is not `'none'`):** skip generation entirely. The sidecar at `.aimi/brainstorms/prototypes/<topicSlug>-bundle-sidecar.json` already matches all current hashes — reuse the existing file at `output_path`. Push `output_path` into `resolvedPrototypePaths` and proceed.
+
+4. **When `needs_generation` is `true`:** ensure the output directory exists, then spawn the author agent:
+
+```bash
+mkdir -p "$(dirname "<output_path>")"
+```
+
+```
+Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
+  [model: <AGENT_MODELS.research when not "inherit">]
+  prompt: "Generate a self-contained HTML prototype for the bundle.
+           bundlePath: <bundlePath>
+           viewList: <view_list extracted names as JSON array>
+           viewSource: viewList
+           designSpecPath: <designSpecPath or empty string when null>
+           businessSpecPath: <businessSpecPath or empty string when null>
+           chatPaths[]: <designBundleMeta.chats[] as JSON array>
+           outputPath: <output_path>"
+```
+
+   After the agent writes `outputPath`, write the sidecar atomically:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI bundle-prototype-finalize \
+  --topic "<topicSlug>" \
+  --bundle-hash "<bundleHash>" \
+  --design-spec-hash "<designSpecHash>" \
+  --business-spec-hash "<businessSpecHash>" \
+  --view-list "<view_list as JSON string>" \
+  --source-command plan
+```
+
+   Push `output_path` into `resolvedPrototypePaths`.
+
+When `designBundleMeta` is non-null:
+- Extract the `prototypes` array from the bundle metadata (may be empty).
+- For each path: resolve absolute path with `realpath`. Paths whose absolute resolution does not start with `AIMI_ROOT` are dropped with one-line warning `prototype <path> rejected — path outside project root` and excluded from `resolvedPrototypePaths`. For paths that pass validation, normalize to relative-to-`AIMI_ROOT` before merging. Deduplicate by relative path against paths already collected from the brainstorm frontmatter (insertion-order, first-occurrence wins).
+- Stash the full bundle object as `designBundleMeta` for Phase 4 metadata derivation.
+
+### Phase-Tier Spec Detail Authoring
+
+Runs after `### Design Bundle Detection` has resolved `designBundleMeta` and before `### Phase 0.7: Spec Ingestion`. Fires only when ALL hold: `ROADMAP_MODE=true`, `designBundleMeta.businessSpec` is non-null, and that file contains the literal marker line `<!-- aimi:per-phase-detail-deferred -->` (a brainstorm of a phased feature writes it in each per-phase section; see `commands/references/business-spec-authoring.md` § Core vs per-phase). Otherwise skip with no output. It never fires when `ROADMAP_MODE=false` — a flat feature has no phase-tier location to author into. This subsection never prompts, in any mode.
+
+The write path is always `$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle` (`$featureSlug` and `$PHASE_DIR` from `#### Extract selected-phase working memory`), never any other location. Check for an existing bundle first:
+
+```bash
+PHASE_TIER_DIR="$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle"
+if [ -f "$PHASE_TIER_DIR/README.md" ]; then
+  echo "phase-tier spec detail: $PHASE_TIER_DIR already authored — skipping"
+fi
+```
+
+When `README.md` exists, authoring is skipped entirely and the existing phase-tier bundle is never overwritten; continue to the re-detection step below. Otherwise author:
+
+1. **Core sections verbatim.** Copy BusinessSpec § 1, § 3, § 7 and § 11 from the feature-level BusinessSpec unchanged. Resolve each section number at run time from `commands/references/spec-section-contract.md`, as `business-spec-authoring.md`'s Write procedure directs, never from this text. A core section is never edited in place: when this phase's detail contradicts one, leave it as is and add the contradiction to § 11 as an open question.
+2. **Evidence for § 4/§ 5.** Spawn the `aimi-spec-deriver` agent with `targets` taken from this phase's own `areas` (`PHASE_AREAS_JSON`) and its `creates`/`needs` identities, then render its `spec_derivation` block with `$AIMI_CLI spec-derivation --input <scratch file>`, exactly as `business-spec-authoring.md` § Propose-then-correct step 2 shows. Entity and endpoint rows come from the verb and nowhere else.
+3. **Author § 2/§ 4/§ 5/§ 9** for this phase by following `business-spec-authoring.md`'s Write procedure, its Propose-then-correct and Absent-vs-unchecked rules, and its agent-mode behavior as written there: proposals are accepted as returned, and any item that would need an operator becomes a § 11 open question. Do not re-implement those rules here.
+4. **Write the bundle.** `README.md` with the generated-bundle marker as `skills/aimi-design-handoff/references/spec-output-shape.md` § `README.md` directs (read from `aimi-cli.sh` at write time, never retyped), `project/BusinessSpec.md` with the sections above, and, when `designBundleMeta.designSpec` is non-null, `project/DesignSpec.md` copied verbatim from it.
+
+**Re-detect.** After authoring, or after the skip-on-exists branch, re-run detection against the phase directory so `designBundleMeta` reflects the phase-tier bundle, which `_select_design_bundle` prefers over the scan tier:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR")
+```
+
+Overwrite `designBundleMeta` with the result (`null` or a JSON object); `### Phase 0.7: Spec Ingestion` then reads `businessSpecPath`/`designSpecPath` from it.
+
+### Phase 0.7: Spec Ingestion
+
+When `designBundleMeta` is non-null:
+- Extract `businessSpec` path from `designBundleMeta` (may be `null`). Store as `businessSpecPath`.
+- Extract `designSpec` path from `designBundleMeta` (may be `null`). Store as `designSpecPath`.
+
+When `businessSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
+- Read the file verbatim; enforce the **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
+- Store contents as `businessSpecContent`.
+
+When `designSpecPath` is non-null and the file exists on disk (within `AIMI_ROOT`):
+- Read the file verbatim; enforce the same **per-file spec truncation cap** of **200 KB** — truncate with a warning if exceeded.
+- Store contents as `designSpecContent`.
+
+Both bullets name the **same** ceiling: the per-file spec truncation cap is one ceiling applied once per file, not two independent ceilings, and it always shortens an oversized spec in place — it never removes one.
+
+When either spec file is missing from disk, log a warning and set the corresponding content variable to `null`; continue — do not abort plan.
+
 ### Implementation Scope Detection
 
 After the brainstorm check, determine the implementation scope:
@@ -830,6 +981,8 @@ Otherwise, emit no line.
 Set the `scopeContextClassificationVerdict` working-memory variable to the same `<fired|skipped>` token computed above — read back, never recomputed, by the Classification Summary Line subsection below. (Step 1 itself ran and classified 0 or 1 scope contexts here — that is `skipped`, distinct from the `not-run` set at this subsection's Trigger/Additional Guard above where Step 1 never ran at all.)
 
 **Step 2 — Propose the cut.** Draft one phase entry per identified scope context in an in-memory `phases` array, using the identical field set, `id`/`idx` semantics, and JSON shape as `commands/brainstorm.md` Phase 3.5 Step 2 — `id`, `name`, `slug`, `goal`, `successCriteria`, `dependsOn`, `creates`, `needs`, `areas` (coarse file-area declaration), each derived per the matching section of `scope-contexts.md` exactly as that step does; see there for the full shape, not restated here. Before the gate is first presented, run the same Shared-Foundation Detection pass `scope-contexts.md` defines: for any artifact **identity** appearing in more than one proposed phase's `creates` (compare the `identity` field alone — two phases may describe the same artifact differently and still collide), promote it into its own foundation phase or consolidate it into whichever consuming phase comes first in dependency order, exactly as `commands/brainstorm.md` Phase 3.5 Step 2 does.
+
+`name`, `goal`, and `successCriteria` are persisted into `roadmap.json`, a plugin-owned artifact, the same as when `commands/brainstorm.md` authors them — per the artifact-language rule (`commands/references/user-communication.md`), author them in English here too; a reader who lands in this fallback never opens `brainstorm.md` to learn that.
 
 **Step 3 — Compact interactive gate.**
 
@@ -1237,11 +1390,15 @@ FIGURES_JSON=$($AIMI_CLI research-figures "$RESEARCH_OUT" 2>/dev/null || printf 
 MEASURE_BLOCKS=$(printf '%s' "$FIGURES_JSON" | jq -r '.blocks // empty' 2>/dev/null)
 BARE_FIGURES=$(printf '%s' "$FIGURES_JSON" | jq -r '.figures_outside // empty' 2>/dev/null)
 DEAD_KEYS=$(printf '%s' "$FIGURES_JSON" | jq -r '(.dead_keys // []) | map("block \(.block) reads \(.key) against \(.subject)") | join("; ")' 2>/dev/null)
+UNRECORDED=$(printf '%s' "$FIGURES_JSON" | jq -r '(.unrecorded // []) | map("block \(.block) line \(.line) `\(.command)`") | join("; ")' 2>/dev/null)
 if [ "${MEASURE_BLOCKS:-1}" = 0 ] && [ "${BARE_FIGURES:-0}" -ge 10 ]; then
   echo "warning: research file carries no measure block - blocks=${MEASURE_BLOCKS}, figures_outside=${BARE_FIGURES}, so every figure in it is UNVERIFIED: $RESEARCH_OUT"
 fi
 if [ -n "${DEAD_KEYS:-}" ]; then
   echo "warning: a measure block indexes a name its own subject does not carry, so its figure is independent of the corpus - ${DEAD_KEYS}: $RESEARCH_OUT"
+fi
+if [ -n "${UNRECORDED:-}" ]; then
+  echo "warning: a measure block records a command with no output, so its figure is UNVERIFIED - ${UNRECORDED}: $RESEARCH_OUT"
 fi
 ```
 
@@ -1251,7 +1408,7 @@ fi
 
 **The `dead_keys` line answers a different question, and the three together still leave a fourth open.** `blocks` proves a block EXISTS. Phase 1.6's re-execution below proves it REPRODUCES. `dead_keys` proves its subject is ADDRESSED — it is what catches a figure produced by `x.get('output','')` over case objects that carry no `output` key, which returned its default for every input and was therefore independent of the corpus, and which re-execution had PASSED twice, because a wrong-but-deterministic command reproduces its own wrong output forever. None of the three proves the command answers the question the prose asks. That last step is human reading, and nothing here claims it.
 
-**The measure-block warning never blocks**, and neither does the `dead_keys` one. Both are advisory in the same way: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status, and no path is dropped from `researchWritten` by either. They add at most two more lines per path to the at-most-two-lines-and-always-continues promise below, which they extend rather than replace. Their scope is this section's own — every researcher Task this run actually spawns, at both spawn sites (Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below) — and never a path taken from `reusedResearch`, for which no Task was spawned this run and so nothing was promised to land.
+**The measure-block warning never blocks**, and neither do the `dead_keys` and `unrecorded` ones (`unrecorded` names a block recording a command with no output under it). All three are advisory in the same way: no abort, no retry, no re-spawn of the researcher, no change to the command's exit status, and no path is dropped from `researchWritten` by any of them. They add at most three more lines per path to the at-most-two-lines-and-always-continues promise below, which they extend rather than replace. Their scope is this section's own — every researcher Task this run actually spawns, at both spawn sites (Phase 1's codebase and learnings researchers above, and Phase 1.5b's best-practices and framework-docs researchers below) — and never a path taken from `reusedResearch`, for which no Task was spawned this run and so nothing was promised to land.
 
 **Recover before you drop.** This branch fires only when the block above printed its warning — the file did not land. Look at the same Task return's pointer block for an `unwritten_findings:` key before giving up on that researcher.
 
@@ -1296,7 +1453,7 @@ Task subagent_type="aimi-engineering:research:aimi-design-bundle-researcher"
            any spec-prototype coverage gaps marked
            [PROMOTE-TO-OPEN-QUESTIONS].
            topicSlug: [topicSlug]
-           bundlePath: [designBundleMeta.bundlePath]
+           bundlePath: [designBundleMeta.path]
            designSpec: [designBundleMeta.designSpec or empty string]
            businessSpec: [designBundleMeta.businessSpec or empty string]
            chats: [designBundleMeta.chats[] as JSON array]
@@ -1412,7 +1569,12 @@ For each file, in this order:
 3. **Compare.** Run each surviving block from the repository root and compare
    its output against the output recorded inside the block, and against the
    figure the prose cites. All three must agree character for character.
-4. **A figure with no block is `UNVERIFIED`.** Including one the researcher
+4. **A block with no recorded output is `UNVERIFIED` and is not re-executed.**
+   When `research-figures` lists a block under `unrecorded`, the block holds a
+   command and nothing to compare against; running it would produce a comparison
+   against nothing. Mark its figure `UNVERIFIED` in the consolidation, carried
+   forward like a refused block, and never raise a Conflicts entry for it.
+5. **A figure with no block is `UNVERIFIED`.** Including one the researcher
    reached by arithmetic over two other figures — the case that produced the
    worst drift this rule exists to stop. Carry the `UNVERIFIED` mark forward
    into the consolidation body so any story that later quotes the figure quotes
@@ -2607,6 +2769,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
       'files': ['<concrete file paths>'],
       'approach': '<actionable strategy referencing codebase patterns>',
       'verify': '<executable command or checkable assertion>',
+      'guardRails': ['<optional - exact text of each verify segment that is SUPPOSED to pass before and after the work, as the probe segmenter splits it>'],
       'prototypeAnchor': '<optional, relative path to single prototype file>'
     },
     'verification': {
@@ -2637,6 +2800,11 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   a criterion written in plain prose that names no command at all ("the
   lint passes"). A criterion that only a human can confirm does not
   belong in 'verify' — route it to 'gate' instead.
+  A segment of 'verify' that is SUPPOSED to pass both before and after
+  the work (a regression guard on a sibling story's behaviour) is
+  labelled, not left bare: list its exact text in
+  'implementation.guardRails'. An unlabelled segment that already passes
+  before the work is reported at plan time as non-discriminating.
 
   IMPORTANT — never name 'verify-probe' inside 'verify':
   Do NOT write 'aimi-cli.sh verify-probe' into 'implementation.verify'.
@@ -2706,14 +2874,15 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     path to populate new fields (or document why mocks are intentionally unchanged).'
     Otherwise: append 'Verify no mock data files require updates'.
   - Spec-driven decomposition (when businessSpecContent non-null):
-    Drive screen decomposition from BusinessSpec § 2 (one story per screen listed).
+    Drive screen decomposition from BusinessSpec § 2 (one story per screen
+    listed; canonical map: commands/references/spec-section-contract.md).
     Seed acceptanceCriteria verbatim from BusinessSpec § 9 matching entries;
     preserve rule IDs (RN-01, RN-02, ...) exactly as written.
     One story per entity in BusinessSpec § 4 (non-trivial entities).
     One story per endpoint group in BusinessSpec § 5.1 and § 5.3.
     One story per persona/permission tier in BusinessSpec § 7.
   - Spec-driven component stories (when designSpecContent non-null):
-    One story per entry in DesignSpec § 2.2 (NOVOS components); include prop
+    One story per entry in DesignSpec § 2.2 (new components); include prop
     type signature verbatim as acceptance criterion.
   - Prototype-region citations for visual-layout AC (when prototypePaths non-empty
     AND verification.strategy == 'visual'): every visual-layout AC must include
@@ -3172,7 +3341,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
 
 **Authored here, never derived:** `title`, `branchName`, `issues`, `finalize`, `decisions` and `researchPaths` — story-merge composes none of these on any path. `branchName`'s prefix is `metadata.type`, decided at the `- **type**` bullet below and therefore not knowable at merge time; the other five are accumulated by this command's own earlier phases and never travel to the merge at all. Reading the split the wrong way costs something in both directions: hand-patching one of the four verified fields overwrites a value the merge already validated, and waiting for one of these six to be pre-filled loses it.
 
-- **title**: `<type>: <Descriptive Name>`
+- **title**: `<type>: <Descriptive Name>`. `<Descriptive Name>` is written in **English**, even when `FEATURE_DESCRIPTION` was typed in another language — the title is authored here rather than copied verbatim from the typed text. See the Artifact Language Rule (`${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md` § Artifact Language Rule), which governs every plugin-owned prose field this command writes, `metadata.title` among them.
 - **type**: `feat`, `ref`, `bug`, or `chore`
 - **branchName**: Kebab-case, prefixed with type. For SIDE-axis split files: `type/[feature]-frontend` and `type/[feature]-backend`. **For PROJECT-axis split files** (`MERGE_RETURN` is an array): `type/[feature]-<project-slug>`, one per returned entry, where `<project-slug>` is the slugified project story-merge already used for that entry's basename — read it from the entry rather than re-slugifying (`printf '%s' "$MERGE_RETURN" | jq -r '.[].branchName' | sed 's|^feat/merged-||'` yields one slug per entry, in returned order — equivalently, the segment each entry's `path` basename carries before `-tasks.json`). Its `ROADMAP_MODE=true` equivalent is the phase-branch value suffixed the same way: `type/${featureSlug}-phase-${SELECTED_PHASE_ID_SLUG}-${PHASE_SLUG}-<project-slug>`.
 
@@ -3222,7 +3391,7 @@ Read the tasks.json file written by story-merge and patch the `metadata` object 
   Normalize each path: relative to `AIMI_ROOT`, no leading `./`, no `..` components. Deduplicate the combined list (insertion-order, first-occurrence wins). If a tasks.json being updated does not already have a `researchPaths` key, create the array. Omit the key entirely when `researchDepth` is `skip` and `reusedPaths` is empty and no research files were written this run and `foundationProposalPathByRoot` is empty. Every file in `SPLIT_FILES` is patched with this same `researchPaths` value (see the patch rule below), so on a PROJECT-axis split each repository's own tasks.json lists all N accepted proposals rather than only its own — existing behaviour of the shared-metadata patch, not a per-repo filter applied here.
 - **prototypePaths**: Convert each path in `resolvedPrototypePaths` to a path relative to `AIMI_ROOT` (no leading `./`, no `..` components). Deduplicate with `| unique`. Emit as `metadata.prototypePaths` array. Omit the key entirely when the array is empty.
 - **prototypeDropped**: Emit the `prototypeDropped` working-memory list Phase 0 § Prototype Context accumulated — one entry per wrapped prototype block that was removed rather than sliced, each `{path, reason, bytes}`: `path` relative to `AIMI_ROOT` (no leading `./`, no `..` components), `reason` a non-empty string naming why (never re-derived here — carry forward whatever the writing step already recorded), and `bytes` the size that step already weighed. The list has **two writers**, each contributing its own `reason` literal: Phase 0 § Prototype Context's **aggregate prototype drop cap**, `reason: "aggregate-cap"`, when the 200 KB aggregate budget removes a whole block before any sub-agent ever sees it; and Phase 3d § Per-Entry View-Scoped Prototype Block Preparation's no-anchor degradation, `reason: "no-view-anchors"`, when a loaded prototype carries zero `data-view` sections and is sent whole to the first outline entry instead of being sliced — that prototype WAS read, unlike an `aggregate-cap` entry. Emit as `metadata.prototypeDropped`, in drop order. This is the complement of `prototypePaths` directly above — a removed prototype is absent from that list by construction, so without this key a plan written from a filename alone is indistinguishable from one written from the file itself. Omit the key entirely when nothing was dropped — never `[]`, never `{}`, never `null`, the same non-placeholder rule `baseRef`, `pluginVersion` and `issues` above already follow, and for the same reason: an absent key reads as "this plan predates the field", which a later reader can recover from, where `[]` reads as "the planner weighed the prototypes and dropped none" — a claim this command cannot honestly make about a file written before the key existed. This is a **shared** value, patched byte-identically into every file in `SPLIT_FILES`: both writers act in Phase 0 or Phase 3d, long before any split axis is known, and the withheld or degraded HTML was withheld or degraded for every Pass 2 sub-agent prompt whatever repository that agent's stories landed in — a property of the *writing run*, exactly as `pluginVersion` is, where `branchName` and `baseRef` name a *repository* and so resolve per file. Attributing it per file would mean inventing a per-repository attribution the drop site does not have, and would leave N−1 files of a PROJECT-axis split silently claiming nothing was dropped.
-- **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. All paths relative to `AIMI_ROOT`. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
+- **designBundle**: When `designBundleMeta` is non-null, emit as `metadata.designBundle` with the following shape: `{ root: string, readme: string, chats: string[], businessSpec: string|null, designSpec: string|null }`. `root` is populated from `designBundleMeta.path` — the verb's own field; there is no `designBundleMeta.root`. All paths relative to `AIMI_ROOT` per D10, consistent with every other path `detect-design-bundle` reports for a bundle inside the project. Omit the key entirely when no bundle was detected. When the bundle was detected, always emit both `businessSpec` and `designSpec` keys — use `null` for whichever spec file is absent.
 - **designTokens**: When `designSpecContent` is non-null and `DesignSpec § 1` contains a token map, parse it and emit as `metadata.designTokens` — a flat object whose top-level keys are the token categories enumerated in `DesignSpec § 1` (e.g., `color`, `typography`, `spacing`, `radii`, `shadow`, `transition`). Values are written verbatim from the spec without normalization. Omit the key entirely when `designSpecContent` is null or `§ 1` contains no token map.
 - **decisions**: Emit one entry per item in the fully accumulated `oqDecisions[]` working memory — this includes every OQ resolved or deferred by Phase 0.5, Phase 1.8, Phase 2.5, outline-gate edits recorded in Phase 3c, phase-cut Edit rounds recorded by the Phase 0 Scope-Context Classification (Inline Fallback) gate, AND the Phase 3d.5 Unresolved Gate below. Each entry carries `anchor`, `source`, `text`, and `resolution` from the corresponding `oqDecisions[]` record. Omit the `decisions` key entirely when `oqDecisions[]` is empty.
 - **maxConcurrency**: Default `20`. Set to `1` for strictly sequential execution.
@@ -3380,6 +3549,7 @@ Patch **every** file in `SPLIT_FILES` independently, with the same `title`, `typ
         "files": ["string[] (required, concrete file paths from research)"],
         "approach": "string (required, actionable strategy referencing codebase patterns)",
         "verify": "string (required, executable command or checkable assertion)",
+        "guardRails": ["string[] (optional, exact text of each verify segment that is supposed to pass before and after the work, as the probe segmenter splits it)"],
         "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Pass 2 sub-agent when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
       },
       "verification": {
@@ -3493,7 +3663,7 @@ Specific obligations:
 - [ ] `prototypePaths` (if set) contains only paths that exist on disk and were successfully loaded into `prototypeBlocks`
 - [ ] `metadata.designBundle` (if set) — all paths (`root`, `readme`, `chats[]`, `businessSpec`, `designSpec`) that are non-null exist on disk under `AIMI_ROOT`
 - [ ] `metadata.designTokens` (if set) is a flat object whose top-level keys match the token categories enumerated in `DesignSpec § 1`
-- [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
+- [ ] When `businessSpecContent` is non-null, every story whose title matches a screen name in `BusinessSpec § 2` (canonical map: `commands/references/spec-section-contract.md`) cites at least one rule ID from `§ 3` (e.g., `RN-01`) or one criterion ID from `§ 9` in its `acceptanceCriteria`
 - [ ] Every story has a `wave` number (wave 1 for roots, computed from `dependsOn` for others)
 - [ ] Wave numbers are contiguous with no gaps
 - [ ] `implementation` (if present) has `files` (string[]), `approach` (string), `verify` (string) with concrete paths and no `cd <project> &&` prefix, per the "verify working directory" rule in the Story JSON shape block above — the executor has already entered the project
@@ -3540,6 +3710,8 @@ Run the loop below once, on every axis — there is no separate single-file bran
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+DESIGN_SPEC_PATH=""      # fill with designBundleMeta.designSpec when it is non-null
+PROTOTYPE_HTML_PATHS=""  # fill with the resolved prototype HTML paths, one per line
 while IFS= read -r VALIDATE_FILE; do
   [ -n "$VALIDATE_FILE" ] || continue
   echo "Validating $VALIDATE_FILE"
@@ -3557,8 +3729,28 @@ while IFS= read -r VALIDATE_FILE; do
     echo "validate-waves rejected $VALIDATE_FILE" >&2
     exit 1
   fi
+  # Advisory only: no `exit` follows this call, whatever it returns.
+  if [ -n "${DESIGN_SPEC_PATH:-}" ] || [ -n "${PROTOTYPE_HTML_PATHS:-}" ]; then
+    set --
+    [ -z "${DESIGN_SPEC_PATH:-}" ] || set -- "$@" --spec "$DESIGN_SPEC_PATH"
+    while IFS= read -r PROTO_PATH; do
+      [ -n "$PROTO_PATH" ] || continue
+      set -- "$@" --prototype "$PROTO_PATH"
+    done <<< "${PROTOTYPE_HTML_PATHS:-}"
+    SV_JSON=$($AIMI_CLI structural-vocabulary --tasks "$VALIDATE_FILE" "$@" </dev/null) || SV_JSON=""
+    if [ -z "$SV_JSON" ]; then
+      echo "structural-vocabulary: no report for $VALIDATE_FILE (advisory, continuing)" >&2
+    elif [ "$(printf '%s' "$SV_JSON" | jq -r '.measured')" = "true" ]; then
+      echo "Structural vocabulary ($VALIDATE_FILE):"
+      printf '%s' "$SV_JSON" | jq -r '(.missing[]? | "  missing: " + .), (.unsourced[]? | "  unsourced: " + .)'
+    else
+      echo "Structural vocabulary ($VALIDATE_FILE): nothing to measure"
+    fi
+  fi
 done <<< "$VALIDATE_FILES"
 ```
+
+**The `structural-vocabulary` call is advisory, and that is deliberate — it is the one call in this loop that never aborts the run.** It runs only for a UI phase (a non-null `designBundleMeta.designSpec` or a non-empty `resolvedPrototypePaths`, narrowed to prototype HTML files) and passes each spec and prototype path as its own quoted `--spec` / `--prototype` flag through the positional parameters, never from an unquoted string variable that zsh would not word-split. `missing` names a source term that never reaches the generated stories; `unsourced` names a container term a story uses that the design never named. A non-zero exit or empty output is logged and the loop continues; `measured: false` prints `nothing to measure`.
 
 `init-session --file` rebinds the session's active tasks file, so the five `validate-*` calls always target the file bound immediately above them — keep them inside the same iteration and never reorder them. A non-zero exit anywhere aborts the loop: fix that file and re-run Phase 4.5 from the top rather than validating the remaining files against a half-fixed set. When the failure came from `normalize-verification` or `normalize-status`, inspect that file for malformed `verification` / `status` fields before retrying.
 
@@ -3573,6 +3765,56 @@ done <<< "$VALIDATE_FILES"
 4. Re-run all validations until they pass
 
 **Note:** `validate-stories` catches malformed `skills[]` — entries that fail the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` regex, lists exceeding 10 entries, or an explicitly empty `skills: []` array (field must be omitted when no skills apply). It also enforces the **gate schema**: the plural `gates` field is rejected outright (use singular `gate`), and any singular `gate` object must carry all three required keys — `type`, `status`, and `prompt`.
+
+**Step 3 — Probe every written file's verifies:**
+
+After the validator loop passes, run `probe-plan` once for **every** file in `VALIDATE_FILES`, so each PROJECT-axis split is probed in its own repository at its own `metadata.baseRef`. The call is advisory in what it measures and strict in what it will not conceal: a probe that cannot answer is a `not probed` line and increments `K`, never a silent zero. The block prints the policy the verb reports, then one summary line, last.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+VALIDATE_FILES=$(printf '%s' "$MERGE_RETURN" | jq -r 'if type == "array" then .[].path elif has("frontend") then .frontend, .backend else .merged end')
+# phase45-probe-plan:begin
+PROBE_UNLABELLED=0
+PROBE_UNMEASURED=0
+PROBE_NOT_PROBED=0
+PROBE_POLICY="report"
+while IFS= read -r VALIDATE_FILE; do
+  [ -n "$VALIDATE_FILE" ] || continue
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  not probed: $VALIDATE_FILE — python3 is not installed"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  PROBE_JSON=$("$AIMI_CLI" probe-plan --tasks-file "$VALIDATE_FILE" </dev/null 2>/dev/null) || PROBE_JSON=""
+  if ! printf '%s' "$PROBE_JSON" | jq -e 'type == "object" and (.probed | type) == "boolean"' >/dev/null 2>&1; then
+    echo "  not probed: $VALIDATE_FILE — probe-plan answered nothing usable"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  if [ "$(printf '%s' "$PROBE_JSON" | jq -r '.probed')" != "true" ]; then
+    PROBE_REASON=$(printf '%s' "$PROBE_JSON" | jq -r '(.reason // "no reason given") | tostring | gsub("[\\n\\r]"; " ") | gsub("`"; "") | gsub("\\$\\("; "") | .[0:200]')
+    echo "  not probed: $VALIDATE_FILE — $PROBE_REASON"
+    PROBE_NOT_PROBED=$((PROBE_NOT_PROBED + 1))
+    continue
+  fi
+  PROBE_N=$(printf '%s' "$PROBE_JSON" | jq -r '[.unlabelledNonDiscriminating[]?] | length')
+  PROBE_M=$(printf '%s' "$PROBE_JSON" | jq -r '[.unmeasured[]?] | length')
+  PROBE_UNLABELLED=$((PROBE_UNLABELLED + PROBE_N))
+  PROBE_UNMEASURED=$((PROBE_UNMEASURED + PROBE_M))
+  [ "$(printf '%s' "$PROBE_JSON" | jq -r '.policy')" != "refuse" ] || PROBE_POLICY="refuse"
+  printf '%s' "$PROBE_JSON" | jq -r 'def clean: tostring | gsub("[\\n\\r]"; " ") | gsub("`"; "") | gsub("\\$\\("; "") | .[0:200]; (.unlabelledNonDiscriminating[]? | "  unlabelled non-discriminating: " + (.id | clean) + ": " + (.segment | clean)), (.unmeasured[]? | "  unmeasured: " + (.id | clean) + ": " + ((.segment // "(whole verify)") | clean) + " — " + ((.why // "no reason given") | clean))'
+done <<< "$VALIDATE_FILES"
+echo "Verify probe policy: $PROBE_POLICY"
+echo "Verify probe: $PROBE_UNLABELLED unlabelled non-discriminating, $PROBE_UNMEASURED unmeasured, $PROBE_NOT_PROBED not probed"
+# phase45-probe-plan:end
+```
+
+Every jq call above reads its input from a pipe and none opens a file. Text that originates in story verifies and in probe reasons is sanitized before it is printed — newlines and carriage returns become spaces, backticks and `$(` are removed, and the text is cut to 200 characters — the same four-step rule the Audit-warnings bullets in Step 5 apply (the backtick is spelled ``` so the block holds no literal one). `unlabelledNonDiscriminating` and `unmeasured` are the verb's own precomputed answers; the block counts and prints them and never re-derives a guard rail from `stories[].segments`. An `unmeasured` entry is a segment the probe could not judge — skipped suite, timeout, shell state it could not reproduce, or an unterminated quote — and is listed by name, never counted clean.
+
+**Applying the policy.** The block prints `Verify probe policy: report|refuse`, which is the `policy` key of the `probe-plan` payload; any other value is treated as `report`. The rationale for the recorded decision is in `commands/references/verify-probe-policy.md` — cite it, do not restate or parse it.
+- **`report`:** continue to Step 4.6. The findings above are in the report; nothing blocks.
+- **`refuse` with `N > 0`:** interactively, fix the written tasks file — label each named segment's exact text in `implementation.guardRails`, or rewrite the verify so it discriminates — re-write the file with the Write tool, and re-run Phase 4.5 from the top. In agent mode (`INTERACTIVE_MODE=agent`) STOP the whole `/aimi:plan` invocation and surface the report. A refusal never deletes a written tasks file.
 
 Do **not** proceed to the report step until all validations succeed.
 
@@ -3604,6 +3846,8 @@ Outline: [N] stories (edits: [M])
 [If brainstorm used]: Context: .aimi/brainstorms/[brainstorm-file]
 [If reusedPaths non-empty]: Research reused: [N] file(s) from brainstorm
 [If prototypePaths non-empty]: Prototypes: [N] variant file(s) registered
+[If structural-vocabulary measured]: Vocabulary: [N] missing, [M] unsourced (advisory)
+Verify probe: [N] unlabelled non-discriminating, [M] unmeasured, [K] not probed
 [If gaps found]: Gaps identified: [N] (captured as criteria/notes)
 [If audit unresolved non-empty AND Unresolved Gate outcome is "applied"]: Audit warnings: [N] cross-story issue(s) — reviewed, applied
 [If audit unresolved non-empty AND Unresolved Gate outcome is "deferred"]: Audit deferred: [N] item(s) — flagged on affected stories, review before execution
@@ -3618,6 +3862,8 @@ Next steps:
 ```
 
 **Tasks line:** render one `Tasks:` line per file in `MERGE_RETURN` (Phase 3e), in the returned order — one line on the legacy path, two on the SIDE axis, N on the PROJECT axis. On the PROJECT axis, suffix each line with its entry's own `project` and `storyCount` (e.g. `Tasks: .aimi/tasks/2026-07-27-checkout-apps-web-tasks.json (apps/web, 4 stories)`) so the reader can tell which repo each file drives. Never print a filename that is not in the returned list.
+
+**Verify probe line:** `Verify probe: N unlabelled non-discriminating, M unmeasured, K not probed` — always present, fed by the counts the Phase 4.5 Step 3 block printed (summed across every file in `VALIDATE_FILES`). A non-zero `K` means some file's verifies were never measured, which is a different statement from zero findings; list each `not probed` and `unmeasured` line beneath it as bullets.
 
 **Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
 
@@ -3696,6 +3942,9 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Phase 4 | File write fails | Report error with path |
 | Phase 4 | Rolling-wave: computed `branchName` fails `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` | Report the invalid branch name and STOP; do not write a mangled variant |
 | Phase 4.5 | Validation fails | Fix issues and re-run until passing |
+| Phase 4.5 | `probe-plan` unavailable or answering nothing usable (python3 missing, older CLI, non-zero exit, empty output) | Count the file as `not probed` and name it; never read it as zero findings; continue with the remaining files |
+| Phase 4.5 | `baseRef` unusable for a file (absent, not in the repository, unborn, shallow, `AIMI_ROOT` not a git repository) | `probe-plan` answers `probed:false` with a reason; report it as `not probed` for that file and continue |
+| Phase 4.5 | Refuse policy hit (`Verify probe policy: refuse` with unlabelled non-discriminating segments) | Interactive: label the segments in `implementation.guardRails` or rewrite the verify, re-write the file, re-run Phase 4.5 from the top. Agent mode: STOP the invocation with the report; never delete the written tasks file |
 | Rolling-Wave Phase Selection | `--phase <N>` does not match `^[0-9]+(\.[0-9]+)?$` — enforced twice, as prose in the argument-parsing step and as the executed `case` in the `--phase` override block, which emits `PHASE_GATE_OUTCOME=INVALID_SHAPE PHASE_OVERRIDE=<N> MAX_DECIMAL_LEVELS=1` on stderr and exits 1 | Compose the refusal from those fields per the Adaptive Language Rule — name the value and the one-decimal-level ceiling — and STOP. Never report it as a phase missing from the roadmap; that is the separate `ABSENT` outcome on the row below |
 | Rolling-Wave Phase Selection | `--phase <N>` of valid shape but absent from the roadmap | Two outcomes, split by `INTERACTIVE_MODE`. Picker: re-validate the id through `roadmap-get` first — a leading zero comes back as `must be a numeric phase id` and STOPs — then present one AskUserQuestion offering to author the phase. On Yes, write it with `roadmap-init --sync` and re-enter `Load the roadmap and ask the CLI which phases may be expanded`; on No, report `Phase [N] not found in [featureSlug]'s roadmap.` and STOP. Agent mode never authors: one log line naming the phase and the feature, and STOP |
 | Rolling-Wave Phase Selection | `--phase <N>` found but ineligible (wrong status, unmet dependsOn, or claimed) | Refuse before any research/expansion Task is spawned; name the phase and list every unmet dependency by id and status; STOP |
@@ -3704,3 +3953,5 @@ For split-file output (`--split full-stack`), `metadata.smellWarnings` is writte
 | Rolling-Wave Phase Selection | Multiple `.aimi/tasks/*/roadmap.json` found, no exact featureSlug match | Interactive: AskUserQuestion to disambiguate, each option carrying that roadmap's phase-status counts. Agent-mode: report the ambiguous candidates with the same counts and STOP — never guess |
 | Rolling-Wave Phase Selection | `validate-contracts` reports duplicate creates (interactive mode) | Surface the CLI's collision message verbatim; STOP before any research/expansion Task is spawned |
 | Rolling-Wave Phase Selection | `validate-contracts` reports unmet needs (either mode) | Surface each `missing[]` entry; STOP — this check is never demoted by `--agent-mode` |
+| Design Bundle Detection | `detect-design-bundle` reports ambiguity (exit 3, two or more same-tier candidates, no `--bundle` named) | Interactive: present one AskUserQuestion listing up to 4 candidates (path + which specs each carries) plus `none — plan without a bundle`; re-detect with `--bundle <chosen path>` on a pick. Agent-mode: compose a refusal naming every candidate and the `--bundle <path>` re-run hint; STOP |
+| Design Bundle Detection | `import-design-bundle` refuses an outside-project `--bundle` because the destination already holds a different copy and no `--reimport` was parsed | Report the CLI's refusal verbatim (already names the source and the destination) and `--reimport` as the way to replace it; STOP before any `detect-design-bundle` call runs |

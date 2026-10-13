@@ -110,13 +110,39 @@ _resolve_for_confinement_check() {
     resolve_path "$target_path"
     return
   fi
-  local parent_dir
-  parent_dir=$(dirname "$target_path")
-  if [ -e "$parent_dir" ]; then
-    echo "$(resolve_path "$parent_dir")/$(basename "$target_path")"
-  else
-    echo "$target_path"
-  fi
+
+  # Walk upward collecting the path components that do not exist yet,
+  # stopping at the first ancestor directory that does -- rather than only
+  # checking the immediate parent, as this used to. A path several levels
+  # of missing directories deep (e.g. a phase directory /aimi:plan has not
+  # created yet, where even the feature folder above it does not exist)
+  # still resolves against PROJECT_ROOT correctly this way, instead of
+  # falling through to the raw, unresolved string the moment even the
+  # immediate parent is missing too -- which could misreport a path that is
+  # genuinely inside PROJECT_ROOT as one that escapes it.
+  local -a missing=()
+  local probe="$target_path"
+  while [ ! -e "$probe" ]; do
+    missing+=("$(basename "$probe")")
+    local parent
+    parent=$(dirname "$probe")
+    if [ "$parent" = "$probe" ]; then
+      # Walked to the filesystem root with nothing existing at all -- there
+      # is nothing left on disk to anchor a resolution to.
+      echo "$target_path"
+      return
+    fi
+    probe="$parent"
+  done
+
+  # $probe now names the deepest existing ancestor; $missing holds the
+  # components walked off along the way, leaf-first -- join them back on
+  # in the opposite order (shallowest first) to rebuild the path.
+  local suffix="" comp
+  for comp in "${missing[@]}"; do
+    suffix="/${comp}${suffix}"
+  done
+  echo "$(resolve_path "$probe")${suffix}"
 }
 
 # Silent predicate: the decision half of validate_path_in_project's rule,
@@ -1903,7 +1929,7 @@ _resolve_skills_base_dir() {
   printf ''
 }
 
-# Get story context (story slice + metadata + skills + designContext + skillsDropped)
+# Get story context (story slice + metadata + skills + designContext + dropped)
 # by ID — for subagent self-brief.
 #
 # THE HOTTEST VERB IN THE SYSTEM: every story-executor agent /aimi:execute
@@ -2051,6 +2077,51 @@ cmd_verify_probe() {
     --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}"
 }
 
+# Run every story's implementation.verify at the tasks file's own
+# metadata.baseRef in one throwaway detached worktree and name the segments that
+# already pass there. Read-only for the caller's tree and takes no lock.
+# Flags: --tasks-file <path> (optional; falls back to get_tasks_file),
+#        --ref <sha> (wins over metadata.baseRef), --run-suites (do not skip
+#        full-suite segments). The tasks-file argument is confined BEFORE
+#        python3 starts; --ref is a git revision, not a path, and is validated
+#        in tasks.py where the git calls are made.
+cmd_probe_plan() {
+  local tasks_file="" ref="" run_suites=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks-file) shift; tasks_file="${1:-}" ;;
+      --ref) shift; ref="${1:-}" ;;
+      --run-suites) run_suites=1 ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  local extra=()
+  if [ -n "$ref" ]; then
+    extra+=(--ref "$ref")
+  fi
+  if [ "$run_suites" -eq 1 ]; then
+    extra+=(--run-suites)
+  fi
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" probe-plan \
+    --tasks-file "$tasks_file" \
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" ${extra[@]+"${extra[@]}"}
+}
+
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
 #
 # Those files are the only diagnosis this pipeline produces for free, and until
@@ -2141,6 +2212,91 @@ cmd_design_decisions() {
 
   check_python3
   python3 "$(_aimi_tasks_py)" design-decisions --brainstorm-path "$brainstorm_path"
+}
+
+# Validate a research agent's entity/endpoint presence findings, relabel every
+# `absent` claim that carries no evidence to `unchecked`, and render the
+# BusinessSpec section 4 / section 5 markdown rows. Read-only, no lock: nothing
+# here touches tasks.json. --input arrives as a CLI argument, so it is confined
+# by validate_path_in_project BEFORE check_python3 and before python3 starts;
+# the op in tasks.py never re-checks it (the same split design-decisions has).
+#
+# Flags: --input <path> (required)
+cmd_spec_derivation() {
+  local input_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --input)
+        shift
+        input_path="${1:-}"
+        ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh spec-derivation --input <path>" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$input_path" ]; then
+    echo "Usage: aimi-cli.sh spec-derivation --input <path>" >&2
+    exit 1
+  fi
+
+  input_path=$(resolve_path "$input_path")
+  validate_path_in_project "$input_path"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" spec-derivation --input "$input_path"
+}
+
+# Measure the structural vocabulary (container/placement terms such as "bottom
+# sheet" or "dialog") a tasks file's stories use against what a spec or
+# prototype names. Read-only, no lock, advisory: it reports `missing` and
+# `unsourced` and never blocks. Every path arrives as a CLI argument, so each
+# is confined by validate_path_in_project BEFORE check_python3 and before
+# python3 starts; the op in tasks.py never re-checks them.
+#
+# Flags: --tasks <path> (required), --spec <path>... , --prototype <path>...
+cmd_structural_vocabulary() {
+  local tasks_path="" spec_paths=() prototype_paths=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tasks) shift; tasks_path="${1:-}" ;;
+      --spec) shift; spec_paths+=("${1:-}") ;;
+      --prototype) shift; prototype_paths+=("${1:-}") ;;
+      *)
+        echo "Error: Unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]..." >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$tasks_path" ]; then
+    echo "Usage: aimi-cli.sh structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]..." >&2
+    exit 1
+  fi
+
+  local args=() p
+  tasks_path=$(resolve_path "$tasks_path")
+  validate_path_in_project "$tasks_path"
+  args+=(--tasks-file "$tasks_path")
+  for p in ${spec_paths[@]+"${spec_paths[@]}"}; do
+    p=$(resolve_path "$p")
+    validate_path_in_project "$p"
+    args+=(--spec "$p")
+  done
+  for p in ${prototype_paths[@]+"${prototype_paths[@]}"}; do
+    p=$(resolve_path "$p")
+    validate_path_in_project "$p"
+    args+=(--prototype "$p")
+  done
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" structural-vocabulary "${args[@]}"
 }
 
 # Mark a story as in-progress
@@ -2385,6 +2541,68 @@ cmd_remove_story() {
       _lock "${tasks_file}.lock"
       python3 "$(_aimi_tasks_py)" remove-story \
         --tasks-file "$tasks_file" --story-id "$story_id" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
+# Record an explicit verification verdict -- the one writer of
+# verification.status a caller should reach for instead of a raw update-field
+# write, because it demands --reason for a skipped verdict and refuses it for
+# passed/failed, in one locked crossing.
+# Usage: set-verification <id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]
+cmd_set_verification() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    if [ "${args[$i]}" = "--reason" ]; then
+      i=$((i + 1))
+      reason="${args[$i]:-}"
+    else
+      remaining+=("${args[$i]}")
+    fi
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+  local status="${positional[1]:-}"
+
+  if [ -z "$story_id" ] || [ -z "$status" ]; then
+    echo "Usage: aimi-cli.sh set-verification <story-id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]" >&2
+    echo "  --reason is required when <status> is skipped, and refused for passed/failed." >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason is treated the same as an absent one -- the same rule
+  # cmd_remove_story applies to its own --reason -- so tasks.py sees no flag
+  # at all rather than an empty string, and refuses either shape identically.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. Deliberately no bash-side check of $status
+  # against passed/failed/skipped and no pre-lock validate_story_exists --
+  # both are document-dependent refusals op_set_verification owns, the same
+  # exception cmd_remove_story's own comment documents; a bash-side status
+  # literal here would be the second list the cross-story contract forbids.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" set-verification \
+        --tasks-file "$tasks_file" --story-id "$story_id" --status "$status" "${reason_args[@]}"
     ) 200>"${tasks_file}.lock"
   )
   printf '%s\n' "$out"
@@ -10511,111 +10729,259 @@ cmd_forge_resolve_review_thread() {
   printf '%s\n' "$result"
 }
 
+# ============================================================================
+# Design Bundle Detection / Import
+# ============================================================================
+# The handoff marker (fixed string, case-sensitive). Script-level and
+# readonly -- not local to cmd_detect_design_bundle -- so cmd_import_design_bundle's
+# own bundle check reads the identical literal rather than a second copy that
+# can drift from it. Every reader (cmd_detect_design_bundle and its nested
+# _collect_design_bundle_candidates/_select_design_bundle/_build_bundle_json,
+# plus cmd_import_design_bundle below) relies on this global rather than its
+# own copy.
+readonly HANDOFF_MARKER='This is a **handoff bundle** from Claude Design (claude.ai/design).'
+# The marker a bundle this plugin generated carries instead — worded so it
+# never reproduces, and is never a substring of, the Claude Design sentence
+# above, so a fixed-string grep against either can never double-match the other.
+readonly AIMI_GENERATED_MARKER='This is a **handoff bundle** generated by the aimi-engineering plugin, not by Claude Design.'
+
+# Collect design-bundle candidate directories under scan_root, mtime-free --
+# the root-is-bundle precheck, depth-1 children (skipping .worktrees,
+# node_modules, .aimi, vendor), and the .aimi/design-bundles/*/ exception,
+# unchanged from cmd_detect_design_bundle's original discovery loop other
+# than dropping every mtime computation. Prints one absolute candidate path
+# per line (each ending in "/"), sorted lexicographically by path so repeated
+# calls over an unchanged tree are always byte-identical -- never by mtime.
+# Shared by _select_design_bundle and cmd_detect_design_bundle's own --all
+# branch, which used to each walk this tree their own way. Reads the
+# script-level HANDOFF_MARKER/AIMI_GENERATED_MARKER readonly globals above --
+# no dynamic scoping involved now that they no longer live inside
+# cmd_detect_design_bundle's own frame.
+# Usage: _collect_design_bundle_candidates "$scan_root"
+_collect_design_bundle_candidates() {
+  local scan_root="$1"
+
+  local root_normalized="${scan_root%/}/"
+  local root_readme="${root_normalized}README.md"
+  if [ -f "$root_readme" ] && { grep -qF "$HANDOFF_MARKER" "$root_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$root_readme"; }; then
+    printf '%s\n' "$root_normalized"
+    return 0
+  fi
+
+  local -a unsorted=()
+  local subdir
+  for subdir in "${scan_root}"/*/; do
+    [ -d "$subdir" ] || continue
+
+    local base
+    base=$(basename "$subdir")
+
+    # Skip noise directories
+    case "$base" in
+      .worktrees|node_modules|.aimi|vendor) continue ;;
+    esac
+
+    local readme="${subdir}README.md"
+    [ -f "$readme" ] || continue
+
+    # Fixed-string, case-sensitive marker check — either marker qualifies
+    grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
+
+    unsorted+=("$subdir")
+  done
+
+  # Second, narrow scan pass: a bundle this plugin generated itself under
+  # <scan_root>/.aimi/design-bundles/<slug>/, reachable without pointing
+  # --root at it directly. The noise-directory skip above excludes .aimi/
+  # wholesale (state, cache, research, tasks, .tasks-staging all live under
+  # it and must stay unreachable) — this is a fixed, plugin-owned exception
+  # to that exclusion, not a relaxation of it.
+  if [ -d "${scan_root%/}/.aimi/design-bundles" ]; then
+    for subdir in "${scan_root%/}/.aimi/design-bundles"/*/; do
+      [ -d "$subdir" ] || continue
+
+      local readme="${subdir}README.md"
+      [ -f "$readme" ] || continue
+
+      grep -qF "$HANDOFF_MARKER" "$readme" || grep -qF "$AIMI_GENERATED_MARKER" "$readme" || continue
+
+      unsorted+=("$subdir")
+    done
+  fi
+
+  if [ ${#unsorted[@]} -gt 0 ]; then
+    printf '%s\n' "${unsorted[@]}" | sort
+  fi
+}
+
+# Elects which design bundle cmd_detect_design_bundle reports when no bundle
+# was named via --bundle and --all was not requested: the phase tier
+# (--phase-dir's own design-bundle/, when it qualifies) always wins over the
+# scan tier, and the scan tier refuses (exit 3) with every same-tier
+# candidate listed when two or more tie with no bundle named -- never
+# silently electing one by mtime or any other order.
+# Reads the script-level HANDOFF_MARKER/AIMI_GENERATED_MARKER readonly
+# globals (see the section header above). Still relies on
+# cmd_detect_design_bundle's own _build_bundle_json through bash's dynamic
+# scoping across the call stack to reach cmd_detect_design_bundle's own
+# scan_root -- so this must only ever be called from within
+# cmd_detect_design_bundle's own execution, after _build_bundle_json is
+# defined.
+# Usage: _select_design_bundle "$phase_dir" "$scan_root"
+# Exit: 0 (null, single match, or phase-tier win) or 3 (ambiguous scan tier)
+_select_design_bundle() {
+  local phase_dir="$1"
+  local scan_root="$2"
+
+  # Phase tier: at most one candidate, ever -- ambiguity within it alone is
+  # structurally impossible (D3), so there is no phase-tier refusal branch.
+  # A phase_dir that does not resolve to a directory at all, or whose
+  # design-bundle/README.md is missing or carries neither marker, simply
+  # leaves phase_bundle empty -- falling through to the scan tier below
+  # rather than refusing, since a phase's directory does not exist until
+  # /aimi:plan creates it.
+  local phase_bundle=""
+  if [ -n "$phase_dir" ]; then
+    local phase_bundle_dir="${phase_dir%/}/design-bundle/"
+    local phase_readme="${phase_bundle_dir}README.md"
+    if [ -f "$phase_readme" ] && { grep -qF "$HANDOFF_MARKER" "$phase_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$phase_readme"; }; then
+      phase_bundle="$phase_bundle_dir"
+    fi
+  fi
+
+  # The scan tier always runs, win or not, so a phase-tier win's own "N
+  # other bundle(s) ignored" count below is a real count, never a placeholder.
+  local -a scan_candidates=()
+  local _sdb_line
+  while IFS= read -r _sdb_line; do
+    [ -n "$_sdb_line" ] && scan_candidates+=("$_sdb_line")
+  done < <(_collect_design_bundle_candidates "$scan_root")
+  local scan_count=${#scan_candidates[@]}
+
+  if [ -n "$phase_bundle" ]; then
+    local bundle_json bundle_path
+    bundle_json=$(_build_bundle_json "$phase_bundle")
+    bundle_path=$(printf '%s' "$bundle_json" | jq -r '.path')
+    printf '%s\n' "$bundle_json"
+    echo "detect-design-bundle: using the phase bundle $bundle_path (named by --phase-dir); $scan_count other bundle(s) ignored" >&2
+    return 0
+  fi
+
+  if [ "$scan_count" -eq 0 ]; then
+    echo "null"
+    return 0
+  elif [ "$scan_count" -eq 1 ]; then
+    _build_bundle_json "${scan_candidates[0]}"
+    return 0
+  fi
+
+  # Two or more same-tier candidates with no bundle named: refuse, listing
+  # every candidate -- never silently electing one (mtime or otherwise).
+  local candidates_json="[]"
+  local subdir
+  for subdir in "${scan_candidates[@]}"; do
+    local bundle_json
+    bundle_json=$(_build_bundle_json "$subdir")
+    candidates_json=$(echo "$candidates_json" | jq --argjson b "$bundle_json" '. + [$b]')
+  done
+
+  jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+
+  {
+    echo "detect-design-bundle: $scan_count bundles match and none was named -- pass --bundle <path> to choose one"
+    printf '%s' "$candidates_json" | jq -r '.[].path'
+  } >&2
+
+  return 3
+}
+
 # Detect a Claude Design handoff bundle under a given root (defaults to CWD).
 # Scans depth-1 subdirectories for a README.md containing the handoff marker.
-# Returns JSON object when found, "null" when not found.
-# With --all, returns a JSON array sorted newest-first (by directory mtime).
+# Returns JSON object when found, "null" when not found. Candidates are
+# collected mtime-free and ordered by path -- never by mtime -- so repeated
+# calls over an unchanged tree are always byte-identical.
+# With --all, returns a JSON array of every scan-tier match, path-sorted; it
+# never refuses, even when the non---all path over the same tree would.
+# With --bundle <path>, skips scan-root resolution entirely and reports on
+# that one directory directly -- always confined to PROJECT_ROOT, with no
+# absolute-path exception and no children-scan fallback on a miss (D5).
+# With --phase-dir <dir>, a phase's own <dir>/design-bundle/ is checked first
+# and wins over the scan tier when it qualifies (phase tier) -- it holds at
+# most one candidate, so no phase-tier ambiguity is possible (D3). --phase-dir
+# is always confined to PROJECT_ROOT, with no absolute-path exception (D5);
+# unlike --bundle, a --phase-dir that resolves inside the project but does
+# not exist, or exists without a qualifying README, falls back to the scan
+# tier silently rather than refusing -- a phase's directory does not exist
+# until /aimi:plan creates it, so absence alone is never treated as an error.
+# With neither flag naming a bundle, two or more scan-tier candidates tying
+# in the same tier refuse (exit 3) with every candidate listed, rather than
+# silently electing one.
 cmd_detect_design_bundle() {
-  local root="" all=false json=false
+  local root="" all=false json=false bundle_arg="" phase_dir=""
 
   # Parse flags
   while [ $# -gt 0 ]; do
     case "$1" in
-      --root) shift; root="${1:-}" ;;
-      --all)  all=true ;;
-      --json) json=true ;;
+      --root)      shift; root="${1:-}" ;;
+      --bundle)    shift; bundle_arg="${1:-}" ;;
+      --phase-dir) shift; phase_dir="${1:-}" ;;
+      --all)       all=true ;;
+      --json)      json=true ;;
       *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
   done
 
-  # Resolve scan root (default: CWD)
-  local scan_root
-  if [ -n "$root" ]; then
-    # For relative paths, validate they stay within project boundary (prevents ../.. traversal).
-    # Absolute paths are allowed as scan roots since this is a read-only operation.
-    case "$root" in
-      /*) : ;;  # Absolute path — skip boundary check (read-only scan)
-      *)  validate_path_in_project "$root" ;;
-    esac
-    scan_root="$root"
-  else
-    scan_root="$(pwd)"
+  # --phase-dir is ALWAYS confined to PROJECT_ROOT -- no --root-style
+  # absolute-path exception (D5) -- checked before any scan or README read,
+  # including the phase-tier marker check in _select_design_bundle below.
+  if [ -n "$phase_dir" ]; then
+    validate_path_in_project "$phase_dir"
   fi
 
-  if [ ! -d "$scan_root" ]; then
-    echo "Error: Scan root does not exist: $scan_root" >&2
-    exit 1
-  fi
+  # HANDOFF_MARKER and AIMI_GENERATED_MARKER are script-level readonly
+  # globals now (see the Design Bundle Detection / Import section header
+  # above this function) -- shared with cmd_import_design_bundle rather than
+  # redeclared here.
 
-  # The handoff marker (fixed string, case-sensitive)
-  local HANDOFF_MARKER='This is a **handoff bundle** from Claude Design (claude.ai/design).'
-
-  # Collect matching bundles: each entry is "<mtime> <abspath>"
-  local found_paths=()
-
-  # Pre-check: scan_root may itself be a bundle directory. When its README has
-  # the handoff marker, treat it as a single bundle and skip the children scan.
-  local root_normalized="${scan_root%/}/"
-  local root_readme="${root_normalized}README.md"
-  if [ -f "$root_readme" ] && grep -qF "$HANDOFF_MARKER" "$root_readme"; then
-    local root_mtime
-    if command -v stat >/dev/null 2>&1; then
-      root_mtime=$(stat -c '%Y' "$root_normalized" 2>/dev/null || stat -f '%m' "$root_normalized" 2>/dev/null || echo 0)
-    else
-      root_mtime=0
-    fi
-    found_paths+=("${root_mtime} ${root_normalized}")
-  else
-    for subdir in "${scan_root}"/*/; do
-      [ -d "$subdir" ] || continue
-
-      local base
-      base=$(basename "$subdir")
-
-      # Skip noise directories
-      case "$base" in
-        .worktrees|node_modules|.aimi|vendor) continue ;;
-      esac
-
-      local readme="${subdir}README.md"
-      [ -f "$readme" ] || continue
-
-      # Fixed-string, case-sensitive marker check
-      grep -qF "$HANDOFF_MARKER" "$readme" || continue
-
-      # Get directory mtime (seconds since epoch) — stat is not POSIX-portable;
-      # use date-based approach via ls for mtime sorting, falling back to 0
-      local mtime
-      if command -v stat >/dev/null 2>&1; then
-        # GNU stat (Linux) or BSD stat (macOS)
-        mtime=$(stat -c '%Y' "$subdir" 2>/dev/null || stat -f '%m' "$subdir" 2>/dev/null || echo 0)
-      else
-        mtime=0
-      fi
-
-      found_paths+=("${mtime} ${subdir}")
-    done
-  fi
-
-  # No bundles found
-  if [ ${#found_paths[@]} -eq 0 ]; then
-    echo "null"
-    return 0
-  fi
-
-  # Sort found_paths by mtime descending (newest first)
-  local sorted_paths
-  sorted_paths=$(printf '%s\n' "${found_paths[@]}" | sort -rn)
-
-  # Build JSON for a single bundle directory
+  # Build JSON for a single bundle directory. Defined up front -- ahead of
+  # both the --bundle short-circuit below and the scan-root resolution
+  # further down -- so both share this one builder rather than diverging.
   _build_bundle_json() {
     local subdir="$1"
     local base
-    base=$(basename "$subdir")
+    # D10: a bundle resolving inside PROJECT_ROOT reports every path relative
+    # to PROJECT_ROOT, never merely its own basename or a scan-root-relative
+    # fragment -- this is what lets a bundle kept beside its phase (reached
+    # via a nested --root at any depth, or pointed at directly via --bundle)
+    # resolve downstream against PROJECT_ROOT the same way a depth-1 child or
+    # the .aimi/design-bundles/<slug> nested scan already did. A bundle
+    # resolving OUTSIDE PROJECT_ROOT -- reachable only through scan-mode
+    # --root's own absolute-path exception, never through --bundle, which
+    # never admits an outside path at all -- keeps the prior scan_root-
+    # relative/basename computation byte for byte, so every existing
+    # mktemp-based test (whose scan roots sit outside the project) keeps
+    # passing unmodified.
+    if path_within_project "$subdir"; then
+      local abs_subdir
+      abs_subdir=$(resolve_path "$subdir")
+      base="${abs_subdir#"$PROJECT_ROOT"/}"
+    else
+      case "$subdir" in
+        "${scan_root%/}/.aimi/design-bundles/"*) base=".aimi/design-bundles/$(basename "$subdir")" ;;
+        *) base=$(basename "$subdir") ;;
+      esac
+    fi
 
     local readme="${subdir}README.md"
     local readme_rel="${base}/README.md"
+
+    # source: which marker qualified this bundle. A matched bundle always
+    # carries at least one marker (that is how it reached found_paths, or how
+    # --bundle validated it below), so this is always a real string, never a
+    # default placeholder.
+    local source="claude-design"
+    grep -qF "$AIMI_GENERATED_MARKER" "$readme" 2>/dev/null && source="aimi-generated"
 
     # chats[]: <bundle>/chats/*.md
     local chats_arr=()
@@ -10681,6 +11047,7 @@ cmd_detect_design_bundle() {
       --argjson hasTailwind "$has_tailwind" \
       --arg   businessSpec "$business_spec" \
       --arg   designSpec   "$design_spec" \
+      --arg   source       "$source" \
       '{
         path:         $path,
         readme:       $readme,
@@ -10689,27 +11056,291 @@ cmd_detect_design_bundle() {
         hasReact:     $hasReact,
         hasTailwind:  $hasTailwind,
         businessSpec: (if $businessSpec == "" then null else $businessSpec end),
-        designSpec:   (if $designSpec   == "" then null else $designSpec   end)
+        designSpec:   (if $designSpec   == "" then null else $designSpec   end),
+        source:       $source
       }'
   }
 
+  # --bundle <path>: a direct pointer at one bundle directory, bypassing scan-
+  # root resolution entirely. Unlike --root, --bundle is ALWAYS confined to
+  # PROJECT_ROOT -- relative or absolute, no exception -- and never falls back
+  # to scanning the given path's children on a miss (D5). Confinement is
+  # checked BEFORE anything on disk is read, so an outside path is refused
+  # without the bundle ever being opened (D6).
+  if [ -n "$bundle_arg" ]; then
+    if ! path_within_project "$bundle_arg"; then
+      echo "Error: --bundle path escapes the project root: $bundle_arg" >&2
+      echo "Bring an outside bundle into the project with import-design-bundle, then point --bundle at the imported copy." >&2
+      exit 1
+    fi
+
+    if [ ! -d "$bundle_arg" ]; then
+      echo "Error: --bundle path does not exist or is not a directory: $bundle_arg" >&2
+      exit 1
+    fi
+
+    local bundle_readme="${bundle_arg%/}/README.md"
+    if [ ! -f "$bundle_readme" ] || ! { grep -qF "$HANDOFF_MARKER" "$bundle_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$bundle_readme"; }; then
+      echo "Error: --bundle path is not a design bundle (no README.md handoff marker): $bundle_arg" >&2
+      exit 1
+    fi
+
+    _build_bundle_json "${bundle_arg%/}/"
+    return 0
+  fi
+
+  # Resolve scan root (default: CWD)
+  local scan_root
+  if [ -n "$root" ]; then
+    # For relative paths, validate they stay within project boundary (prevents ../.. traversal).
+    # Absolute paths are allowed as scan roots since this is a read-only operation.
+    case "$root" in
+      /*) : ;;  # Absolute path — skip boundary check (read-only scan)
+      *)  validate_path_in_project "$root" ;;
+    esac
+    scan_root="$root"
+  else
+    scan_root="$(pwd)"
+  fi
+
+  if [ ! -d "$scan_root" ]; then
+    echo "Error: Scan root does not exist: $scan_root" >&2
+    exit 1
+  fi
+
   if [ "$all" = true ]; then
-    # Return all bundles as a JSON array, sorted newest-first
+    # Return every scan-tier match as a JSON array, path-sorted -- never
+    # refuses, even when the non---all path over the same tree would (the
+    # contract this flag has always had; only the ordering changed, from
+    # mtime to path, since nothing in the existing suite or in commands/
+    # pins --all's prior mtime-first order).
+    local -a all_candidates=()
+    local _ddb_line
+    while IFS= read -r _ddb_line; do
+      [ -n "$_ddb_line" ] && all_candidates+=("$_ddb_line")
+    done < <(_collect_design_bundle_candidates "$scan_root")
+
     local entries_json="[]"
-    while IFS= read -r entry; do
-      local subdir="${entry#* }"
+    local subdir
+    for subdir in "${all_candidates[@]}"; do
       local bundle_json
       bundle_json=$(_build_bundle_json "$subdir")
       entries_json=$(echo "$entries_json" | jq --argjson b "$bundle_json" '. + [$b]')
-    done <<< "$sorted_paths"
+    done
     echo "$entries_json"
-  else
-    # Return only the newest bundle
-    local newest_entry
-    newest_entry=$(echo "$sorted_paths" | head -1)
-    local newest_subdir="${newest_entry#* }"
-    _build_bundle_json "$newest_subdir"
+    return 0
   fi
+
+  # No bundle named via --bundle, and --all not requested: the phase tier
+  # (--phase-dir's own design-bundle/) wins when it qualifies, otherwise the
+  # scan tier answers -- null, the sole match, or an exit-3 refusal listing
+  # every same-tier candidate when two or more tie. _select_design_bundle's
+  # own exit code (0 or 3) is this function's last statement, so it
+  # propagates through the detect-design-bundle dispatch arm and main() under
+  # this file's own `set -euo pipefail` with no explicit `exit 3` needed here.
+  _select_design_bundle "$phase_dir" "$scan_root"
+}
+
+# Compute a deterministic SHA-256 over a design-bundle tree, folding each
+# regular file's path RELATIVE TO THE TREE ROOT into the digest alongside its
+# bytes. This is NOT _hash_dir: that helper concatenates sorted file CONTENTS
+# only and never folds a file's relative path in, so two trees holding
+# matching per-slot byte content under different filenames would hash
+# identically -- a false "identical" cmd_import_design_bundle's
+# overwrite-safety guarantee cannot tolerate. Symlinks and other special
+# files are excluded (find -type f never follows a symlink's own type),
+# matching the "copy regular files and directories only" rule the copy step
+# in cmd_import_design_bundle applies.
+# Usage: _hash_bundle_tree <dir>
+# Prints: 64-char hex string, or empty string if dir is empty/missing
+_hash_bundle_tree() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    printf ""
+    return 0
+  fi
+  local dir_norm="${dir%/}"
+  local rel_list
+  rel_list=$(cd "$dir_norm" && find . -type f | sort)
+  if [ -z "$rel_list" ]; then
+    printf ""
+    return 0
+  fi
+  if [ "$_HAS_SHA256SUM" -eq 1 ]; then
+    { while IFS= read -r rel; do printf '%s\n' "$rel"; cat "${dir_norm}/${rel}"; done <<< "$rel_list"; } \
+      | sha256sum | awk '{print $1}'
+  else
+    { while IFS= read -r rel; do printf '%s\n' "$rel"; cat "${dir_norm}/${rel}"; done <<< "$rel_list"; } \
+      | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# Count regular files and their total byte size under a design-bundle tree
+# (symlinks and other special files excluded, same as _hash_bundle_tree).
+# Usage: _bundle_tree_stats <dir>
+# Prints: "<file_count> <total_bytes>"
+_bundle_tree_stats() {
+  local dir="$1"
+  local count=0 bytes=0 f sz
+  while IFS= read -r -d '' f; do
+    count=$((count + 1))
+    sz=$(_file_size_bytes "$f")
+    bytes=$((bytes + sz))
+  done < <(find "$dir" -type f -print0)
+  printf '%s %s\n' "$count" "$bytes"
+}
+
+# Copy an outside design bundle into the project, so it can be read by
+# --bundle/--phase-dir without --bundle's own absolute-path exception ever
+# being exercised on a path outside PROJECT_ROOT. --from is read-only and
+# NEVER confined (D6: it may be anywhere) -- it only has to already resolve
+# to a bundle. --to IS confined, and additionally restricted to one of the
+# two shapes a design bundle is ever read back from: a phase's own
+# design-bundle/ folder, or a standalone .aimi/design-bundles/<slug>.
+#
+# A --to that already holds a byte-for-byte-identical copy (by
+# _hash_bundle_tree, which is keyed on relative path, not content alone) is
+# left untouched -- status "reused", not a single mtime rewritten. A --to
+# holding a DIFFERENT copy is refused unless --reimport is given, in which
+# case the old copy is replaced atomically (build fresh in a sibling temp
+# dir, then mv-mv-rm, mirroring cmd_write_review's mktemp-then-mv discipline
+# for a single file, generalized to a tree).
+cmd_import_design_bundle() {
+  local from="" to="" reimport=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from)     shift; from="${1:-}" ;;
+      --to)       shift; to="${1:-}" ;;
+      --reimport) reimport=true ;;
+      *) echo "Unknown flag: $1" >&2; exit 1 ;;
+    esac
+    shift
+  done
+
+  if [ -z "$from" ] || [ -z "$to" ]; then
+    echo "Usage: aimi-cli.sh import-design-bundle --from <path> --to <path> [--reimport]" >&2
+    exit 1
+  fi
+
+  # --from is validated FIRST, before --to is touched at all (not even its
+  # confinement check runs yet): a non-bundle source is refused without --to
+  # ever being read, created, or even resolved.
+  local from_norm="${from%/}"
+  local from_readme="${from_norm}/README.md"
+  if [ ! -f "$from_readme" ] || ! { grep -qF "$HANDOFF_MARKER" "$from_readme" || grep -qF "$AIMI_GENERATED_MARKER" "$from_readme"; }; then
+    echo "Error: import-design-bundle: --from is not a design bundle (missing or non-qualifying README.md handoff marker): $from" >&2
+    exit 1
+  fi
+
+  # --to IS confined to PROJECT_ROOT -- relative (resolved against it) or
+  # absolute, no exception, the same validate_path_in_project call every
+  # other project-relative artifact path in this file goes through.
+  local to_abs
+  case "$to" in
+    /*) to_abs="$to" ;;
+    *)  to_abs="${PROJECT_ROOT}/${to}" ;;
+  esac
+  validate_path_in_project "$to_abs"
+
+  # Shape check, over --to's PROJECT_ROOT-relative path: exactly
+  # .aimi/tasks/<feature>/<phase-dir>/design-bundle (5 segments) or exactly
+  # .aimi/design-bundles/<slug> (3 segments) -- a plain case/glob pattern is
+  # insufficient here because bash's `*` matches "/" too, so count segments
+  # explicitly instead of globbing.
+  local to_resolved to_rel
+  to_resolved="$(_resolve_for_confinement_check "$to_abs")"
+  case "$to_resolved" in
+    "$PROJECT_ROOT"/*) to_rel="${to_resolved#"$PROJECT_ROOT"/}" ;;
+    *)                 to_rel="" ;;
+  esac
+
+  local -a to_segs
+  IFS='/' read -ra to_segs <<< "$to_rel"
+  local to_nsegs=${#to_segs[@]}
+  local to_shape_ok=false
+  if [ "$to_nsegs" -eq 5 ] && [ "${to_segs[0]}" = ".aimi" ] && [ "${to_segs[1]}" = "tasks" ] && [ "${to_segs[4]}" = "design-bundle" ]; then
+    to_shape_ok=true
+  elif [ "$to_nsegs" -eq 3 ] && [ "${to_segs[0]}" = ".aimi" ] && [ "${to_segs[1]}" = "design-bundles" ]; then
+    to_shape_ok=true
+  fi
+  if [ "$to_shape_ok" != true ]; then
+    echo "Error: import-design-bundle: --to must be, relative to the project root, exactly .aimi/tasks/<feature>/<phase-dir>/design-bundle or exactly .aimi/design-bundles/<slug>: $to" >&2
+    exit 1
+  fi
+
+  # Whole-source symlink-escape scan, BEFORE any copy begins: a refusal here
+  # must leave no partial copy at --to. Each symlink inside --from is
+  # resolved (the same realpath-style resolution _resolve_for_confinement_check
+  # already uses) and must land inside --from's own realpath'd tree.
+  local from_real
+  from_real="$(resolve_path "$from_norm")"
+  local _idb_link _idb_link_target
+  while IFS= read -r -d '' _idb_link; do
+    _idb_link_target="$(resolve_path "$_idb_link")"
+    case "$_idb_link_target" in
+      "$from_real"/*) : ;;
+      "$from_real")   : ;;
+      *)
+        echo "Error: import-design-bundle: a symlink inside --from resolves outside --from's own tree: ${_idb_link#"$from_real"/}" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find "$from_real" -type l -print0)
+
+  # Build the copy in a sibling temp directory next to --to -- mktemp-then-mv,
+  # the same discipline cmd_write_review uses for a single file, generalized
+  # to a tree. mkdir -p ensures --to's parent exists before mktemp -d there.
+  mkdir -p "$(dirname "$to_abs")"
+  local tmp_build
+  tmp_build="$(mktemp -d "${to_abs}.XXXXXX")"
+
+  local _idb_entry _idb_rel _idb_dest
+  while IFS= read -r -d '' _idb_entry; do
+    _idb_rel="${_idb_entry#"$from_real"/}"
+    _idb_dest="${tmp_build}/${_idb_rel}"
+    if [ -L "$_idb_entry" ]; then
+      :  # non-escaping symlink -- skip, never copied, never a cause for refusal
+    elif [ -d "$_idb_entry" ]; then
+      mkdir -p "$_idb_dest"
+    elif [ -f "$_idb_entry" ]; then
+      mkdir -p "$(dirname "$_idb_dest")"
+      cp -p "$_idb_entry" "$_idb_dest"
+    else
+      :  # FIFO, device, socket, etc. -- skip, never copied, never a cause for refusal
+    fi
+  done < <(find "$from_real" -mindepth 1 -print0)
+
+  local status
+  if [ ! -e "$to_abs" ]; then
+    mv "$tmp_build" "$to_abs"
+    status="imported"
+  else
+    local existing_hash new_hash
+    existing_hash="$(_hash_bundle_tree "$to_abs")"
+    new_hash="$(_hash_bundle_tree "$tmp_build")"
+    if [ "$existing_hash" = "$new_hash" ]; then
+      rm -rf "$tmp_build"
+      status="reused"
+    elif [ "$reimport" != true ]; then
+      rm -rf "$tmp_build"
+      echo "Error: import-design-bundle: $to already holds a different copy of $from -- pass --reimport to replace it" >&2
+      exit 1
+    else
+      local stale
+      stale="$(mktemp -u "${to_abs}.old.XXXXXX")"
+      mv "$to_abs" "$stale"
+      mv "$tmp_build" "$to_abs"
+      rm -rf "$stale"
+      status="replaced"
+    fi
+  fi
+
+  local files bytes
+  read -r files bytes < <(_bundle_tree_stats "$to_abs")
+
+  jq -n --arg bundle "$to_rel" --arg status "$status" --argjson files "$files" --argjson bytes "$bytes" \
+    '{bundle: $bundle, status: $status, files: $files, bytes: $bytes}'
 }
 
 # ============================================================================
@@ -12997,6 +13628,51 @@ cmd_gate_fail() {
   [ "$rc" -eq 0 ] || exit "$rc"
 }
 
+# Derive a verification verdict from the verify evidence mark-complete
+# already persisted, rather than stamping "passed" blind -- the verb
+# execute.md's non-visual branch calls instead of the old blanket
+# update-field rewrite. Mirrors cmd_update_field's shape (validate_story_id,
+# --tasks-file resolution plus validate_path_in_project, pre-lock
+# validate_story_exists, check_python3), not cmd_set_verification's -- the
+# story's own evidence decides the verdict here, so nothing about it is
+# document-dependent in the way set-verification's status/reason are.
+# Usage: judge-verification <story-id> [--tasks-file <path>]
+cmd_judge_verification() {
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh judge-verification <story-id> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  # One crossing, inside the lock. op_judge_verification decides everything
+  # document-dependent -- visual strategy, already-judged status, no
+  # verification object, and the evidence-derived verdict itself -- and
+  # reports why it wrote nothing rather than writing something dishonest.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" judge-verification \
+        --tasks-file "$tasks_file" --story-id "$story_id"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Update a nested field on a story
 # Usage: update-field US-NNN field.path value [--tasks-file <path>]
 # field.path is a dotted chain of identifier segments, e.g. "verification.status"
@@ -13962,6 +14638,8 @@ $rp_entry"
 #                    four-digit years excluded via ^(19|20)[0-9]{2}$
 #   dead_keys        per measure block, the names its command indexes a
 #                    STRUCTURED subject by that the subject does not carry
+#   unrecorded       per measure block, the first command recorded WITHOUT any
+#                    output beneath it: [{block, line, command}]
 #
 # THE RULE ALREADY EXISTED; WHAT WAS MISSING IS THE MEASUREMENT. The three
 # research agents' Structured Findings Format has required a ```measure block
@@ -13986,6 +14664,18 @@ $rp_entry"
 # written only when something was actually found, absent otherwise, never
 # `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
 # which is what every caller written before this third count reads.
+#
+# `unrecorded` follows the same omitted-when-empty rule and reports a block
+# that records a command and nothing else: a `$ ` line with no non-blank,
+# non-command content line before the closing fence. Phase 1.6 would otherwise
+# re-execute it into a comparison against nothing. `block` is the same 1-based
+# index dead_keys uses, `line` the 1-based file line of the `$ ` line, `command`
+# the text with the prompt stripped (continuation lines of a multi-line command
+# are part of it, joined by the same double-quote parity rule). A block whose
+# command is still unbalanced at the closing fence is NOT reported. Exempt by
+# design, because they are empty on success: `grep -q ...` (also combined flags
+# such as -Eq), `test ...`, and `[ ... ]` / `[[ ... ]]`. A block mixing exempt
+# and non-exempt commands with no output names its first non-exempt command.
 #
 # Nothing here is executed. The file is read and counted, never sourced, and
 # the commands inside its measure blocks are treated as text -- which is why
@@ -14129,6 +14819,52 @@ $subject_keys"
   done
 }
 
+# One TSV record per measure block that records a command and no output: block
+# index, the 1-based file line of the command's `$ ` line, the command text
+# (prompt stripped, continuation lines joined by a space). Prints nothing for a
+# clean file. Parity and continuation handling mirror
+# _research_figures_dead_keys deliberately; a block whose command is still
+# unbalanced at the closing fence is dropped, not reported.
+# Usage: _research_figures_unrecorded "<research file path>"
+_research_figures_unrecorded() {
+  local file_path="$1"
+  awk '
+    function dq(s,   n, i) {
+      n = 0
+      for (i = 1; i <= length(s); i++) if (substr(s, i, 1) == "\"") n++
+      return n
+    }
+    function done_cmd(c, ln) {
+      ncmds++
+      if (first == "" && c !~ /^grep[[:space:]]+(-[^[:space:]]+[[:space:]]+)*-[A-Za-z]*q/ \
+          && c !~ /^test[[:space:]]/ && c !~ /^\[\[?[[:space:]]/) {
+        first = c; firstline = ln
+      }
+    }
+    /^```measure[[:space:]]*$/ {
+      inblock = 1; idx++; acc = ""; open = 0
+      ncmds = 0; first = ""; firstline = 0; has_out = 0
+      next
+    }
+    inblock && /^```[[:space:]]*$/ {
+      if (!open && ncmds > 0 && !has_out && first != "") print idx "\t" firstline "\t" first
+      inblock = 0; open = 0; acc = ""
+      next
+    }
+    inblock && open {
+      acc = acc " " $0
+      if (dq(acc) % 2 == 0) { done_cmd(acc, startnr); acc = ""; open = 0 }
+      next
+    }
+    inblock && /^\$ / {
+      acc = substr($0, 3); startnr = NR
+      if (dq(acc) % 2 == 0) { done_cmd(acc, startnr); acc = "" } else { open = 1 }
+      next
+    }
+    inblock && /[^[:space:]]/ { has_out = 1 }
+  ' "$file_path"
+}
+
 cmd_research_figures() {
   local file_path=""
 
@@ -14195,14 +14931,22 @@ cmd_research_figures() {
         | split("\t")
         | {block: (.[0] | tonumber), key: .[1], subject: .[2]})')
 
+  local unrec_records unrec_json
+  unrec_records=$(_research_figures_unrecorded "$file_path")
+  unrec_json=$(printf '%s' "$unrec_records" \
+    | jq -R -s 'split("\n")
+        | map(select(length > 0)
+        | split("\t")
+        | {block: (.[0] | tonumber), line: (.[1] | tonumber), command: (.[2:] | join("\t"))})')
+
   jq -n \
     --argjson blocks "${blocks:-0}" \
     --argjson figures "${figures:-0}" \
     --argjson dead "$dead_json" \
-    'if ($dead | length) > 0
-       then {blocks: $blocks, figures_outside: $figures, dead_keys: $dead}
-       else {blocks: $blocks, figures_outside: $figures}
-     end'
+    --argjson unrec "$unrec_json" \
+    '{blocks: $blocks, figures_outside: $figures}
+     + (if ($dead | length) > 0 then {dead_keys: $dead} else {} end)
+     + (if ($unrec | length) > 0 then {unrecorded: $unrec} else {} end)'
 }
 
 # ============================================================================
@@ -15417,6 +16161,96 @@ cmd_roadmap_set_status() {
   printf '%s\n' "$out"
 }
 
+# Writes a phase's visual-gate verdict into roadmap.json, in place.
+#
+# cmd_roadmap_set_status's shape: one crossing, inside the lock. This verb takes
+# no stdin payload, so every refusal reachable without the document (feature,
+# phase id, status vocabulary, --review confinement) happens here before the
+# lock, and the ones that need the file (reason pairing is judged in roadmap.py
+# so the vocabulary lives beside its reason rule; phase-not-found) happen inside
+# the single crossing. Ungated by _roadmap_require_contracts: it reads and
+# writes no creates/needs entry. --review is confined here, before the lock,
+# the way every other path that arrives as a CLI argument is.
+cmd_roadmap_record_visual_gate() {
+  local feature="" phase_id="" status="" reason="" review=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      --status) shift; status="${1:-}" ;;
+      --reason) shift; reason="${1:-}" ;;
+      --review) shift; review="${1:-}" ;;
+      *)
+        echo "Error: roadmap-record-visual-gate: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-record-visual-gate"
+
+  case "$status" in
+    passed|diverges|skipped|accepted) ;;
+    *)
+      echo "Error: roadmap-record-visual-gate: --status must be one of passed|diverges|skipped|accepted, got: $status" >&2
+      exit 1
+      ;;
+  esac
+
+  [ -n "$review" ] && validate_path_in_project "$review"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-record-visual-gate" "$feature")
+
+  check_python3
+  local reason_args=() review_args=()
+  [ -n "$reason" ] && reason_args=(--reason "$reason")
+  [ -n "$review" ] && review_args=(--review "$review")
+
+  local out
+  out=$(
+    (
+      _lock "${roadmap_path}.lock"
+      python3 "$(_aimi_roadmap_py)" record-visual-gate \
+        --roadmap "$roadmap_path" --phase "$phase_id" --status "$status" \
+        "${reason_args[@]}" "${review_args[@]}"
+    ) 200>"${roadmap_path}.lock"
+  ) || exit $?
+  printf '%s\n' "$out"
+}
+
+# Whether a phase owes a visual comparison, derived from its own tasks file(s).
+# Structurally cmd_roadmap_get: a read, so no lock, and ungated by
+# _roadmap_require_contracts (no creates/needs entry is read).
+cmd_roadmap_visual_gate_required() {
+  local feature="" phase_id=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) shift; feature="${1:-}" ;;
+      --phase) shift; phase_id="${1:-}" ;;
+      *)
+        echo "Error: roadmap-visual-gate-required: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+
+  _roadmap_validate_feature "$feature"
+  _roadmap_validate_phase_id "$phase_id" "roadmap-visual-gate-required"
+
+  local roadmap_path
+  roadmap_path=$(_roadmap_require "roadmap-visual-gate-required" "$feature")
+
+  check_python3
+  python3 "$(_aimi_roadmap_py)" visual-gate-required \
+    --roadmap "$roadmap_path" --phase "$phase_id"
+}
+
 cmd_roadmap_claim() {
   local feature="" session_id="" session_pid="" phase_override=""
 
@@ -15659,6 +16493,15 @@ cmd_roadmap_write_handoff() {
 # phase that does not exist; deriving from the tasks file basename names it
 # after something that genuinely identifies this run instead.
 #
+# --kind <name> is an optional suffix, appended to whichever name the mode above
+# chose: <feature>-phase-<N>-<name>.md, or <tasks basename>-<name>.md. It exists
+# because one phase has more than one review. Step 5's per-story design review
+# and the phase visual gate's review both name the same feature and phase, so
+# without a suffix the later write replaces the earlier one -- and the gate's
+# review is the one roadmap-record-visual-gate --review points at. Absent, the
+# name is byte-identical to what it always was. The name is one lowercase slug
+# component, so it can neither carry a path separator nor start with a dash.
+#
 # A single flag with no partner is refused rather than guessed: --phase alone
 # cannot borrow --feature's flat-mode meaning, and --feature alone cannot
 # invent a phase number, so half a pair is treated as a mistake rather than as
@@ -15667,12 +16510,13 @@ cmd_roadmap_write_handoff() {
 # The path is confined by validate_path_in_project, the standing authority over
 # every path arriving as a CLI ARGUMENT -- no second check is invented here.
 cmd_write_review() {
-  local feature="" phase_id=""
+  local feature="" phase_id="" kind=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
       --feature) shift; feature="${1:-}" ;;
       --phase) shift; phase_id="${1:-}" ;;
+      --kind) shift; kind="${1:-}" ;;
       *)
         echo "Error: write-review: unknown flag: $1" >&2
         exit 1
@@ -15681,8 +16525,14 @@ cmd_write_review() {
     shift
   done
 
-  local reviews_dir review_path
+  if [ -n "$kind" ] && ! [[ "$kind" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "Error: write-review: --kind must be one lowercase slug (^[a-z0-9][a-z0-9-]*\$) -- got: $kind" >&2
+    exit 1
+  fi
+
+  local reviews_dir review_path suffix=""
   reviews_dir="$AIMI_DIR/reviews"
+  [ -n "$kind" ] && suffix="-$kind"
 
   if [ -n "$feature" ] || [ -n "$phase_id" ]; then
     if [ -z "$feature" ] || [ -z "$phase_id" ]; then
@@ -15691,11 +16541,11 @@ cmd_write_review() {
     fi
     _roadmap_validate_feature "$feature" "write-review"
     _roadmap_validate_phase_id "$phase_id" "write-review"
-    review_path="$reviews_dir/${feature}-phase-${phase_id}.md"
+    review_path="$reviews_dir/${feature}-phase-${phase_id}${suffix}.md"
   else
     local tasks_file
     tasks_file=$(get_tasks_file) || exit 1
-    review_path="$reviews_dir/$(basename "$tasks_file" .json).md"
+    review_path="$reviews_dir/$(basename "$tasks_file" .json)${suffix}.md"
   fi
 
   validate_path_in_project "$review_path"
@@ -16295,6 +17145,17 @@ COMMANDS:
                               nothing) when the id is not found, the story is not
                               pending, another story depends on it, it is the only
                               story left in the file, or --reason is missing/empty.
+    set-verification <id> <passed|failed|skipped> --reason <text> [--tasks-file <path>]
+                              Record an explicit verification verdict in one locked
+                              crossing (returns {id, verification} JSON). --reason is
+                              required when the status is skipped and refused for
+                              passed/failed. Refuses (writes nothing) on status pending
+                              or any value outside passed/failed/skipped, a --reason
+                              that does not match the status, an id not found, or a
+                              story whose verification field is absent or not an
+                              object. A skipped write replaces any stale skipReason
+                              left by an earlier verdict; passed/failed removes it.
+                              Prefer this over update-field for a verification verdict.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -16332,6 +17193,18 @@ COMMANDS:
                               Update a nested field on a story (e.g., verification.status passed).
                               <field.path> must be a dotted chain of identifier segments
                               ([A-Za-z_][A-Za-z0-9_]* joined by '.'); anything else is refused.
+                              verification.status and verification.strategy are further
+                              constrained to their documented value sets (pending/passed/
+                              failed/skipped, and test/visual/api); prefer set-verification
+                              over this for recording a verification verdict.
+    judge-verification <id> [--tasks-file <path>]
+                              Derive a verification verdict from the story's own recorded
+                              verify evidence (returns {id, judged, verification|reason}
+                              JSON) -- passed on evidence.exit 0, failed on a non-zero
+                              integer exit, skipped with a skipReason otherwise. Writes
+                              nothing, and reports why, for a story whose verification.
+                              status is not pending, whose strategy is visual, or that
+                              carries no verification object at all.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
@@ -16347,10 +17220,13 @@ COMMANDS:
     get-story <id> [--tasks-file <path>]
                               Get full story object by ID (read-only)
     get-story-context <id> [--tasks-file <path>]
-                              Get story slice + metadata + skills[] + designContext + skillsDropped[] as JSON
+                              Get story slice + metadata + skills[] + designContext + dropped[] as JSON
                               (for subagent self-brief). Output keys: story, metadata, skills,
-                              designContext. skills[] contains {name, path, content} per
-                              declared skill. designContext contains {decisions, bundleGuidance}.
+                              designContext, dropped. skills[] contains {name, path, content} per
+                              declared skill. designContext contains {decisions, bundleGuidance,
+                              specSections}. dropped[] contains {kind, name, path, section, reason,
+                              bytes, deferred} per excluded skill, evicted spec section, or spec
+                              file missing on disk / escaping the project root.
     verify-probe <id> [--tasks-file <path>] [--previous-file <path>]
                  [--skip-matching <regex>]
                               Run a story's implementation.verify ONE ASSERTION AT A TIME and
@@ -16378,6 +17254,20 @@ COMMANDS:
                               every skipped segment is one this probe can no longer warn about.
                               A segment that outlives the per-segment ceiling answers the same
                               null: a run that was cut off measured nothing.
+    probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]
+                              Run every story's implementation.verify at the tasks file's own
+                              metadata.baseRef (or --ref, which wins) in ONE throwaway
+                              detached git worktree outside the repository, and print
+                              {baseRef, probed, policy, stories, unlabelledNonDiscriminating,
+                              unmeasured}. unlabelledNonDiscriminating names, by story id and
+                              segment, each segment that already PASSED at baseRef and is not
+                              labelled in implementation.guardRails. Full-suite segments (a
+                              pytest run with no -k or :: selector, any test-*.sh) are skipped
+                              by default and listed in unmeasured; --run-suites measures
+                              them. A baseRef that cannot be used answers
+                              {baseRef, probed:false, reason} at exit 0 with the result
+                              arrays omitted, never an empty-but-clean report. Like
+                              verify-probe it refuses to run inside another probe.
     list-known-gaps [--feature <name>] [--since <YYYY-MM-DD>]
                               Read every planning defect a previous executor recorded in
                               .aimi/known-gaps/ and print them as a JSON array of
@@ -16396,6 +17286,39 @@ COMMANDS:
                               python3 starts, because it arrives as a CLI argument --
                               distinct from get-story-context's own unconfined,
                               document-sourced read of metadata.brainstormPath.
+    spec-derivation --input <path>
+                              Validate a JSON file shaped {"records":[{"kind":
+                              "entity"|"endpoint","name":"...","status":"present"|
+                              "absent"|"unchecked","evidence":["..."]}]} and print
+                              {records, relabeled, markdown:{entities, endpoints}}.
+                              A record claimed `absent` with an empty evidence
+                              array is relabeled `unchecked` (listed in relabeled
+                              as <kind>:<name>, one stderr line each); a genuine
+                              `unchecked` record passes through unchanged. The
+                              markdown strings hold one `| name | status | evidence |`
+                              row per record, in input order. Malformed input exits
+                              1 naming the record index and the invalid field.
+                              --input is confined to the project root by
+                              validate_path_in_project before python3 starts.
+    structural-vocabulary --tasks <path> [--spec <path>]... [--prototype <path>]...
+                              Count a fixed lexicon of container/placement terms
+                              (STRUCTURAL_LEXICON in tasks.py: bottom sheet, dialog,
+                              modal, drawer, sidebar, side panel, header, footer, tab
+                              bar, toolbar, stepper, step indicator, card, list, grid,
+                              popover, tooltip, toast, banner, accordion, carousel,
+                              full-screen, overlay, split view) verbatim, case-
+                              insensitive, as whole phrases, in the spec/prototype
+                              files and in the tasks file's story text (title,
+                              description, acceptanceCriteria, implementation.approach,
+                              tasks[], notes). Prints {measured, terms, missing,
+                              unsourced}: `missing` are terms a source names that no
+                              story mentions, `unsourced` terms stories use that no
+                              source names. When no term occurs anywhere it prints
+                              {"measured": false, "terms": [], "missing": [],
+                              "unsourced": []} and exits 0. Advisory only. Every path
+                              is confined by validate_path_in_project before python3
+                              starts; an unreadable or invalid --tasks file exits 1
+                              naming it.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
                               Detect and cache the repository's default branch
@@ -16775,6 +17698,11 @@ COMMANDS:
                               not carry. dead_keys is omitted entirely when empty (the
                               baseRef/prototypeDropped convention), never [], so a clean
                               file prints exactly blocks and figures_outside.
+                              unrecorded lists [{block, line, command}] for a block that
+                              records a command with no output beneath it (line is the
+                              1-based file line of the `$ ` line); omitted when empty, like
+                              dead_keys. Exempt, being empty by design: grep -q (also -Eq),
+                              test, and [ ... ] / [[ ... ]]. Unbalanced commands are skipped.
                               A block whose subject is not structured (a grep or awk over a
                               .md) contributes no names and is never reported.
                               Reports only: nothing is executed, no threshold is applied and
@@ -16816,17 +17744,111 @@ COMMANDS:
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
                               30 days. .aimi/archive is ignored. Silent when nothing cleaned.
-    detect-design-bundle [--root <path>] [--all] [--json]
-                              Detect a Claude Design handoff bundle. --root may
-                              point at a bundle directory directly, or at a
-                              parent dir whose immediate children include bundle
-                              dirs (depth-1 scan in that case). Returns JSON
-                              {path,readme,chats[],prototypes[],hasReact,
-                              hasTailwind,businessSpec,designSpec} or null when
-                              no bundle found.
-                              --root   Scan <path> (bundle or parent) instead of CWD
-                              --all    Return all matching bundles as JSON array
-                              --json   Alias; output is always JSON
+    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json]
+                              Detect a design handoff bundle -- either a Claude
+                              Design export or one this plugin generated itself.
+                              --root may point at a bundle directory directly,
+                              or at a parent dir whose immediate children
+                              include bundle dirs (depth-1 scan in that case).
+                              A bundle this plugin generated under
+                              <root>/.aimi/design-bundles/<slug>/ is also
+                              reachable by pointing --root at the project root
+                              -- never at that subdirectory directly. Returns
+                              JSON {path,readme,chats[],prototypes[],hasReact,
+                              hasTailwind,businessSpec,designSpec,source} or
+                              null when no bundle found. source is
+                              "claude-design" or "aimi-generated", naming which
+                              marker qualified the bundle. Every returned path
+                              (path, readme, chats[], prototypes[],
+                              businessSpec, designSpec) is relative to
+                              PROJECT_ROOT -- never merely the bundle's own
+                              basename -- for a bundle that resolves inside
+                              PROJECT_ROOT, however deep --root nests it; a
+                              bundle outside PROJECT_ROOT (--root's own
+                              absolute-path exception only) keeps the older
+                              scan-root-relative/basename form. Scan-tier
+                              candidates are collected mtime-free and ordered
+                              by path -- never by mtime, which no longer
+                              breaks a tie. With no bundle named (no --bundle,
+                              and --phase-dir did not win) and two or more
+                              scan-tier candidates tie, the verb refuses --
+                              exit 3, stdout {ambiguous:true,tier:"scan",
+                              candidates:[...]} (same per-entry shape as a
+                              single answer, ordered by path), stderr naming
+                              the count and listing every candidate path --
+                              rather than silently electing one.
+                              --root       Scan <path> (bundle or parent) instead of CWD
+                              --bundle     Point directly at one bundle directory.
+                              Always confined to PROJECT_ROOT -- relative or
+                              absolute, no exception -- and never falls back to
+                              scanning the given path's children on a miss. A
+                              path outside the project is refused without being
+                              read, naming import-design-bundle as the way to
+                              bring it in first. A given path that exists but is
+                              not a bundle (no README.md, or a README.md with
+                              neither marker), or that does not exist at all, is
+                              refused naming the given path.
+                              --phase-dir  Check <path>/design-bundle/ first (the
+                              fixed lookup location for a planned phase's own
+                              bundle); when it qualifies, it wins over every
+                              scan-tier match -- stderr names the win and how
+                              many scan-tier matches it out-ranked. Always
+                              confined to PROJECT_ROOT, with no --root-style
+                              absolute-path exception. Unlike --bundle, a
+                              --phase-dir that resolves inside the project but
+                              does not exist yet, or whose design-bundle/ has
+                              no qualifying README, falls back to the scan
+                              tier silently rather than refusing -- a phase's
+                              own directory does not exist until /aimi:plan
+                              creates it, so its absence alone is never an
+                              error. Only a --phase-dir resolving OUTSIDE the
+                              project is refused (exit 1, before any scan or
+                              README read).
+                              --all        Return every scan-tier match as a JSON
+                              array, path-sorted; never refuses, even when the
+                              non---all path over the same tree would.
+                              --json       Alias; output is always JSON
+    import-design-bundle --from <path> --to <path> [--reimport]
+                              Copy a design bundle from outside the project
+                              into .aimi/, so it is reachable via --bundle or
+                              --phase-dir without their own confinement ever
+                              being asked to cross the project boundary.
+                              --from       May be anywhere -- never confined
+                              to PROJECT_ROOT -- but must already resolve to
+                              a bundle (<from>/README.md carrying the Claude
+                              Design handoff marker or the aimi-generated
+                              marker). Refused by name otherwise, before --to
+                              is touched at all.
+                              --to         Confined to PROJECT_ROOT (relative
+                              or absolute, no exception) AND restricted to
+                              one of two shapes, relative to it: exactly
+                              .aimi/tasks/<feature>/<phase-dir>/design-bundle
+                              or exactly .aimi/design-bundles/<slug>. Any
+                              other shape, or a path outside the project, is
+                              refused by name.
+                              Every symlink inside --from is checked before
+                              any copy begins; one resolving outside --from's
+                              own tree refuses by name with no partial copy
+                              left at --to. A non-escaping symlink, or any
+                              other special file (FIFO, device, socket), is
+                              silently skipped -- never copied, never a cause
+                              for refusal on its own.
+                              Prints {bundle,status,files,bytes} -- bundle is
+                              --to's path relative to PROJECT_ROOT, status is
+                              one of:
+                                imported   --to did not exist; now it does
+                                reused     --to already matched --from
+                                           byte-for-byte (a hash keyed on
+                                           each file's relative path, not
+                                           bytes alone); nothing at --to was
+                                           touched, mtimes included
+                                replaced   --to held a DIFFERENT copy and
+                                           --reimport was given; the old
+                                           copy is replaced atomically
+                              Without --reimport, a --to holding a different
+                              copy is refused (exit 1, naming --from, --to
+                              and --reimport) and left byte-for-byte unchanged.
+                              --reimport   Replace a --to that differs from --from
     bundle-prototype-status --bundle <path> --topic <slug> [--force]
                               Check whether a bundle prototype needs (re-)generation.
                               Returns JSON with keys: needs_generation (bool),
@@ -17272,7 +18294,32 @@ COMMANDS:
                               may create or overwrite that file -- direct
                               Write/Edit tool calls on it are blocked by
                               guard-runtime-state.py.
-    write-review [--feature <slug> --phase <N>]
+    roadmap-record-visual-gate --feature <slug> --phase <id> --status <passed|diverges|skipped|accepted> [--reason <text>] [--review <path>]
+                              Locked read-modify-write. Records a phase's
+                              visual-gate verdict as phases[].visualGate =
+                              {status, reason, review, recordedAt} (reason and
+                              review null when not given; recordedAt is an
+                              ISO-8601 UTC time). --status accepts exactly
+                              passed|diverges|skipped|accepted. --reason is
+                              required (non-blank) for diverges, skipped and
+                              accepted, and optional for passed. --review must
+                              resolve inside the project root. Always replaces
+                              the whole visualGate object in place, so a resumed
+                              or re-verified phase carries one record, never two.
+                              A phase id absent from roadmap.json is refused,
+                              naming the id and the roadmap path.
+    roadmap-visual-gate-required --feature <slug> --phase <id>
+                              Read-only. Derives, from the phase's own tasks
+                              file(s) (every member of a split phase), whether a
+                              visual comparison is owed. Prints
+                              {required, reason, prototypePaths, designSpec,
+                              visualStories, groups}: required is true only when
+                              metadata.prototypePaths is non-empty AND at least
+                              one completed story carries verification.strategy
+                              "visual"; visualStories is [{id, url}], groups the
+                              number of resolved tasks files. A phase id absent
+                              from roadmap.json is refused.
+    write-review [--feature <slug> --phase <N>] [--kind <name>]
                               Read a review as markdown on stdin and atomically
                               write it to disk, so the review outlives the
                               session that produced it. With --feature and
@@ -17282,7 +18329,10 @@ COMMANDS:
                               pair to name a file with), writes to
                               .aimi/reviews/<active tasks file's basename>.md
                               instead -- one flag without its partner is
-                              refused rather than guessed. The body is stored
+                              refused rather than guessed. --kind <name> appends
+                              -<name> to either name, so two reviews of one
+                              phase (.aimi/reviews/<slug>-phase-<N>-<name>.md)
+                              never overwrite each other. The body is stored
                               verbatim -- backticks and code fences are a
                               review's content, not something to strip -- and an
                               empty stdin is refused rather than written. Needs
@@ -17593,6 +18643,8 @@ main() {
     gate-fail)         shift; cmd_gate_fail "$@" ;;
     update-field)      shift; cmd_update_field "$@" ;;
     remove-story)      shift; cmd_remove_story "$@" ;;
+    set-verification)  shift; cmd_set_verification "$@" ;;
+    judge-verification) shift; cmd_judge_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;
@@ -17602,8 +18654,11 @@ main() {
     get-story)         shift; cmd_get_story "$@" ;;
     get-story-context) shift; cmd_get_story_context "$@" ;;
     verify-probe)      shift; cmd_verify_probe "$@" ;;
+    probe-plan)        shift; cmd_probe_plan "$@" ;;
     list-known-gaps)   shift; cmd_list_known_gaps "$@" ;;
     design-decisions)  shift; cmd_design_decisions "$@" ;;
+    spec-derivation)   shift; cmd_spec_derivation "$@" ;;
+    structural-vocabulary) shift; cmd_structural_vocabulary "$@" ;;
     get-state)         cmd_get_state ;;
     detect-default-branch) shift; cmd_detect_default_branch "$@" ;;
     detect-parent-branch) shift; cmd_detect_parent_branch "$@" ;;
@@ -17624,6 +18679,7 @@ main() {
     extract-sections)  shift; cmd_extract_sections "$@" ;;
     extract-prototype-sections) shift; cmd_extract_prototype_sections "$@" ;;
     detect-design-bundle) shift; cmd_detect_design_bundle "$@" ;;
+    import-design-bundle) shift; cmd_import_design_bundle "$@" ;;
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
@@ -17638,6 +18694,8 @@ main() {
     roadmap-release-claim) shift; cmd_roadmap_release_claim "$@" ;;
     roadmap-reconcile)     shift; cmd_roadmap_reconcile "$@" ;;
     roadmap-write-handoff) shift; cmd_roadmap_write_handoff "$@" ;;
+    roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
+    roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;

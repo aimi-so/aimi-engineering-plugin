@@ -4,6 +4,8 @@ Shared reference for the `/aimi:brainstorm` agent when generating multi-variant 
 
 ## Output Path Pattern
 
+These files are plugin-owned artifacts under `.aimi/brainstorms/`, so per the artifact-language rule (`commands/references/user-communication.md`) their authored UI copy is written in English.
+
 Variant files MUST be written to:
 
 ```

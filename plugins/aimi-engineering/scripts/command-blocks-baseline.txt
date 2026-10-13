@@ -74,6 +74,7 @@ loop-scope	plan.md	PROJECT_PATH	# SUSPECTED LIVE DEFECT: only the Phase 3e valid
 # sentence) and SPLIT_BRANCH_ARGS (the variable the `mapfile` failed to fill).
 # Both are gone. That is what this list is for: a NEW name means a new one.
 unassigned	brainstorm.md	renderBundlePending	# bundle-detection verdict the surrounding prose resolves; no block assigns it
+unassigned	brainstorm.md	CHOSEN_BUNDLE_PATH	# AskUserQuestion pick the surrounding prose resolves; no block assigns it
 unassigned	execute.md	ARTIFACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
 unassigned	execute.md	CONTRACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
 unassigned	execute.md	DECISIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
@@ -85,7 +86,6 @@ unassigned	next.md	CONTAINER_ROOT	# supplied by the orchestrator that invokes th
 unassigned	next.md	PROJECT_PATH	# supplied by the orchestrator that invokes this flow, never by next.md itself
 unassigned	open-pr.md	INCLUDE_BACKEND_SPEC	# flag the prose decides -- `<if $INCLUDE_BACKEND_SPEC=1, append ...>` -- not a shell assignment
 unassigned	open-pr.md	s	# single letter from pseudo-code, not a shell variable
-unassigned	plan.md	BUNDLE_OVERRIDE	# optional bundle root the surrounding prose resolves before detect-design-bundle is called
 unassigned	plan.md	entry	# ${entry.idx} inside a commented pseudo-code line; never a shell expansion
 unassigned	plan.md	overflow	# ${overflow} inside a commented pseudo-code line; never a shell expansion
 unassigned	plan.md	ROOT	# search root the surrounding prose assigns before this block runs
