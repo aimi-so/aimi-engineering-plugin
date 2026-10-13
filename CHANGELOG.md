@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.149.0] - 2026-10-13
+
+Six defects seen in one multi-repo phase run (#164).
+
+### Added
+- `acknowledge-smell <story-id> --type <type> --reason <text> [--tasks-file <path>]`: records `acknowledged`, `acknowledgedReason` and `acknowledgedAt` on the `metadata.smellWarnings` entry matched by story and type, in one locked crossing. It refuses in agent mode before taking the lock, on a blank reason and on an unknown entry; a repeat call is a no-op. The completed-gate note names the verb instead of a hand edit.
+- `acknowledge-evidence --reason <text>`: records `metadata.evidenceAcknowledged {reason, acknowledgedAt, completed}` in one locked crossing. It refuses in agent mode before the lock, is idempotent, and lapses when the phase's completed-story count changes. The completion report and the phase handoff echo it.
+- `metadata.prototypeSuperseded`, an optional array of `{path, decision, note}`: when a decision recorded in `oqDecisions[]` changes something a loaded prototype depicts, `/aimi:plan` Phase 4 records it here and the prototype itself is kept, never regenerated. The key is omitted when empty, copied to every file of a split, validated by `validate-tasks` as rule R22, and surfaced by `get-story-context` so the story executor reads the entry next to the prototype and does not reproduce the superseded decision.
+- `aimi-cross-story-auditor` gains a seventh concern, cross-project contract orphan: a contract or wire symbol one project's story introduces that no story of the consuming project names is reported as an `unresolved[]` entry. It is advisory and never emits a patch.
+
+### Changed
+- `roadmap-set-status --status completed` now refuses a phase that has completed stories and no proven discriminating verification evidence, aggregated across every member tasks file, until `acknowledge-evidence` records a reason. Previously such a phase closed with an "unchecked" note.
+- `probe-plan` probes each split tasks file in the project repository its stories name, one group per `project`, at that file's own `metadata.baseRef`, including when `AIMI_ROOT` is a plain non-git parent folder. A project that is not a repository, or does not resolve, is reported as `unmeasured` while the other groups are still probed.
+- `story-merge` verify-coverage follows `npm|bun|pnpm|yarn run <name>`, `run-script <name>` and `<pm> test` through the story project's `package.json` scripts (visited set, depth cap 5, whole-token match). Cycles, over-cap chains, undefined scripts and an unreadable `package.json` are reported as not evaluated, never as findings or clean.
+
+### Fixed
+- `validate-tasks` resolved every story's `implementation.files` against the layout root, so the missing-directory warning fired on every entry of a multi-repo plan. Entries now resolve under the story's confined `project` directory; a project that escapes the root is never traversed and reports its entries through the same warning. Severity and warning text are unchanged.
+
 ## [1.148.0] - 2026-10-09
 
 ### Added
