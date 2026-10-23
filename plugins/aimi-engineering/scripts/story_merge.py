@@ -422,12 +422,18 @@ def read_staging(paths):
         with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         entries = value if isinstance(value, list) else [value]
+        # The staged filename idx, taken with the same match the duplicate-index
+        # check uses: "" for an unnumbered file. outline:NN names THIS, never a
+        # position in the merged array, because a skipped expansion leaves a gap
+        # in the filenames that a position would silently close.
+        staged_idx = re.match(r"[0-9]*", _basename(path)).group(0)
         for entry in entries:
             if not isinstance(entry, dict):
                 die(
                     "Error: story-merge: staging file must hold a story object or an "
                     "array of story objects: " + _basename(path)
                 )
+            entry["_stagedIdx"] = staged_idx
             # Written and removed again rather than never written: an authored
             # _srcIdx was overwritten and deleted by the jq, so a staging file
             # carrying one must not smuggle it into the output either.
@@ -446,13 +452,39 @@ def assign_ids(stories):
         story["id"] = "US-" + _pad(position + 1, 3)
 
 
+# One pattern for what an outline reference looks like inside story text: the
+# literal "outline:" and exactly two digits that are not followed by a third.
+# outline:041 and outline:7 are not tokens, so a longer number or a bare digit is
+# never half-rewritten, and US-NNN text can never match. Compiled once here so the
+# pre-split pass below and the post-split pass in _remap_block cannot disagree.
+OUTLINE_TOKEN = re.compile(r"outline:([0-9]{2})(?![0-9])")
+
+
 def outline_map(stories):
-    """outline:NN is a 1-based position in the merged array, zero-padded to two."""
-    return {_pad(position + 1, 2): story["id"] for position, story in enumerate(stories)}
+    """{staged filename idx: story id}, the first story staged under each idx.
+
+    outline:NN is the zero-padded idx in the staged FILENAME (NN-slug.json), not a
+    position in the merged array: after a skipped expansion the two disagree, and
+    resolving by position repoints every later reference at the wrong story. An
+    unnumbered file has no idx and is never a target. A story dict carrying no
+    _stagedIdx key at all (a list built by hand, as a unit test does) falls back
+    to its 1-based list position; read_staging always sets the key, so a real run
+    never takes that branch.
+    """
+    mapping = {}
+    for position, story in enumerate(stories):
+        idx = story.get("_stagedIdx")
+        if idx is None:
+            idx = _pad(position + 1, 2)
+        if idx == "":
+            continue
+        mapping.setdefault(idx, story["id"])
+    return mapping
 
 
-def remap_outline_tokens(stories):
-    mapping = outline_map(stories)
+def remap_outline_tokens(stories, mapping=None):
+    if mapping is None:
+        mapping = outline_map(stories)
     for story in stories:
         remapped = []
         for dep in _list(story.get("dependsOn")):
@@ -462,6 +494,67 @@ def remap_outline_tokens(stories):
             else:
                 remapped.append(dep)
         story["dependsOn"] = remapped
+
+
+def remap_story_text_tokens(stories, mapping):
+    """Resolve every OUTLINE_TOKEN in a story's text fields by staged filename idx.
+
+    Covers implementation.approach, tasks[], notes, acceptanceCriteria[],
+    implementation.verify, implementation.guardRails[], gate.prompt and
+    gate.options[]. verify and guardRails go through the SAME helper, so a
+    guardRails entry that equalled a verify segment before the merge still does
+    after it. A field is assigned only when its text changed, so no key is
+    created and no order moves, and a second application changes nothing (a story
+    id contains no "outline:").
+
+    Returns one "US-NNN <field path>: outline:NN" line per token whose idx has no
+    staged file; such a token is left in place here and the caller refuses the
+    merge, so it is never dropped and never resolved by position.
+    """
+    unmapped = []
+
+    def sub(text, story_id, path):
+        def replace(match):
+            target = mapping.get(match.group(1))
+            if target is None:
+                unmapped.append(story_id + " " + path + ": " + match.group(0))
+                return match.group(0)
+            return target
+
+        return OUTLINE_TOKEN.sub(replace, text)
+
+    def field(container, key, story_id, path):
+        value = container.get(key)
+        if isinstance(value, str):
+            rewritten = sub(value, story_id, path)
+            if rewritten != value:
+                container[key] = rewritten
+
+    def entries(container, key, story_id, path):
+        values = container.get(key)
+        if not isinstance(values, list):
+            return
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                rewritten = sub(value, story_id, path + "[" + str(index) + "]")
+                if rewritten != value:
+                    values[index] = rewritten
+
+    for story in stories:
+        story_id = story["id"]
+        implementation = story.get("implementation")
+        if isinstance(implementation, dict):
+            field(implementation, "approach", story_id, "implementation.approach")
+            field(implementation, "verify", story_id, "implementation.verify")
+            entries(implementation, "guardRails", story_id, "implementation.guardRails")
+        entries(story, "tasks", story_id, "tasks")
+        field(story, "notes", story_id, "notes")
+        entries(story, "acceptanceCriteria", story_id, "acceptanceCriteria")
+        gate = story.get("gate")
+        if isinstance(gate, dict):
+            field(gate, "prompt", story_id, "gate.prompt")
+            entries(gate, "options", story_id, "gate.options")
+    return unmapped
 
 
 def unresolved_outline_refs(stories):
@@ -497,7 +590,7 @@ def _die_each(lines):
     sys.exit(1)
 
 
-def inject_foundation(stories, foundation_values):
+def inject_foundation(stories, foundation_values, mapping=None):
     """--foundation NN | <project>:NN, repeatable: one foundation PER project group.
 
     Each accepted foundation gains an edge from every OTHER story sharing its
@@ -561,7 +654,8 @@ def inject_foundation(stories, foundation_values):
         # is unambiguously the separator.
         parsed.append((raw, tail if sep else raw, head if sep else None))
 
-    mapping = outline_map(stories)
+    if mapping is None:
+        mapping = outline_map(stories)
 
     # Gate 1 -- indices resolving to nothing. Byte-identical to the pre-batch
     # single message when exactly one value is at fault.
@@ -2524,12 +2618,23 @@ def main(argv):
 
     stories = read_staging(paths)
     assign_ids(stories)
-    remap_outline_tokens(stories)
+    # Computed ONCE, while every story still carries its _stagedIdx, and reused by
+    # --foundation below so the two can never resolve an idx differently.
+    idx_map = outline_map(stories)
+    remap_outline_tokens(stories, idx_map)
     unresolved = unresolved_outline_refs(stories)
     if unresolved:
         die_list("Error: story-merge: unresolved outline reference(s):", unresolved)
+    text_unresolved = remap_story_text_tokens(stories, idx_map)
+    if text_unresolved:
+        die_list(
+            "Error: story-merge: outline reference(s) in story text name no staged file"
+            " (outline:NN is the staged filename index, never a position):",
+            text_unresolved,
+        )
     for story in stories:
         story.pop("_srcIdx", None)
+        story.pop("_stagedIdx", None)
 
     # Earliest point at which every story carries its final US-NNN id, and still
     # ahead of --foundation, cycle detection and the sweeps: a refusal here costs
@@ -2546,7 +2651,7 @@ def main(argv):
         else None
     )
 
-    foundation_ids = inject_foundation(stories, foundation_values) if foundation_values else []
+    foundation_ids = inject_foundation(stories, foundation_values, idx_map) if foundation_values else []
 
     in_cycle = cycle_stories(stories)
     if in_cycle:
