@@ -5330,9 +5330,16 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # so a traversal-shaped name cannot leave it. They WRITE nothing: the
     # verb still writes only the one --tasks-file it was handed. No new root,
     # and no leaf this module chose.
-    assert code.count("os.path.") == 55
+    #
+    # The fifty-sixth is verify_grep_directory_findings' own isdir() (R23), over
+    # a path confined_spec_path() already resolved and returned `inside` for in
+    # the same expression -- stat only, a question about a path the verify
+    # names, never a write. No new root, and no leaf this module chose: the
+    # operand is a literal word of the verify, joined onto the story's base by
+    # confined_spec_path and refused when it escapes.
+    assert code.count("os.path.") == 56
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
-    assert code.count("os.path.isdir(") == 3
+    assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
     archive_confinement = code.split("def require_in_project", 1)[1].split("\ndef ", 1)[0]
@@ -11278,3 +11285,285 @@ def test_prototype_superseded_surfaces_in_metadata_and_is_absent_when_not_record
     run = _run_get_story_context(without, "US-001", str(root))
     assert run.returncode == 0, run.stderr
     assert "prototypeSuperseded" not in json.loads(run.stdout)["metadata"]
+
+
+# ---------------------------------------------------------------------------
+# R23 -- what a multi-line implementation.verify can hide (issue #167, US-002)
+# ---------------------------------------------------------------------------
+#
+# Two predicates in tasks.py (verify_composition_findings and
+# verify_grep_directory_findings) and the rule that reports them. Bash never ran
+# this rule and no recording in golden_from_jq.json carries a verify at all, so
+# these cases ARE the coverage. Every exemption below is asserted from both
+# sides: the exempt shape is silent AND its closest unexempt twin fires, so a
+# predicate that fired on everything, or on nothing, cannot pass.
+
+_COMPOSITION_PREFIX = "is multi-line and can swallow a failing line: "
+
+_COMPOSITION_SILENT = [
+    pytest.param(None, id="non-str-none"),
+    pytest.param(7, id="non-str-int"),
+    pytest.param(["a", "b"], id="non-str-list"),
+    pytest.param("", id="empty"),
+    pytest.param("test -f a", id="single-line"),
+    pytest.param("test -f a; test -f b", id="semicolon-one-line"),
+    pytest.param("test -f a\n", id="trailing-newline-only"),
+    pytest.param("\n  test -f a  \n\n", id="padding-newlines-only"),
+    pytest.param("set -e\ntest -f a\ntest -f b", id="set-e"),
+    pytest.param("set -euo pipefail\ntest -f a\ntest -f b", id="set-euo-pipefail"),
+    pytest.param("set -Eeu\ntest -f a\ntest -f b", id="set-Eeu"),
+    pytest.param("set -o errexit\ntest -f a\ntest -f b", id="set-o-errexit"),
+    pytest.param("test -f a &&\ntest -f b", id="and-continuation"),
+    pytest.param("test -f a &&\n  test -f b &&\n  test -f c", id="and-continuation-3"),
+    pytest.param("test -f a ||\ntest -f b", id="or-continuation"),
+    pytest.param("test -f a \\\n  -a -f b", id="backslash-continuation"),
+    pytest.param("x='one\ntwo'", id="newline-inside-quotes"),
+    pytest.param("python3 - <<'PY'\nprint(1)\nprint(2)\nPY", id="heredoc-is-one-segment"),
+    pytest.param("echo 'unterminated\ntest -f a\ntest -f b", id="unterminated-quote"),
+]
+
+_COMPOSITION_FIRES = [
+    pytest.param("test -f a\ntest -f b", id="no-header"),
+    pytest.param("test -f a\n\ntest -f b\n", id="no-header-blank-lines"),
+    pytest.param("set -u\ntest -f a\ntest -f b", id="header-only-set-u"),
+    pytest.param("set -o pipefail\ntest -f a\ntest -f b", id="header-only-pipefail"),
+    pytest.param("set -e\ntest -f a\nset +e\ntest -f b", id="errexit-switched-off"),
+    pytest.param("set -e\ntest -f a\nset +o errexit\ntest -f b", id="errexit-switched-off-o"),
+    pytest.param("test -f a\nset -e\ntest -f b", id="set-not-first"),
+    pytest.param("test -f a &&\ntest -f b\ntest -f c", id="one-unchained-among-chained"),
+]
+
+
+@pytest.mark.parametrize("text", _COMPOSITION_SILENT)
+def test_verify_composition_is_silent_on_every_protected_or_ineligible_shape(text):
+    assert T.verify_composition_findings(text) == []
+
+
+@pytest.mark.parametrize("text", _COMPOSITION_FIRES)
+def test_verify_composition_fires_once_on_every_unprotected_twin(text):
+    found = T.verify_composition_findings(text)
+    assert len(found) == 1
+    assert found[0].startswith(_COMPOSITION_PREFIX)
+    assert "\n" not in found[0], "a finding is one warning line"
+
+
+def test_verify_composition_names_the_switch_that_turned_errexit_off():
+    found = T.verify_composition_findings("set -e\ntest -f a\nset +e\ntest -f b")
+    assert "set +e" in found[0] and "errexit is switched off" in found[0]
+
+
+def test_verify_composition_names_the_first_unchained_line():
+    found = T.verify_composition_findings("test -f first\ntest -f second\ntest -f third")
+    assert '"test -f second"' in found[0] and "test -f third" not in found[0]
+
+
+def _grep_tree(tmp_path):
+    (tmp_path / "scripts" / "nested").mkdir(parents=True)
+    (tmp_path / "scripts" / "a.sh").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "file.txt").write_text("needle\n", encoding="utf-8")
+    return str(tmp_path)
+
+
+_GREP_FINDING_PREFIX = "greps a directory without -r: "
+
+
+@pytest.mark.parametrize(
+    "text,operands",
+    [
+        pytest.param("grep -q needle scripts", ["scripts"], id="plain"),
+        pytest.param("! grep -q needle scripts", ["scripts"], id="behind-negation"),
+        pytest.param("cat x | grep -q needle scripts", ["scripts"], id="later-pipeline-stage"),
+        pytest.param("cat x |grep -q needle scripts", ["scripts"], id="glued-pipe"),
+        pytest.param("echo $(grep -q needle scripts)", ["scripts"], id="substitution"),
+        pytest.param("A=$(echo $(grep -q n scripts))", ["scripts"], id="nested-substitution"),
+        pytest.param("LC_ALL=C grep -q needle scripts", ["scripts"], id="env-prefix"),
+        pytest.param("grep -q needle 'scripts'", ["scripts"], id="single-quoted"),
+        pytest.param('grep -q needle "scripts"', ["scripts"], id="double-quoted"),
+        pytest.param("grep -q needle ./scripts/", ["./scripts/"], id="dot-slash-trailing"),
+        pytest.param("grep -q needle scripts/nested", ["scripts/nested"], id="nested-dir"),
+        pytest.param("grep -q needle .", ["."], id="the-base-itself"),
+        pytest.param("grep -q needle scripts 2>/dev/null", ["scripts"], id="redirect-after"),
+        pytest.param("grep -q needle scripts file.txt", ["scripts"], id="dir-among-files"),
+        pytest.param(
+            "grep -q needle scripts scripts/nested", ["scripts", "scripts/nested"], id="two-dirs"
+        ),
+        pytest.param("grep -e needle scripts", ["scripts"], id="e-pattern-keeps-operand"),
+        pytest.param("grep -qe needle scripts", ["scripts"], id="cluster-ending-in-e"),
+        pytest.param("grep -f pats scripts", ["scripts"], id="f-pattern-file"),
+        pytest.param("grep -A2 needle scripts", ["scripts"], id="A-with-attached-value"),
+        pytest.param("grep -m 1 needle scripts", ["scripts"], id="m-with-separate-value"),
+        pytest.param("grep --max-count 1 needle scripts", ["scripts"], id="long-value-option"),
+        pytest.param("grep -- -q scripts", ["scripts"], id="after-double-dash"),
+        pytest.param("grep -q needle scripts\ngrep -q x file.txt", ["scripts"], id="one-of-two-lines"),
+    ],
+)
+def test_verify_grep_directory_fires_once_per_directory_operand(tmp_path, text, operands):
+    base = _grep_tree(tmp_path)
+    found = T.verify_grep_directory_findings(text, base)
+    assert [f.split(" -- ")[0] for f in found] == [_GREP_FINDING_PREFIX + o for o in operands]
+    assert all("\n" not in f for f in found)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("grep -rq needle scripts", id="r"),
+        pytest.param("grep -R needle scripts", id="R"),
+        pytest.param("grep -nr needle scripts", id="r-in-cluster"),
+        pytest.param("grep --recursive needle scripts", id="long-recursive"),
+        pytest.param("grep --dereference-recursive needle scripts", id="long-dereference"),
+        pytest.param("grep -d recurse needle scripts", id="d-recurse"),
+        pytest.param("grep -d skip needle scripts", id="d-skip"),
+        pytest.param("grep --directories=skip needle scripts", id="long-directories"),
+        pytest.param("grep -q needle file.txt", id="a-file"),
+        pytest.param("grep -q needle missing-dir", id="a-path-that-does-not-exist"),
+        pytest.param("grep -q scripts file.txt", id="pattern-is-never-read-as-a-file"),
+        pytest.param("grep -e scripts file.txt", id="e-pattern-is-never-read-as-a-file"),
+        pytest.param("grep -q needle", id="no-operand-reads-stdin"),
+        pytest.param("grep -q needle -", id="dash-is-stdin"),
+        pytest.param("grep -q needle < scripts", id="redirected-stdin"),
+        pytest.param("grep -q needle <<< scripts", id="here-string"),
+        pytest.param("grep -q needle <<EOF\nscripts\nEOF", id="heredoc-body-is-stdin"),
+        pytest.param("cat scripts | grep -q needle", id="dir-named-in-another-stage"),
+        pytest.param("grep -q needle scripts/*", id="glob"),
+        pytest.param("grep -q needle scripts/n*", id="glob-tail"),
+        pytest.param("grep -q needle $DIR", id="variable-operand"),
+        pytest.param('grep -q needle "$DIR/scripts"', id="quoted-variable-operand"),
+        pytest.param("grep -q needle $(echo scripts)", id="substitution-operand"),
+        pytest.param("grep -q needle ~/scripts", id="tilde"),
+        pytest.param("grep -q needle /etc", id="absolute"),
+        pytest.param("grep -q needle ../outside", id="escapes-the-base"),
+        pytest.param("grep -q needle scripts/../../outside", id="escapes-through-a-child"),
+        pytest.param("echo grep scripts", id="not-a-grep-command"),
+        pytest.param("rg needle scripts", id="a-different-tool"),
+        pytest.param("cd scripts && grep -q needle nested", id="after-a-cd"),
+        pytest.param("grep -q needle 'scripts", id="unterminated"),
+    ],
+)
+def test_verify_grep_directory_is_silent_on_every_exempt_shape(tmp_path, text):
+    base = _grep_tree(tmp_path)
+    assert T.verify_grep_directory_findings(text, base) == []
+
+
+def test_verify_grep_directory_stops_at_the_first_directory_change_but_not_before_it(tmp_path):
+    base = _grep_tree(tmp_path)
+    before = "grep -q needle scripts\ncd scripts\ngrep -q needle nested"
+    found = T.verify_grep_directory_findings(before, base)
+    assert [f.split(" -- ")[0] for f in found] == [_GREP_FINDING_PREFIX + "scripts"]
+
+
+def test_verify_grep_directory_does_not_resolve_past_the_substitution_depth_cap(tmp_path):
+    base = _grep_tree(tmp_path)
+    text = "$(" * 5 + "grep -q needle scripts" + ")" * 5
+    assert T.verify_grep_directory_findings(text, base) == []
+    assert T.verify_grep_directory_findings("$(grep -q needle scripts)", base) != []
+
+
+def test_verify_grep_directory_ignores_non_string_input(tmp_path):
+    base = _grep_tree(tmp_path)
+    assert T.verify_grep_directory_findings(None, base) == []
+    assert T.verify_grep_directory_findings(["grep a scripts"], base) == []
+    assert T.verify_grep_directory_findings("grep a scripts", None) == []
+
+
+def test_verify_grep_directory_does_not_follow_a_symlink_out_of_the_base(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "link").symlink_to(outside, target_is_directory=True)
+    assert T.verify_grep_directory_findings("grep -q needle link", str(base)) == []
+
+
+def _r23_replay(verify, tmp_path, files=None, project=_ABSENT):
+    return _replay_implementation(
+        {"files": ["src/x.py"], "approach": "a", "verify": verify},
+        tmp_path,
+        {"src/x.py": "#\n", "scripts/a.sh": "needle\n", **(files or {})},
+        project=project,
+    )
+
+
+_R23_FILE = "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: implementation.verify "
+
+
+def test_r23_verify_warns_once_on_an_unprotected_multi_line_verify_and_stays_valid(tmp_path):
+    actual = _r23_replay("test -f a\ntest -f b", tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1
+    assert actual["stderr"].startswith(_R23_FILE + _COMPOSITION_PREFIX)
+
+
+def test_r23_verify_warns_once_on_a_grep_of_a_directory_and_stays_valid(tmp_path):
+    actual = _r23_replay("! grep -q needle scripts", tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1
+    assert actual["stderr"].startswith(_R23_FILE + _GREP_FINDING_PREFIX + "scripts")
+
+
+def test_r23_verify_emits_both_findings_composition_first(tmp_path):
+    actual = _r23_replay("! grep -q needle scripts\ntest -f src/x.py", tmp_path)
+    lines = actual["stderr"].splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith(_R23_FILE + _COMPOSITION_PREFIX)
+    assert lines[1].startswith(_R23_FILE + _GREP_FINDING_PREFIX + "scripts")
+
+
+@pytest.mark.parametrize(
+    "verify",
+    [
+        pytest.param("set -e\ntest -f src/x.py\ntest -f src/x.py", id="set-e-header"),
+        pytest.param("test -f src/x.py &&\ntest -f src/x.py", id="and-chained"),
+        pytest.param("! grep -rq needle scripts", id="grep-r"),
+        pytest.param("! grep -q needle src/x.py", id="grep-a-file"),
+        pytest.param("test -f src/x.py", id="single-line"),
+    ],
+)
+def test_r23_verify_is_silent_on_the_protected_shapes(tmp_path, verify):
+    actual = _r23_replay(verify, tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+@pytest.mark.parametrize(
+    "implementation",
+    [
+        pytest.param(_ABSENT, id="absent-implementation"),
+        pytest.param("a string", id="scalar-implementation"),
+        pytest.param(["a"], id="array-implementation"),
+        pytest.param({"files": ["src/x.py"]}, id="no-verify"),
+        pytest.param({"files": ["src/x.py"], "verify": None}, id="null-verify"),
+        pytest.param({"files": ["src/x.py"], "verify": ["a", "b"]}, id="list-verify"),
+        pytest.param({"files": ["src/x.py"], "verify": 7}, id="number-verify"),
+    ],
+)
+def test_r23_verify_says_nothing_when_there_is_no_string_verify(tmp_path, implementation):
+    actual = _replay_implementation(
+        implementation, tmp_path, {"src/x.py": "#\n", "scripts/a.sh": "needle\n"}
+    )
+    assert actual["exit"] == 0
+    assert "implementation.verify" not in actual["stderr"]
+
+
+def test_r23_verify_resolves_the_grep_base_from_the_story_project(tmp_path):
+    seeded = {"apps/web/lib/a.ts": "needle\n", "apps/web/src/x.py": "#\n"}
+    in_project = _r23_replay("grep -q needle lib", tmp_path, seeded, project="apps/web")
+    assert in_project["stderr"].startswith(_R23_FILE + _GREP_FINDING_PREFIX + "lib")
+    at_root = _r23_replay("grep -q needle lib", tmp_path, seeded)
+    assert "implementation.verify" not in at_root["stderr"], "lib is not a directory at the root"
+
+
+def test_r23_verify_keeps_the_composition_finding_when_the_project_escapes_the_root(tmp_path):
+    actual = _r23_replay("grep -q needle scripts\ntest -f a", tmp_path, project="../elsewhere")
+    lines = [ln for ln in actual["stderr"].splitlines() if "implementation.verify" in ln]
+    assert len(lines) == 1 and _COMPOSITION_PREFIX in lines[0]
+
+
+def test_r23_verify_is_appended_after_r22_so_no_recorded_line_moves(tmp_path):
+    with open(TASKS_PY, encoding="utf-8") as handle:
+        source = handle.read()
+    assert source.index("    # R23 -- ") > source.index("    # R22 -- ")
+    assert source.index("    # R23 -- ") < source.index("    return errors\n", source.index("    # R22 -- "))
