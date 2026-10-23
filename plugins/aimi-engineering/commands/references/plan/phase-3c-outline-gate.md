@@ -10,6 +10,7 @@ Present the outline to the user and allow iterative editing before any expansion
 
 When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
 - Skip AskUserQuestion entirely.
+- `outlineContractErrors` is empty here: the Phase 3b Outline Contract Check already repaired once or stopped the run.
 - If `outlineWarnings` is non-empty, emit each warning as a chat log line **before** the auto-approve line:
   ```
   [warn] outline:<idx>: summary too short (<N> chars) — expand to clarify scope.
@@ -17,6 +18,10 @@ When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
   [warn] ... and N more entries with potential outline gaps.
   ```
   (emit only the lines present in `outlineWarnings` — the examples above show the possible formats)
+- Emit the wave summary line **before** the auto-approve line (`W` is the number of `outlineWaves`; entries of one wave are space-separated, waves are separated by ` | `; no contracts at all reads as one wave):
+  ```
+  [plan] outline waves (W): 01 02 | 03 | 04
+  ```
 - Emit **exactly** this chat line (substitute actual N):
   ```
   [plan] outline auto-approved (non-interactive): N stories
@@ -34,6 +39,14 @@ Outline (N stories):
 02. <title> — <summary>
 …
 ```
+
+Append `[produces P, consumes C]` to each line from `outlineCounts`, then one wave line below the list (same format as above, `W` is the number of `outlineWaves`):
+
+```
+Waves (W): 01 02 | 03 | 04
+```
+
+When `outlineContractErrors` is non-empty (see the Phase 3b Outline Contract Check), show each as `[error] <code>: <message>` before the picker. **Approve is refused while any stands**: re-present the gate with the errors, and the wave line is omitted because there are no waves.
 
 When the outline contains more than 15 entries, prepend a warning line:
 ```
@@ -85,7 +98,7 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
 **For each edit operation:**
 
 - **Approve**: exit the loop, proceed to Phase 3d.
-- **Rename `<idx>`**: ask for the new title and summary; update `outline.json` entry at `idx`. Record in `oqDecisions[]`:
+- **Rename `<idx>`**: ask for the new title and summary, and for the entry's `produces` and `consumes` (offer the current ones as the default); update `outline.json` entry at `idx`. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<idx>",
@@ -94,8 +107,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "title: '<new-title>' / summary: '<new-summary>'"
   }
   ```
-  Increment `outlineEditCount`. Re-present the gate.
-- **Add**: ask for position (after which `idx`) and the new title/summary; insert the entry, renumber all subsequent `idx` values. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
+- **Add**: ask for position (after which `idx`), the new title/summary and the entry's `produces` and `consumes`; insert the entry, renumber all subsequent `idx` values. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<new-idx>",
@@ -104,8 +117,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "title: '<title>' / summary: '<summary>'"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
-- **Remove `<idx>`**: remove the entry; renumber subsequent `idx` values. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
+- **Remove `<idx>`**: remove the entry; renumber subsequent `idx` values. Contracts are kept by name, never by position: every other entry keeps its own `produces`/`consumes` arrays unchanged, because a token names a thing and not an `idx`, so nothing goes stale when `idx` moves. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<idx>",
@@ -114,8 +127,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "removed: '<title>'"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate. If removing an entry causes zero stories remaining, present an error and ask the user to add at least one story before approving.
-- **Reorder**: ask for the new order as a comma-separated list of `idx` values; rebuild the array in the specified order, renumber `idx` from `01`. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate. If removing an entry causes zero stories remaining, present an error and ask the user to add at least one story before approving.
+- **Reorder**: ask for the new order as a comma-separated list of `idx` values; rebuild the array in the specified order, renumber `idx` from `01` and nothing else: each entry carries its own `produces`/`consumes` along, by name. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:reorder",
@@ -124,7 +137,7 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "new order: <comma-separated original idx values>"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
 
 Loop until the user selects **Approve**.
 

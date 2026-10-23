@@ -48,6 +48,8 @@ Each entry:
   "idx": "01",
   "title": "Story title (≤ 200 chars, imperative)",
   "summary": "One-line description of what this story delivers (≤ 120 chars)",
+  "produces": ["sym:parseConfig", "path:src/config.ts"],
+  "consumes": ["ext:sym:Logger"],
   "foundationEntry": false,
   "foundationMode": "greenfield",
   "foundationProject": null
@@ -60,6 +62,7 @@ Rules for outline authoring:
 - `idx` is zero-padded, 1-based, matching position in the array (`"01"`, `"02"`, …).
 - Do not assign `US-NNN` IDs yet — IDs are assigned by `story-merge` after approval.
 - Target 3–15 entries. Entries beyond 15 are allowed but surface a warning at the outline gate.
+- `produces` and `consumes` are arrays of contract tokens, `[]` when an entry neither introduces nor relies on a named thing. Author them from the research: `produces` names what this entry introduces, `consumes` names what another entry introduces. A token is `[ext:]<kind>:<name>` with kind `sym:`, `path:`, `cli:` or `http:`. A name holds no whitespace, except `http:`, which is exactly `METHOD /path` (one space). No `..` segment, no leading `/`, no shell metacharacters. `ext:` goes only in `consumes` and marks a name that already exists in the repository, so it needs no producer. Errors: a name produced by two entries, a consumed name nobody produces (and not `ext:`), an entry consuming its own product, `ext:` on a name some entry produces, and a cycle.
 - `foundationEntry` is `false` on every entry except the ones designated by the Foundation-first rule below (present only where Phase 1.9 recorded an accepted verdict — see its Working-Memory Shape) — it tells Phase 3d's sub-agent which entries are foundation stories themselves versus consumers of an accepted proposal. **This field is the only way to identify a foundation entry:** every downstream reader tests it on the entry itself, never the entry's position.
 - `foundationMode` is `"greenfield"` (the default) on every entry except the ones designated by the Foundation-first rule below, each of which instead carries whatever value Phase 1.9's gate resolved **for its own repository** (`foundationModeByRoot[<root>]` — `"greenfield"` or `"brownfield"`) — it tells Phase 3d's sub-agent, and in turn `aimi-story-expander`, whether that foundation entry should scaffold a fresh skeleton or document an existing repo in place.
 - `foundationProject` is `null` (the default) on every entry except the ones designated by the Foundation-first rule below, each of which carries **its own** repository's routing key — that root's key in Phase 1.9's `foundationRoots` map: `"."` for the single-repo/`AIMI_ROOT` case, otherwise that child repository's relative path from `AIMI_ROOT` (no leading `./`, no `..` components), reusing the same `.project`/`metadata.splitGroup.project` routing-key convention. It tells Phase 3c's carve-out and Phase 3d's sub-agent which repository a foundation entry belongs to. A non-foundation entry keeps `null`: this is a foundation-entry marker, **not** a general per-story project router.
@@ -92,7 +95,7 @@ Persist the outline immediately after generation:
 
 ```bash
 # Write outline.json to staging dir
-# Content: JSON array of {idx, title, summary} objects
+# Content: JSON array of {idx, title, summary, produces, consumes, foundation*} objects
 ```
 
 Use the Write tool to write the array to `<RUN_DIR>/outline.json`. This file is the checkpoint for Phase 3c; it is also consumed by Phase 3d sub-agents as their ordered work list.
@@ -163,3 +166,21 @@ For each entry in `outline.json` (in order), apply the checks below. Collect **a
 ```
 
 When `outlineWarnings` is empty after this step, no preamble is rendered at the Phase 3c gate — the gate proceeds identically to the current behavior.
+
+### Phase 3b Outline Contract Check
+
+Run after `outline.json` is written, and again from Phase 3c after every outline rewrite. Unlike the warnings above it blocks approval. Read the exit status and JSON it prints.
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+CONTRACT_JSON=$($AIMI_CLI validate-outline --outline "$RUN_DIR/outline.json")
+CONTRACT_EXIT=$?
+printf '%s\n' "$CONTRACT_EXIT" "$CONTRACT_JSON"
+```
+
+- **Exit 0:** keep `waves` as `outlineWaves` and `counts` as `outlineCounts`; `outlineContractErrors` is empty. An outline with every contract empty is one wave.
+- **Exit 1 with JSON:** keep `errors[]` (`{code, idx, message}`) as `outlineContractErrors`; `outlineWaves` is empty.
+- **Exit 1, nothing on stdout:** a refusal. Keep its stderr line as the only error.
+
+While `outlineContractErrors` is non-empty Phase 3c refuses Approve. In agent mode, repair once: rewrite only the `produces`/`consumes` of the entries the errors name, from the research, re-write `outline.json`, and run the check again. If it still exits non-zero, stop with `[plan] outline contract invalid (non-interactive): <first message>`. An invalid contract is never auto-approved.
