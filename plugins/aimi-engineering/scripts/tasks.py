@@ -1254,7 +1254,7 @@ def _story_errors(story):
     # No quotes around either word: see the note at the top of this section.
     if jq_has(story, "gates", STORY):
         errors.append(
-            story_id + ": gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+            story_id + ": gate: gates field is invalid; use singular gate (see references/plan/phase-4-schema-v33.md § Schema v3.3 Structure)"
         )
     gate = jq_index(story, "gate", STORY)
     if gate is not None:

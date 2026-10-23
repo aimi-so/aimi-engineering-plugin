@@ -746,18 +746,26 @@ check_reverify_branch() {
 # a real bash block and must keep the dot.
 # ---------------------------------------------------------------------------
 check_plan_branchname_slugified() {
-  local plan="$COMMANDS_DIR/plan.md"
-  local raw_branch missing shape kept widened
+  local plan_router="$COMMANDS_DIR/plan.md"
+  local plan raw_branch missing shape kept widened
 
-  if [ ! -f "$plan" ]; then
+  if [ ! -f "$plan_router" ]; then
     assert_eq "found" "missing" "Check 8 — plan.md is readable"
     return 0
   fi
 
+  # plan.md is a router: the derivations moved with their phase into
+  # references/plan/. Every leg below greps the router and every phase file
+  # together, so a derivation is found wherever its phase now lives.
+  plan="$(mktemp)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$plan'" RETURN
+  cat "$COMMANDS_DIR"/references/plan/*.md "$plan_router" > "$plan"
+
   # Leg 1 -- no branchName derivation may interpolate the RAW id. The `type/`
   # prefix is what makes an occurrence a branch rather than a filesystem path.
   raw_branch="$(grep -nF 'type/${featureSlug}-phase-${SELECTED_PHASE_ID}' "$plan" \
-    | cut -c1-160 | sed 's/^/plan.md:/')"
+    | cut -c1-160 | sed 's/^/plan (router + references\/plan, combined):/')"
   assert_no_findings "$raw_branch" \
     "Check 8 — no plan.md branchName derivation interpolates the raw phase id" \
     "A decimal phase id yields '...-phase-5.5-...', which plan.md's own Phase 4 rule rejects and STOPs on. Use \${SELECTED_PHASE_ID_SLUG}."

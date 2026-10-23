@@ -183,7 +183,7 @@ def test_recorded_files_are_exactly_the_ones_the_story_names():
         "execute.md",
         "references/container-execution.md",
         "review.md",
-        "plan.md",
+        "references/plan/phase-3e-story-merge.md",
         "references/execution-mode.md",
     }
     assert {s["file"] for s in SITES} == named

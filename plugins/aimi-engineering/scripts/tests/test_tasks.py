@@ -83,6 +83,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tasks as T  # noqa: E402
+from plan_text import plan_text  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
@@ -1044,7 +1045,7 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
     #    jq lived in a bash single-quoted string and the ones the author typed
     #    closed and reopened it. This is the string /aimi:plan matches on.
     assert _errors("gates-plural-stories") == [
-        "US-001: gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+        "US-001: gate: gates field is invalid; use singular gate (see references/plan/phase-4-schema-v33.md § Schema v3.3 Structure)"
     ]
     # 8. a gate object missing each of type, status and prompt IN TURN
     for key in ("type", "status", "prompt"):
@@ -10372,10 +10373,11 @@ def _metadata_keys_plan_md_emits():
     template is picked up by its position in the document and not by anyone
     remembering to update a second list here.
     """
-    with open(os.path.join(PLUGIN_ROOT, "commands", "plan.md"), encoding="utf-8") as handle:
-        plan = handle.read()
+    # The template moved out of plan.md (now a router) into
+    # commands/references/plan/; plan_text() is every file of /aimi:plan.
+    plan = plan_text()
     opener = '"metadata": {'
-    assert plan.count(opener) == 1, "plan.md no longer has exactly one metadata template"
+    assert plan.count(opener) == 1, "the plan text no longer has exactly one metadata template"
     start = plan.index(opener) + len('"metadata": ')
     depth = 0
     for offset in range(start, len(plan)):

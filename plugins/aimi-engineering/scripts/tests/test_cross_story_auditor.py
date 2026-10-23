@@ -1,14 +1,18 @@
 """Structural tests for the cross-story auditor's seventh and eighth concerns.
 
-The agent file and plan.md Phase 3d.5 are read as text; nothing is executed.
+The agent file and the plan Phase 3d.5 are read as text; nothing is executed.
 """
 
 import re
 from pathlib import Path
 
+from plan_text import plan_text
+
 ROOT = Path(__file__).resolve().parents[2]
 AGENT_TEXT = (ROOT / "agents" / "workflow" / "aimi-cross-story-auditor.md").read_text(encoding="utf-8")
-PLAN_TEXT = (ROOT / "commands" / "plan.md").read_text(encoding="utf-8")
+# plan.md is a router; Phase 3d.5 lives in commands/references/plan/. plan_text()
+# puts the references first, so the heading below resolves to the moved section.
+PLAN_TEXT = plan_text()
 
 HEADING = "### 7. Cross-project contract orphan"
 HEADING_8 = "### 8. Intra-story contradiction"
