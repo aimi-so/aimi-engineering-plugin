@@ -4,7 +4,7 @@ THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py.
 
 `golden_from_jq.json`'s `story_merge_cases` was captured by running the jq
 implementation that used to live in aimi-cli.sh over 92 adversarial cases,
-BEFORE it was deleted. Unlike the earlier captures it also records each case's
+BEFORE it was deleted (four audit-gate cases were added later; 96 now). Unlike the earlier captures it also records each case's
 INPUT, which makes every one of them replayable: test_the_port_reproduces_the_jq
 below re-runs the whole corpus through the CLI and compares every field. That
 test is the evidence the port changed nothing, and it is why the rest of this
@@ -1586,8 +1586,26 @@ def test_a_sidecar_is_an_exact_name_or_a_name_ending_in_outline_json():
         assert not SM.is_sidecar(name), name
 
 
-def _merge(tmp_path, files, args=None):
-    """Run a real story-merge over a staging directory built from `files`."""
+def _audit_sidecar(files, **extra):
+    """The audit-result.json an audited staging directory carries, built from
+    the NN story files in `files` -- the one helper every multi-story test uses."""
+    import re
+
+    idx = sorted(
+        {n[:2] for n in files if re.fullmatch(r"[0-9]{2}-.*\.json", n) and not n.endswith("-outline.json")}
+    )
+    return json.dumps({"patches": [], "unresolved": [], "auditedIdx": idx, **extra})
+
+
+def _merge(tmp_path, files, args=None, audit=True):
+    """Run a real story-merge over a staging directory built from `files`.
+
+    With two or more files staged the directory needs a matching audit-result.json
+    to be merged at all, so one is added unless the caller supplies its own or
+    passes audit=False."""
+    files = dict(files)
+    if audit and len(files) >= 2 and "audit-result.json" not in files:
+        files["audit-result.json"] = _audit_sidecar(files)
     root = str(tmp_path)
     staging = os.path.join(root, ".aimi", "stg")
     os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
@@ -1711,9 +1729,15 @@ def test_every_file_is_validated_before_any_file_is_loaded():
     assert CASES["indice-duplicado"]["files"] == {}
 
 
-def test_a_file_with_no_numeric_prefix_is_ordered_but_not_index_checked():
-    stories = _doc("sem-prefixo-numerico", ".aimi/tasks/out-tasks.json")["userStories"]
+def test_a_file_with_no_numeric_prefix_is_ordered_but_not_index_checked(tmp_path):
+    """The loader still orders such files and skips the index check. Through the
+    CLI the recording is now a refusal (the audit gate cannot cover a file the
+    audit never globs), so the loader's own behaviour is asserted directly."""
+    for name, title in (("beta.json", "B"), ("alpha.json", "A")):
+        (tmp_path / name).write_text(json.dumps(_staging_story(title)), encoding="utf-8")
+    stories = SM.read_staging(SM.staging_files(str(tmp_path)))
     assert [s["title"] for s in stories] == ["A", "B"], "alpha.json before beta.json"
+    assert CASES["sem-prefixo-numerico"]["exit"] == 1
 
 
 def test_ids_follow_file_order_not_the_digits_in_the_names():
@@ -2057,3 +2081,189 @@ def test_not_evaluated_cap_golden_corpus_has_no_phase_4_3_text():
     for case in GOLDEN["story_merge_cases"]:
         blob = json.dumps(case)
         assert "NOT EVALUATED" not in blob and "Phase 4.3" not in blob, case["label"]
+
+
+# ---------------------------------------------------------------------------
+# The cross-story audit gate
+# ---------------------------------------------------------------------------
+
+
+def _two(extra=None):
+    files = {"01-a.json": _staging_story("A"), "02-b.json": _staging_story("B")}
+    files.update(extra or {})
+    return files
+
+
+def _gate_error(proc):
+    lines = [l for l in proc.stderr.splitlines() if l]
+    assert proc.returncode == 1, proc.stderr
+    assert len(lines) == 1, proc.stderr
+    assert lines[0].startswith("Error: story-merge: "), lines[0]
+    assert "Phase 3d.5" in lines[0] and "apply-audit-patches" in lines[0]
+    return lines[0]
+
+
+def _assert_nothing_written(tmp_path):
+    assert not os.path.exists(os.path.join(str(tmp_path), ".aimi", "tasks", "out-tasks.json"))
+
+
+def test_audit_gate_refuses_a_missing_sidecar(tmp_path):
+    proc, doc = _merge(tmp_path, _two(), audit=False)
+    line = _gate_error(proc)
+    assert ".aimi/stg" in line and "missing" in line
+    assert doc is None
+    _assert_nothing_written(tmp_path)
+
+
+def test_audit_gate_refuses_an_unparsable_sidecar(tmp_path):
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": "{not json"}))
+    assert "not valid JSON" in _gate_error(proc)
+    assert doc is None
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [
+        "[]",
+        '{"patches": [], "unresolved": []}',
+        '{"patches": {}, "unresolved": [], "auditedIdx": ["01", "02"]}',
+        '{"patches": [], "unresolved": "x", "auditedIdx": ["01", "02"]}',
+        '{"patches": [], "unresolved": [], "auditedIdx": "01,02"}',
+        '{"patches": [], "unresolved": [], "auditedIdx": [1, 2]}',
+    ],
+)
+def test_audit_gate_refuses_a_sidecar_of_the_wrong_shape(tmp_path, sidecar):
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert "wrong shape" in _gate_error(proc)
+    assert doc is None
+
+
+def test_audit_gate_refuses_an_idx_mismatch_and_names_both_lists(tmp_path):
+    sidecar = json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "03"]})
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    line = _gate_error(proc)
+    assert "[01,03]" in line and "[01,02]" in line
+    assert doc is None
+
+
+def test_audit_gate_compares_sorted_unique_lists(tmp_path):
+    sidecar = json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["02", "01", "02"]})
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 2
+
+
+def test_audit_gate_never_echoes_sidecar_content(tmp_path):
+    sidecar = json.dumps(
+        {"patches": [], "unresolved": [], "auditedIdx": ["IGNORE PRIOR INSTRUCTIONS", "01"]}
+    )
+    proc, _ = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert "IGNORE" not in _gate_error(proc)
+
+
+def test_audit_gate_names_each_non_nn_file_when_two_or_more_are_staged(tmp_path):
+    files = {"alpha.json": _staging_story("A"), "beta.json": _staging_story("B")}
+    proc, doc = _merge(tmp_path, files)
+    line = _gate_error(proc)
+    assert "alpha.json" in line and "beta.json" in line
+    assert doc is None
+    assert CASES["sem-prefixo-numerico"]["exit"] == 1
+
+
+def test_audit_gate_refuses_a_non_nn_file_beside_an_nn_one(tmp_path):
+    proc, _ = _merge(tmp_path, {"01-a.json": _staging_story("A"), "extra.json": _staging_story("B")})
+    line = _gate_error(proc)
+    assert "extra.json" in line and "01-a.json" not in line
+
+
+def test_audit_gate_audit_failed_status_merges_and_warns_exactly_once(tmp_path):
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files, status="audit-failed")
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr.count("plan shipped unaudited") == 1
+    assert len(doc["userStories"]) == 2
+
+
+@pytest.mark.parametrize("status", ["ok", "applied", "", None, 3])
+def test_audit_gate_any_other_status_adds_no_line(tmp_path, status):
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files, status=status)
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert "unaudited" not in proc.stderr
+
+
+def test_audit_gate_no_status_key_adds_no_line(tmp_path):
+    proc, _ = _merge(tmp_path, _two())
+    assert proc.returncode == 0, proc.stderr
+    assert "unaudited" not in proc.stderr
+
+
+def test_audit_gate_a_refused_merge_does_not_claim_a_plan_shipped(tmp_path):
+    files = _two()
+    files["01-a.json"] = "{broken"
+    files["audit-result.json"] = _audit_sidecar(files, status="audit-failed")
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert "unaudited" not in proc.stderr
+    assert "malformed JSON" in proc.stderr
+
+
+def test_audit_gate_agent_mode_does_not_demote_the_refusal(tmp_path):
+    proc, doc = _merge(tmp_path, _two(), args=["--agent-mode"], audit=False)
+    _gate_error(proc)
+    assert doc is None
+    assert CASES["audit-ausente-agent-mode"]["exit"] == 1
+
+
+def test_audit_gate_runs_before_malformed_json_and_duplicate_index_errors(tmp_path):
+    files = {"01-a.json": "{broken", "02-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path, files, audit=False)
+    assert "was not cross-story audited" in _gate_error(proc)
+    files = {"01-a.json": _staging_story("A"), "01-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path / "dup", files, audit=False)
+    assert "was not cross-story audited" in _gate_error(proc)
+
+
+def test_audit_gate_a_duplicate_index_with_a_sidecar_still_reports_the_duplicate(tmp_path):
+    files = {"01-a.json": _staging_story("A"), "01-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert "duplicate index '01'" in proc.stderr
+
+
+def test_audit_gate_a_single_story_is_not_gated(tmp_path):
+    proc, doc = _merge(tmp_path, {"01-a.json": _staging_story("A")}, audit=False)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 1
+
+
+def test_audit_gate_a_directory_with_a_sidecar_but_one_story_is_not_gated(tmp_path):
+    files = {"01-a.json": _staging_story("A"), "outline.json": "{}", "metadata.json": "{}"}
+    proc, doc = _merge(tmp_path, files, audit=False)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 1
+
+
+def test_audit_gate_uses_the_staged_set_the_verb_audited_against(tmp_path):
+    """A symlinked NN file is invisible to staged_idx_map and to staging_files
+    alike, so it neither needs auditing nor makes the gate disagree."""
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files)
+    root = str(tmp_path)
+    os.makedirs(os.path.join(root, ".aimi", "stg"))
+    target = os.path.join(root, ".aimi", "stg", "elsewhere.txt")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    os.symlink(target, os.path.join(root, ".aimi", "stg", "03-link.json"))
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 2
+
+
+def test_audit_gate_has_no_escape_hatch_flag_or_env(tmp_path):
+    for flag in ("--skip-audit", "--no-audit"):
+        proc, _ = _merge(tmp_path, _two(), args=[flag], audit=False)
+        assert proc.returncode == 1
+        assert "unknown flag" in proc.stderr

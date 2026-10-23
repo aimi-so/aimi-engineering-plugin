@@ -15073,6 +15073,8 @@ cmd_research_figures() {
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>|<project>:NN]...
 #           [--feature <slug> --phase <id>]
+#   Two or more staged stories are merged only with an audit-result.json whose
+#   auditedIdx matches them (written by apply-audit-patches); no flag skips it.
 # ============================================================================
 #
 # Everything from "read the staging directory" to "the files are on disk" lives

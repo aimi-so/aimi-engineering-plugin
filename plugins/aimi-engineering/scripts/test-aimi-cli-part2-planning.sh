@@ -4886,6 +4886,20 @@ _sm_make_story() {
 EOF
 }
 
+# Helper: stamp the audit-result.json an audited staging directory carries.
+# story-merge refuses two or more staged stories without one whose auditedIdx
+# equals the staged NN idx set, so every test that stages several NN files calls
+# this before invoking it. It writes nothing for fewer than two files, which
+# are not gated.
+_sm_audit_sidecar() {
+  local stg="$1" idx count
+  count=$(find "$stg" -maxdepth 1 -type f -name '[0-9][0-9]-*.json' ! -name '*-outline.json' | wc -l)
+  [ "$count" -ge 2 ] || return 0
+  idx=$(find "$stg" -maxdepth 1 -type f -name '[0-9][0-9]-*.json' ! -name '*-outline.json' \
+    | while IFS= read -r f; do basename "$f" | cut -c1-2; done | sort -u | jq -R . | jq -sc .)
+  jq -n --argjson idx "$idx" '{patches: [], unresolved: [], auditedIdx: $idx}' > "$stg/audit-result.json"
+}
+
 # TC1: Happy path — three staging files produce US-001..003 with contiguous waves
 test_story_merge_happy_path() {
   echo ""
@@ -4903,6 +4917,7 @@ test_story_merge_happy_path() {
   _sm_make_story "$stg/03-ui.json"      "UI story"    '["outline:02"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC1: story-merge happy path exits 0"
 
@@ -4956,6 +4971,7 @@ test_story_merge_missing_dir() {
   local out_file=".aimi/tasks/sm-tc2-tasks.json"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC2: missing staging dir exits 1"
   assert_contains "does not exist" "$output" "TC2: error mentions 'does not exist'"
@@ -5005,6 +5021,7 @@ test_story_merge_malformed_json() {
   printf '{ "title": "Bad, unclosed' > "$stg/02-bad.json"  # malformed JSON
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC3: malformed JSON exits 1"
   assert_contains "02-bad.json" "$output" "TC3: offending filename in error"
@@ -5035,9 +5052,56 @@ test_story_merge_duplicate_index() {
   _sm_make_story "$stg/01-beta.json"  "Beta"   # same '01' prefix
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC4: duplicate index exits 1"
   assert_contains "duplicate index" "$output" "TC4: error mentions 'duplicate index'"
+
+  rm -rf "$stg"
+}
+
+# TC-AUDIT: story-merge refuses a multi-story staging directory that was never
+# cross-story audited, and passes an audit-failed one with a visible notice.
+test_story_merge_audit_gate() {
+  echo ""
+  echo "=== TC-AUDIT: story-merge audit gate ==="
+
+  local stg=".aimi/.tasks-staging-tcaudit"
+  local out_file=".aimi/tasks/sm-tcaudit-tasks.json"
+  local output exit_code
+  rm -rf "$stg"; rm -f "$out_file"
+  mkdir -p "$stg"
+
+  # No audit-result.json beside two stories: refused, nothing written.
+  _sm_make_story "$stg/01-alpha.json" "Alpha"
+  _sm_make_story "$stg/02-beta.json"  "Beta"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC-AUDIT: two stories with no audit-result.json exit 1"
+  assert_contains "audit-result.json is missing" "$output" "TC-AUDIT: the refusal names the missing sidecar"
+  assert_eq "no output file" "$([ -f "$out_file" ] && echo "an output file" || echo "no output file")" \
+    "TC-AUDIT: the refusal wrote nothing"
+
+  # A sidecar whose auditedIdx names a different set: refused, both lists named.
+  jq -n '{patches: [], unresolved: [], auditedIdx: ["01", "03"]}' > "$stg/audit-result.json"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC-AUDIT: an auditedIdx that differs from the staged set exits 1"
+  assert_contains "differ from staged indices" "$output" "TC-AUDIT: the refusal names the idx mismatch"
+
+  # A non-NN file beside the stories: refused by name, because the audit never reads it.
+  _sm_audit_sidecar "$stg"
+  _sm_make_story "$stg/gamma.json" "Gamma"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC-AUDIT: a non-NN staged file exits 1"
+  assert_contains "gamma.json" "$output" "TC-AUDIT: the refusal names the non-NN file"
+  assert_contains "not named NN-<slug>.json" "$output" "TC-AUDIT: the refusal says why"
+  rm -f "$stg/gamma.json"
+
+  # status audit-failed with a matching auditedIdx merges and says so exactly once.
+  jq -n '{patches: [], unresolved: [], auditedIdx: ["01", "02"], status: "audit-failed"}' > "$stg/audit-result.json"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC-AUDIT: an audit-failed sidecar with matching indices merges"
+  assert_eq "1" "$(printf '%s\n' "$output" | grep -c 'plan shipped unaudited')" \
+    "TC-AUDIT: the audit-failed notice appears exactly once"
 
   rm -rf "$stg"
 }
@@ -5057,6 +5121,7 @@ test_story_merge_cycle() {
   _sm_make_story "$stg/02-b.json" "Story B" '["outline:01"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC5: cycle exits 1"
   assert_contains "circular" "$output" "TC5: error mentions 'circular'"
@@ -5078,6 +5143,7 @@ test_story_merge_dangling_ref() {
   _sm_make_story "$stg/01-story.json" "Story A" '["outline:99"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC6: dangling ref exits 1"
   assert_contains "unresolved outline" "$output" "TC6: error mentions unresolved outline reference"
@@ -5130,6 +5196,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC7: Rule 22 routing exits 0"
 
@@ -5208,6 +5275,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC8: full-stack split exits 0"
 
@@ -5320,6 +5388,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --phase-aware 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC12: full-stack split --phase-aware exits 0"
 
@@ -5558,6 +5627,7 @@ test_story_merge_outline_sidecar_ignored() {
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC9: outline.json sidecar does not crash story-merge"
 
@@ -5624,6 +5694,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC10: dead-code positive — exits 0 (warning only)"
   assert_contains "Phase 4.2" "$output" "TC10: dead-code positive — Phase 4.2 warning emitted"
@@ -5681,6 +5752,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC11: dead-code negative — exits 0"
 
@@ -5716,6 +5788,7 @@ test_story_merge_foundation_injection() {
   _sm_make_story "$stg/03-third.json"      "Third story"   '["outline:02"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC13: --foundation injection exits 0"
 
@@ -5765,6 +5838,7 @@ test_story_merge_foundation_omitted_noop() {
   _sm_make_story "$stg/03-third.json"      "Third story"   '["outline:02"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC14: story-merge without --foundation exits 0"
 
@@ -5817,6 +5891,7 @@ test_story_merge_foundation_dedup() {
   _sm_make_story "$stg/02-explicit.json"   "Explicit dependent" '["outline:01"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC15: --foundation dedup case exits 0"
 
@@ -5851,6 +5926,7 @@ test_story_merge_foundation_invalid_idx() {
   _sm_make_story "$stg/02-second.json"     "Second story"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 1 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC16: malformed --foundation value exits 1"
   assert_contains "must be a two-digit index" "$output" "TC16: error mentions 'must be a two-digit index'"
@@ -5862,6 +5938,7 @@ test_story_merge_foundation_invalid_idx() {
     ((TESTS_FAILED++))
   fi
 
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 99 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC16: well-formed-but-nonexistent --foundation value exits 1"
   assert_contains "not present among staging files" "$output" "TC16: error mentions 'not present among staging files'"
@@ -5891,6 +5968,7 @@ test_story_merge_foundation_nonempty_dependson() {
   _sm_make_story "$stg/02-other.json"      "Other story"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation 01 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC17: foundation with non-empty dependsOn exits 1"
   assert_contains "non-empty dependsOn" "$output" "TC17: error mentions 'non-empty dependsOn'"
@@ -6009,6 +6087,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC18: full-stack split exits 0"
 
@@ -6117,6 +6196,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC19: full-stack split exits 0"
 
@@ -6244,6 +6324,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC20: full-stack split exits 0"
 
@@ -6380,6 +6461,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC21: full-stack split exits 0"
 
@@ -6505,6 +6587,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC22: full-stack split exits 0"
 
@@ -6573,6 +6656,7 @@ test_story_merge_cross_file_dep_dropped_banner() {
   jq '. + {implementation: {files: ["src/components/SettingsPanel.tsx"], approach: "Build React component", verify: "tsc --noEmit"}}' "$stg/03-ui2.json" > "$stg/03-ui2.json.tmp" && mv "$stg/03-ui2.json.tmp" "$stg/03-ui2.json"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC23: exits 0 (warning only)"
   assert_contains "cross-file dependsOn edge(s) dropped" "$output" "TC23: aggregated stderr banner emitted"
@@ -6639,6 +6723,7 @@ test_story_merge_cross_file_false_root_vs_partial_loss() {
   jq '. + {implementation: {files: ["app/controllers/settings_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/04-api2.json" > "$stg/04-api2.json.tmp" && mv "$stg/04-api2.json.tmp" "$stg/04-api2.json"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC24: exits 0 (warning only)"
   assert_contains "US-002 (frontend): became a false wave-1 root" "$output" "TC24: false-root story IS enumerated on stderr"
@@ -6692,6 +6777,7 @@ test_story_merge_cross_file_dep_dropped_negative() {
   jq '. + {implementation: {files: ["app/controllers/user_profiles_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/03-api.json" > "$stg/03-api.json.tmp" && mv "$stg/03-api.json.tmp" "$stg/03-api.json"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC25: exits 0"
 
@@ -6757,6 +6843,7 @@ EOF
 EOF
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC26: exits 0"
 
@@ -6805,6 +6892,7 @@ test_story_merge_split_empty_side_warning() {
   jq '. + {implementation: {files: ["app/controllers/fetch_controller.rb"], approach: "Rails controller", verify: "rspec"}}' "$stg/02-api2.json" > "$stg/02-api2.json.tmp" && mv "$stg/02-api2.json.tmp" "$stg/02-api2.json"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC27: exits 0 despite one side being empty"
   assert_contains "frontend split produced zero stories" "$output" "TC27: stderr names the empty (frontend) side"
@@ -6882,6 +6970,7 @@ test_story_merge_project_split_three_projects() {
   _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"       "apps/web/"    "src/components/Settings.tsx"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC28: project-axis split exits 0"
 
@@ -7029,6 +7118,7 @@ test_story_merge_project_split_untagged_story_refused() {
   _sm_make_story "$stg/03-root.json" "Repo-wide tooling update" '[]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC29: an untagged story in a multi-repo plan exits 1"
 
@@ -7084,6 +7174,7 @@ test_story_merge_project_split_explicit_root_group() {
   _sm_make_project_story "$stg/03-root.json" "Repo-wide tooling update" "."            "Makefile"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC47: an explicitly-rooted story merges cleanly"
 
@@ -7167,6 +7258,7 @@ test_story_merge_project_split_singleton_group() {
   _sm_make_project_story "$stg/04-api.json"  "UserProfile API endpoint"    "api-service" "app/controllers/u.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC30: singleton-group merge exits 0"
 
@@ -7214,6 +7306,7 @@ test_story_merge_project_split_slash_project_slug() {
   _sm_make_project_story "$stg/02-api.json" "Billing API"    "services/billing"       "app/controllers/b.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC31: slash-bearing project merge exits 0"
 
@@ -7269,6 +7362,7 @@ test_story_merge_project_split_dot_project_slug() {
   _sm_make_project_story "$stg/02-api.json"  "Reports API"         "services/reports" "app/controllers/r.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC32: dot-bearing project merge exits 0"
 
@@ -7312,6 +7406,7 @@ test_story_merge_project_split_basename_collision() {
   _sm_make_project_story "$stg/02-b.json" "Dot flavored"    "apps.web" "src/b.ts"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC33: basename collision exits 1"
   assert_contains "collide on the same output basename" "$output" "TC33: error names the collision"
@@ -7358,6 +7453,7 @@ test_story_merge_project_split_project_keyed_warnings() {
   _sm_make_project_story "$stg/04-web2.json"   "React SettingsPanel"      "apps/web"     "src/components/Settings.tsx"    '["outline:02"]'
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC34: project-axis cross-group drop exits 0 (warning only)"
   assert_contains "cross-project dependsOn edge(s) dropped" "$output" "TC34: aggregated stderr banner emitted"
@@ -7492,6 +7588,7 @@ test_story_merge_project_split_foundation_edge() {
   _sm_make_project_story "$stg/03-api.json"  "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --foundation 01 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC35: --foundation + multi-repo split exits 0 (warning only)"
 
@@ -7601,6 +7698,7 @@ test_story_merge_project_split_foundation_qualified() {
   _sm_make_project_story "$stg/04-api2.json" "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
     --foundation apps/web:01 --foundation services/api:03 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC55: two qualified foundations exit 0"
@@ -7663,6 +7761,7 @@ test_story_merge_project_split_foundation_qualified() {
   _sm_make_project_story "$stg/03-api.json"  "Rails app scaffold"      "services/api" "config/application.rb"
 
   local bad_output bad_exit
+  _sm_audit_sidecar "$stg"
   bad_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
     --foundation wrong-project:01 --foundation services/api:03 2>&1) && bad_exit=0 || bad_exit=$?
   assert_exit_code "1" "$bad_exit" "TC55: a qualifier disagreeing with the staging file refuses the merge"
@@ -7677,6 +7776,7 @@ test_story_merge_project_split_foundation_qualified() {
   # A bare value alongside another is refused for the arity alone, before any
   # index is resolved -- which project would the bare one be for?
   local bare_output bare_exit
+  _sm_audit_sidecar "$stg"
   bare_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack \
     --foundation 01 --foundation services/api:03 2>&1) && bare_exit=0 || bare_exit=$?
   assert_exit_code "1" "$bare_exit" "TC55: a bare value alongside another is refused"
@@ -7684,6 +7784,7 @@ test_story_merge_project_split_foundation_qualified() {
 
   # Bash validates SHAPE only, one value at a time, before python3 runs.
   local shape_output shape_exit
+  _sm_audit_sidecar "$stg"
   shape_output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --foundation apps/web:1 2>&1) && shape_exit=0 || shape_exit=$?
   assert_exit_code "1" "$shape_exit" "TC55: a malformed qualified value is refused by the wrapper"
   assert_contains "<project>:NN" "$shape_output" "TC55: the shape refusal names the qualified form too"
@@ -7715,6 +7816,7 @@ test_story_merge_project_split_phase_aware() {
   _sm_make_project_story "$stg/02-api.json" "UserProfile API endpoint" "services/api" "app/controllers/u.rb"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack --phase-aware 2>/dev/null) && exit_code=0 || exit_code=$?
   assert_exit_code "0" "$exit_code" "TC48: project-axis split --phase-aware exits 0"
 
@@ -7790,6 +7892,7 @@ test_story_merge_project_split_partial_write_failure() {
   mkdir -p "${web_file}.lock"
 
   local output exit_code
+  _sm_audit_sidecar "$stg"
   output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "TC49: a failed group write exits 1"
 
@@ -8705,6 +8808,7 @@ main() {
   test_apply_audit_patches
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
+  test_story_merge_audit_gate
   test_story_merge_cycle
   test_story_merge_dangling_ref
   test_story_merge_rule22_routing

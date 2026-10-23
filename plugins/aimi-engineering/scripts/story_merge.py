@@ -56,6 +56,7 @@ import shutil
 import sys
 import time
 
+from audit_patches import AuditRefusal, staged_idx_map
 from sanitize import rm_sanitize
 
 # The two caps the jq applied, at the two places it applied them. A title
@@ -263,6 +264,124 @@ def staging_files(staging_dir):
                 " contributes no story. Rename it if it is a story.\n"
             )
     return kept
+
+
+# ---------------------------------------------------------------------------
+# The cross-story audit gate
+# ---------------------------------------------------------------------------
+#
+# A staging directory holding two or more stories is merged only after the
+# cross-story audit (/aimi:plan Phase 3d.5) has run, and the proof that it ran
+# is audit-result.json carrying `auditedIdx`: the staged idx set the
+# apply-audit-patches verb stamped on it. Requiring the proof turns a skipped
+# audit from something nobody can see into a refusal. The gate has no flag, no
+# environment variable and no --agent-mode exemption: an escape hatch is a
+# default-off gate by another name.
+#
+# The staged set comes from audit_patches.staged_idx_map, the same function the
+# verb audited against, so the two cannot disagree on which files are stories.
+
+# Step 5 of /aimi:plan matches on the phrase inside this line, so it is a
+# constant rather than a literal at the call site.
+AUDIT_FAILED_NOTICE = (
+    "Warning: story-merge: the cross-story audit failed for this staging"
+    " directory; plan shipped unaudited"
+)
+
+_NN_STORY = re.compile(r"[0-9]{2}-.*\.json", re.S)
+_AUDIT_STEP = (
+    "Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches"
+    " --staging-dir <dir>) and retry."
+)
+_IDX_LIST_CAP = 50
+
+
+def _gate_refusal(staging_dir, reason):
+    die(
+        "Error: story-merge: staging directory "
+        + staging_dir
+        + " was not cross-story audited ("
+        + reason
+        + "). "
+        + _AUDIT_STEP.replace("<dir>", staging_dir)
+    )
+
+
+def _idx_text(values):
+    """An idx list as a refusal prints it: two-digit tokens only, capped.
+
+    The list in audit-result.json was written by a model. Anything that is not
+    a two-digit string is shown as '?' and nothing else of the file is echoed.
+    """
+    shown = [
+        v if isinstance(v, str) and re.fullmatch(r"[0-9]{2}", v) else "?"
+        for v in values[:_IDX_LIST_CAP]
+    ]
+    text = "[" + ",".join(shown) + (",..." if len(values) > _IDX_LIST_CAP else "") + "]"
+    return text
+
+
+def require_audit(staging_dir, paths):
+    """Refuse a multi-story staging directory that carries no matching audit result.
+
+    Returns the audit result's `status` (None unless it is a string) so the
+    caller can announce an audit-failed run once the merge is certain to go on.
+    Fewer than two staged files is not gated.
+    """
+    if len(paths) < 2:
+        return None
+
+    extras = [_basename(p) for p in paths if not _NN_STORY.fullmatch(_basename(p))]
+    if extras:
+        _gate_refusal(
+            staging_dir,
+            "staged file(s) not named NN-<slug>.json, which the audit never reads: "
+            + ", ".join(extras),
+        )
+
+    sidecar = os.path.join(staging_dir, "audit-result.json")
+    try:
+        with open(sidecar, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+    except FileNotFoundError:
+        _gate_refusal(staging_dir, "audit-result.json is missing")
+    except (OSError, ValueError, RecursionError):
+        _gate_refusal(staging_dir, "audit-result.json is unreadable or not valid JSON")
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("patches"), list)
+        or not isinstance(result.get("unresolved"), list)
+        or not isinstance(result.get("auditedIdx"), list)
+        or not all(isinstance(v, str) for v in result["auditedIdx"])
+    ):
+        _gate_refusal(
+            staging_dir,
+            "audit-result.json has the wrong shape: it needs an object with"
+            " patches[], unresolved[] and auditedIdx[] of strings",
+        )
+
+    try:
+        staged = sorted(staged_idx_map(staging_dir))
+    except AuditRefusal as refusal:
+        # Two staged files sharing one index cannot be merged at all, and
+        # read_staging names the pair right after this gate; a symlink leaving
+        # the staging directory is the other cause, and that one stops here.
+        indices = [_basename(p)[:2] for p in paths]
+        if len(set(indices)) != len(indices):
+            return result.get("status") if isinstance(result.get("status"), str) else None
+        _gate_refusal(staging_dir, str(refusal))
+
+    audited = sorted(set(result["auditedIdx"]))
+    if audited != staged:
+        _gate_refusal(
+            staging_dir,
+            "audited indices "
+            + _idx_text(audited)
+            + " differ from staged indices "
+            + _idx_text(staged),
+        )
+    status = result.get("status")
+    return status if isinstance(status, str) else None
 
 
 def read_staging(paths):
@@ -2222,6 +2341,8 @@ def main(argv):
     if not paths:
         die("Error: story-merge: no *.json files found in " + staging_dir)
 
+    audit_status = require_audit(staging_dir, paths)
+
     stories = read_staging(paths)
     assign_ids(stories)
     remap_outline_tokens(stories)
@@ -2424,6 +2545,10 @@ def main(argv):
             write_side_split(stories, output_path, staging_dir, smells, phase_aware)
     else:
         write_legacy(stories, output_path, staging_dir, smells, phase_metadata)
+    # Once, and only for a merge that completed: a refusal above never shipped
+    # anything, so it must not claim a plan did. Any other status adds no line.
+    if audit_status == "audit-failed":
+        sys.stderr.write(AUDIT_FAILED_NOTICE + "\n")
     return 0
 
 

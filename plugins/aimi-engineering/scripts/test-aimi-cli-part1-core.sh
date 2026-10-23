@@ -3634,9 +3634,11 @@ EOF
   # tasks.py imports compute_waves from story_merge.py (normalize-waves' own
   # rule, read from the writer rather than restated) -- so story_merge.py is
   # now one of tasks.py's siblings this fixture must provision, the same as
-  # roadmap.py and sanitize.py already are.
+  # roadmap.py and sanitize.py already are. story_merge.py in turn imports
+  # audit_patches.py (the staged-idx helper its audit gate shares with the
+  # apply-audit-patches verb), so that is provisioned too.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
-    "$SCRIPT_DIR/story_merge.py" \
+    "$SCRIPT_DIR/story_merge.py" "$SCRIPT_DIR/audit_patches.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 

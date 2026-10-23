@@ -216,4 +216,4 @@ def test_comment_states_the_never_regenerate_rule():
 def test_no_existing_golden_block_was_touched():
     # A sentinel from a block this story must not modify -- a change here
     # would mean the golden file's earlier content drifted, not just grew.
-    assert len(GOLDEN["story_merge_cases"]) == 92
+    assert len(GOLDEN["story_merge_cases"]) == 96
