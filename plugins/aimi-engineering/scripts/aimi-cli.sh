@@ -15396,6 +15396,49 @@ cmd_apply_audit_patches() {
 }
 
 # ============================================================================
+# validate-outline: check an outline's produces/consumes contract, derive waves
+# Usage: aimi-cli.sh validate-outline --outline <path>
+# ============================================================================
+#
+# Modelled on cmd_apply_audit_patches: no tasks file and so no lock. Bash keeps
+# the flags and the path confinement -- done before python3 starts, so an
+# escaping --outline is refused without outline_contract.py ever running -- and
+# check_python3, which refuses rather than degrading: a verb that answers
+# "valid" without the interpreter would turn a missing dependency into a
+# passing check. Every rule is outline_contract.py's, behind one crossing.
+cmd_validate_outline() {
+  local usage="usage: aimi-cli.sh validate-outline --outline <path>"
+  local outline_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --outline)
+        if [ $# -lt 2 ]; then
+          echo "Error: validate-outline: --outline needs a value ($usage)" >&2
+          exit 1
+        fi
+        outline_path="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: validate-outline: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$outline_path" ]; then
+    echo "Error: validate-outline: --outline <path> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$outline_path"
+
+  check_python3
+  python3 "$(_aimi_script_py outline_contract.py)" --outline "$outline_path"
+}
+
+# ============================================================================
 # split-detect — the read side of metadata.splitGroup
 # ============================================================================
 #
@@ -17371,6 +17414,15 @@ COMMANDS:
                               --annotate-deferred --reason <text> instead appends the
                               audit-deferred marker to the notes of every story an unresolved
                               entry names and prints {annotated, oqDecisions}.
+    validate-outline --outline <path>
+                              Check an outline.json array's produces/consumes contract
+                              ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
+                              consumes) and layer the entries into expansion waves. Prints
+                              {valid, errors, waves, edges, counts} and exits 0; an invalid
+                              outline still prints the object, with valid false, waves []
+                              and errors[] of {code, idx, message}, and exits 1. An
+                              unreadable --outline (missing, not JSON, not an array) is
+                              refused on stderr with exit 1 and nothing on stdout.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
                               completed} in one locked crossing, so a phase whose completed
@@ -18908,6 +18960,7 @@ main() {
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
+    validate-outline) shift; cmd_validate_outline "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;
