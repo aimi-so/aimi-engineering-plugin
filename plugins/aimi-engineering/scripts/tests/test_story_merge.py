@@ -2267,3 +2267,388 @@ def test_audit_gate_has_no_escape_hatch_flag_or_env(tmp_path):
         proc, _ = _merge(tmp_path, _two(), args=[flag], audit=False)
         assert proc.returncode == 1
         assert "unknown flag" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Advisory story smells: field-overlap and story-oversize
+# ---------------------------------------------------------------------------
+#
+# Measured: no story_merge_cases recording fires either smell, so the golden
+# corpus is neither edited nor regenerated for them (test below pins that).
+
+_OVERLAP_APPROACH = (
+    "Add the threshold constants to the merge module then implement the two pure helpers "
+    "that compute the overlap ratio and the serialized size and finally call the reporting "
+    "pair from every writer after the identifiers are remapped so the figures use final "
+    "identifiers"
+)
+_OVERLAP_TASKS = [
+    "Add the threshold constants to the merge module then implement the two pure helpers",
+    "that compute the overlap ratio and the serialized size and finally call the reporting pair",
+    "from every writer after the identifiers are remapped so the figures use final identifiers",
+]
+_UNRELATED_TASKS = [
+    "Draft the glossary entry for the new vocabulary",
+    "Rename the fixture directory under the examples folder",
+    "Backfill the changelog paragraph describing behaviour",
+]
+
+
+def _smelly(title, tasks=None, approach=None, notes="", files=None):
+    story = _staging_story(title)
+    story["implementation"]["approach"] = _OVERLAP_APPROACH if approach is None else approach
+    if files is not None:
+        story["implementation"]["files"] = files
+    if tasks is not None:
+        story["tasks"] = tasks
+    story["notes"] = notes
+    return story
+
+
+def _types(doc, kind):
+    return [e for e in doc["metadata"].get("smellWarnings", []) if e["type"] == kind]
+
+
+def test_field_overlap_fires_when_tasks_restate_the_approach():
+    story = _smelly("A", tasks=_OVERLAP_TASKS)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) == 1.0
+    (entry,) = SM.advisory_story_smells([story])
+    assert entry["type"] == "field-overlap" and entry["storyId"] == "US-001"
+    assert entry["ratio"] == 1.0 and entry["ngram"] == SM.FIELD_OVERLAP_NGRAM
+    assert isinstance(entry["message"], str) and entry["message"]
+    assert set(entry) == {"type", "storyId", "ratio", "ngram", "message"}
+
+
+def test_field_overlap_ratio_is_recorded_rounded_to_three_places():
+    tasks = [_OVERLAP_TASKS[0], "one two three four five", "six seven eight nine ten"]
+    story = _smelly("A", tasks=tasks)
+    story["id"] = "US-001"
+    raw = SM.field_overlap_ratio(story)
+    assert 0 < raw < 1
+    if raw >= SM.FIELD_OVERLAP_THRESHOLD:
+        (entry,) = SM.advisory_story_smells([story])
+        assert entry["ratio"] == round(raw, 3)
+
+
+def test_field_overlap_stays_quiet_below_the_threshold_and_for_unrelated_tasks():
+    story = _smelly("A", tasks=_UNRELATED_TASKS)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) < SM.FIELD_OVERLAP_THRESHOLD
+    assert SM.advisory_story_smells([story]) == []
+
+
+@pytest.mark.parametrize(
+    "tasks,approach",
+    [
+        (None, None),  # no tasks at all
+        (_OVERLAP_TASKS[:2], None),  # only two tasks
+        (_OVERLAP_TASKS, "Add the threshold constants to the merge module"),  # approach < 200
+        (["a b c", "d e f", "g h i"], None),  # no entry reaches one n-gram
+        ("not a list", None),
+    ],
+    ids=["no-tasks", "two-tasks", "short-approach", "no-ngram", "tasks-not-a-list"],
+)
+def test_field_overlap_never_fires_outside_its_gates(tasks, approach):
+    story = _smelly("A", tasks=tasks, approach=approach)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) is None
+    assert SM.advisory_story_smells([story]) == []
+
+
+def test_field_overlap_ngrams_never_span_two_tasks_entries():
+    """Three three-word entries whose concatenation IS a run of the approach: a
+    n-gram that crossed entries would match; per-entry building yields none."""
+    approach = (
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi "
+        "rho sigma tau upsilon phi chi psi omega alpha beta gamma delta epsilon zeta eta theta "
+        "iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega again"
+    )
+    assert len(approach) >= 200
+    story = _smelly("A", tasks=["alpha beta gamma", "delta epsilon zeta", "eta theta iota"], approach=approach)
+    assert SM.field_overlap_ratio(story) is None
+
+
+def test_field_overlap_tokenizes_unicode_letters_so_portuguese_works():
+    approach = (
+        "Implementar a validação da configuração antes de gravar o arquivo de saída e "
+        "registrar cada decisão tomada durante a execução para que a revisão posterior "
+        "encontre o histórico completo sem precisar reconstruir nada a partir do código"
+    )
+    tasks = [
+        "Implementar a validação da configuração antes de gravar",
+        "o arquivo de saída e registrar cada decisão tomada",
+        "durante a execução para que a revisão posterior encontre",
+    ]
+    story = _smelly("A", tasks=tasks, approach=approach)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) == 1.0
+    assert SM._words("Ação, REVISÃO_final 42") == ["ação", "revisão", "final", "42"]
+
+
+def _sized(story_id, size_hint):
+    story = _staging_story("S" + story_id)
+    story["id"] = "US-" + story_id
+    story["notes"] = "x" * size_hint
+    return story
+
+
+def test_story_bytes_is_the_compact_utf8_size_without_working_keys_and_wave():
+    story = _sized("001", 10)
+    base = SM.story_bytes(story)
+    story["wave"] = 3
+    story["_fe"] = True
+    story["referenceInventory"] = ["ignored"]
+    assert SM.story_bytes(story) == base
+    expected = json.dumps(
+        {k: v for k, v in _sized("001", 10).items()}, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    assert base == len(expected)
+    story["notes"] = "ação"
+    assert SM.story_bytes(story) == len(
+        json.dumps(
+            {k: v for k, v in story.items() if k not in ("wave", "_fe", "referenceInventory")},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def test_story_bytes_survives_a_lone_surrogate_in_staging_text():
+    story = _sized("001", 1)
+    story["notes"] = "broken \ud800 text"
+    assert SM.story_bytes(story) > 0
+
+
+def test_story_oversize_fires_above_the_floor_even_for_a_lone_story():
+    story = _sized("001", SM.STORY_OVERSIZE_FLOOR_BYTES + 100)
+    (entry,) = SM.advisory_story_smells([story])
+    assert entry["type"] == "story-oversize" and entry["storyId"] == "US-001"
+    assert entry["bytes"] == SM.story_bytes(story) > SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert entry["medianBytes"] == entry["bytes"]
+    assert entry["floorBytes"] == SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert set(entry) == {"type", "storyId", "bytes", "medianBytes", "floorBytes", "message"}
+    assert isinstance(entry["medianBytes"], int)
+
+
+def test_story_oversize_fires_on_the_median_rule_in_a_plan_of_three_or_more():
+    small = SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES // 8
+    stories = [_sized("001", small), _sized("002", small), _sized("003", SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES * 2)]
+    assert SM.story_bytes(stories[2]) < SM.STORY_OVERSIZE_FLOOR_BYTES
+    entries = SM.advisory_story_smells(stories)
+    assert [e["storyId"] for e in entries] == ["US-003"]
+    assert entries[0]["medianBytes"] == SM.story_bytes(stories[0])
+
+
+def test_story_oversize_needs_three_stories_for_the_median_rule():
+    stories = [_sized("001", 50), _sized("002", SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES * 2)]
+    assert SM.advisory_story_smells(stories) == []
+
+
+def test_story_oversize_ignores_a_lone_large_story_under_the_minimum():
+    """Three stories, one more than 2x the median, but under the small minimum:
+    a tiny plan's relatively-large story is not oversize."""
+    stories = [_sized("001", 50), _sized("002", 50), _sized("003", 900)]
+    assert SM.story_bytes(stories[2]) > 2 * SM.story_bytes(stories[0])
+    assert SM.story_bytes(stories[2]) <= SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES
+    assert SM.advisory_story_smells(stories) == []
+
+
+def test_the_advisory_helpers_tolerate_skeletal_stories():
+    assert SM.advisory_story_smells([{"id": "US-001"}, {"id": "US-002", "tasks": 3, "implementation": []}]) == []
+    assert SM.advisory_story_smells([]) == []
+
+
+def test_the_thresholds_are_named_constants_beside_one_calibration_marker():
+    for name in (
+        "SMELL_CALIBRATION_AS_OF",
+        "FIELD_OVERLAP_NGRAM",
+        "FIELD_OVERLAP_THRESHOLD",
+        "STORY_OVERSIZE_FLOOR_BYTES",
+        "STORY_OVERSIZE_MEDIAN_MIN_BYTES",
+    ):
+        assert hasattr(SM, name), name
+    assert (SM.FIELD_OVERLAP_NGRAM, SM.FIELD_OVERLAP_THRESHOLD) == (4, 0.30)
+    assert SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES == 4096
+
+
+def _three_with_both_smells():
+    return {
+        "01-a.json": _smelly("A", tasks=_UNRELATED_TASKS),
+        "02-b.json": _smelly("B", tasks=_OVERLAP_TASKS),
+        "03-c.json": _smelly("C", tasks=_UNRELATED_TASKS, notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200)),
+    }
+
+
+def test_a_merge_reports_both_smells_with_final_ids_and_keeps_every_story(tmp_path):
+    proc, doc = _merge(tmp_path, _three_with_both_smells())
+    assert proc.returncode == 0, proc.stderr
+    assert [s["id"] for s in doc["userStories"]] == ["US-001", "US-002", "US-003"]
+    (overlap,) = _types(doc, "field-overlap")
+    (oversize,) = _types(doc, "story-oversize")
+    assert overlap["storyId"] == "US-002" and overlap["ratio"] == 1.0 and overlap["ngram"] == 4
+    assert oversize["storyId"] == "US-003"
+    assert oversize["bytes"] > oversize["floorBytes"] == SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert oversize["medianBytes"] < oversize["bytes"]
+    assert proc.stderr.count("field-overlap smell detected") == 1
+    assert proc.stderr.count("story-oversize smell detected") == 1
+    assert "  Story US-002: " in proc.stderr and "  Story US-003: " in proc.stderr
+
+
+def test_a_merge_with_neither_smell_says_nothing_and_adds_no_metadata(tmp_path):
+    files = {"01-a.json": _smelly("A", tasks=_UNRELATED_TASKS), "02-b.json": _smelly("B")}
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert "field-overlap" not in proc.stderr and "story-oversize" not in proc.stderr
+    assert not _types(doc, "field-overlap") and not _types(doc, "story-oversize")
+
+
+def test_a_single_story_merge_can_still_carry_an_oversize_entry(tmp_path):
+    files = {"01-a.json": _smelly("A", notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200))}
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert [e["storyId"] for e in _types(doc, "story-oversize")] == ["US-001"]
+
+
+def _split_files(project_a=None, project_b=None):
+    def tag(story, project):
+        if project is not None:
+            story["project"] = project
+        return story
+
+    return {
+        "01-a.json": tag(_smelly("A", files=["src/server/a.ts"]), project_a),
+        "02-b.json": tag(_smelly("B", tasks=_OVERLAP_TASKS, files=["src/web/components/b.tsx"]), project_b),
+        "03-c.json": tag(
+            _smelly("C", files=["src/server/c.ts"], notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200)),
+            project_a,
+        ),
+        "04-d.json": tag(_smelly("D", files=["src/web/components/d.tsx"]), project_b),
+    }
+
+
+def _split_docs(tmp_path):
+    tasks = tmp_path / ".aimi" / "tasks"
+    docs = []
+    for name in sorted(os.listdir(tasks)):
+        if name.endswith("-tasks.json"):
+            with open(tasks / name, encoding="utf-8") as handle:
+                docs.append(json.load(handle))
+    return docs
+
+
+def _plan_median(docs):
+    sizes = [SM.story_bytes(s) for d in docs for s in d["userStories"]]
+    sizes.sort()
+    middle = len(sizes) // 2
+    return int(sizes[middle] if len(sizes) % 2 else (sizes[middle - 1] + sizes[middle]) / 2)
+
+
+def _assert_same_entries_everywhere(docs):
+    assert len(docs) == 2
+    sets = [
+        [e for e in d["metadata"].get("smellWarnings", []) if e["type"] in ("field-overlap", "story-oversize")]
+        for d in docs
+    ]
+    assert sets[0] == sets[1] and len(sets[0]) == 2
+    by_type = {e["type"]: e for e in sets[0]}
+    all_ids = {s["id"] for d in docs for s in d["userStories"]}
+    for entry in by_type.values():
+        assert entry["storyId"] in all_ids
+    # The entry names the id the story carries in the file that holds it.
+    titles = {s["id"]: s["title"] for d in docs for s in d["userStories"]}
+    assert titles[by_type["field-overlap"]["storyId"]] == "B"
+    assert titles[by_type["story-oversize"]["storyId"]] == "C"
+    assert by_type["story-oversize"]["medianBytes"] == _plan_median(docs)
+
+
+def test_a_side_split_gives_every_file_the_same_entries_with_remapped_ids(tmp_path):
+    proc, _ = _merge(tmp_path, _split_files(), args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(tmp_path)
+    _assert_same_entries_everywhere(docs)
+    # The backend file renumbers after the frontend block: ids are post-remap.
+    ids = [s["id"] for d in docs for s in d["userStories"]]
+    assert sorted(ids) == ["US-001", "US-002", "US-003", "US-004"]
+    assert proc.stderr.count("story-oversize smell detected") == 1
+
+
+def test_a_project_split_gives_every_file_the_same_entries_with_remapped_ids(tmp_path):
+    proc, _ = _merge(
+        tmp_path, _split_files("services/api", "apps/web"), args=["--split", "full-stack"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(tmp_path)
+    _assert_same_entries_everywhere(docs)
+    assert proc.stderr.count("field-overlap smell detected") == 1
+
+
+def _no_agent_env():
+    return {k: v for k, v in os.environ.items() if k not in ("CI", "AIMI_AGENT_MODE")}
+
+
+@pytest.mark.parametrize("kind,story_id", [("field-overlap", "US-002"), ("story-oversize", "US-003")])
+def test_acknowledge_smell_round_trips_on_both_new_types(tmp_path, kind, story_id):
+    proc, _ = _merge(tmp_path, _three_with_both_smells())
+    assert proc.returncode == 0, proc.stderr
+    path = str(tmp_path / ".aimi" / "tasks" / "out-tasks.json")
+    ack = subprocess.run(
+        ["bash", CLI, "acknowledge-smell", story_id, "--type", kind,
+         "--reason", "reviewed by hand", "--tasks-file", path],
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=120, env=_no_agent_env(),
+    )
+    assert ack.returncode == 0, ack.stderr
+    with open(path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    (entry,) = [e for e in _types(doc, kind) if e["storyId"] == story_id]
+    assert entry["acknowledged"] is True and entry["acknowledgedReason"] == "reviewed by hand"
+    other = "story-oversize" if kind == "field-overlap" else "field-overlap"
+    assert all("acknowledged" not in e for e in _types(doc, other))
+
+
+def test_no_golden_case_records_either_new_smell():
+    """Measured, not assumed: the corpus is untouched because nothing in it fires."""
+    for label, case in CASES.items():
+        blob = case["stderr"] + case["stdout"] + "".join(case["files"].values())
+        assert "field-overlap" not in blob and "story-oversize" not in blob, label
+
+
+def test_roadmap_py_never_mentions_the_advisory_types():
+    with open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8") as handle:
+        text = handle.read()
+    assert "field-overlap" not in text and "story-oversize" not in text
+
+
+def test_the_164_plan_fires_neither_smell():
+    """Calibration gate: skipped when the gitignored .aimi/ plan is not on this
+    checkout (CI, a fresh clone)."""
+    sys.path.insert(0, HERE)
+    import calibrate_story_smells as CAL
+
+    plans = [
+        (p, s)
+        for p, s in CAL.tasks_plans(None)
+        if "fix-issue-164-multi-repo-plan-execute-defects" in os.path.basename(p)
+    ]
+    if not plans:
+        pytest.skip("the #164 plan file is not present on this checkout")
+    for path, stories in plans:
+        assert CAL.fired(stories) == [], path
+
+
+def test_the_calibration_script_counts_only_numbered_story_inputs():
+    sys.path.insert(0, HERE)
+    import calibrate_story_smells as CAL
+
+    total = sum(len(stories) for _, stories in CAL.golden_plans())
+    expected = 0
+    for case in CASES.values():
+        for name, content in (case["input"] or {}).items():
+            if SM.is_sidecar(name) or not SM._NN_STORY.fullmatch(name):
+                continue
+            try:
+                value = json.loads(content)
+            except ValueError:
+                continue
+            expected += len([e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)])
+    assert total == expected > 0
