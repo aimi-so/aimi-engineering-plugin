@@ -53,6 +53,7 @@ import os
 import random
 import re
 import shutil
+import statistics
 import sys
 import time
 
@@ -1745,6 +1746,175 @@ def _for_output(stories):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Advisory story smells: tasks[]/approach overlap and oversized stories
+# ---------------------------------------------------------------------------
+#
+# Both are reported into metadata.smellWarnings and on stderr, and neither ever
+# drops a story, blocks the merge or changes its exit status. They are computed
+# inside each writer, AFTER the id remap, so storyId is the id that lands on
+# disk -- the orphan-symbol and verify-coverage entries are built in main
+# before a split renumbers, and these deliberately do not copy that.
+#
+# Every threshold below is a named constant and was measured, not guessed:
+# `python3 scripts/tests/calibrate_story_smells.py` prints the tables and
+# `--check` exits 1 when a constant fires on any golden case or on the plan
+# under test. Adjust a constant only within what that script prints, and
+# update SMELL_CALIBRATION_AS_OF and the firing counts when you do.
+#
+# SMELL_CALIBRATION_AS_OF = the commit the constants were measured on, and the date.
+# Measured firing counts at the values below (calibrate_story_smells.py, default
+# mode, run at that commit; plan files are live, so their figures are as of that run):
+#   golden corpus (86 staged cases, 167 stories, bytes max 369):
+#       field-overlap 0, story-oversize 0
+#   the #164 plan, .aimi/tasks/2026-10-13-fix-issue-164-multi-repo-plan-execute-defects-tasks.json
+#   (7 stories, 6496-11570 bytes, median 7372; overlap n=4 max 0.23):
+#       field-overlap 0, story-oversize 0   <- the gate `--check` enforces
+#   every tasks file under .aimi/ (70 files, 419 stories, bytes p50 12354 p90 22268;
+#   overlap n=4 over 405 eligible stories p50 0.11 p90 0.25 p95 0.29 max 0.45):
+#       field-overlap 16, story-oversize 210 (floor 14336 would flag 160, 16384
+#       would flag 109); the 2x-median rule alone flags 2 of 419.
+#   This includes the plan being executed when these were measured (the #165 plan:
+#   13 stories, 5385-15230 bytes, median 8344, overlap max 0.09), whose largest
+#   story (15230 bytes) fires story-oversize at 12288. That is expected and
+#   advisory, not a calibration failure: the gate pins the #164 plan, not that one.
+# 12288 is the smallest 1 KiB step above the #164 plan's maximum (11570); 0.30 at
+# n=4 is the p95 of history and sits above that plan's 0.23 maximum. n=3 is too
+# noisy (max 0.31 there, 0.52 overall) and n=5 loses the signal (p95 0.23).
+SMELL_CALIBRATION_AS_OF = "4b261f8 2026-10-23"
+FIELD_OVERLAP_NGRAM = 4
+FIELD_OVERLAP_THRESHOLD = 0.30
+FIELD_OVERLAP_MIN_TASKS = 3
+FIELD_OVERLAP_MIN_APPROACH_CHARS = 200
+STORY_OVERSIZE_FLOOR_BYTES = 12288
+STORY_OVERSIZE_MEDIAN_FACTOR = 2
+STORY_OVERSIZE_MEDIAN_MIN_STORIES = 3
+STORY_OVERSIZE_MEDIAN_MIN_BYTES = 4096
+
+_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _words(text):
+    return _WORD_RE.findall(text.lower())
+
+
+def _entry_ngrams(text, size):
+    words = _words(text)
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def field_overlap_ratio(story, size=FIELD_OVERLAP_NGRAM):
+    """Share of tasks[] word n-grams that also occur in implementation.approach.
+
+    None when the story is not eligible: fewer than FIELD_OVERLAP_MIN_TASKS
+    entries, an approach shorter than FIELD_OVERLAP_MIN_APPROACH_CHARS, or no
+    n-gram in tasks[] at all. N-grams are built per entry, so none spans two.
+    """
+    tasks = story.get("tasks")
+    implementation = story.get("implementation")
+    approach = implementation.get("approach") if isinstance(implementation, dict) else None
+    if not isinstance(tasks, list) or len(tasks) < FIELD_OVERLAP_MIN_TASKS:
+        return None
+    if not isinstance(approach, str) or len(approach) < FIELD_OVERLAP_MIN_APPROACH_CHARS:
+        return None
+    task_grams = set()
+    for entry in tasks:
+        if isinstance(entry, str):
+            task_grams |= _entry_ngrams(entry, size)
+    if not task_grams:
+        return None
+    return len(task_grams & _entry_ngrams(approach, size)) / len(task_grams)
+
+
+def story_bytes(story):
+    """Serialized size of a story as it lands on disk, minus `wave`.
+
+    `wave` is left out so the figure does not depend on when waves are computed.
+    surrogatepass keeps a lone surrogate in staging text from crashing the merge.
+    """
+    shaped = _for_output([story])[0]
+    shaped.pop("wave", None)
+    text = json.dumps(shaped, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
+def advisory_story_smells(stories):
+    """The field-overlap and story-oversize entries for a plan's stories.
+
+    `stories` is every story of the plan -- on a split, the union of all output
+    files -- so the median is plan-wide. Returns the combined entries, field-
+    overlap first.
+    """
+    stories = [s for s in stories if isinstance(s, dict)]
+    overlap = []
+    for story in stories:
+        ratio = field_overlap_ratio(story)
+        if ratio is not None and ratio >= FIELD_OVERLAP_THRESHOLD:
+            rounded = round(ratio, 3)
+            overlap.append(
+                {
+                    "type": "field-overlap",
+                    "storyId": story.get("id"),
+                    "ratio": rounded,
+                    "ngram": FIELD_OVERLAP_NGRAM,
+                    "message": "tasks[] restates implementation.approach ("
+                    + str(rounded)
+                    + " of its "
+                    + str(FIELD_OVERLAP_NGRAM)
+                    + "-word sequences also occur in the approach)",
+                }
+            )
+    sizes = [story_bytes(s) for s in stories]
+    median = int(statistics.median(sizes)) if sizes else 0
+    oversize = []
+    for story, size in zip(stories, sizes):
+        over_floor = size > STORY_OVERSIZE_FLOOR_BYTES
+        over_median = (
+            len(stories) >= STORY_OVERSIZE_MEDIAN_MIN_STORIES
+            and size > STORY_OVERSIZE_MEDIAN_FACTOR * median
+            and size > STORY_OVERSIZE_MEDIAN_MIN_BYTES
+        )
+        if over_floor or over_median:
+            oversize.append(
+                {
+                    "type": "story-oversize",
+                    "storyId": story.get("id"),
+                    "bytes": size,
+                    "medianBytes": median,
+                    "floorBytes": STORY_OVERSIZE_FLOOR_BYTES,
+                    "message": "story serializes to "
+                    + str(size)
+                    + " bytes (plan median "
+                    + str(median)
+                    + ", floor "
+                    + str(STORY_OVERSIZE_FLOOR_BYTES)
+                    + ")",
+                }
+            )
+    return overlap + oversize
+
+
+def report_advisory_story_smells(entries):
+    """One stderr banner per smell type, one line per story."""
+    for kind, header in (
+        (
+            "field-overlap",
+            "Warning: story-merge: field-overlap smell detected (advisory; tasks[] restates"
+            " implementation.approach):",
+        ),
+        (
+            "story-oversize",
+            "Warning: story-merge: story-oversize smell detected (advisory; story is far above"
+            " the plan's norm):",
+        ),
+    ):
+        lines = [
+            "  Story " + str(e["storyId"]) + ": " + e["message"] for e in entries if e["type"] == kind
+        ]
+        if lines:
+            warn_list(header, lines)
+
+
 def _document(metadata, stories):
     return {"schemaVersion": "3.3", "metadata": metadata, "userStories": _for_output(stories)}
 
@@ -1755,7 +1925,9 @@ def _emit(value):
 
 
 def write_legacy(stories, output_path, staging_dir, smells, phase_metadata=None):
-    metadata = _metadata("feat: merged tasks", "feat/merged", smells)
+    advisory = advisory_story_smells(stories)
+    report_advisory_story_smells(advisory)
+    metadata = _metadata("feat: merged tasks", "feat/merged", smells + advisory)
     # Merged AFTER _metadata's own keys, which is where the hand-patched
     # phase-scoped files on disk carry them. _metadata's arguments are
     # untouched, so branchName still arrives from this caller as the literal it
@@ -1924,10 +2096,14 @@ def write_side_split(stories, output_path, staging_dir, smells, phase_aware):
             )
 
     # Merged before either file is built, so both carry the same combined set.
-    combined = smells + cross
+    # Computed here, after the remap, over BOTH sides: the ids are final and the
+    # median is plan-wide rather than per file.
+    advisory = advisory_story_smells(frontend + backend)
+    combined = smells + cross + advisory
     if cross:
         _dropped_banner(cross, "cross-file", "--split full-stack")
         _false_root_note(_false_root_lines(cross, "side", "cross-file"))
+    report_advisory_story_smells(advisory)
 
     compute_waves(frontend)
     compute_waves(backend)
@@ -2147,7 +2323,9 @@ def write_project_split(
                 }
             )
 
-    combined = smells + cross
+    # After every block's remap, over every block: final ids, plan-wide median.
+    advisory = advisory_story_smells([s for block in blocks for s in block["stories"]])
+    combined = smells + cross + advisory
     if cross:
         _dropped_banner(cross, "cross-project", "--split full-stack, project axis")
         # The --foundation note is separate from the drop-count banner because
@@ -2173,6 +2351,7 @@ def write_project_split(
                 " droppedDeps[].foundationEdge)\n"
             )
         _false_root_note(_false_root_lines(cross, "project", "cross-project"))
+    report_advisory_story_smells(advisory)
 
     # 3. Derive every output path / slug / branchName up front.
     base = _strip_extension(_basename(output_path))
