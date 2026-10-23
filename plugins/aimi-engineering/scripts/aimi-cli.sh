@@ -15318,6 +15318,82 @@ cmd_story_merge() {
 }
 
 # ============================================================================
+# apply-audit-patches: validate and apply the cross-story auditor's patches
+# Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
+#           [--annotate-deferred --reason <text>]
+# ============================================================================
+#
+# Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
+# tasks file here and so no lock, and the staged files are private to one
+# /aimi:plan run. What stays in bash is the shell-shaped half -- flags and path
+# confinement, both done before python3 starts so an escaping --staging-dir or
+# --result is refused without audit_patches.py ever running. Everything else
+# (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
+# one crossing.
+cmd_apply_audit_patches() {
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir|--result|--reason)
+        if [ $# -lt 2 ]; then
+          echo "Error: apply-audit-patches: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        case "$1" in
+          --staging-dir) staging_dir="$2" ;;
+          --result) result_path="$2" ;;
+          --reason) reason="$2"; reason_given=true ;;
+        esac
+        shift 2
+        ;;
+      --annotate-deferred)
+        annotate=true
+        shift
+        ;;
+      *)
+        echo "Error: apply-audit-patches: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: apply-audit-patches: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ "$annotate" = true ] && [ -z "$reason" ]; then
+    echo "Error: apply-audit-patches: --annotate-deferred requires a non-empty --reason ($usage)" >&2
+    exit 1
+  fi
+  if [ "$annotate" != true ] && [ "$reason_given" = true ]; then
+    echo "Error: apply-audit-patches: --reason is only valid with --annotate-deferred ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+  if [ -n "$result_path" ]; then
+    validate_path_in_project "$result_path"
+  fi
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: apply-audit-patches: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  local aa_args=(--staging-dir "$staging_dir")
+  if [ -n "$result_path" ]; then
+    aa_args+=(--result "$result_path")
+  fi
+  if [ "$annotate" = true ]; then
+    aa_args+=(--annotate-deferred --reason "$reason")
+  fi
+  python3 "$(_aimi_script_py audit_patches.py)" "${aa_args[@]}"
+}
+
+# ============================================================================
 # split-detect — the read side of metadata.splitGroup
 # ============================================================================
 #
@@ -17281,6 +17357,18 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]
+                              Validate and apply the cross-story auditor's patches to the
+                              staged NN-*.json story files in one crossing: one read and one
+                              atomic write per affected file, every refusal decided before
+                              the first write. Rewrites <dir>/audit-result.json (or --result)
+                              with auditedIdx and appliedAt and prints {applied, dropped[],
+                              unresolved, capped, auditedIdx}. Exit 0 even when patches were
+                              dropped; exit 1 on an unreadable result, a duplicate idx, an
+                              escaping symlink or an array-valued staging file.
+                              --annotate-deferred --reason <text> instead appends the
+                              audit-deferred marker to the notes of every story an unresolved
+                              entry names and prints {annotated, oqDecisions}.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
                               completed} in one locked crossing, so a phase whose completed
@@ -18817,6 +18905,7 @@ main() {
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;

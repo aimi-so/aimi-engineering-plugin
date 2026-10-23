@@ -30,6 +30,7 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
+#   - apply-audit-patches Tests (six assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC53)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -4960,6 +4961,36 @@ test_story_merge_missing_dir() {
   assert_contains "does not exist" "$output" "TC2: error mentions 'does not exist'"
 }
 
+# apply-audit-patches: the verb that applies the cross-story auditor's patches.
+# Fixtures live under .aimi/ so path confinement accepts them. Six assertions.
+test_apply_audit_patches() {
+  echo ""
+  echo "=== apply-audit-patches: apply, drop, annotate, refuse ==="
+
+  local stg=".aimi/.audit-staging-aap-$$"
+  mkdir -p "$stg"
+  local n
+  for n in 01 02; do
+    printf '%s\n' '{"title":"S'"$n"'","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","verification":{"strategy":"test","status":"pending"}}' > "$stg/$n-story.json"
+  done
+  printf '%s\n' '{"patches":[{"storyIdx":"01","field":"notes","op":"add","value":"cross-checked"},{"storyIdx":"02","field":"title","op":"add","value":"x"}],"unresolved":[{"storyIdx":"02","message":"endpoint name drift"}]}' > "$stg/audit-result.json"
+
+  local output exit_code
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "apply-audit-patches: a run that drops a patch still exits 0"
+  assert_eq "1|field-not-allowed" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["applied"]) + "|" + d["dropped"][0]["reason"])' "$output")" "apply-audit-patches: report counts the applied patch and names the schema drop"
+  assert_eq "01,02" "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["auditedIdx"]))' "$stg/audit-result.json")" "apply-audit-patches: audit-result.json records the staged idx set"
+
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "02|cross-checked" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=json.load(open(sys.argv[2]))["notes"]; print(",".join(d["annotated"]) + "|" + n)' "$output" "$stg/01-story.json")" "apply-audit-patches: --annotate-deferred touches only the story an unresolved entry names"
+
+  output=$("$CLI" apply-audit-patches --staging-dir "/tmp" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "apply-audit-patches: an escaping --staging-dir exits 1"
+  assert_contains "escapes project root" "$output" "apply-audit-patches: the escape is refused by confinement before the module runs"
+
+  rm -rf "$stg"
+}
+
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
 test_story_merge_malformed_json() {
   echo ""
@@ -8671,6 +8702,7 @@ main() {
   echo "--- story-merge Tests ---"
   test_story_merge_happy_path
   test_story_merge_missing_dir
+  test_apply_audit_patches
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_cycle

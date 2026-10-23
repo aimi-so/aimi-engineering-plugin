@@ -1478,9 +1478,11 @@ test_validators_moved_to_tasks_py() {
 
   # The screen the jq wrote out THREE times -- title, description, tasks[] --
   # is one constant now. Three copies of a prompt-injection rule are three
-  # chances to fix two of them.
-  assert_eq "1" "$(grep -c '^SUSPICIOUS = ($' "$tasks_py" || true)" \
-    "validators: exactly one SUSPICIOUS definition in tasks.py"
+  # chances to fix two of them. It lives in sanitize.py now (the patch matcher
+  # shares it), so the single definition is counted there and tasks.py is
+  # required to import it rather than define a second one.
+  assert_eq "1:0" "$(grep -c '^SUSPICIOUS = ($' "$(dirname "$tasks_py")/sanitize.py" || true):$(grep -c '^SUSPICIOUS = ' "$tasks_py" || true)" \
+    "validators: exactly one SUSPICIOUS definition, in sanitize.py, and none in tasks.py"
 
   # The story-id regex is the one thing here that did NOT fully move, and the
   # count says so rather than leaving a reader to wonder. validate_story_id
