@@ -136,6 +136,31 @@ Write exactly one JSON object to `outputPath`. Fields:
 
 `gate` and `skills` and `tasks` are optional — omit the field entirely when it would be empty. `verification` MUST be an object — never a bare string. `status` is REQUIRED and MUST be `"pending"` for all new stories.
 
+## Field ownership and budget
+
+Each fact has exactly one home field. Write it there once and let every other field point at it or stay silent; a story that restates one fact in `acceptanceCriteria`, `implementation.approach` and `tasks[]` pays for it three times and drifts when one copy is edited.
+
+| Field | The one kind of fact it owns |
+|---|---|
+| `description` | Who, what and why: the role, the capability and the benefit, in the sentence the format above prescribes. |
+| `acceptanceCriteria` | Observable behaviour, plus the cross-story and wire contracts another story or a consumer depends on. Never the steps that produce it. |
+| `implementation.approach` | How: the strategy, the pattern to follow and the reason it was chosen. Never a restatement of what a criterion already asserts. |
+| `implementation.files` and `verify` | Where and what runs: the concrete paths, and the command that executes the criteria. |
+| `tasks[]` | A short checklist the executor ticks off in order. |
+| `notes` | Residue: what no other field carries. |
+
+**One criterion may list test cases, and only one.** A story's `acceptanceCriteria` allows exactly one criterion that enumerates test cases; every other criterion states a behaviour and leaves the case list out. Scatter the cases across several criteria and each one grows past the budget below while repeating its neighbours.
+
+**`tasks[]` entries are short verb-object phrases of about 120 characters.** They name a step, not its reasoning, and they do not paraphrase `implementation.approach`: if an entry could be read aloud as a sentence of the approach, it is the approach, and the checklist should name only the step that acts on it. The 5000-character ceiling in the `tasks[]` section below is a hard cap and not a target.
+
+**`notes` admits only a fact that no other field and no `metadata.decisions` entry carries.** A `<design_decisions>` entry is never copied into `notes`: the decision already reaches the executor through `metadata.decisions`, and a second copy there is a second place to go stale. When nothing qualifies, omit `notes`.
+
+**The budget is soft and sits beneath the hard cap.** Aim for about 600 characters per criterion and 6 to 8 KB per serialized story. The 5000-character per-criterion cap above is unchanged and remains the only limit that rejects a story; the budget is guidance for keeping a story readable in one pass. A story that cannot fit usually holds two outcomes, which is a signal to say so in your result rather than to compress it.
+
+**Measure rather than trust.** `story-merge` reports two advisory smells about exactly these habits: field-overlap, when a fact appears in more than one field of the same story, and story-oversize, when a serialized story exceeds the size budget. Neither blocks a merge. They are how a budget you were only asked to respect gets checked.
+
+The first-criterion rule, the project's own type or syntax check rule and the 3–15 entries `tasks[]` count apply as stated in their own sections, and so does "## Verify coverage": this section adds ownership and size, and restates none of them.
+
 ## Artifact language
 
 Every prose field you write — `title`, `description`, every `acceptanceCriteria` entry, `notes`, `implementation.approach`, and every `tasks[]` entry — is **written in English**, whatever language the feature description, the research excerpts, or the conversation this run started from were in. This is the plugin's Artifact Language Rule; its home is `commands/references/user-communication.md` (§ Artifact Language Rule), and it is restated here in full rather than pointed to, because "## What you do NOT do" below permits you to read only research and prototype files — nothing here authorizes opening a reference file at runtime to look this rule up.
