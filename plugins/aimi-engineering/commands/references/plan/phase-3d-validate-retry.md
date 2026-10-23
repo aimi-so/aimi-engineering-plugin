@@ -39,19 +39,28 @@ After 2 failed retries (3 total attempts), mark this expansion as **permanently 
 
 ### Failure Budget
 
-After all expansions complete (in parallel):
+After every wave has completed (see Wave Dispatch and Producer Slice Block Preparation in the prep-blocks file):
 - **All succeeded**: proceed to Phase 3e.
 - A story whose `implementation.verify` can swallow a failing line, or that lacks a producer's `outline:NN` in `dependsOn`, fails validation in step 2b and is retried like any other. When the retry prompt names it, state the rule as: a multi-line verify must not swallow a failing line, so start it with `set -e` or chain every line with `&&`. `story-merge` refuses the same story again at merge (see Phase 3e), so an expansion that exhausts its retries on this rule counts as permanently failed.
 - **Some permanently failed**: surface to user via AskUserQuestion:
   ```
   Pass 2 expansion failed for N story(ies):
   <list of failed idx + title>
+    held back, never spawned: <idx + title> (producer <idx> failed)   [one line per held-back entry, beneath its producer]
   Options:
     Skip failed — proceed to story-merge without them
     Retry with hint — provide additional context for failed stories, then re-expand
     Abort — stop plan generation
   ```
-  When `INTERACTIVE_MODE=agent`, auto-select **Skip failed** and emit one log line:
+  When `INTERACTIVE_MODE=agent`, auto-select **Skip failed**, which skips the held-back closure too instead of expanding it blind, and emit one log line:
   ```
-  [plan] Pass 2: N expansion(s) permanently failed (agent-mode: skipping)
+  [plan] Pass 2: N expansion(s) permanently failed, M held back (agent-mode: skipping)
   ```
+  N counts the permanently failed expansions and M the held-back entries, `0` when none.
+
+### Held-Back Dependents of a Failed Producer
+
+When an expansion is marked permanently failed, hold back its **dependent closure**: every entry reachable from it along the `edges` Wave Dispatch kept (the entries that consume what it produces, then the entries consuming theirs). Those entries are never spawned, since their expander would be told to cite a story that does not exist (specFlow:CriticalQ5). Record each as failed with the cause `held back: producer <idx> failed`, naming the nearest failed producer, and list it beneath that producer in the Failure Budget prompt above. A held-back entry is listed only as the line beneath its producer; it adds no failure of its own to the count in `N story(ies)`. An entry is not held back by a failed entry it does not consume from, even in the same wave.
+
+- **Skip failed** drops the closure along with the failed producer: no staging file exists for any of them, and Phase 3e proceeds without them.
+- **Retry with hint** re-expands the failed producers first, through Schema Validation and Retry again, and only then dispatches the closure, in wave order, with the recovered producers' slices. A producer that fails again keeps its closure held back.
