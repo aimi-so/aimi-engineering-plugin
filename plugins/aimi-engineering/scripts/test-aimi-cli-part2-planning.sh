@@ -5007,6 +5007,41 @@ test_apply_audit_patches() {
   rm -rf "$stg"
 }
 
+test_validate_outline() {
+  echo ""
+  echo "=== validate-outline: contract check, waves, refusals ==="
+
+  local dir=".aimi/.outline-vo-$$"
+  mkdir -p "$dir"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","produces":["sym:foo"]},{"idx":"02","title":"B","summary":"s","consumes":["sym:foo","ext:path:src/old.py"]}]' > "$dir/ok.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","consumes":["sym:ghost"]}]' > "$dir/bad.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s"},{"idx":"02","title":"B","summary":"s"}]' > "$dir/plain.json"
+  printf '%s' '{"idx":"01"}' > "$dir/object.json"
+
+  local output exit_code
+  output=$("$CLI" validate-outline --outline "$dir/ok.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "validate-outline: a valid outline exits 0"
+  assert_eq "true|01;02|01>02:sym:foo" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["valid"]).lower() + "|" + ";".join(",".join(w) for w in d["waves"]) + "|" + ";".join(e["from"] + ">" + e["to"] + ":" + e["name"] for e in d["edges"]))' "$output")" "validate-outline: waves put the consumer after its producer and edges name the token"
+
+  output=$("$CLI" validate-outline --outline "$dir/plain.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "01,02" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(",".join(d["waves"][0]) + ("" if len(d["waves"]) == 1 else "+more"))' "$output")" "validate-outline: an outline with no contract keys is one wave holding every idx"
+
+  output=$("$CLI" validate-outline --outline "$dir/bad.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-outline: an invalid outline exits 1"
+  assert_eq "false|unproduced-consume|0" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["valid"]).lower() + "|" + d["errors"][0]["code"] + "|" + str(len(d["waves"])))' "$output")" "validate-outline: an invalid outline still prints the report with waves empty"
+
+  output=$("$CLI" validate-outline --outline "$dir/object.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "Error: validate-outline:" "$output" "validate-outline: a non-array outline is refused as an Error: validate-outline line"
+
+  output=$("$CLI" validate-outline --outline "/tmp" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "escapes project root" "$output" "validate-outline: an escaping --outline is refused by confinement"
+
+  output=$("$CLI" validate-outline 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "--outline <path> is required" "$output" "validate-outline: a missing --outline is refused"
+
+  rm -rf "$dir"
+}
+
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
 test_story_merge_malformed_json() {
   echo ""
@@ -8806,6 +8841,7 @@ main() {
   test_story_merge_happy_path
   test_story_merge_missing_dir
   test_apply_audit_patches
+  test_validate_outline
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_audit_gate
