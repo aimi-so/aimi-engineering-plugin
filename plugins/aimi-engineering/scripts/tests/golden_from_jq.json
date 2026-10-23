@@ -12627,7 +12627,8 @@
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 3\n}\n",
@@ -12654,7 +12655,8 @@
       "input": {
         "10-j.json": "{\n  \"title\": \"J\",\n  \"description\": \"As a user, I want J so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"10\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 3\n}\n",
@@ -12856,7 +12858,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "01-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "01-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -12866,6 +12869,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/01-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -12882,17 +12886,15 @@
         "alpha.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "beta.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
       },
-      "exit": 0,
-      "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
-      "stderr": "",
-      "files": {
-        ".aimi/tasks/out-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"feat: merged tasks\",\n    \"type\": \"feat\",\n    \"branchName\": \"feat/merged\",\n    \"createdAt\": \"<DATE>\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"title\": \"A\",\n      \"description\": \"As a user, I want A so that it works.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"priority\": 1,\n      \"status\": \"pending\",\n      \"dependsOn\": [],\n      \"notes\": \"\",\n      \"implementation\": {\n        \"files\": [\n          \"src/x.ts\"\n        ],\n        \"approach\": \"Implement it\",\n        \"verify\": \"tsc --noEmit\"\n      },\n      \"id\": \"US-001\",\n      \"wave\": 1\n    },\n    {\n      \"title\": \"B\",\n      \"description\": \"As a user, I want B so that it works.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"priority\": 1,\n      \"status\": \"pending\",\n      \"dependsOn\": [],\n      \"notes\": \"\",\n      \"implementation\": {\n        \"files\": [\n          \"src/x.ts\"\n        ],\n        \"approach\": \"Implement it\",\n        \"verify\": \"tsc --noEmit\"\n      },\n      \"id\": \"US-002\",\n      \"wave\": 1\n    }\n  ]\n}\n",
-        ".aimi/tasks/out-tasks.json.lock": ""
-      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: story-merge: staging directory .aimi/stg was not cross-story audited (staged file(s) not named NN-<slug>.json, which the audit never reads: alpha.json, beta.json). Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches --staging-dir .aimi/stg) and retry.\n",
+      "files": {},
       "tree": [
-        ".aimi/tasks/",
-        ".aimi/tasks/out-tasks.json",
-        ".aimi/tasks/out-tasks.json.lock"
+        ".aimi/stg/",
+        ".aimi/stg/alpha.json",
+        ".aimi/stg/beta.json",
+        ".aimi/tasks/"
       ]
     },
     {
@@ -12935,7 +12937,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -12945,6 +12948,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -12960,7 +12964,8 @@
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:03\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -12971,6 +12976,7 @@
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
         ".aimi/stg/03-c.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -13007,7 +13013,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:09\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:08\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:08\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -13017,6 +13024,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -13053,7 +13061,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"in_progress\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13137,7 +13146,8 @@
         "07-s.json": "{\n  \"title\": \"S7\",\n  \"description\": \"As a user, I want S7 so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "08-s.json": "{\n  \"title\": \"S8\",\n  \"description\": \"As a user, I want S8 so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "09-s.json": "{\n  \"title\": \"S9\",\n  \"description\": \"As a user, I want S9 so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "10-s.json": "{\n  \"title\": \"S10\",\n  \"description\": \"As a user, I want S10 so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "10-s.json": "{\n  \"title\": \"S10\",\n  \"description\": \"As a user, I want S10 so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\",\n    \"04\",\n    \"05\",\n    \"06\",\n    \"07\",\n    \"08\",\n    \"09\",\n    \"10\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 10\n}\n",
@@ -13163,7 +13173,8 @@
       ],
       "input": {
         "01-schema.json": "{\n  \"title\": \"UserProfile schema\",\n  \"description\": \"As a user, I want UserProfile schema so that it works.\",\n  \"acceptanceCriteria\": [\n    \"The userName and avatarUrl fields are added\",\n    \"Mock data updated to match the schema\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/schemas/user.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-consumer.json": "{\n  \"title\": \"Profile page\",\n  \"description\": \"As a user, I want Profile page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Renders userName and avatarUrl\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-consumer.json": "{\n  \"title\": \"Profile page\",\n  \"description\": \"As a user, I want Profile page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Renders userName and avatarUrl\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13189,7 +13200,8 @@
       ],
       "input": {
         "01-schema.json": "{\n  \"title\": \"UserProfile schema\",\n  \"description\": \"As a user, I want UserProfile schema so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Mock data updated to match the schema\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/schemas/user.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-consumer.json": "{\n  \"title\": \"Profile page for User\",\n  \"description\": \"As a user, I want Profile page for User so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-consumer.json": "{\n  \"title\": \"Profile page for User\",\n  \"description\": \"As a user, I want Profile page for User so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13215,7 +13227,8 @@
       ],
       "input": {
         "01-schema.json": "{\n  \"title\": \"Zzzz schema\",\n  \"description\": \"As a user, I want Zzzz schema so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Mock data updated\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/schemas/zzzz.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-outro.json": "{\n  \"title\": \"Qqqq unrelated\",\n  \"description\": \"As a user, I want Qqqq unrelated so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/qqqq.go\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-outro.json": "{\n  \"title\": \"Qqqq unrelated\",\n  \"description\": \"As a user, I want Qqqq unrelated so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/qqqq.go\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13241,7 +13254,8 @@
       ],
       "input": {
         "01-schema.json": "{\n  \"title\": \"UserProfile schema\",\n  \"description\": \"As a user, I want UserProfile schema so that it works.\",\n  \"acceptanceCriteria\": [\n    \"The userName field is added\",\n    \"Mock data updated to match the schema\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/schemas/user.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-consumer.json": "{\n  \"title\": \"Profile page\",\n  \"description\": \"As a user, I want Profile page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Renders userName\",\n    \"Verify mock fixtures\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-consumer.json": "{\n  \"title\": \"Profile page\",\n  \"description\": \"As a user, I want Profile page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Renders userName\",\n    \"Verify mock fixtures\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/pages/Profile.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13388,7 +13402,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Add parseWidget and renderWidget helpers\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Touch nothing shared at all\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Touch nothing shared at all\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13415,7 +13430,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Add parseWidget and renderWidget helpers\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Touch nothing shared at all\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Touch nothing shared at all\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13441,7 +13457,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Add parseWidget helper\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Call parseWidget from the view\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Call parseWidget from the view\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13492,7 +13509,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Add userId to the payload\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Read userIdentifier from the session\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Read userIdentifier from the session\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13521,7 +13539,8 @@
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 3\n}\n",
@@ -13549,7 +13568,8 @@
       ],
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
@@ -13576,7 +13596,8 @@
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 3\n}\n",
@@ -13605,7 +13626,8 @@
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -13616,6 +13638,7 @@
         ".aimi/stg/01-f.json",
         ".aimi/stg/02-b.json",
         ".aimi/stg/03-c.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -13632,7 +13655,8 @@
       ],
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -13642,6 +13666,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-f.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -13659,7 +13684,8 @@
       "input": {
         "01-f.json": "{\n  \"title\": \"Foundation\",\n  \"description\": \"As a user, I want Foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-c.json": "{\n  \"title\": \"C\",\n  \"description\": \"As a user, I want C so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 3\n}\n",
@@ -13848,7 +13874,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -13880,7 +13907,8 @@
       ],
       "input": {
         "01-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 0,\n  \"backend_stories\": 2\n}\n",
@@ -13912,7 +13940,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-fe2.json": "{\n  \"title\": \"Another UI page\",\n  \"description\": \"As a user, I want Another UI page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-fe2.json": "{\n  \"title\": \"Another UI page\",\n  \"description\": \"As a user, I want Another UI page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 2,\n  \"backend_stories\": 0\n}\n",
@@ -13944,7 +13973,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -13977,7 +14007,8 @@
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 2\n}\n",
@@ -14009,7 +14040,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"Fix widget\\nWarning: forged line`rm -rf /`\",\n  \"description\": \"As a user, I want Fix widget\\nWarning: forged line`rm -rf /` so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -14042,7 +14074,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/feat-phase-2-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/feat-phase-2-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -14074,7 +14107,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -14106,7 +14140,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web/\"\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -14141,7 +14176,8 @@
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
         "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "03-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-be2.json": "{\n  \"title\": \"Widget worker\",\n  \"description\": \"As a user, I want Widget worker so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/w.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 2\n}\n",
@@ -14173,7 +14209,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"referenceInventory\": [\n    {\n      \"element\": \"E0\",\n      \"verdict\": \"encoded\"\n    },\n    {\n      \"element\": \"E1\",\n      \"verdict\": \"encoded\"\n    },\n    {\n      \"element\": \"E2\",\n      \"verdict\": \"encoded\"\n    },\n    {\n      \"element\": \"E3\",\n      \"verdict\": \"encoded\"\n    },\n    {\n      \"element\": \"E4\",\n      \"verdict\": \"encoded\"\n    }\n  ],\n  \"ac_anchors\": 5\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "{\n  \"frontend\": \".aimi/tasks/out-tasks-frontend-tasks.json\",\n  \"backend\": \".aimi/tasks/out-tasks-backend-tasks.json\",\n  \"frontend_stories\": 1,\n  \"backend_stories\": 1\n}\n",
@@ -14205,7 +14242,8 @@
       ],
       "input": {
         "01-fe.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
-        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-be.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14217,6 +14255,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-fe.json",
         ".aimi/stg/02-be.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/",
         ".aimi/tasks/out-tasks-frontend-tasks.json.<MKTEMP>",
         ".aimi/tasks/out-tasks-frontend-tasks.json.lock/"
@@ -14235,7 +14274,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14268,7 +14308,8 @@
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
         "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
-        "03-mob.json": "{\n  \"title\": \"Mobile profile\",\n  \"description\": \"As a user, I want Mobile profile so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/p.dart\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/mobile\"\n}\n"
+        "03-mob.json": "{\n  \"title\": \"Mobile profile\",\n  \"description\": \"As a user, I want Mobile profile so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"lib/p.dart\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/mobile\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-mobile-tasks.json\",\n    \"project\": \"apps/mobile\",\n    \"branchName\": \"feat/merged-apps-mobile\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14304,7 +14345,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14314,6 +14356,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-web.json",
         ".aimi/stg/02-api.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14331,7 +14374,8 @@
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
         "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "03-x.json": "{\n  \"title\": \"Untagged one\",\n  \"description\": \"As a user, I want Untagged one so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+        "03-x.json": "{\n  \"title\": \"Untagged one\",\n  \"description\": \"As a user, I want Untagged one so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14342,6 +14386,7 @@
         ".aimi/stg/01-web.json",
         ".aimi/stg/02-api.json",
         ".aimi/stg/03-x.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14358,7 +14403,8 @@
       ],
       "input": {
         "01-root.json": "{\n  \"title\": \"Root story\",\n  \"description\": \"As a user, I want Root story so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \".\"\n}\n",
-        "02-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n"
+        "02-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-root-tasks.json\",\n    \"project\": \".\",\n    \"branchName\": \"feat/merged-root\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14391,7 +14437,8 @@
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
         "02-web2.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "03-api.json": "{\n  \"title\": \"Lone api story\",\n  \"description\": \"As a user, I want Lone api story so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"a.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "03-api.json": "{\n  \"title\": \"Lone api story\",\n  \"description\": \"As a user, I want Lone api story so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"a.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 2\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14423,7 +14470,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web/\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14455,7 +14503,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"a.b\"\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-a-b-tasks.json\",\n    \"project\": \"a.b\",\n    \"branchName\": \"feat/merged-a-b\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14487,7 +14536,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"a/b\"\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"a.b\"\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"a.b\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14497,6 +14547,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14513,7 +14564,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14546,7 +14598,8 @@
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
         "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
-        "03-api2.json": "{\n  \"title\": \"Api follow-up\",\n  \"description\": \"As a user, I want Api follow-up so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"b.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "03-api2.json": "{\n  \"title\": \"Api follow-up\",\n  \"description\": \"As a user, I want Api follow-up so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\",\n    \"outline:02\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"b.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 2\n  }\n]\n",
@@ -14581,7 +14634,8 @@
       "input": {
         "01-f.json": "{\n  \"title\": \"Shared foundation\",\n  \"description\": \"As a user, I want Shared foundation so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
         "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
-        "03-mob.json": "{\n  \"title\": \"Mobile\",\n  \"description\": \"As a user, I want Mobile so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"m.dart\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/mobile\"\n}\n"
+        "03-mob.json": "{\n  \"title\": \"Mobile\",\n  \"description\": \"As a user, I want Mobile so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"m.dart\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/mobile\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-mobile-tasks.json\",\n    \"project\": \"apps/mobile\",\n    \"branchName\": \"feat/merged-apps-mobile\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14618,7 +14672,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/feat-phase-3-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/feat-phase-3-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14651,7 +14706,8 @@
       "input": {
         "01-mob.json": "{\n  \"title\": \"Mobile\",\n  \"description\": \"As a user, I want Mobile so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"m.dart\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/mobile\"\n}\n",
         "02-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "03-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "03-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\",\n    \"03\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14665,6 +14721,7 @@
         ".aimi/stg/01-mob.json",
         ".aimi/stg/02-web.json",
         ".aimi/stg/03-api.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/",
         ".aimi/tasks/out-tasks-apps-mobile-tasks.json",
         ".aimi/tasks/out-tasks-apps-mobile-tasks.json.lock",
@@ -14684,7 +14741,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14694,6 +14752,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14710,7 +14769,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14720,6 +14780,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14736,7 +14797,8 @@
       ],
       "input": {
         "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"../evil\"\n}\n",
-        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 1,
       "stdout": "",
@@ -14746,6 +14808,7 @@
         ".aimi/stg/",
         ".aimi/stg/01-a.json",
         ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
         ".aimi/tasks/"
       ]
     },
@@ -14762,7 +14825,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"Fix `rm -rf /`\\nWarning: forged\",\n  \"description\": \"As a user, I want Fix `rm -rf /`\\nWarning: forged so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [\n    \"outline:01\"\n  ],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14794,7 +14858,8 @@
       ],
       "input": {
         "01-web.json": "{\n  \"title\": \"React Widget page\",\n  \"description\": \"As a user, I want React Widget page so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/components/Widget.tsx\"\n    ],\n    \"approach\": \"Add parseWidget helper\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"apps/web\"\n}\n",
-        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Nothing shared\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n"
+        "02-api.json": "{\n  \"title\": \"Widget API endpoint\",\n  \"description\": \"As a user, I want Widget API endpoint so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"pending\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"app/controllers/widget_controller.rb\"\n    ],\n    \"approach\": \"Nothing shared\",\n    \"verify\": \"tsc --noEmit\"\n  },\n  \"project\": \"services/api\"\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ]\n}\n"
       },
       "exit": 0,
       "stdout": "[\n  {\n    \"path\": \".aimi/tasks/out-tasks-apps-web-tasks.json\",\n    \"project\": \"apps/web\",\n    \"branchName\": \"feat/merged-apps-web\",\n    \"storyCount\": 1\n  },\n  {\n    \"path\": \".aimi/tasks/out-tasks-services-api-tasks.json\",\n    \"project\": \"services/api\",\n    \"branchName\": \"feat/merged-services-api\",\n    \"storyCount\": 1\n  }\n]\n",
@@ -14812,9 +14877,111 @@
         ".aimi/tasks/out-tasks-services-api-tasks.json",
         ".aimi/tasks/out-tasks-services-api-tasks.json.lock"
       ]
+    },
+    {
+      "label": "audit-ausente",
+      "args": [
+        "story-merge",
+        "--staging-dir",
+        ".aimi/stg",
+        "--output",
+        ".aimi/tasks/out-tasks.json"
+      ],
+      "input": {
+        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"in_progress\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: story-merge: staging directory .aimi/stg was not cross-story audited (audit-result.json is missing). Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches --staging-dir .aimi/stg) and retry.\n",
+      "files": {},
+      "tree": [
+        ".aimi/stg/",
+        ".aimi/stg/01-a.json",
+        ".aimi/stg/02-b.json",
+        ".aimi/tasks/"
+      ]
+    },
+    {
+      "label": "audit-indices-divergentes",
+      "args": [
+        "story-merge",
+        "--staging-dir",
+        ".aimi/stg",
+        "--output",
+        ".aimi/tasks/out-tasks.json"
+      ],
+      "input": {
+        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"in_progress\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\"\n  ]\n}\n"
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: story-merge: staging directory .aimi/stg was not cross-story audited (audited indices [01] differ from staged indices [01,02]). Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches --staging-dir .aimi/stg) and retry.\n",
+      "files": {},
+      "tree": [
+        ".aimi/stg/",
+        ".aimi/stg/01-a.json",
+        ".aimi/stg/02-b.json",
+        ".aimi/stg/audit-result.json",
+        ".aimi/tasks/"
+      ]
+    },
+    {
+      "label": "audit-falhou-aviso",
+      "args": [
+        "story-merge",
+        "--staging-dir",
+        ".aimi/stg",
+        "--output",
+        ".aimi/tasks/out-tasks.json"
+      ],
+      "input": {
+        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"in_progress\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "audit-result.json": "{\n  \"patches\": [],\n  \"unresolved\": [],\n  \"auditedIdx\": [\n    \"01\",\n    \"02\"\n  ],\n  \"status\": \"audit-failed\"\n}\n"
+      },
+      "exit": 0,
+      "stdout": "{\n  \"merged\": \".aimi/tasks/out-tasks.json\",\n  \"stories\": 2\n}\n",
+      "stderr": "Warning: story-merge: the cross-story audit failed for this staging directory; plan shipped unaudited\n",
+      "files": {
+        ".aimi/tasks/out-tasks.json": "{\n  \"schemaVersion\": \"3.3\",\n  \"metadata\": {\n    \"title\": \"feat: merged tasks\",\n    \"type\": \"feat\",\n    \"branchName\": \"feat/merged\",\n    \"createdAt\": \"<DATE>\",\n    \"planPath\": null\n  },\n  \"userStories\": [\n    {\n      \"title\": \"A\",\n      \"description\": \"As a user, I want A so that it works.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"priority\": 1,\n      \"status\": \"in_progress\",\n      \"dependsOn\": [],\n      \"notes\": \"\",\n      \"implementation\": {\n        \"files\": [\n          \"src/x.ts\"\n        ],\n        \"approach\": \"Implement it\",\n        \"verify\": \"tsc --noEmit\"\n      },\n      \"id\": \"US-001\",\n      \"wave\": 1\n    },\n    {\n      \"title\": \"B\",\n      \"description\": \"As a user, I want B so that it works.\",\n      \"acceptanceCriteria\": [\n        \"Typecheck passes\"\n      ],\n      \"priority\": 1,\n      \"status\": \"done\",\n      \"dependsOn\": [],\n      \"notes\": \"\",\n      \"implementation\": {\n        \"files\": [\n          \"src/x.ts\"\n        ],\n        \"approach\": \"Implement it\",\n        \"verify\": \"tsc --noEmit\"\n      },\n      \"id\": \"US-002\",\n      \"wave\": 1\n    }\n  ]\n}\n",
+        ".aimi/tasks/out-tasks.json.lock": ""
+      },
+      "tree": [
+        ".aimi/tasks/",
+        ".aimi/tasks/out-tasks.json",
+        ".aimi/tasks/out-tasks.json.lock"
+      ]
+    },
+    {
+      "label": "audit-ausente-agent-mode",
+      "args": [
+        "story-merge",
+        "--staging-dir",
+        ".aimi/stg",
+        "--output",
+        ".aimi/tasks/out-tasks.json",
+        "--agent-mode"
+      ],
+      "input": {
+        "01-a.json": "{\n  \"title\": \"A\",\n  \"description\": \"As a user, I want A so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"in_progress\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n",
+        "02-b.json": "{\n  \"title\": \"B\",\n  \"description\": \"As a user, I want B so that it works.\",\n  \"acceptanceCriteria\": [\n    \"Typecheck passes\"\n  ],\n  \"priority\": 1,\n  \"status\": \"done\",\n  \"dependsOn\": [],\n  \"notes\": \"\",\n  \"implementation\": {\n    \"files\": [\n      \"src/x.ts\"\n    ],\n    \"approach\": \"Implement it\",\n    \"verify\": \"tsc --noEmit\"\n  }\n}\n"
+      },
+      "exit": 1,
+      "stdout": "",
+      "stderr": "Error: story-merge: staging directory .aimi/stg was not cross-story audited (audit-result.json is missing). Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches --staging-dir .aimi/stg) and retry.\n",
+      "files": {},
+      "tree": [
+        ".aimi/stg/",
+        ".aimi/stg/01-a.json",
+        ".aimi/stg/02-b.json",
+        ".aimi/tasks/"
+      ]
     }
   ],
-  "_comment_story_merge": "The story-merge family -- cmd_story_merge, _story_merge_resolve_axis and the three writers -- captured the same way, before its jq was deleted: 92 cases over one adversarial corpus spanning legacy mode, both split axes, --foundation, --phase-aware, --agent-mode, and the write failures nobody had exercised. Recorded per case: the flags, the staging files it was handed (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, every file left under .aimi/tasks with its content, and the whole .aimi tree listing, so a refusal that wrote something as a side effect could not hide. Each case ran in its own throwaway project root; paths are relative because the flags were; createdAt normalizes to <DATE> (it is today's date by construction), mktemp's six random characters to <MKTEMP> (that one SURVIVED is the evidence, not which one), and the absolute script path and line number a shell diagnostic quotes to <CLI> and <N>. Two runs of the pre-port CLI produce this file byte for byte. 440 of 460 field comparisons identical after the port -- every stdout, stderr, written file and tree matched in 84 of the 92 cases, including every case the 41 black-box calls in the bash suite drive. The 20 that differ fall in 8 cases and are ALL of one kind: jq or `set -e` aborting before the code's own diagnostic could run, so the exit status was the engine's and the message the code was written to print was unreachable. They are named here so nobody has to rediscover them. (1) arquivo-array, the loud one: a staging file holding an ARRAY of stories, which the story-merge docs promise is supported. The bash has a complete flattening loop for it, introduced with the comment 'Simpler approach: just append with sequential indices' -- and directly above that loop a first attempt calling `path` with no argument, which is a compile error, whose 2>/dev/null'd failure assigned the EMPTY STRING over the accumulator the loop was about to append to. jq then aborted (exit 5, 'null (null) has no keys') and nothing was ever written. The Python runs the loop the bash was written to run, so an array file now merges. This is the one recorded difference that is a capability rather than a message, and it is deliberate: writing code to reproduce a swallowed compile error would be writing the defect on purpose. (2) json-numero and json-string (exit 5 -> 1): a staging file whose top-level value is a number or a string. jq aborted adding it to {_srcIdx}; the Python refuses by name and says which file. (3) json-multiplos-valores (exit 2 -> 1): two JSON values in one file. `jq -e .` accepted it and `--argjson` rejected it three steps later; the Python reports it at the malformed-JSON check, which is where that question was already being asked. (4) dep-nao-string (exit 5 -> 1): a dependsOn entry that is not a string. jq aborted in startswith(); the Python lets it through the outline remap, and Kahn's algorithm reports it as a cycle -- which is what the bash already did for every other dependsOn naming no story, and is preserved on purpose. (5) escrita-legada-falha and side-escrita-falha: a directory where the lock file goes. `set -e` killed the shell on the failing `200>` redirect, so the legacy and SIDE writers' own 'failed to write output file' branch was unreachable dead code and the mktemp scratch file survived. The Python prints that message and removes the scratch file. Both remain refusals at exit 1 that write no tasks file, which the file and tree fields confirm. (6) proj-falha-parcial: the same obstacle on the PROJECT axis, where `|| write_exit=$?` kept the branch reachable. Its whole three-set report is byte-identical; the only difference is the shell's own redirect diagnostic, which preceded it and has no Python equivalent. ONE case was re-recorded after the capture, deliberately and in the same commit as the rule that changed it: proj-fundacao-edge. --foundation used to point every story in every repository at one shared index; it now injects only within each foundation's own normalized .project group. That case is a lone bare --foundation 01 over three stories in three different projects, so its foundation's group (apps/web) has no other member and the other two groups name no foundation of their own -- nothing is injected, therefore nothing is dropped. Its exit code, args, input and stdout are untouched; its stderr became empty, no output file's metadata carries a smellWarnings key, and every story's dependsOn stays []. Re-recorded by replaying the case's own recorded input through _replay(), never hand-typed. Every OTHER --foundation case here still matches the jq byte for byte, because each is a lone bare index over stories that all share one group, where per-group injection reduces exactly to what the jq did.",
+  "_comment_story_merge": "The story-merge family -- cmd_story_merge, _story_merge_resolve_axis and the three writers -- captured the same way, before its jq was deleted: 92 cases over one adversarial corpus spanning legacy mode, both split axes, --foundation, --phase-aware, --agent-mode, and the write failures nobody had exercised. Recorded per case: the flags, the staging files it was handed (`input`, so the case is REPLAYABLE and not merely described), exit code, stdout, stderr, every file left under .aimi/tasks with its content, and the whole .aimi tree listing, so a refusal that wrote something as a side effect could not hide. Each case ran in its own throwaway project root; paths are relative because the flags were; createdAt normalizes to <DATE> (it is today's date by construction), mktemp's six random characters to <MKTEMP> (that one SURVIVED is the evidence, not which one), and the absolute script path and line number a shell diagnostic quotes to <CLI> and <N>. Two runs of the pre-port CLI produce this file byte for byte. 440 of 460 field comparisons identical after the port -- every stdout, stderr, written file and tree matched in 84 of the 92 cases, including every case the 41 black-box calls in the bash suite drive. The 20 that differ fall in 8 cases and are ALL of one kind: jq or `set -e` aborting before the code's own diagnostic could run, so the exit status was the engine's and the message the code was written to print was unreachable. They are named here so nobody has to rediscover them. (1) arquivo-array, the loud one: a staging file holding an ARRAY of stories, which the story-merge docs promise is supported. The bash has a complete flattening loop for it, introduced with the comment 'Simpler approach: just append with sequential indices' -- and directly above that loop a first attempt calling `path` with no argument, which is a compile error, whose 2>/dev/null'd failure assigned the EMPTY STRING over the accumulator the loop was about to append to. jq then aborted (exit 5, 'null (null) has no keys') and nothing was ever written. The Python runs the loop the bash was written to run, so an array file now merges. This is the one recorded difference that is a capability rather than a message, and it is deliberate: writing code to reproduce a swallowed compile error would be writing the defect on purpose. (2) json-numero and json-string (exit 5 -> 1): a staging file whose top-level value is a number or a string. jq aborted adding it to {_srcIdx}; the Python refuses by name and says which file. (3) json-multiplos-valores (exit 2 -> 1): two JSON values in one file. `jq -e .` accepted it and `--argjson` rejected it three steps later; the Python reports it at the malformed-JSON check, which is where that question was already being asked. (4) dep-nao-string (exit 5 -> 1): a dependsOn entry that is not a string. jq aborted in startswith(); the Python lets it through the outline remap, and Kahn's algorithm reports it as a cycle -- which is what the bash already did for every other dependsOn naming no story, and is preserved on purpose. (5) escrita-legada-falha and side-escrita-falha: a directory where the lock file goes. `set -e` killed the shell on the failing `200>` redirect, so the legacy and SIDE writers' own 'failed to write output file' branch was unreachable dead code and the mktemp scratch file survived. The Python prints that message and removes the scratch file. Both remain refusals at exit 1 that write no tasks file, which the file and tree fields confirm. (6) proj-falha-parcial: the same obstacle on the PROJECT axis, where `|| write_exit=$?` kept the branch reachable. Its whole three-set report is byte-identical; the only difference is the shell's own redirect diagnostic, which preceded it and has no Python equivalent. ONE case was re-recorded after the capture, deliberately and in the same commit as the rule that changed it: proj-fundacao-edge. --foundation used to point every story in every repository at one shared index; it now injects only within each foundation's own normalized .project group. That case is a lone bare --foundation 01 over three stories in three different projects, so its foundation's group (apps/web) has no other member and the other two groups name no foundation of their own -- nothing is injected, therefore nothing is dropped. Its exit code, args, input and stdout are untouched; its stderr became empty, no output file's metadata carries a smellWarnings key, and every story's dependsOn stays []. Re-recorded by replaying the case's own recorded input through _replay(), never hand-typed. Every OTHER --foundation case here still matches the jq byte for byte, because each is a lone bare index over stories that all share one group, where per-group injection reduces exactly to what the jq did. AUDIT GATE (added after the capture, in the same commit as the rule): story-merge now refuses a staging directory holding two or more stories unless audit-result.json exists, is an object with patches[], unresolved[] and auditedIdx[], and its auditedIdx equals the staged NN idx set, so a skipped cross-story audit is a refusal instead of an invisible omission. A sidecar with status \"audit-failed\" and a matching auditedIdx passes and adds one stderr line containing 'plan shipped unaudited'. The 53 cases that stage two or more NN files gained an `audit-result.json` input (patches [], unresolved [], auditedIdx = that case's idx set); their recorded exit, stdout, stderr and files are byte-identical to the capture, and the recorded tree of each exit-1 case among them gained `.aimi/stg/audit-result.json`, because the staging directory survives a refusal. sem-prefixo-numerico (two non-NN files, alpha.json and beta.json) was re-recorded from exit 0 to exit 1: the audit globs only NN files, so merging them would bypass the gate. Four cases were added (audit-ausente, audit-indices-divergentes, audit-falhou-aviso, audit-ausente-agent-mode), recorded by replaying their own input, which makes the corpus 96 cases. Those 53 inputs stay jq-era evidence for everything except the gate itself: the sidecar is the only thing added to them, and the recorded outputs still describe what the jq implementation did.",
   "tasks_read_cases": [
     {
       "label": "clamp-metadata-ausente",
@@ -26818,7 +26985,7 @@
         "state": {}
       },
       "exit": 1,
-      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"US-001: gate: gates field is invalid; use singular gate (see plan.md L687-692)\"\n  ]\n}\n",
+      "stdout": "{\n  \"valid\": false,\n  \"errors\": [\n    \"US-001: gate: gates field is invalid; use singular gate (see references/plan/phase-4-schema-v33.md § Schema v3.3 Structure)\"\n  ]\n}\n",
       "stderr": "",
       "state_after": {}
     },
@@ -44383,11 +44550,11 @@
     },
     {
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "id": "site-033",
-      "line": 2335,
+      "line": 21,
       "operand": "$f",
       "program": "if type == \"array\" then .[] else . end | .project // empty",
       "question": "which project does this story (or split member) belong to"
@@ -57757,12 +57924,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "no-metadata",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57773,12 +57940,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "metadata-null",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": null,\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57789,12 +57956,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "branchname-missing",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"title\": \"ref: x\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57805,12 +57972,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "branchname-nonstring-array",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": [\n      \"a\",\n      \"b\",\n      \"c\",\n      \"d\"\n    ],\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57821,12 +57988,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "execution-absent",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57837,12 +58004,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "execution-inline",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"execution\": \"inline\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57853,12 +58020,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "execution-container",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"execution\": \"container\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57869,12 +58036,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "execution-unrecognized",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"execution\": \"bogus-mode\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57885,12 +58052,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "userstories-absent",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\"\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57901,12 +58068,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "userstories-empty",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": []\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57917,12 +58084,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "stories-with-project",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"A\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"B\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-003\",\n      \"project\": \".\",\n      \"status\": \"pending\",\n      \"title\": \"C\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57933,12 +58100,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "stories-without-project",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"completed\",\n      \"title\": \"A\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"status\": \"pending\",\n      \"title\": \"B\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57949,12 +58116,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "story-no-status",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"title\": \"A\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57965,12 +58132,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "all-completed",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"completed\",\n      \"title\": \"A\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"status\": \"completed\",\n      \"title\": \"B\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57981,12 +58148,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "splitgroup-present-siblings-populated",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"splitGroup\": {\n      \"index\": 1,\n      \"project\": \"apps/api\",\n      \"siblings\": [\n        \"demo-feature-apps-web-tasks.json\"\n      ],\n      \"total\": 2\n    },\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -57997,12 +58164,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "splitgroup-absent",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58013,12 +58180,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "splitgroup-siblings-empty",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"splitGroup\": {\n      \"index\": 1,\n      \"project\": \"apps/api\",\n      \"siblings\": [],\n      \"total\": 1\n    },\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58029,12 +58196,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "verification-absent",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"pending\",\n      \"title\": \"A\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58045,12 +58212,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "verification-null",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"pending\",\n      \"title\": \"A\",\n      \"verification\": null\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58061,12 +58228,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "verification-string",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"pending\",\n      \"title\": \"A\",\n      \"verification\": \"visual (manual)\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58077,12 +58244,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "verification-object-no-url",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"pending\",\n      \"title\": \"A\",\n      \"verification\": {\n        \"status\": \"pending\",\n        \"strategy\": \"visual\"\n      }\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58093,12 +58260,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "verification-object-with-url",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"status\": \"pending\",\n      \"title\": \"A\",\n      \"verification\": {\n        \"status\": \"pending\",\n        \"strategy\": \"visual\",\n        \"url\": \"http://localhost:4000/y\"\n      }\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58109,12 +58276,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "id-literal-placeholder-with-url",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"ref\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"[full_story.id]\",\n      \"status\": \"pending\",\n      \"title\": \"Placeholder id\",\n      \"verification\": {\n        \"status\": \"pending\",\n        \"strategy\": \"visual\",\n        \"url\": \"http://localhost:5000/z\"\n      }\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58125,12 +58292,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "type-fix",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/corpus-fixture\",\n    \"title\": \"ref: corpus fixture\",\n    \"type\": \"fix\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58141,12 +58308,12 @@
     {
       "exit": 0,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "type-absent",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\n  \"metadata\": {\n    \"branchName\": \"ref/x\",\n    \"title\": \"ref: x\"\n  },\n  \"schemaVersion\": \"3.3\",\n  \"userStories\": [\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-001\",\n      \"project\": \"apps/api\",\n      \"status\": \"completed\",\n      \"title\": \"First\"\n    },\n    {\n      \"dependsOn\": [],\n      \"id\": \"US-002\",\n      \"project\": \"apps/web\",\n      \"status\": \"pending\",\n      \"title\": \"Second\"\n    }\n  ]\n}\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",
@@ -58157,12 +58324,12 @@
     {
       "exit": 4,
       "expression": "jq -r 'if type == \"array\" then .[] else . end | .project // empty' \"$f\"",
-      "file": "plan.md",
+      "file": "references/plan/phase-3e-story-merge.md",
       "fixture": "malformed-document",
       "group": "project-grouping",
       "heading": "Project Path Gate (runs first — before `story-merge`) (block 1)",
       "input": "{\"schemaVersion\": \"3.3\", \"metadata\": {\n",
-      "line": 2335,
+      "line": 21,
       "question": "which project does this story (or split member) belong to",
       "shellLines": 0,
       "shellValue": "",

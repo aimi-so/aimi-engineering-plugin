@@ -83,6 +83,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tasks as T  # noqa: E402
+from plan_text import plan_text  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
@@ -1044,7 +1045,7 @@ def test_the_validate_corpus_exercises_every_error_class_each_verb_can_emit():
     #    jq lived in a bash single-quoted string and the ones the author typed
     #    closed and reopened it. This is the string /aimi:plan matches on.
     assert _errors("gates-plural-stories") == [
-        "US-001: gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+        "US-001: gate: gates field is invalid; use singular gate (see references/plan/phase-4-schema-v33.md § Schema v3.3 Structure)"
     ]
     # 8. a gate object missing each of type, status and prompt IN TURN
     for key in ("type", "status", "prompt"):
@@ -1629,9 +1630,14 @@ def test_the_suspicious_content_screen_has_one_definition_for_its_three_call_sit
     """The jq wrote this regex out three times -- title, description, tasks[] --
     and three copies of a prompt-injection screen are three chances to fix two of
     them. The same collapse clamp_max_concurrency got, for the same reason."""
+    # The definition moved to sanitize.py so the patch matcher can share it;
+    # tasks.py keeps the import and the three call sites.
+    with open(os.path.join(SCRIPTS, "sanitize.py"), encoding="utf-8") as handle:
+        sanitize_source = handle.read()
+    assert len(re.findall(r"^SUSPICIOUS = \($", sanitize_source, re.M)) == 1
     source = _source()
-    assert len(re.findall(r"^SUSPICIOUS = \($", source, re.M)) == 1
-    assert source.count("SUSPICIOUS") == 4, "one definition plus three call sites"
+    assert len(re.findall(r"^SUSPICIOUS = \($", source, re.M)) == 0
+    assert source.count("SUSPICIOUS") == 4, "one import plus three call sites"
     for label in ("titulo-suspeito", "descricao-suspeita", "tasks-suspeito"):
         assert _verdict(label + "-stories")["valid"] is False, label
 
@@ -2103,7 +2109,9 @@ def test_a_designspec_citation_is_the_one_anchor_that_does_not_warn(tmp_path):
 _ABSENT = object()
 
 
-def _replay_implementation(implementation, tmp_path, files=None, finalize=_ABSENT):
+def _replay_implementation(
+    implementation, tmp_path, files=None, finalize=_ABSENT, project=_ABSENT
+):
     """One story through the real CLI, carrying `implementation` as given.
 
     R17's own replay, built here for the reason _replay_line_anchor is built
@@ -2143,6 +2151,8 @@ def _replay_implementation(implementation, tmp_path, files=None, finalize=_ABSEN
     }
     if implementation is not _ABSENT:
         story["implementation"] = implementation
+    if project is not _ABSENT:
+        story["project"] = project
     metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
     if finalize is not _ABSENT:
         metadata["finalize"] = finalize
@@ -2234,6 +2244,88 @@ def test_implementation_files_naming_a_missing_directory_warns_and_stays_valid(t
         "nao/existe/de/jeito/nenhum/x.py"
         " — the file may be new, the directory it lands in may not\n"
     )
+
+
+_MISSING_DIR_WARNING = (
+    "/TMP/.aimi/tasks/2020-01-01-corpus-tasks.json: US-001: "
+    "implementation.files names a directory that does not exist: %s"
+    " — the file may be new, the directory it lands in may not\n"
+)
+
+
+def _impl(*files):
+    return {"files": list(files), "approach": "a", "verify": "true"}
+
+
+def test_implementation_files_resolve_against_story_project_existing_directory_is_silent(tmp_path):
+    """Multi-repo: the directory exists under the story's own child repository."""
+    seeded = {"api/src/existente.py": "# vizinho\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == ""
+
+
+def test_implementation_files_resolve_against_story_project_missing_directory_warns(tmp_path):
+    """The same child, a directory that is not there: still a warning, still valid.
+
+    The root carries `nao/existe/` so a rule that resolved against the root
+    would stay silent here -- the warning can only come from the child base.
+    """
+    seeded = {"api/src/existente.py": "# vizinho\n", "nao/existe/outro.py": "#\n"}
+    actual = _replay_implementation(
+        _impl("nao/existe/x.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "nao/existe/x.py"
+
+
+def test_implementation_files_resolve_against_story_project_unchanged_for_root_projects(tmp_path):
+    """Absent and "." projects keep resolving against the project root."""
+    seeded = {"src/existente.py": "# vizinho\n"}
+    for project in (_ABSENT, None, ".", ""):
+        quiet = _replay_implementation(
+            _impl("src/novo.py"), tmp_path, seeded, project=project
+        )
+        assert quiet["exit"] == 0 and quiet["stderr"] == ""
+        loud = _replay_implementation(
+            _impl("nao/existe/x.py"), tmp_path, seeded, project=project
+        )
+        assert loud["exit"] == 0
+        assert loud["stderr"] == _MISSING_DIR_WARNING % "nao/existe/x.py"
+
+
+def test_implementation_files_resolve_against_story_project_not_the_root(tmp_path):
+    """A directory present only at the root does not satisfy a child's entry."""
+    seeded = {"src/existente.py": "# so na raiz\n", "api/README.md": "x\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py"), tmp_path, seeded, project="api"
+    )
+    assert actual["exit"] == 0
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "src/novo.py"
+
+
+def test_implementation_files_project_escape_dotdot_warns_and_stays_valid(tmp_path):
+    seeded = {"src/existente.py": "# vizinho\n"}
+    actual = _replay_implementation(
+        _impl("src/novo.py", "src/outro.py"), tmp_path, seeded, project="../outside"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"].count("\n") == 1, "one warning line per story"
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "src/novo.py, src/outro.py"
+
+
+def test_implementation_files_project_escape_absolute_project_warns_and_stays_valid(tmp_path):
+    actual = _replay_implementation(
+        _impl("passwd"), tmp_path, {"src/existente.py": "#\n"}, project="/etc"
+    )
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+    assert actual["stderr"] == _MISSING_DIR_WARNING % "passwd"
 
 
 # The well-formed `metadata.finalize` every R18/R19 case below starts from. One
@@ -2773,7 +2865,8 @@ def test_prototypedropped_acquired_no_consumer():
     tuple is the cleanup loop that MOVES and DELETES the paths it names.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
+        "prototypeSuperseded",
     )
     cleanup = inspect.getsource(T.op_archive_task)
     assert 'for key in ("researchPaths", "prototypePaths"):' in cleanup
@@ -3855,7 +3948,8 @@ def test_the_projected_set_is_named_once_and_decisions_is_not_in_it():
     this rule. Re-run the grep the comment records when a reader is added.
     """
     assert T.STORY_CONTEXT_METADATA_KEYS == (
-        "designBundle", "designTokens", "prototypePaths", "prototypeDropped"
+        "designBundle", "designTokens", "prototypePaths", "prototypeDropped",
+        "prototypeSuperseded",
     )
     assert "decisions" not in T.STORY_CONTEXT_METADATA_KEYS
 
@@ -5227,8 +5321,17 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # tempfile.TemporaryDirectory's, the second is git's answer, and the
     # worktree path beneath the first is built by string concatenation, so
     # no join() was added. No new root, no leaf this module chose.
-    assert code.count("os.path.") == 48
-    assert code.count("os.path.isfile(") == 9
+    #
+    # The last SEVEN are _evidence_phase_members' (acknowledge-evidence): a
+    # dirname and a basename of --tasks-file, then for each split sibling a
+    # basename, a join onto that same directory and an isfile(), and for the
+    # legacy frontend/backend pair a join and an isfile() -- every one over
+    # the directory bash already confined, reading a sibling file by BASENAME
+    # so a traversal-shaped name cannot leave it. They WRITE nothing: the
+    # verb still writes only the one --tasks-file it was handed. No new root,
+    # and no leaf this module chose.
+    assert code.count("os.path.") == 55
+    assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 3
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
     assert confinement.count("os.path.") == 8
@@ -5337,6 +5440,8 @@ def test_every_locked_tasks_verb_crosses_into_python_exactly_once():
         "cmd_update_field",
         "cmd_remove_story",
         "cmd_set_verification",
+        "cmd_acknowledge_smell",
+        "cmd_acknowledge_evidence",
         "cmd_judge_verification",
         "cmd_set_execution_mode",
         "cmd_normalize_status",
@@ -5663,6 +5768,210 @@ def test_remove_story_refuses_a_whitespace_only_reason(tmp_path, capsys):
         )
     assert raised.value.code == 1
     assert "--reason" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# acknowledge-smell -- a reasoned acknowledgement on a smellWarnings entry
+# ---------------------------------------------------------------------------
+
+
+def _ack_file(tmp_path, smells):
+    path = _rs_file(tmp_path, "a.json", [_rs_story("US-001"), _rs_story("US-002")])
+    doc = _rs_read(path)
+    doc["metadata"]["smellWarnings"] = smells
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    return path
+
+
+def _ack_smells():
+    return [
+        {"type": "verify-coverage", "storyId": "US-001", "commands": ["a"], "message": "m1"},
+        {"type": "verify-coverage", "storyId": "US-002", "commands": ["b"], "message": "m2"},
+        {"type": "orphan-symbol", "storyId": "US-001", "symbols": ["s"], "message": "m3"},
+    ]
+
+
+def _ack(path, story_id="US-001", smell_type="verify-coverage", reason="reviewed"):
+    argv = ["acknowledge-smell", "--tasks-file", path, "--story-id", story_id, "--type", smell_type]
+    if reason is not None:
+        argv += ["--reason", reason]
+    return T.op_acknowledge_smell(argv)
+
+
+def test_acknowledge_smell_sets_the_three_keys_by_story_and_type_and_echoes_the_entry(
+    tmp_path, capsys
+):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path, reason="checked by hand") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["smellWarnings"]
+    assert out == saved[0]
+    assert saved[0]["acknowledged"] is True
+    assert saved[0]["acknowledgedReason"] == "checked by hand"
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved[0]["acknowledgedAt"])
+    # Sibling entries (another story, another type) are untouched.
+    assert saved[1] == _ack_smells()[1]
+    assert saved[2] == _ack_smells()[2]
+
+
+def test_acknowledge_smell_acknowledges_every_matching_entry(tmp_path, capsys):
+    smells = _ack_smells() + [
+        {"type": "verify-coverage", "storyId": "US-001", "commands": ["c"], "message": "m4"}
+    ]
+    path = _ack_file(tmp_path, smells)
+    assert _ack(path) == 0
+    saved = _rs_read(path)["metadata"]["smellWarnings"]
+    assert saved[0]["acknowledged"] is True and saved[3]["acknowledged"] is True
+    assert "acknowledged" not in saved[1] and "acknowledged" not in saved[2]
+
+
+def test_acknowledge_smell_is_idempotent_and_keeps_the_first_timestamp(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path) == 0
+    first_bytes = open(path, encoding="utf-8").read()
+    first_at = _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledgedAt"]
+    assert _ack(path) == 0
+    assert open(path, encoding="utf-8").read() == first_bytes
+    assert _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledgedAt"] == first_at
+    assert _rs_read(path)["metadata"]["smellWarnings"][0]["acknowledged"] is True
+
+
+def test_acknowledge_smell_refuses_an_unknown_entry_naming_id_and_type(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ack(path, story_id="US-002", smell_type="orphan-symbol")
+    assert raised.value.code == 1
+    err = capsys.readouterr().err
+    assert "US-002" in err and "orphan-symbol" in err
+    assert open(path, encoding="utf-8").read() == before
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_acknowledge_smell_refuses_a_missing_or_blank_reason_and_writes_nothing(
+    tmp_path, capsys, reason
+):
+    path = _ack_file(tmp_path, _ack_smells())
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ack(path, reason=reason)
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_acknowledge_smell_sanitizes_and_caps_the_reason(tmp_path, capsys):
+    path = _ack_file(tmp_path, _ack_smells())
+    assert _ack(path, reason="x" * 900) == 0
+    saved = _rs_read(path)["metadata"]["smellWarnings"][0]
+    assert len(saved["acknowledgedReason"]) <= T.SMELL_ACKNOWLEDGE_REASON_MAXLEN
+
+
+# ---------------------------------------------------------------------------
+# acknowledge-evidence -- metadata.evidenceAcknowledged, phase-aggregate N
+# ---------------------------------------------------------------------------
+
+
+def _ackev_file(tmp_path, name="e.json", completed=2, pending=1, extra_metadata=None):
+    stories = [_rs_story("US-%03d" % (i + 1), "completed") for i in range(completed)]
+    stories += [_rs_story("US-%03d" % (completed + i + 1)) for i in range(pending)]
+    path = _rs_file(tmp_path, name, stories)
+    if extra_metadata:
+        doc = _rs_read(path)
+        doc["metadata"].update(extra_metadata)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle)
+    return path
+
+
+def _ackev(path, reason="reviewed by hand"):
+    argv = ["acknowledge-evidence", "--tasks-file", path]
+    if reason is not None:
+        argv += ["--reason", reason]
+    return T.op_acknowledge_evidence(argv)
+
+
+def test_acknowledge_evidence_writes_reason_timestamp_and_completed_count(tmp_path, capsys):
+    path = _ackev_file(tmp_path, completed=2, pending=1)
+    assert _ackev(path, reason="checked by hand") == 0
+    out = json.loads(capsys.readouterr().out)
+    saved = _rs_read(path)["metadata"]["evidenceAcknowledged"]
+    assert out == saved
+    assert saved["reason"] == "checked by hand"
+    assert saved["completed"] == 2
+    assert re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", saved["acknowledgedAt"])
+    assert set(saved) == {"reason", "acknowledgedAt", "completed"}
+
+
+def test_acknowledge_evidence_is_idempotent_and_keeps_the_first_timestamp(tmp_path, capsys):
+    path = _ackev_file(tmp_path)
+    assert _ackev(path) == 0
+    first_bytes = open(path, encoding="utf-8").read()
+    assert _ackev(path) == 0
+    assert open(path, encoding="utf-8").read() == first_bytes
+
+
+def test_acknowledge_evidence_with_a_changed_completed_count_replaces_the_record(
+    tmp_path, capsys
+):
+    path = _ackev_file(tmp_path, completed=1, pending=1)
+    assert _ackev(path) == 0
+    assert _rs_read(path)["metadata"]["evidenceAcknowledged"]["completed"] == 1
+    doc = _rs_read(path)
+    doc["userStories"][1]["status"] = "completed"
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle)
+    assert _ackev(path) == 0
+    assert _rs_read(path)["metadata"]["evidenceAcknowledged"]["completed"] == 2
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_acknowledge_evidence_refuses_a_missing_or_blank_reason_and_writes_nothing(
+    tmp_path, capsys, reason
+):
+    path = _ackev_file(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(SystemExit) as raised:
+        _ackev(path, reason=reason)
+    assert raised.value.code == 1
+    assert "--reason" in capsys.readouterr().err
+    assert open(path, encoding="utf-8").read() == before
+
+
+def test_acknowledge_evidence_sanitizes_and_caps_the_reason(tmp_path, capsys):
+    path = _ackev_file(tmp_path)
+    assert _ackev(path, reason="x" * 900) == 0
+    saved = _rs_read(path)["metadata"]["evidenceAcknowledged"]
+    assert len(saved["reason"]) <= T.EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN
+
+
+def test_acknowledge_evidence_counts_the_phase_aggregate_across_split_siblings(
+    tmp_path, capsys
+):
+    """N is the count the gate measures against, so a split phase's member
+    counts every sibling's completed stories, and the verb writes only into
+    the file it was given."""
+    alpha = os.path.join(str(tmp_path), "f-phase-1-alpha-tasks.json")
+    beta = os.path.join(str(tmp_path), "f-phase-1-beta-tasks.json")
+
+    def doc(sibling, stories):
+        return {
+            "schemaVersion": "3.3",
+            "metadata": {"title": "t", "splitGroup": {
+                "project": "p", "index": 1, "total": 2, "siblings": [sibling]}},
+            "userStories": stories,
+        }
+
+    with open(alpha, "w", encoding="utf-8") as handle:
+        json.dump(doc("f-phase-1-beta-tasks.json", [_rs_story("US-001", "completed")]), handle)
+    with open(beta, "w", encoding="utf-8") as handle:
+        json.dump(doc("f-phase-1-alpha-tasks.json", [
+            _rs_story("US-001", "completed"), _rs_story("US-002", "completed")]), handle)
+    beta_before = open(beta, encoding="utf-8").read()
+    assert _ackev(alpha) == 0
+    assert _rs_read(alpha)["metadata"]["evidenceAcknowledged"]["completed"] == 3
+    assert open(beta, encoding="utf-8").read() == beta_before
 
 
 # ---------------------------------------------------------------------------
@@ -6800,6 +7109,8 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "cascade-skip",
         "remove-story",
         "set-verification",
+        "acknowledge-smell",
+        "acknowledge-evidence",
         "judge-verification",
         "reset-orphaned",
         "archive-task",
@@ -10062,10 +10373,11 @@ def _metadata_keys_plan_md_emits():
     template is picked up by its position in the document and not by anyone
     remembering to update a second list here.
     """
-    with open(os.path.join(PLUGIN_ROOT, "commands", "plan.md"), encoding="utf-8") as handle:
-        plan = handle.read()
+    # The template moved out of plan.md (now a router) into
+    # commands/references/plan/; plan_text() is every file of /aimi:plan.
+    plan = plan_text()
     opener = '"metadata": {'
-    assert plan.count(opener) == 1, "plan.md no longer has exactly one metadata template"
+    assert plan.count(opener) == 1, "the plan text no longer has exactly one metadata template"
     start = plan.index(opener) + len('"metadata": ')
     depth = 0
     for offset in range(start, len(plan)):
@@ -10600,6 +10912,101 @@ def test_probe_plan_is_not_probed_when_the_baseref_is_absent_unknown_or_the_repo
           _plan_git(root4, "rev-parse", "HEAD~1"), "git is not installed")
 
 
+def _plan_multi_repo(tmp_path, stories):
+    """A NON-git parent holding `.aimi/` and child repositories: `a` has
+    `marker.txt` at the base tag, `b` does not, `c` is not a repository.
+    Returns (parent, tasks_file)."""
+    parent = os.path.join(os.path.realpath(str(tmp_path)), "multi")
+    os.makedirs(os.path.join(parent, ".aimi", "tasks"))
+    for name, files in (("a", ["README", "marker.txt"]), ("b", ["README"])):
+        child = os.path.join(parent, name)
+        os.makedirs(child)
+        _plan_git(child, "init", "-q")
+        for fname in files:
+            with open(os.path.join(child, fname), "w", encoding="utf-8") as handle:
+                handle.write(name + "\n")
+            _plan_git(child, "add", fname)
+        _plan_git(child, "commit", "-q", "-m", "first")
+        _plan_git(child, "tag", "base")
+        with open(os.path.join(child, "later.txt"), "w", encoding="utf-8") as handle:
+            handle.write("later\n")
+        _plan_git(child, "add", "later.txt")
+        _plan_git(child, "commit", "-q", "-m", "second")
+    os.makedirs(os.path.join(parent, "c"))
+    built = []
+    for index, spec in enumerate(stories, start=1):
+        story = {
+            "id": "US-%03d" % index, "title": "s", "description": "d",
+            "acceptanceCriteria": ["x"], "priority": 1, "status": "pending",
+            "dependsOn": [],
+        }
+        story.update(spec)
+        built.append(story)
+    tasks_file = os.path.join(parent, ".aimi", "tasks", "p-tasks.json")
+    with open(tasks_file, "w", encoding="utf-8") as handle:
+        json.dump({"schemaVersion": "3.3",
+                   "metadata": {"title": "t", "branchName": "b", "baseRef": "base"},
+                   "userStories": built}, handle)
+    return parent, tasks_file
+
+
+def test_probe_plan_roots_each_project_group_in_its_own_repository_under_a_non_git_parent(tmp_path):
+    verify = {"verify": "test -f marker.txt"}
+    stories = [
+        {"project": "a", "implementation": dict(verify)},
+        {"project": "b", "implementation": dict(verify)},
+        {"project": "c", "implementation": dict(verify)},
+        {"project": "../outside", "implementation": dict(verify)},
+        {"project": "gone", "implementation": dict(verify)},
+    ]
+    parent, tasks_file = _plan_multi_repo(tmp_path, stories)
+    out = _plan_ok(parent, tasks_file,
+                   env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(parent)})
+    assert out["probed"] is True and out["baseRef"] == "base"
+    by_id = {s["id"]: s["segments"] for s in out["stories"]}
+    assert [s["id"] for s in out["stories"]] == ["US-00%d" % n for n in range(1, 6)]
+    # `a` has marker.txt at the base tag: the segment already passes there
+    assert by_id["US-001"][0]["discriminates"] is False
+    # `b` does not: the same text fails at the base, so it discriminates
+    assert by_id["US-002"][0]["discriminates"] is True
+    assert {"id": "US-001", "segment": "test -f marker.txt"} in out["unlabelledNonDiscriminating"]
+    # c is not a repository, the escape and the missing directory are named
+    why = {u["id"]: u["why"] for u in out["unmeasured"]}
+    assert "project c is not a git repository" in why["US-003"]
+    assert "not a routable project path" in why["US-004"]
+    assert "project gone" in why["US-005"] and "does not exist" in why["US-005"]
+    for sid in ("US-003", "US-004", "US-005"):
+        assert by_id[sid] == []
+    # no probe worktree is left behind in either child
+    for name in ("a", "b"):
+        listing = _plan_git(os.path.join(parent, name), "worktree", "list", "--porcelain")
+        assert listing.count("worktree ") == 1
+
+
+def test_probe_plan_reports_probed_false_when_no_project_group_resolves(tmp_path):
+    stories = [{"project": "c", "implementation": {"verify": "test -f x"}},
+               {"implementation": {"verify": "test -f y"}}]
+    parent, tasks_file = _plan_multi_repo(tmp_path, stories)
+    out = _plan_ok(parent, tasks_file,
+                   env_extra={"GIT_CEILING_DIRECTORIES": os.path.dirname(parent)})
+    assert out["probed"] is False
+    assert "not inside a git repository" in out["reason"]
+    assert "stories" not in out
+
+
+def test_probe_plan_single_repo_cwd_result_is_unchanged(tmp_path):
+    root, tasks_file, first, _ = _plan_repo(tmp_path, [_PLAN_VERIFY])
+    out = _plan_ok(root, tasks_file)
+    assert list(out) == ["baseRef", "probed", "policy", "stories",
+                         "unlabelledNonDiscriminating", "unmeasured"]
+    assert out["baseRef"] == first and out["probed"] is True
+    assert out["policy"] == "report"
+    assert [s["id"] for s in out["stories"]] == ["US-001"]
+    assert out["unlabelledNonDiscriminating"] == [
+        {"id": "US-001", "segment": "test -f README"}]
+    assert out["unmeasured"] == []
+
+
 def test_probe_plan_skips_suites_by_default_and_lists_them_unmeasured(tmp_path):
     verify = "python3 -m pytest tests/ -q\npytest tests/ -q -k name\nbash scripts/test-x.sh\ntrue\n"
     root, tasks_file, _, _ = _plan_repo(tmp_path, [{"implementation": {"verify": verify}}])
@@ -10732,3 +11139,142 @@ def test_probe_plan_op_is_registered_under_the_verb_name():
         source = handle.read()
     assert 'shift; cmd_probe_plan "$@"' in source
     assert "probe-plan --tasks-file <path> [--ref <sha>] [--run-suites]" in source
+
+
+_WELL_FORMED_SUPERSEDED = {
+    "path": ".aimi/brainstorms/prototypes/x-variant-c.html",
+    "decision": "outline:edit:02",
+    "note": "The decision moves the filter bar below the list.",
+}
+
+
+def _replay_prototype_superseded(superseded, tmp_path, outside=None):
+    """R22's replay, built the way _replay_prototype_dropped is: bash never ran
+    this rule, so there is no jq recording and nothing for the golden corpus."""
+    story = {
+        "id": "US-001",
+        "title": "Story US-001",
+        "description": "As a user, I want US-001.",
+        "acceptanceCriteria": ["um criterio sem ancora nenhuma"],
+        "status": "pending",
+        "priority": 1,
+        "dependsOn": [],
+        "wave": 0,
+    }
+    metadata = {"branchName": "ref/corpus", "maxConcurrency": 1}
+    if superseded is not _ABSENT:
+        metadata["prototypeSuperseded"] = superseded
+    document = {"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}
+    case = {
+        "args": ["validate-tasks"],
+        "input": {
+            "tasks_file": "2020-01-01-corpus-tasks.json",
+            "tasks": json.dumps(document, ensure_ascii=False) + "\n",
+            "files": {},
+            "outside": outside or {},
+            "state": {},
+        },
+    }
+    return _replay_validate(case, tmp_path)
+
+
+def _assert_refuses_prototype_superseded(actual):
+    assert actual["exit"] == 1
+    verdict = json.loads(actual["stdout"])
+    assert verdict["valid"] is False
+    assert any(
+        "metadata.prototypeSuperseded" in entry for entry in verdict["errors"]
+    ), verdict["errors"]
+    return verdict
+
+
+def test_prototype_superseded_absent_or_null_validates_exactly_as_before(tmp_path):
+    for value in (_ABSENT, None):
+        actual = _replay_prototype_superseded(value, tmp_path)
+        assert actual["exit"] == 0
+        assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+        assert actual["stderr"] == ""
+
+
+def test_prototype_superseded_well_formed_entry_is_accepted(tmp_path):
+    actual = _replay_prototype_superseded([_WELL_FORMED_SUPERSEDED], tmp_path)
+    assert actual["exit"] == 0
+    assert actual["stdout"] == '{"valid": true, "errors": []}\n'
+
+
+def test_prototype_superseded_empty_array_is_refused_with_its_own_message(tmp_path):
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded([], tmp_path)
+    )
+    assert any("omit the key" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_non_array_and_non_object_entry_are_refused(tmp_path):
+    for value in ({}, "x.html", [_WELL_FORMED_SUPERSEDED["path"]]):
+        _assert_refuses_prototype_superseded(_replay_prototype_superseded(value, tmp_path))
+
+
+@pytest.mark.parametrize("key", ["path", "decision", "note"])
+def test_prototype_superseded_missing_empty_or_non_string_field_is_refused(key, tmp_path):
+    missing = {k: v for k, v in _WELL_FORMED_SUPERSEDED.items() if k != key}
+    for entry in (missing, dict(_WELL_FORMED_SUPERSEDED, **{key: ""}),
+                  dict(_WELL_FORMED_SUPERSEDED, **{key: 7})):
+        verdict = _assert_refuses_prototype_superseded(
+            _replay_prototype_superseded([entry], tmp_path)
+        )
+        assert any("[0]." + key in entry for entry in verdict["errors"]), verdict["errors"]
+
+
+def test_prototype_superseded_unknown_key_is_refused(tmp_path):
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded(
+            [dict(_WELL_FORMED_SUPERSEDED, extra="x")], tmp_path
+        )
+    )
+    assert any("unknown key" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_path_escaping_the_project_root_is_refused(tmp_path):
+    # The target EXISTS outside the root: a missing one resolves through bash's
+    # documented unresolved-string arm and is accepted (see require_in_project).
+    verdict = _assert_refuses_prototype_superseded(
+        _replay_prototype_superseded(
+            [dict(_WELL_FORMED_SUPERSEDED, path="../fora/proto.html")],
+            tmp_path,
+            outside={"fora/proto.html": "<html></html>"},
+        )
+    )
+    assert any("escapes the project root" in entry for entry in verdict["errors"])
+
+
+def test_prototype_superseded_surfaces_in_metadata_and_is_absent_when_not_recorded(tmp_path):
+    root = tmp_path / "proj"
+    tasks_dir = root / ".aimi" / "tasks"
+    tasks_dir.mkdir(parents=True)
+    story = {
+        "id": "US-001", "title": "t", "description": "d",
+        "acceptanceCriteria": ["a"], "status": "pending", "priority": 1,
+        "dependsOn": [], "wave": 0,
+    }
+
+    def write(name, metadata):
+        target = tasks_dir / name
+        target.write_text(
+            json.dumps({"schemaVersion": "3.3", "metadata": metadata, "userStories": [story]}),
+            encoding="utf-8",
+        )
+        return str(target)
+
+    base = {"title": "t", "branchName": "b"}
+    with_key = write("sup.json", dict(base, prototypeSuperseded=[_WELL_FORMED_SUPERSEDED]))
+    without = write("clean.json", base)
+
+    run = _run_get_story_context(with_key, "US-001", str(root))
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)["metadata"] == {
+        "prototypeSuperseded": [_WELL_FORMED_SUPERSEDED]
+    }
+
+    run = _run_get_story_context(without, "US-001", str(root))
+    assert run.returncode == 0, run.stderr
+    assert "prototypeSuperseded" not in json.loads(run.stdout)["metadata"]

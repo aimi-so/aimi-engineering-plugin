@@ -1,6 +1,6 @@
-"""Tests for plan.md Phase 4.5 Step 3 -- the probe-plan block.
+"""Tests for plan Phase 4.5 Step 3 -- the probe-plan block.
 
-The block is extracted from plan.md between its `phase45-probe-plan:begin` /
+The block is extracted from the plan text (plan_text.py) between its `phase45-probe-plan:begin` /
 `phase45-probe-plan:end` marker lines and run against a stub $AIMI_CLI that
 answers `probe-plan` with a canned payload, under bash and under zsh. The
 stub never calls the real probe.
@@ -15,10 +15,13 @@ from pathlib import Path
 
 import pytest
 
+from plan_text import plan_text
+
 ROOT = Path(__file__).resolve().parents[2]
-PLAN = ROOT / "commands" / "plan.md"
 SKILL = ROOT / "skills" / "story-executor" / "SKILL.md"
-PLAN_TEXT = PLAN.read_text(encoding="utf-8")
+# plan.md is a router; the probe-plan block and the Phase 4.5 prose live in
+# commands/references/plan/. plan_text() is the whole of /aimi:plan.
+PLAN_TEXT = plan_text()
 
 SHELLS = [s for s in ("bash", "zsh") if shutil.which(s)]
 
@@ -246,3 +249,10 @@ def test_guardrails_mentioned_in_the_three_plan_places_and_the_skill():
     skill = SKILL.read_text(encoding="utf-8")
     assert "implementation.guardRails" in skill
     assert "WARNING and NEVER a block" in skill
+
+
+def test_failure_row_no_longer_anticipates_non_git_root():
+    rows = [l for l in PLAN_TEXT.splitlines() if l.startswith("| Phase 4.5 |") and "baseRef" in l]
+    assert len(rows) == 1
+    assert "`AIMI_ROOT` not a git repository" not in rows[0]
+    assert "non-git parent" in PLAN_TEXT and "in the project repository its stories name" in PLAN_TEXT

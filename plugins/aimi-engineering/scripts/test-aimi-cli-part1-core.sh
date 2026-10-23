@@ -1135,6 +1135,127 @@ EOF
   rm -f "$file_a" "$file_b"
 }
 
+test_acknowledge_smell() {
+  echo ""
+  echo "=== Testing acknowledge-smell ==="
+
+  local rc err_out output before
+  local file_a="$TASKS_DIR/9999-99-88-acknowledge-smell-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2,
+    "smellWarnings": [
+      {"type": "verify-coverage", "storyId": "US-900", "commands": ["npm test"], "message": "m1"},
+      {"type": "verify-coverage", "storyId": "US-901", "commands": ["npm run lint"], "message": "m2"},
+      {"type": "orphan-symbol", "storyId": "US-900", "symbols": ["foo"], "message": "m3"}
+    ]},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "pending", "dependsOn": [], "notes": ""},
+    {"id": "US-901", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+
+  # --- refusal: agent mode (AIMI_AGENT_MODE and CI both resolve to agent) ---
+  before=$(cat "$file_a")
+  err_out=$(AIMI_AGENT_MODE=true "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: AIMI_AGENT_MODE=true exits non-zero"
+  assert_contains "human decision" "$err_out" "acknowledge-smell: agent-mode refusal names the reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: agent-mode refusal leaves the file unchanged"
+  err_out=$(CI=true "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: CI=true exits non-zero"
+
+  # --- refusal: malformed story id ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell 'bad id' --type verify-coverage --reason 'x' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: malformed story id exits non-zero"
+
+  # --- refusal: no matching entry names the id and the type ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-902 --type verify-coverage --reason 'x' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: no matching entry exits non-zero"
+  assert_contains "US-902" "$err_out" "acknowledge-smell: no-match refusal names the story id"
+  assert_contains "verify-coverage" "$err_out" "acknowledge-smell: no-match refusal names the type"
+
+  # --- refusal: empty / whitespace-only --reason ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason '   ' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-smell: whitespace-only --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "acknowledge-smell: empty-reason refusal names --reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: refusals leave the file unchanged"
+
+  # --- success: matched by storyId + type, sibling entries untouched ---
+  local sibling_before at_value at_ok="no"
+  sibling_before=$(jq -c '[.metadata.smellWarnings[1], .metadata.smellWarnings[2]]' "$file_a")
+  output=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'reviewed by hand' --tasks-file "$file_a") && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-smell: success exits 0"
+  assert_eq "true" "$(printf '%s' "$output" | jq '.acknowledged')" "acknowledge-smell: prints the post-write entry"
+  assert_eq "true" "$(jq '.metadata.smellWarnings[0].acknowledged' "$file_a")" "acknowledge-smell: on disk, acknowledged is the JSON literal true"
+  assert_eq "reviewed by hand" "$(jq -r '.metadata.smellWarnings[0].acknowledgedReason' "$file_a")" "acknowledge-smell: on disk, reason recorded"
+  at_value=$(jq -r '.metadata.smellWarnings[0].acknowledgedAt' "$file_a")
+  if printf '%s' "$at_value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then at_ok="yes"; fi
+  assert_eq "yes" "$at_ok" "acknowledge-smell: acknowledgedAt is ISO-8601 UTC"
+  assert_eq "$sibling_before" "$(jq -c '[.metadata.smellWarnings[1], .metadata.smellWarnings[2]]' "$file_a")" "acknowledge-smell: other story and other type entries are unchanged"
+
+  # --- idempotent: same call again writes nothing ---
+  before=$(cat "$file_a")
+  env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-smell US-900 --type verify-coverage --reason 'reviewed by hand' --tasks-file "$file_a" >/dev/null && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-smell: repeat call exits 0"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-smell: repeat call leaves the file byte-identical"
+
+  rm -f "$file_a"
+}
+
+test_acknowledge_evidence() {
+  echo ""
+  echo "=== Testing acknowledge-evidence ==="
+
+  local rc err_out output before at_value at_ok="no"
+  local file_a="$TASKS_DIR/9999-99-88-acknowledge-evidence-a-tasks.json"
+  cat > "$file_a" << 'EOF'
+{
+  "schemaVersion": "3.3",
+  "metadata": {"title": "ref", "type": "ref", "branchName": "ref/x", "createdAt": "9999-99-99", "planPath": null, "maxConcurrency": 2},
+  "userStories": [
+    {"id": "US-900", "title": "Story", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 1, "status": "completed", "dependsOn": [], "notes": ""},
+    {"id": "US-901", "title": "Story two", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 2, "status": "completed", "dependsOn": [], "notes": ""},
+    {"id": "US-902", "title": "Story three", "description": "d", "acceptanceCriteria": ["Passes"], "priority": 3, "status": "pending", "dependsOn": [], "notes": ""}
+  ]
+}
+EOF
+
+  # --- refusal: agent mode (AIMI_AGENT_MODE and CI both resolve to agent) ---
+  before=$(cat "$file_a")
+  err_out=$(AIMI_AGENT_MODE=true "$CLI" acknowledge-evidence --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: AIMI_AGENT_MODE=true exits non-zero"
+  assert_contains "human decision" "$err_out" "acknowledge-evidence: agent-mode refusal names the reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: agent-mode refusal leaves the file unchanged"
+  err_out=$(CI=true "$CLI" acknowledge-evidence --reason 'checked' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: CI=true exits non-zero"
+
+  # --- refusal: whitespace-only --reason ---
+  err_out=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason '   ' --tasks-file "$file_a" 2>&1 1>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "acknowledge-evidence: whitespace-only --reason exits non-zero"
+  assert_contains "--reason" "$err_out" "acknowledge-evidence: empty-reason refusal names --reason"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: refusals leave the file unchanged"
+
+  # --- success: record carries the reason, a UTC stamp and the completed count ---
+  output=$(env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason 'reviewed by hand' --tasks-file "$file_a") && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-evidence: success exits 0"
+  assert_eq "reviewed by hand" "$(printf '%s' "$output" | jq -r '.reason')" "acknowledge-evidence: prints the written record"
+  assert_eq "reviewed by hand" "$(jq -r '.metadata.evidenceAcknowledged.reason' "$file_a")" "acknowledge-evidence: on disk, reason recorded"
+  assert_eq "2" "$(jq '.metadata.evidenceAcknowledged.completed' "$file_a")" "acknowledge-evidence: on disk, completed is the completed-story count"
+  at_value=$(jq -r '.metadata.evidenceAcknowledged.acknowledgedAt' "$file_a")
+  if printf '%s' "$at_value" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then at_ok="yes"; fi
+  assert_eq "yes" "$at_ok" "acknowledge-evidence: acknowledgedAt is ISO-8601 UTC"
+
+  # --- idempotent: same call again writes nothing ---
+  before=$(cat "$file_a")
+  env -u CI -u AIMI_AGENT_MODE "$CLI" acknowledge-evidence --reason 'reviewed by hand' --tasks-file "$file_a" >/dev/null && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "acknowledge-evidence: repeat call exits 0"
+  assert_eq "$before" "$(cat "$file_a")" "acknowledge-evidence: repeat call leaves the file byte-identical"
+
+  rm -f "$file_a"
+}
+
 test_validate_deps() {
   echo ""
   echo "=== Testing validate-deps ==="
@@ -1357,9 +1478,11 @@ test_validators_moved_to_tasks_py() {
 
   # The screen the jq wrote out THREE times -- title, description, tasks[] --
   # is one constant now. Three copies of a prompt-injection rule are three
-  # chances to fix two of them.
-  assert_eq "1" "$(grep -c '^SUSPICIOUS = ($' "$tasks_py" || true)" \
-    "validators: exactly one SUSPICIOUS definition in tasks.py"
+  # chances to fix two of them. It lives in sanitize.py now (the patch matcher
+  # shares it), so the single definition is counted there and tasks.py is
+  # required to import it rather than define a second one.
+  assert_eq "1:0" "$(grep -c '^SUSPICIOUS = ($' "$(dirname "$tasks_py")/sanitize.py" || true):$(grep -c '^SUSPICIOUS = ' "$tasks_py" || true)" \
+    "validators: exactly one SUSPICIOUS definition, in sanitize.py, and none in tasks.py"
 
   # The story-id regex is the one thing here that did NOT fully move, and the
   # count says so rather than leaving a reader to wonder. validate_story_id
@@ -3511,9 +3634,11 @@ EOF
   # tasks.py imports compute_waves from story_merge.py (normalize-waves' own
   # rule, read from the writer rather than restated) -- so story_merge.py is
   # now one of tasks.py's siblings this fixture must provision, the same as
-  # roadmap.py and sanitize.py already are.
+  # roadmap.py and sanitize.py already are. story_merge.py in turn imports
+  # audit_patches.py (the staged-idx helper its audit gate shares with the
+  # apply-audit-patches verb), so that is provisioned too.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
-    "$SCRIPT_DIR/story_merge.py" \
+    "$SCRIPT_DIR/story_merge.py" "$SCRIPT_DIR/audit_patches.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 
@@ -11600,6 +11725,8 @@ main() {
   test_mark_skipped
   test_remove_story
   test_set_verification
+  test_acknowledge_smell
+  test_acknowledge_evidence
   test_validate_deps_circular
   test_validate_deps
   test_status

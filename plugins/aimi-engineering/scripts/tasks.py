@@ -156,7 +156,15 @@ import time
 # If a third module ever needs these, they follow rm_sanitize into a module of
 # their own -- that is what sanitize.py is, and why it was extracted in its own
 # commit rather than being imported out of whichever file happened to hold it.
-from roadmap import TERMINAL_STORY_STATUSES, _json_type, ground_truth, jq_numbers, jq_sort_key
+from roadmap import (
+    TERMINAL_STORY_STATUSES,
+    _completed_gate_has_marker,
+    _completed_story_ids,
+    _json_type,
+    ground_truth,
+    jq_numbers,
+    jq_sort_key,
+)
 
 # compute_waves is the WRITER's own rule -- roots at 1, everyone else at
 # max(dependency waves) + 1. normalize_waves (below) recomputes a stale
@@ -174,7 +182,7 @@ from story_merge import compute_waves
 # first WRITER of metadata.decisions anywhere in this file -- every existing
 # entry is written command-side, at plan time -- so it needs the identical
 # rule rather than a third copy of it.
-from sanitize import rm_sanitize
+from sanitize import rm_sanitize, SUSPICIOUS
 
 # THE default, in the one place it is now written.
 #
@@ -1003,49 +1011,11 @@ def next_story(doc):
 # Its bash body ended at the jq call, so an invalid verdict still exits 0 --
 # the verdict lives in `.valid`, never in `$?`. See op_validate_waves.
 
-# The prompt-injection screen, written out THREE times in the jq -- once for a
-# title, once for a description, once per tasks[] entry. One constant here for
-# the same reason clamp_max_concurrency is one function: three copies of a
-# security rule are three chances to fix two of them.
-#
-# WHICH RULER THIS IS: the instruction-injection one, and only that one. None of
-# the three fields it guards is ever evaluated by a shell. They are interpolated
-# into PROMPTS -- get-story-context hands title, description and tasks[] to the
-# story executor, and /aimi:plan threads a description into story-expander
-# sub-agent prompts via phaseHandoffBlocks (grep that symbol; line numbers
-# drift). An instruction marker does damage there, and so does a code fence,
-# because these fields land INSIDE fenced prompt blocks and a fence in the data
-# can break out of one. A command-substitution operator does neither: nothing
-# here reaches a shell, so its only measured effect was refusing PROSE -- a
-# tasks[] entry that merely named the operator while describing the parsing it
-# was fixing. That alternative was dropped and nothing else about this changed.
-#
-# The split is roadmap.py's, applied rather than re-derived: read the comment
-# above cv_suspicious there before widening this back. cv_injection judges both
-# an identity and its description because both reach prompts, while _SHELL_CLASS
-# judges the identity ALONE -- judging the description too refused "cmd_clean"
-# described as "does x; then y", an identity that is itself clean. That is this
-# defect with the fields renamed.
-#
-# The shell ruler is re-scoped, never abolished. It still applies exactly where
-# a shell reads: validate_stories below keeps `.project`'s own `[\$`;|&]`
-# metacharacter test and skills[]'s PATH_COMPONENT check untouched, and
-# validate_path_in_project in aimi-cli.sh remains the sole authority over every
-# path arriving as a CLI argument.
-#
-# The two surfaces that TELL an author this rule move with it -- the
-# "Forbidden in tasks[]" line in commands/plan.md and the one in
-# agents/workflow/aimi-story-expander.md each enumerate exactly the alternatives
-# below. A reader that accepts what the writer still forbids is the
-# writer-mints-what-reader-refuses shape of .aimi/known-gaps/2026-08-08-US-003.md
-# running the other way, and it leaves the defect alive under its own fix.
-SUSPICIOUS = (
-    "ignore previous"
-    "|(^|\\s)[^a-zA-Z0-9]*system\\s*:"
-    "|(^|\\s)[^a-zA-Z0-9]*#{1,6}\\s*INSTRUCTIONS\\b"
-    "|INSTRUCTIONS\\s*:"
-    "|```"
-)
+# The prompt-injection screen's pattern, and the rationale for what it does and
+# does not refuse, now live in sanitize.py beside the patch matcher that shares
+# it. This module cannot own the definition: sanitize.py is imported here, and an
+# import the other way would be circular. The three call sites are in
+# _story_errors below.
 
 # aimi-cli.sh's `[[ "$id" =~ ^US-[0-9]{3}[a-z]?$ ]]`, verbatim. The optional
 # lowercase suffix is the contract; see the note above before "fixing" it.
@@ -1071,6 +1041,15 @@ VERIFICATION_STATUSES = ("pending", "passed", "failed", "skipped")
 # one-line explanation ("agent-browser not installed") while still bounding
 # what a skipped verdict can carry into the document.
 VERIFICATION_SKIP_REASON_MAXLEN = 500
+
+# acknowledge-smell's own cap on --reason, through rm_sanitize like
+# set-verification's -- its own name rather than a reuse of the verification
+# constant, because the two are different fields that merely agree today.
+SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
+
+# acknowledge-evidence's own cap on --reason, through rm_sanitize. Its own
+# name for the same reason: a different field that merely agrees today.
+EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -1275,7 +1254,7 @@ def _story_errors(story):
     # No quotes around either word: see the note at the top of this section.
     if jq_has(story, "gates", STORY):
         errors.append(
-            story_id + ": gate: gates field is invalid; use singular gate (see plan.md L687-692)"
+            story_id + ": gate: gates field is invalid; use singular gate (see references/plan/phase-4-schema-v33.md § Schema v3.3 Structure)"
         )
     gate = jq_index(story, "gate", STORY)
     if gate is not None:
@@ -2147,6 +2126,56 @@ def prototype_dropped_shape_errors(dropped):
     return problems
 
 
+def prototype_superseded_shape_errors(superseded):
+    """`metadata.prototypeSuperseded`'s shape, for R22. Returns a list of suffixes.
+
+    The sibling of prototype_dropped_shape_errors above and the same contract:
+    ABSENT (or an explicit null, which jq cannot tell from absent) is valid and
+    skipped by the caller, `[]` gets a message of its own because the key is
+    omitted-when-empty, and every element is an object carrying EXACTLY
+    `path`, `decision` and `note` -- each a non-empty string. An unknown key is
+    an error: the writer is /aimi:plan Phase 4 alone, so a stray key is the
+    plugin having written a record its own reader cannot parse.
+
+    The record names a prototype a later decision (`oqDecisions[]`) changed
+    something of. It stays in `metadata.prototypePaths` -- recorded, never
+    regenerated. `path` confinement is the CALLER's job, since it needs
+    project_root; this helper only judges shape.
+    """
+    if jq_type(superseded) != "array":
+        return [" is not an array (expected [{path, decision, note}, …])"]
+
+    if not superseded:
+        return [
+            " is an empty array — omit the key entirely when nothing was superseded"
+        ]
+
+    problems = []
+    for index, entry in enumerate(superseded):
+        where = "[" + str(index) + "]"
+        if jq_type(entry) != "object":
+            problems.append(
+                where + " is not an object (expected {path, decision, note})"
+            )
+            continue
+
+        for key in ("path", "decision", "note"):
+            value = jq_index(entry, key, ".metadata.prototypeSuperseded" + where)
+            if not isinstance(value, str) or not value:
+                problems.append(
+                    where + "." + key + " is missing or not a non-empty string"
+                )
+
+        for key in entry:
+            if key not in ("path", "decision", "note"):
+                problems.append(
+                    where + " has unknown key \"" + str(key)
+                    + "\" (allowed: path, decision, note)"
+                )
+
+    return problems
+
+
 def _visual_ac_lines(docs):
     """`.userStories[] | select(.verification.strategy == "visual") | …| @tsv`,
     over the whole STREAM -- unlike the metadata above, which took line one."""
@@ -2406,11 +2435,32 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             files = jq_index(implementation, "files", ".userStories[].implementation")
             if not isinstance(files, list):
                 continue
+            # A story's entries are relative to ITS project, not to the
+            # layout root: in a multi-repo layout `project` names the child
+            # repository the story's files live in. Absent, non-string, "" or
+            # "." keeps the root as the base (the single-repo behaviour, byte
+            # for byte). A project that escapes the root -- `..` segments or an
+            # absolute path -- is never traversed: every entry is reported
+            # through the same warning. The leading "/" is checked first because
+            # confined_spec_path joins with a string, so `/etc` would become
+            # `<root>//etc` and look lexically inside the root.
+            project = _report_project(story)
+            if project in (None, "", "."):
+                base = project_root
+            elif project.startswith("/"):
+                base = None
+            else:
+                project_path, project_inside = confined_spec_path(project_root, project)
+                base = project_path if project_inside else None
             unopenable = []
             for entry in files:
                 if not isinstance(entry, str):
                     continue
-                path, inside = confined_spec_path(project_root, entry)
+                if base is None:
+                    inside = False
+                    path = entry
+                else:
+                    path, inside = confined_spec_path(base, entry)
                 if inside and os.path.isdir(os.path.dirname(path)):
                     continue
                 if entry not in unopenable:
@@ -2591,6 +2641,39 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
     if prototype_dropped is not None:
         for problem in prototype_dropped_shape_errors(prototype_dropped):
             errors.append(tasks_file + ": metadata.prototypeDropped" + problem)
+
+    # R22 -- metadata.prototypeSuperseded's shape and path confinement. Appended
+    # AFTER R21 for R17's reason: a rule below the last one can only add lines
+    # after everything already recorded. An ERROR, R21's reasoning held: the key
+    # has one writer (/aimi:plan Phase 4), so a malformed value is the plugin
+    # having written a record its reader cannot parse, and a warning would hand
+    # back the silence the record exists to break. ABSENT/null does nothing.
+    #
+    # UNLIKE prototypeDropped, this `path` IS confined, because it names a
+    # prototype the executor is told to read next to -- through
+    # confined_spec_path, never a fresh check. archive-task's cleanup tuple is
+    # deliberately NOT extended with this key (prototypeDropped is not in it
+    # either): `path` always points at an entry already in
+    # metadata.prototypePaths, which archive-task already confines and removes.
+    prototype_superseded = jq_index(doc0_metadata, "prototypeSuperseded", ".metadata")
+    if prototype_superseded is not None:
+        for problem in prototype_superseded_shape_errors(prototype_superseded):
+            errors.append(tasks_file + ": metadata.prototypeSuperseded" + problem)
+        if isinstance(prototype_superseded, list):
+            for index, entry in enumerate(prototype_superseded):
+                if jq_type(entry) != "object":
+                    continue
+                given = jq_index(
+                    entry, "path", ".metadata.prototypeSuperseded[" + str(index) + "]"
+                )
+                if not isinstance(given, str) or not given:
+                    continue
+                _resolved, inside = confined_spec_path(project_root, given)
+                if not inside:
+                    errors.append(
+                        tasks_file + ": metadata.prototypeSuperseded[" + str(index)
+                        + "].path escapes the project root: " + given
+                    )
 
     return errors
 
@@ -4611,7 +4694,8 @@ def op_validate_tasks(argv):
 # On 28 September 2026, over SKILL.md and both files under references/, that
 # printed five distinct matches -- metadata.designBundle (2 occurrences),
 # metadata.designTokens (1), metadata.prototypePaths (10) and
-# metadata.prototypeDropped (3), plus one metadata.baseRef that names a
+# metadata.prototypeDropped (3) -- and, once added, metadata.prototypeSuperseded --
+# plus one metadata.baseRef that names a
 # DIFFERENT document's field entirely (step 1.5's own prose about a verify
 # resolving baseRef from the full tasks file it reads directly, never from
 # this payload) and is excluded from the tuple below for that reason. Re-run
@@ -4626,7 +4710,20 @@ def op_validate_tasks(argv):
 # writes -- one object per resolved question, each carrying the question's own
 # prose -- and nothing in the executor has ever read it, so it travelled in
 # every spawn of every story for nothing.
-STORY_CONTEXT_METADATA_KEYS = ("designBundle", "designTokens", "prototypePaths", "prototypeDropped")
+#
+# metadata.prototypeSuperseded joined the tuple with the same measured read:
+# the executor checks it beside each prototypeDropped check (reading the
+# superseded entry NEXT TO the prototype). It is a RECORD of a decision, and
+# the key is deliberately absent from archive-task's cleanup tuple -- its
+# `path` always names an entry of metadata.prototypePaths, which archive-task
+# already confines and removes.
+STORY_CONTEXT_METADATA_KEYS = (
+    "designBundle",
+    "designTokens",
+    "prototypePaths",
+    "prototypeDropped",
+    "prototypeSuperseded",
+)
 
 
 def projected_metadata(metadata):
@@ -5172,6 +5269,174 @@ def op_set_verification(argv):
     for doc in docs:
         for payload in field_payload(doc, story_id, "verification"):
             _emit(payload)
+    return 0
+
+
+def op_acknowledge_smell(argv):
+    """acknowledge-smell: record a reasoned acknowledgement on a
+    metadata.smellWarnings entry, matched by storyId + type (never by index).
+
+    Every refusal is decided here, inside the single crossing, in this fixed
+    order: --reason missing or blank, then no matching entry. The wrapper has
+    already refused a malformed id and agent mode before the lock.
+
+    Every matching entry is acknowledged (a story can carry two entries of one
+    type). An entry already acknowledged with the literal true and the same
+    sanitized reason is a no-op: nothing is written and the first call's
+    acknowledgedAt survives. `acknowledged` is read with `is True`, the same
+    literal-only discipline the completed gate applies.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    smell_type = _flag(argv, "--type")
+    reason = _flag(argv, "--reason")
+    if not path or story_id is None or not smell_type:
+        die(
+            "Usage: tasks.py acknowledge-smell --tasks-file <path> --story-id <id> "
+            "--type <smell-type> --reason <text>"
+        )
+    if not reason or not reason.strip():
+        die("Error: acknowledge-smell: --reason is required")
+    clean_reason = rm_sanitize(reason, SMELL_ACKNOWLEDGE_REASON_MAXLEN)
+
+    docs = read_docs(path, "acknowledge-smell")
+    matches = []
+    for doc in docs:
+        metadata = doc.get("metadata") if isinstance(doc, dict) else None
+        warnings = metadata.get("smellWarnings") if isinstance(metadata, dict) else None
+        if not isinstance(warnings, list):
+            continue
+        for entry in warnings:
+            if (
+                isinstance(entry, dict)
+                and entry.get("storyId") == story_id
+                and entry.get("type") == smell_type
+            ):
+                matches.append(entry)
+    if not matches:
+        die(
+            "Error: acknowledge-smell: no smellWarnings entry for story " + story_id
+            + " of type " + smell_type + " in " + path
+        )
+
+    changed = False
+    for entry in matches:
+        if entry.get("acknowledged") is True and entry.get("acknowledgedReason") == clean_reason:
+            continue
+        entry["acknowledged"] = True
+        entry["acknowledgedReason"] = clean_reason
+        entry["acknowledgedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed = True
+
+    if changed:
+        write_docs_atomically(path, docs)
+    _emit(matches[0])
+    return 0
+
+
+def _evidence_phase_members(path, docs):
+    """The tasks file paths whose completed stories make up THIS file's
+    phase: itself, plus the siblings a well-formed `metadata.splitGroup`
+    names (resolved by basename in this file's own directory, so a
+    traversal-shaped sibling never escapes it), or the counterpart of a
+    legacy -frontend-/-backend-tasks.json pair. Mirrors the member discipline
+    `roadmap._completed_gate_resolve_members` applies to the same phase, so
+    the count recorded here is the count the gate measures against."""
+    members = [path]
+    directory = os.path.dirname(path) or "."
+    first = docs[0] if docs and isinstance(docs[0], dict) else None
+    if _completed_gate_has_marker(first):
+        for sibling in first["metadata"]["splitGroup"].get("siblings") or []:
+            if not isinstance(sibling, str):
+                continue
+            candidate = os.path.join(directory, os.path.basename(sibling))
+            if os.path.isfile(candidate) and candidate not in members:
+                members.append(candidate)
+        return members
+    base = os.path.basename(path)
+    for suffix, other in (("-frontend-tasks.json", "-backend-tasks.json"),
+                          ("-backend-tasks.json", "-frontend-tasks.json")):
+        if base.endswith(suffix):
+            candidate = os.path.join(directory, base[: -len(suffix)] + other)
+            if os.path.isfile(candidate):
+                members.append(candidate)
+            break
+    return members
+
+
+def op_acknowledge_evidence(argv):
+    """acknowledge-evidence: record, on this tasks file's metadata, that a
+    human saw a phase whose completed stories prove nothing discriminating and
+    chose to let it close -- `metadata.evidenceAcknowledged = {reason,
+    acknowledgedAt, completed}`.
+
+    `completed` is the PHASE-AGGREGATE completed-story count (this file plus
+    every split sibling), because that is the number the completed gate
+    compares it against; the verb writes only into the one file it is given,
+    and the gate honors an acknowledgement found in ANY member. The
+    acknowledgement lapses, by the gate's own comparison, the moment that
+    count changes.
+
+    Refusals, decided here inside the single crossing: --reason missing or
+    blank. The wrapper has already refused agent mode before the lock.
+    A repeat call with the same sanitized reason and the same completed count
+    is a no-op that leaves the first acknowledgedAt alone; a different reason
+    or count replaces the whole record.
+    """
+    path = _flag(argv, "--tasks-file")
+    reason = _flag(argv, "--reason")
+    if not path:
+        die("Usage: tasks.py acknowledge-evidence --tasks-file <path> --reason <text>")
+    if not reason or not reason.strip():
+        die("Error: acknowledge-evidence: --reason is required")
+    clean_reason = rm_sanitize(reason, EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN)
+    if not clean_reason.strip():
+        die("Error: acknowledge-evidence: --reason is required")
+
+    docs = read_docs(path, "acknowledge-evidence")
+    # The first document's metadata object; one is created when the document
+    # has none, a metadata that is some other shape is refused rather than
+    # overwritten.
+    target = None
+    first = docs[0] if docs else None
+    if isinstance(first, dict):
+        if first.get("metadata") is None:
+            first["metadata"] = {}
+        if isinstance(first["metadata"], dict):
+            target = first["metadata"]
+    if target is None:
+        die("Error: acknowledge-evidence: no metadata object in " + path)
+
+    completed = 0
+    for member in _evidence_phase_members(path, docs):
+        if member == path:
+            member_docs = docs
+        else:
+            try:
+                member_docs = load_docs(member)
+            except (OSError, ValueError):
+                continue
+        completed += sum(len(_completed_story_ids(doc)) for doc in member_docs)
+
+    existing = target.get("evidenceAcknowledged")
+    if (
+        isinstance(existing, dict)
+        and existing.get("reason") == clean_reason
+        and existing.get("completed") == completed
+        and not isinstance(existing.get("completed"), bool)
+        and isinstance(existing.get("acknowledgedAt"), str)
+    ):
+        _emit(existing)
+        return 0
+
+    record = {
+        "reason": clean_reason,
+        "acknowledgedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "completed": completed,
+    }
+    target["evidenceAcknowledged"] = record
+    write_docs_atomically(path, docs)
+    _emit(record)
     return 0
 
 
@@ -7656,13 +7921,45 @@ def op_probe_plan(argv):
         _emit(_probe_plan_not_probed(ref, "git is not installed or cannot run here"))
         return 0
     if top[0] != 0:
-        _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        grouped = _probe_plan_project_groups(
+            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+        )
+        if grouped is None:
+            _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
+        else:
+            _emit(grouped)
         return 0
     toplevel = top[1].strip()
+    outcome = _probe_plan_in_repo(
+        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+    )
+    if outcome[0] == "not-probed":
+        _emit(_probe_plan_not_probed(ref, outcome[1]))
+        return 0
+    _emit(_probe_plan_payload(ref, outcome[1], outcome[2], outcome[3]))
+    return 0
+
+
+def _probe_plan_payload(ref, stories_out, unlabelled, unmeasured):
+    return {
+        "baseRef": ref,
+        "probed": True,
+        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
+        "stories": stories_out,
+        "unlabelledNonDiscriminating": unlabelled,
+        "unmeasured": unmeasured,
+    }
+
+
+def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
+    """The resolve-ref / worktree-add / per-story sequence against ONE
+    repository. `toplevel` is its root and `cwd` a directory inside it whose
+    prefix the stories' own relative paths hang from. Returns
+    ("not-probed", reason) or ("ok", stories, unlabelled, unmeasured); the
+    throwaway worktree is gone on every path out."""
     resolved = _probe_plan_git(["rev-parse", "--verify", "--quiet", ref + "^{commit}"], toplevel)
     if resolved is None or resolved[0] != 0 or not resolved[1].strip():
-        _emit(_probe_plan_not_probed(ref, "the ref does not resolve to a commit in this repository"))
-        return 0
+        return ("not-probed", "the ref does not resolve to a commit in this repository")
     sha = resolved[1].strip()
     shown = _probe_plan_git(["rev-parse", "--show-prefix"], cwd)
     prefix = shown[1].strip() if shown is not None and shown[0] == 0 else ""
@@ -7670,36 +7967,131 @@ def op_probe_plan(argv):
         scratch_real = os.path.realpath(scratch)
         top_real = os.path.realpath(toplevel)
         if scratch_real == top_real or scratch_real.startswith(top_real + "/"):
-            _emit(_probe_plan_not_probed(
-                ref, "the temporary directory would land inside the repository"
-            ))
-            return 0
+            return ("not-probed", "the temporary directory would land inside the repository")
         git_tree = scratch_real + "/tree"
         added = _probe_plan_git(["worktree", "add", "--detach", git_tree, sha], toplevel)
         if added is None or added[0] != 0:
             _probe_plan_git(["worktree", "prune"], toplevel)
             detail = (added[2].strip().splitlines() or ["no output"])[0] if added else "git cannot run"
-            _emit(_probe_plan_not_probed(ref, "git worktree add failed: " + detail))
-            return 0
+            return ("not-probed", "git worktree add failed: " + detail)
         try:
             stories_out, unlabelled, unmeasured = _probe_plan_stories(
-                docs, path, git_tree, sha, prefix,
-                None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+                docs, path, git_tree, sha, prefix, skip_matching,
             )
         finally:
             removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
             _probe_plan_git(["worktree", "prune"], toplevel)
             if removed is None or removed[0] != 0:
                 sys.stderr.write("probe-plan: could not remove the temporary worktree %s\n" % git_tree)
-    _emit({
-        "baseRef": ref,
-        "probed": True,
-        "policy": PROBE_PLAN_NONDISCRIMINATING_POLICY,
-        "stories": stories_out,
-        "unlabelledNonDiscriminating": unlabelled,
-        "unmeasured": unmeasured,
-    })
-    return 0
+    return ("ok", stories_out, unlabelled, unmeasured)
+
+
+def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
+    """The invocation directory is not inside a git repository, which is the
+    multi-repo layout: AIMI_ROOT is a plain parent holding one repository per
+    project. Each story's own `project` names the repository it is probed in,
+    so the stories are grouped by it and each group goes through the same
+    sequence a single repository does, at the file's own `ref`.
+
+    The `project` is document-sourced, so its directory is confined to
+    PROJECT_ROOT by `confined_spec_path` (never a fresh check); one that
+    escapes, does not exist or is not a repository leaves its stories
+    `unmeasured` by name, and the other groups are still probed. Returns None
+    when no group could be resolved (the caller then answers `probed: false`
+    exactly as before), else the same payload a single repository gives."""
+    project_root = os.environ.get("PROJECT_ROOT") or cwd
+    entries = []  # (project key or None, story)
+    for doc in docs:
+        if not isinstance(doc, dict) or not isinstance(doc.get("userStories"), list):
+            continue
+        for story in doc["userStories"]:
+            if isinstance(story, dict):
+                project = _report_project(story)
+                entries.append((project if project is not None else ".", story))
+    results = [None] * len(entries)  # per story: (stories_entry, [unlabelled], [unmeasured])
+    order = []
+    for index, (project, _) in enumerate(entries):
+        if project not in order:
+            order.append(project)
+    resolved_any = False
+
+    def _declined(index, story, why):
+        sid = story.get("id")
+        implementation = story.get("implementation")
+        verify = implementation.get("verify") if isinstance(implementation, dict) else None
+        unmeasured = []
+        if verify is not None and not (isinstance(verify, str) and not verify.strip()):
+            unmeasured.append({"id": sid, "segment": None, "why": why})
+        results[index] = ({"id": sid, "segments": []}, [], unmeasured)
+
+    for project in order:
+        members = [i for i, (key, _) in enumerate(entries) if key == project]
+        reason = None
+        group_dir = None
+        if project == ".":
+            reason = "project . is the invocation directory, which is not inside a git repository"
+        elif _invalid_project(project):
+            reason = "project %r is not a routable project path" % project
+        else:
+            group_dir, inside = confined_spec_path(project_root, project)
+            if not inside:
+                reason = "project %s escapes the project root" % project
+        toplevel = None
+        if reason is None:
+            top = _probe_plan_git(["rev-parse", "--show-toplevel"], group_dir)
+            if top is None:
+                # git could not even start in it: the directory is not there
+                # (or is not a directory), git itself having run above.
+                reason = "project %s: the directory does not exist" % project
+            elif top[0] != 0:
+                reason = "project %s is not a git repository" % project
+            else:
+                toplevel = top[1].strip()
+        if reason is None:
+            # The group's stories lose their own `project`: the repository is
+            # already the group, so the per-story path logic must not add it
+            # to the prefix a second time.
+            stripped = [
+                {k: v for k, v in entries[i][1].items() if k != "project"}
+                for i in members
+            ]
+            outcome = _probe_plan_in_repo(
+                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching
+            )
+            if outcome[0] == "not-probed":
+                reason = "project %s could not be probed: %s" % (project, outcome[1])
+        if reason is not None:
+            for i in members:
+                _declined(i, entries[i][1], reason)
+            continue
+        resolved_any = True
+        _, stories_out, unlabelled, unmeasured = outcome
+        # every dict story yields exactly one stories entry, in order; the
+        # unlabelled/unmeasured lists are attributed to a story by its id.
+        for position, i in enumerate(members):
+            sid = entries[i][1].get("id")
+            results[i] = (
+                stories_out[position],
+                [u for u in unlabelled if u["id"] == sid and position == _first_with_id(entries, members, sid)],
+                [u for u in unmeasured if u["id"] == sid and position == _first_with_id(entries, members, sid)],
+            )
+    if not resolved_any:
+        return None
+    stories_out, unlabelled, unmeasured = [], [], []
+    for entry, rows_u, rows_m in results:
+        stories_out.append(entry)
+        unlabelled.extend(rows_u)
+        unmeasured.extend(rows_m)
+    return _probe_plan_payload(ref, stories_out, unlabelled, unmeasured)
+
+
+def _first_with_id(entries, members, sid):
+    """Position within `members` of the first story carrying `sid`, so a
+    duplicated id's rows are attributed once rather than once per twin."""
+    for position, i in enumerate(members):
+        if entries[i][1].get("id") == sid:
+            return position
+    return -1
 
 
 # ---------------------------------------------------------------------------
@@ -8234,6 +8626,8 @@ _OPS = {
     "cascade-skip": op_cascade_skip,
     "remove-story": op_remove_story,
     "set-verification": op_set_verification,
+    "acknowledge-smell": op_acknowledge_smell,
+    "acknowledge-evidence": op_acknowledge_evidence,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

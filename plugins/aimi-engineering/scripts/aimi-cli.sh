@@ -2608,6 +2608,123 @@ cmd_set_verification() {
   printf '%s\n' "$out"
 }
 
+# Record a reasoned acknowledgement on a metadata.smellWarnings entry, so
+# `roadmap-set-status --status completed` can be unblocked by command rather
+# than by a hand edit of tasks.json. A confirmation needs a human decision, so
+# it refuses when detect-interactivity resolves to agent -- checked here, in
+# bash, before the lock, because it needs no document.
+# Usage: acknowledge-smell <story-id> --type <smell-type> --reason <text> [--tasks-file <path>]
+cmd_acknowledge_smell() {
+  local tasks_file positional=() reason="" smell_type="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --reason) i=$((i + 1)); reason="${args[$i]:-}" ;;
+      --type) i=$((i + 1)); smell_type="${args[$i]:-}" ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ] || [ -z "$smell_type" ]; then
+    echo "Usage: aimi-cli.sh acknowledge-smell <story-id> --type <smell-type> --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ "$(cmd_detect_interactivity)" = "agent" ]; then
+    echo "Error: acknowledge-smell: acknowledging a smell needs a human decision, and this session resolved to agent mode (AIMI_AGENT_MODE, CI or --non-interactive); nothing was written" >&2
+    exit 1
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason reaches tasks.py as an absent one, which refuses it by
+  # naming --reason -- the refusal is op_acknowledge_smell's, not bash's.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock. No pre-lock validate_story_exists: whether a
+  # smellWarnings entry matches is a document-dependent refusal the op owns.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" acknowledge-smell \
+        --tasks-file "$tasks_file" --story-id "$story_id" --type "$smell_type" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
+# Record, on a tasks file's metadata, that a human saw a phase whose completed
+# stories carry no discriminating evidence and chose to let it close, so
+# `roadmap-set-status --status completed` can be unblocked by command. Same
+# agent-mode refusal as acknowledge-smell, for the same reason: it needs a
+# human decision and no document, so bash decides it before the lock.
+# Usage: acknowledge-evidence --reason <text> [--tasks-file <path>]
+cmd_acknowledge_evidence() {
+  local tasks_file positional=() reason="" remaining=()
+  local args=("$@")
+  local i=0 n=${#args[@]}
+  while [ "$i" -lt "$n" ]; do
+    case "${args[$i]}" in
+      --reason) i=$((i + 1)); reason="${args[$i]:-}" ;;
+      *) remaining+=("${args[$i]}") ;;
+    esac
+    i=$((i + 1))
+  done
+  _parse_positional_tasks_file tasks_file positional "${remaining[@]}"
+
+  if [ "${#positional[@]}" -gt 0 ]; then
+    echo "Usage: aimi-cli.sh acknowledge-evidence --reason <text> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  if [ "$(cmd_detect_interactivity)" = "agent" ]; then
+    echo "Error: acknowledge-evidence: acknowledging missing evidence needs a human decision, and this session resolved to agent mode (AIMI_AGENT_MODE, CI or --non-interactive); nothing was written" >&2
+    exit 1
+  fi
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+
+  # An empty --reason reaches tasks.py as an absent one, which refuses it by
+  # naming --reason -- the refusal is op_acknowledge_evidence's, not bash's.
+  local reason_args=()
+  if [ -n "$reason" ]; then
+    reason_args=(--reason "$reason")
+  fi
+
+  # One crossing, inside the lock.
+  check_python3
+  local out
+  out=$(
+    (
+      _lock "${tasks_file}.lock"
+      python3 "$(_aimi_tasks_py)" acknowledge-evidence \
+        --tasks-file "$tasks_file" "${reason_args[@]}"
+    ) 200>"${tasks_file}.lock"
+  )
+  printf '%s\n' "$out"
+}
+
 # Persist a --container/--inline override onto metadata.execution.
 # execute.md and next.md call this after resolving a session-level override so
 # a later re-invocation without the flag continues in the same mode instead of
@@ -14660,7 +14777,8 @@ $rp_entry"
 # human reading, and this verb does not claim it.
 #
 # `dead_keys` follows the omitted-when-empty convention `metadata.baseRef`,
-# `metadata.pluginVersion` and `metadata.prototypeDropped` already use:
+# `metadata.pluginVersion`, `metadata.prototypeDropped` and
+# `metadata.prototypeSuperseded` already use:
 # written only when something was actually found, absent otherwise, never
 # `[]`. A clean file therefore prints exactly `blocks` and `figures_outside`,
 # which is what every caller written before this third count reads.
@@ -14955,6 +15073,8 @@ cmd_research_figures() {
 #           [--split legacy|full-stack] [--agent-mode] [--phase-aware]
 #           [--foundation <NN>|<project>:NN]...
 #           [--feature <slug> --phase <id>]
+#   Two or more staged stories are merged only with an audit-result.json whose
+#   auditedIdx matches them (written by apply-audit-patches); no flag skips it.
 # ============================================================================
 #
 # Everything from "read the staging directory" to "the files are on disk" lives
@@ -15197,6 +15317,82 @@ cmd_story_merge() {
     fi
   fi
   python3 "$(_aimi_script_py story_merge.py)" "${sm_args[@]}"
+}
+
+# ============================================================================
+# apply-audit-patches: validate and apply the cross-story auditor's patches
+# Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
+#           [--annotate-deferred --reason <text>]
+# ============================================================================
+#
+# Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
+# tasks file here and so no lock, and the staged files are private to one
+# /aimi:plan run. What stays in bash is the shell-shaped half -- flags and path
+# confinement, both done before python3 starts so an escaping --staging-dir or
+# --result is refused without audit_patches.py ever running. Everything else
+# (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
+# one crossing.
+cmd_apply_audit_patches() {
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir|--result|--reason)
+        if [ $# -lt 2 ]; then
+          echo "Error: apply-audit-patches: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        case "$1" in
+          --staging-dir) staging_dir="$2" ;;
+          --result) result_path="$2" ;;
+          --reason) reason="$2"; reason_given=true ;;
+        esac
+        shift 2
+        ;;
+      --annotate-deferred)
+        annotate=true
+        shift
+        ;;
+      *)
+        echo "Error: apply-audit-patches: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: apply-audit-patches: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ "$annotate" = true ] && [ -z "$reason" ]; then
+    echo "Error: apply-audit-patches: --annotate-deferred requires a non-empty --reason ($usage)" >&2
+    exit 1
+  fi
+  if [ "$annotate" != true ] && [ "$reason_given" = true ]; then
+    echo "Error: apply-audit-patches: --reason is only valid with --annotate-deferred ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+  if [ -n "$result_path" ]; then
+    validate_path_in_project "$result_path"
+  fi
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: apply-audit-patches: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  local aa_args=(--staging-dir "$staging_dir")
+  if [ -n "$result_path" ]; then
+    aa_args+=(--result "$result_path")
+  fi
+  if [ "$annotate" = true ]; then
+    aa_args+=(--annotate-deferred --reason "$reason")
+  fi
+  python3 "$(_aimi_script_py audit_patches.py)" "${aa_args[@]}"
 }
 
 # ============================================================================
@@ -17156,6 +17352,32 @@ COMMANDS:
                               object. A skipped write replaces any stale skipReason
                               left by an earlier verdict; passed/failed removes it.
                               Prefer this over update-field for a verification verdict.
+    acknowledge-smell <id> --type <smell-type> --reason <text> [--tasks-file <path>]
+                              Acknowledge a metadata.smellWarnings entry (matched by
+                              story id + type) in one locked crossing; sets
+                              acknowledged, acknowledgedReason and acknowledgedAt and
+                              prints the entry. Refuses (writes nothing) in agent
+                              mode, on a malformed id, with no matching entry, or with
+                              an empty --reason. Idempotent: a repeat call is a no-op.
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]
+                              Validate and apply the cross-story auditor's patches to the
+                              staged NN-*.json story files in one crossing: one read and one
+                              atomic write per affected file, every refusal decided before
+                              the first write. Rewrites <dir>/audit-result.json (or --result)
+                              with auditedIdx and appliedAt and prints {applied, dropped[],
+                              unresolved, capped, auditedIdx}. Exit 0 even when patches were
+                              dropped; exit 1 on an unreadable result, a duplicate idx, an
+                              escaping symlink or an array-valued staging file.
+                              --annotate-deferred --reason <text> instead appends the
+                              audit-deferred marker to the notes of every story an unresolved
+                              entry names and prints {annotated, oqDecisions}.
+    acknowledge-evidence --reason <text> [--tasks-file <path>]
+                              Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
+                              completed} in one locked crossing, so a phase whose completed
+                              stories carry no discriminating evidence can close. completed
+                              is the phase-aggregate completed-story count; the gate stops
+                              honoring it when that count changes. Refuses (writes nothing)
+                              in agent mode or with an empty --reason. Idempotent.
     set-execution-mode <container|inline> [--tasks-file <path>]
                               Persist a --container/--inline override onto metadata.execution
                               (returns {execution} JSON). Refuses with non-zero exit on a
@@ -17696,7 +17918,7 @@ COMMANDS:
                               ^(19|20)[0-9]{2}$), and dead_keys -- per block, the names its
                               command indexes a structured subject by that the subject does
                               not carry. dead_keys is omitted entirely when empty (the
-                              baseRef/prototypeDropped convention), never [], so a clean
+                              baseRef/prototypeDropped/prototypeSuperseded convention), never [], so a clean
                               file prints exactly blocks and figures_outside.
                               unrecorded lists [{block, line, command}] for a block that
                               records a command with no output beneath it (line is the
@@ -18644,6 +18866,8 @@ main() {
     update-field)      shift; cmd_update_field "$@" ;;
     remove-story)      shift; cmd_remove_story "$@" ;;
     set-verification)  shift; cmd_set_verification "$@" ;;
+    acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
+    acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
@@ -18683,6 +18907,7 @@ main() {
     bundle-prototype-status)   shift; cmd_bundle_prototype_status "$@" ;;
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
+    apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;

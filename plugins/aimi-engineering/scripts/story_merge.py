@@ -53,9 +53,11 @@ import os
 import random
 import re
 import shutil
+import statistics
 import sys
 import time
 
+from audit_patches import AuditRefusal, staged_idx_map
 from sanitize import rm_sanitize
 
 # The two caps the jq applied, at the two places it applied them. A title
@@ -263,6 +265,124 @@ def staging_files(staging_dir):
                 " contributes no story. Rename it if it is a story.\n"
             )
     return kept
+
+
+# ---------------------------------------------------------------------------
+# The cross-story audit gate
+# ---------------------------------------------------------------------------
+#
+# A staging directory holding two or more stories is merged only after the
+# cross-story audit (/aimi:plan Phase 3d.5) has run, and the proof that it ran
+# is audit-result.json carrying `auditedIdx`: the staged idx set the
+# apply-audit-patches verb stamped on it. Requiring the proof turns a skipped
+# audit from something nobody can see into a refusal. The gate has no flag, no
+# environment variable and no --agent-mode exemption: an escape hatch is a
+# default-off gate by another name.
+#
+# The staged set comes from audit_patches.staged_idx_map, the same function the
+# verb audited against, so the two cannot disagree on which files are stories.
+
+# Step 5 of /aimi:plan matches on the phrase inside this line, so it is a
+# constant rather than a literal at the call site.
+AUDIT_FAILED_NOTICE = (
+    "Warning: story-merge: the cross-story audit failed for this staging"
+    " directory; plan shipped unaudited"
+)
+
+_NN_STORY = re.compile(r"[0-9]{2}-.*\.json", re.S)
+_AUDIT_STEP = (
+    "Run the cross-story audit (/aimi:plan Phase 3d.5, aimi-cli apply-audit-patches"
+    " --staging-dir <dir>) and retry."
+)
+_IDX_LIST_CAP = 50
+
+
+def _gate_refusal(staging_dir, reason):
+    die(
+        "Error: story-merge: staging directory "
+        + staging_dir
+        + " was not cross-story audited ("
+        + reason
+        + "). "
+        + _AUDIT_STEP.replace("<dir>", staging_dir)
+    )
+
+
+def _idx_text(values):
+    """An idx list as a refusal prints it: two-digit tokens only, capped.
+
+    The list in audit-result.json was written by a model. Anything that is not
+    a two-digit string is shown as '?' and nothing else of the file is echoed.
+    """
+    shown = [
+        v if isinstance(v, str) and re.fullmatch(r"[0-9]{2}", v) else "?"
+        for v in values[:_IDX_LIST_CAP]
+    ]
+    text = "[" + ",".join(shown) + (",..." if len(values) > _IDX_LIST_CAP else "") + "]"
+    return text
+
+
+def require_audit(staging_dir, paths):
+    """Refuse a multi-story staging directory that carries no matching audit result.
+
+    Returns the audit result's `status` (None unless it is a string) so the
+    caller can announce an audit-failed run once the merge is certain to go on.
+    Fewer than two staged files is not gated.
+    """
+    if len(paths) < 2:
+        return None
+
+    extras = [_basename(p) for p in paths if not _NN_STORY.fullmatch(_basename(p))]
+    if extras:
+        _gate_refusal(
+            staging_dir,
+            "staged file(s) not named NN-<slug>.json, which the audit never reads: "
+            + ", ".join(extras),
+        )
+
+    sidecar = os.path.join(staging_dir, "audit-result.json")
+    try:
+        with open(sidecar, "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+    except FileNotFoundError:
+        _gate_refusal(staging_dir, "audit-result.json is missing")
+    except (OSError, ValueError, RecursionError):
+        _gate_refusal(staging_dir, "audit-result.json is unreadable or not valid JSON")
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("patches"), list)
+        or not isinstance(result.get("unresolved"), list)
+        or not isinstance(result.get("auditedIdx"), list)
+        or not all(isinstance(v, str) for v in result["auditedIdx"])
+    ):
+        _gate_refusal(
+            staging_dir,
+            "audit-result.json has the wrong shape: it needs an object with"
+            " patches[], unresolved[] and auditedIdx[] of strings",
+        )
+
+    try:
+        staged = sorted(staged_idx_map(staging_dir))
+    except AuditRefusal as refusal:
+        # Two staged files sharing one index cannot be merged at all, and
+        # read_staging names the pair right after this gate; a symlink leaving
+        # the staging directory is the other cause, and that one stops here.
+        indices = [_basename(p)[:2] for p in paths]
+        if len(set(indices)) != len(indices):
+            return result.get("status") if isinstance(result.get("status"), str) else None
+        _gate_refusal(staging_dir, str(refusal))
+
+    audited = sorted(set(result["auditedIdx"]))
+    if audited != staged:
+        _gate_refusal(
+            staging_dir,
+            "audited indices "
+            + _idx_text(audited)
+            + " differ from staged indices "
+            + _idx_text(staged),
+        )
+    status = result.get("status")
+    return status if isinstance(status, str) else None
 
 
 def read_staging(paths):
@@ -1044,6 +1164,100 @@ def _format_not_evaluated_line(entries):
     return line
 
 
+_SCRIPT_EXPANSION_DEPTH_CAP = 5
+_SCRIPT_NAME_CHARS = r"A-Za-z0-9_:.@/\-"
+_RUNNER_INVOCATION_RE = re.compile(
+    r"(?<![" + _SCRIPT_NAME_CHARS + r"])(?:npm|bun|pnpm|yarn)[ \t]+(?:"
+    r"(?:run-script|run)[ \t]+(?:-{1,2}[A-Za-z0-9][A-Za-z0-9_-]*(?:=\S+)?[ \t]+)*"
+    r"(?P<name>[" + _SCRIPT_NAME_CHARS + r"]+)"
+    r"|(?P<test>test)(?![" + _SCRIPT_NAME_CHARS + r"])"
+    r")"
+)
+
+
+def _runner_script_names(text):
+    """Script names `text` invokes through a package manager, in order:
+    `npm|bun|pnpm|yarn run <name>`, `npm run-script <name>` and `<pm> test`
+    (script `test`). The name is a whole token, so `check:foo` and
+    `check:foo-extra` are different names."""
+    names = []
+    for match in _RUNNER_INVOCATION_RE.finditer(text):
+        names.append(match.group("name") or "test")
+    return names
+
+
+def _package_scripts(root):
+    """`root`'s package.json `scripts` object, or None when the file is
+    missing, unreadable, malformed or carries no scripts object."""
+    text = _read_repo_text(root, "package.json")
+    if text is None:
+        return None
+    try:
+        scripts = json.loads(text).get("scripts")
+    except (ValueError, AttributeError):
+        return None
+    return scripts if isinstance(scripts, dict) else None
+
+
+def _expand_script_runs(text, scripts):
+    """Follow package-manager script runs in `text` through `scripts`,
+    transitively. Returns (reached_names, bodies, problems): every script name
+    invoked anywhere along the chain, the body text of each script that was
+    expanded, and one line per reason the expansion is incomplete (empty
+    list == complete). A visited set stops re-expansion; a script already on
+    the current path is a cycle; a chain deeper than the depth cap, a script
+    absent from `scripts`, or `scripts` None are all incomplete."""
+    reached = set()
+    bodies = []
+    problems = []
+    expanded = set()
+
+    def walk(body, path):
+        for name in _runner_script_names(body):
+            reached.add(name)
+            if name in path:
+                problems.append("cycle: " + " -> ".join(path + (name,)))
+                continue
+            if name in expanded:
+                continue
+            if scripts is None:
+                problems.append(
+                    "script '" + name + "' cannot be read: package.json is missing,"
+                    " unreadable or has no scripts"
+                )
+                continue
+            if name not in scripts or not isinstance(scripts[name], str):
+                problems.append("script '" + name + "' is not defined in package.json")
+                continue
+            if len(path) + 1 > _SCRIPT_EXPANSION_DEPTH_CAP:
+                problems.append(
+                    "chain deeper than "
+                    + str(_SCRIPT_EXPANSION_DEPTH_CAP)
+                    + " at '"
+                    + name
+                    + "': "
+                    + " -> ".join(path + (name,))
+                )
+                continue
+            expanded.add(name)
+            bodies.append(scripts[name])
+            walk(scripts[name], path + (name,))
+
+    walk(text, ())
+    return reached, bodies, problems
+
+
+def _token_in_text(command, text):
+    """`command` as a whole token of `text`, case-insensitive -- never a
+    substring of a longer token."""
+    pattern = (
+        r"(?<![" + _SCRIPT_NAME_CHARS + r"])"
+        + re.escape(command.lower())
+        + r"(?![" + _SCRIPT_NAME_CHARS + r"])"
+    )
+    return re.search(pattern, text.lower()) is not None
+
+
 def verify_coverage_findings(stories, project_root):
     """Phase 4.3: a story whose acceptanceCriteria cite (in backticks) a
     repo-vocabulary command that implementation.verify's own text never runs.
@@ -1098,8 +1312,21 @@ def verify_coverage_findings(stories, project_root):
     (_NOT_EVALUATED_MAX_STORIES / _NOT_EVALUATED_MAX_SPANS), listing
     unrecognised spans first, then introduced, then non-command; the full
     classified data stays in this return value.
+
+    A verify that invokes a package-manager script (`bun run verify`,
+    `npm test`, ...) is expanded through the story's OWN project group's
+    package.json `scripts` (see _expand_script_runs): a cited command is
+    covered when the chain reaches it as a whole token. When a cited command
+    is not found AND the expansion was incomplete (a cycle, a chain deeper
+    than _SCRIPT_EXPANSION_DEPTH_CAP, a script absent from package.json, or
+    an unreadable package.json), the story lands in `not_evaluated` with a
+    reason naming the unexpandable chain and no `spanClasses` -- never in
+    `findings`, since the chain that would have covered it could not be
+    followed, and never in `clean_story_ids`. A verify that invokes no
+    package manager is judged exactly as before.
     """
     vocabulary_cache = {}
+    scripts_cache = {}
     findings = []
     undetermined_story_ids = []
     clean_story_ids = []
@@ -1130,8 +1357,20 @@ def verify_coverage_findings(stories, project_root):
             undetermined_story_ids.append(story["id"])
             continue
 
+        if group not in scripts_cache:
+            group_root = project_root if group is None else os.path.join(project_root, group)
+            scripts_cache[group] = _package_scripts(group_root)
+        scripts = scripts_cache[group]
+
         lowered_vocabulary = {v.lower() for v in vocabulary}
-        asserted = sorted(cmd for cmd in cited if cmd.lower() in lowered_vocabulary)
+
+        def _asserted(cmd):
+            if cmd.lower() in lowered_vocabulary:
+                return True
+            names = _runner_script_names(cmd)
+            return bool(names) and scripts is not None and all(n in scripts for n in names)
+
+        asserted = sorted(cmd for cmd in cited if _asserted(cmd))
         if not asserted:
             # Reason (b), the more dangerous of the two: the story NAMED
             # something and the gate walked past it. `asserted` is empty
@@ -1149,9 +1388,30 @@ def verify_coverage_findings(stories, project_root):
             )
             continue
 
-        verify_text = _cat(_implementation_verify(story)).lower()
-        missing = [cmd for cmd in asserted if cmd.lower() not in verify_text]
-        if missing:
+        verify_raw = _cat(_implementation_verify(story))
+        verify_text = verify_raw.lower()
+        reached, bodies, problems = _expand_script_runs(verify_raw, scripts)
+
+        def _covered(cmd):
+            if cmd.lower() in verify_text:
+                return True
+            names = _runner_script_names(cmd)
+            if names:
+                return all(n in reached for n in names)
+            return any(_token_in_text(cmd, body) for body in bodies)
+
+        missing = [cmd for cmd in asserted if not _covered(cmd)]
+        if missing and problems:
+            not_evaluated.append(
+                {
+                    "id": story["id"],
+                    "reason": "verify script expansion is incomplete, so "
+                    + _join(", ", missing)
+                    + " could not be confirmed: "
+                    + _join("; ", problems),
+                }
+            )
+        elif missing:
             findings.append({"id": story["id"], "commands": missing})
         else:
             clean_story_ids.append(story["id"])
@@ -1486,6 +1746,175 @@ def _for_output(stories):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Advisory story smells: tasks[]/approach overlap and oversized stories
+# ---------------------------------------------------------------------------
+#
+# Both are reported into metadata.smellWarnings and on stderr, and neither ever
+# drops a story, blocks the merge or changes its exit status. They are computed
+# inside each writer, AFTER the id remap, so storyId is the id that lands on
+# disk -- the orphan-symbol and verify-coverage entries are built in main
+# before a split renumbers, and these deliberately do not copy that.
+#
+# Every threshold below is a named constant and was measured, not guessed:
+# `python3 scripts/tests/calibrate_story_smells.py` prints the tables and
+# `--check` exits 1 when a constant fires on any golden case or on the plan
+# under test. Adjust a constant only within what that script prints, and
+# update SMELL_CALIBRATION_AS_OF and the firing counts when you do.
+#
+# SMELL_CALIBRATION_AS_OF = the commit the constants were measured on, and the date.
+# Measured firing counts at the values below (calibrate_story_smells.py, default
+# mode, run at that commit; plan files are live, so their figures are as of that run):
+#   golden corpus (86 staged cases, 167 stories, bytes max 369):
+#       field-overlap 0, story-oversize 0
+#   the #164 plan, .aimi/tasks/2026-10-13-fix-issue-164-multi-repo-plan-execute-defects-tasks.json
+#   (7 stories, 6496-11570 bytes, median 7372; overlap n=4 max 0.23):
+#       field-overlap 0, story-oversize 0   <- the gate `--check` enforces
+#   every tasks file under .aimi/ (70 files, 419 stories, bytes p50 12354 p90 22268;
+#   overlap n=4 over 405 eligible stories p50 0.11 p90 0.25 p95 0.29 max 0.45):
+#       field-overlap 16, story-oversize 210 (floor 14336 would flag 160, 16384
+#       would flag 109); the 2x-median rule alone flags 2 of 419.
+#   This includes the plan being executed when these were measured (the #165 plan:
+#   13 stories, 5385-15230 bytes, median 8344, overlap max 0.09), whose largest
+#   story (15230 bytes) fires story-oversize at 12288. That is expected and
+#   advisory, not a calibration failure: the gate pins the #164 plan, not that one.
+# 12288 is the smallest 1 KiB step above the #164 plan's maximum (11570); 0.30 at
+# n=4 is the p95 of history and sits above that plan's 0.23 maximum. n=3 is too
+# noisy (max 0.31 there, 0.52 overall) and n=5 loses the signal (p95 0.23).
+SMELL_CALIBRATION_AS_OF = "4b261f8 2026-10-23"
+FIELD_OVERLAP_NGRAM = 4
+FIELD_OVERLAP_THRESHOLD = 0.30
+FIELD_OVERLAP_MIN_TASKS = 3
+FIELD_OVERLAP_MIN_APPROACH_CHARS = 200
+STORY_OVERSIZE_FLOOR_BYTES = 12288
+STORY_OVERSIZE_MEDIAN_FACTOR = 2
+STORY_OVERSIZE_MEDIAN_MIN_STORIES = 3
+STORY_OVERSIZE_MEDIAN_MIN_BYTES = 4096
+
+_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _words(text):
+    return _WORD_RE.findall(text.lower())
+
+
+def _entry_ngrams(text, size):
+    words = _words(text)
+    return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
+
+
+def field_overlap_ratio(story, size=FIELD_OVERLAP_NGRAM):
+    """Share of tasks[] word n-grams that also occur in implementation.approach.
+
+    None when the story is not eligible: fewer than FIELD_OVERLAP_MIN_TASKS
+    entries, an approach shorter than FIELD_OVERLAP_MIN_APPROACH_CHARS, or no
+    n-gram in tasks[] at all. N-grams are built per entry, so none spans two.
+    """
+    tasks = story.get("tasks")
+    implementation = story.get("implementation")
+    approach = implementation.get("approach") if isinstance(implementation, dict) else None
+    if not isinstance(tasks, list) or len(tasks) < FIELD_OVERLAP_MIN_TASKS:
+        return None
+    if not isinstance(approach, str) or len(approach) < FIELD_OVERLAP_MIN_APPROACH_CHARS:
+        return None
+    task_grams = set()
+    for entry in tasks:
+        if isinstance(entry, str):
+            task_grams |= _entry_ngrams(entry, size)
+    if not task_grams:
+        return None
+    return len(task_grams & _entry_ngrams(approach, size)) / len(task_grams)
+
+
+def story_bytes(story):
+    """Serialized size of a story as it lands on disk, minus `wave`.
+
+    `wave` is left out so the figure does not depend on when waves are computed.
+    surrogatepass keeps a lone surrogate in staging text from crashing the merge.
+    """
+    shaped = _for_output([story])[0]
+    shaped.pop("wave", None)
+    text = json.dumps(shaped, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8", errors="surrogatepass"))
+
+
+def advisory_story_smells(stories):
+    """The field-overlap and story-oversize entries for a plan's stories.
+
+    `stories` is every story of the plan -- on a split, the union of all output
+    files -- so the median is plan-wide. Returns the combined entries, field-
+    overlap first.
+    """
+    stories = [s for s in stories if isinstance(s, dict)]
+    overlap = []
+    for story in stories:
+        ratio = field_overlap_ratio(story)
+        if ratio is not None and ratio >= FIELD_OVERLAP_THRESHOLD:
+            rounded = round(ratio, 3)
+            overlap.append(
+                {
+                    "type": "field-overlap",
+                    "storyId": story.get("id"),
+                    "ratio": rounded,
+                    "ngram": FIELD_OVERLAP_NGRAM,
+                    "message": "tasks[] restates implementation.approach ("
+                    + str(rounded)
+                    + " of its "
+                    + str(FIELD_OVERLAP_NGRAM)
+                    + "-word sequences also occur in the approach)",
+                }
+            )
+    sizes = [story_bytes(s) for s in stories]
+    median = int(statistics.median(sizes)) if sizes else 0
+    oversize = []
+    for story, size in zip(stories, sizes):
+        over_floor = size > STORY_OVERSIZE_FLOOR_BYTES
+        over_median = (
+            len(stories) >= STORY_OVERSIZE_MEDIAN_MIN_STORIES
+            and size > STORY_OVERSIZE_MEDIAN_FACTOR * median
+            and size > STORY_OVERSIZE_MEDIAN_MIN_BYTES
+        )
+        if over_floor or over_median:
+            oversize.append(
+                {
+                    "type": "story-oversize",
+                    "storyId": story.get("id"),
+                    "bytes": size,
+                    "medianBytes": median,
+                    "floorBytes": STORY_OVERSIZE_FLOOR_BYTES,
+                    "message": "story serializes to "
+                    + str(size)
+                    + " bytes (plan median "
+                    + str(median)
+                    + ", floor "
+                    + str(STORY_OVERSIZE_FLOOR_BYTES)
+                    + ")",
+                }
+            )
+    return overlap + oversize
+
+
+def report_advisory_story_smells(entries):
+    """One stderr banner per smell type, one line per story."""
+    for kind, header in (
+        (
+            "field-overlap",
+            "Warning: story-merge: field-overlap smell detected (advisory; tasks[] restates"
+            " implementation.approach):",
+        ),
+        (
+            "story-oversize",
+            "Warning: story-merge: story-oversize smell detected (advisory; story is far above"
+            " the plan's norm):",
+        ),
+    ):
+        lines = [
+            "  Story " + str(e["storyId"]) + ": " + e["message"] for e in entries if e["type"] == kind
+        ]
+        if lines:
+            warn_list(header, lines)
+
+
 def _document(metadata, stories):
     return {"schemaVersion": "3.3", "metadata": metadata, "userStories": _for_output(stories)}
 
@@ -1496,7 +1925,9 @@ def _emit(value):
 
 
 def write_legacy(stories, output_path, staging_dir, smells, phase_metadata=None):
-    metadata = _metadata("feat: merged tasks", "feat/merged", smells)
+    advisory = advisory_story_smells(stories)
+    report_advisory_story_smells(advisory)
+    metadata = _metadata("feat: merged tasks", "feat/merged", smells + advisory)
     # Merged AFTER _metadata's own keys, which is where the hand-patched
     # phase-scoped files on disk carry them. _metadata's arguments are
     # untouched, so branchName still arrives from this caller as the literal it
@@ -1665,10 +2096,14 @@ def write_side_split(stories, output_path, staging_dir, smells, phase_aware):
             )
 
     # Merged before either file is built, so both carry the same combined set.
-    combined = smells + cross
+    # Computed here, after the remap, over BOTH sides: the ids are final and the
+    # median is plan-wide rather than per file.
+    advisory = advisory_story_smells(frontend + backend)
+    combined = smells + cross + advisory
     if cross:
         _dropped_banner(cross, "cross-file", "--split full-stack")
         _false_root_note(_false_root_lines(cross, "side", "cross-file"))
+    report_advisory_story_smells(advisory)
 
     compute_waves(frontend)
     compute_waves(backend)
@@ -1888,7 +2323,9 @@ def write_project_split(
                 }
             )
 
-    combined = smells + cross
+    # After every block's remap, over every block: final ids, plan-wide median.
+    advisory = advisory_story_smells([s for block in blocks for s in block["stories"]])
+    combined = smells + cross + advisory
     if cross:
         _dropped_banner(cross, "cross-project", "--split full-stack, project axis")
         # The --foundation note is separate from the drop-count banner because
@@ -1914,6 +2351,7 @@ def write_project_split(
                 " droppedDeps[].foundationEdge)\n"
             )
         _false_root_note(_false_root_lines(cross, "project", "cross-project"))
+    report_advisory_story_smells(advisory)
 
     # 3. Derive every output path / slug / branchName up front.
     base = _strip_extension(_basename(output_path))
@@ -2081,6 +2519,8 @@ def main(argv):
     paths = staging_files(staging_dir)
     if not paths:
         die("Error: story-merge: no *.json files found in " + staging_dir)
+
+    audit_status = require_audit(staging_dir, paths)
 
     stories = read_staging(paths)
     assign_ids(stories)
@@ -2284,6 +2724,10 @@ def main(argv):
             write_side_split(stories, output_path, staging_dir, smells, phase_aware)
     else:
         write_legacy(stories, output_path, staging_dir, smells, phase_metadata)
+    # Once, and only for a merge that completed: a refusal above never shipped
+    # anything, so it must not claim a plan did. Any other status adds no line.
+    if audit_status == "audit-failed":
+        sys.stderr.write(AUDIT_FAILED_NOTICE + "\n")
     return 0
 
 

@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.150.0] - 2026-10-23
+
+Cross-story audit made mandatory and enforced, and `commands/plan.md` split into a router plus per-phase references (#165).
+
+### Added
+- `apply-audit-patches` (`scripts/audit_patches.py`): applies the Phase 3d.5 cross-story auditor's `patches[]` to the staged `NN-*.json` files and annotates deferrals, in one crossing into Python (no lock: it works on a staging directory, not on a tasks file), and records `auditedIdx` in `audit-result.json`. A patch that fails validation, and a semantic drop, becomes an `unresolved[]` entry instead of being applied. This is the Phase 3d.5 patch validation and application that `plan.md` used to describe in prose, now a verb.
+- `sanitize_patch_value` and `PATCH_TRIGGERS` in `sanitize.py`: a patch-safety matcher that rejects imperative forms in a patch value. It shares the `SUSPICIOUS` screen with `validate-tasks`; `SUSPICIOUS` moved into `sanitize.py` so neither caller owns it.
+- `story-merge` advisory `smellWarnings` of type `field-overlap` (a story's `tasks[]` repeating its `approach`) and `story-oversize` (a story far larger than its siblings or past a byte floor). Their thresholds are named constants in `story_merge.py` with an as-of marker recording the corpus they were measured on. They are advisory and never gate completion.
+- `guard-runtime-state` hook denies `Edit` and `Write` over an existing staged `NN-*.json`, pointing at `apply-audit-patches` or a re-run of the expander. It is a guard rail against hand edits, not a security boundary.
+- `test-install-opencode.sh`, the first test suite for `install.sh`, and `test_plan_wiring.py`, a structural test that pins the audit wiring and the `plan.md` router.
+- `aimi-cross-story-auditor` gains an eighth concern, intra-story contradiction.
+
+### Changed
+- `story-merge` now refuses, with no flag or environment escape (`--agent-mode` does not demote it), two or more staged stories unless `audit-result.json` is a well-formed object with `patches[]` and `unresolved[]` arrays whose `auditedIdx` equals the staged `NN` index set. Files without an `NN-` prefix staged beside others are refused by name. A sidecar with status `audit-failed` and matching indices passes, with one stderr line containing "plan shipped unaudited". A single staged story needs no audit.
+- `/aimi:plan` Phase 3d.5 always runs the audit when two or more stories are staged and applies its output through `apply-audit-patches`; when the audit cannot run it writes the `audit-failed` stub. Phase 3d retries delete the stale staging file before re-spawning the expander. The report renders the new smell warnings.
+- `commands/plan.md` is now a 16362-byte router (was 406414 bytes loaded on every invocation in 1.149.0); the phases live in 44 files under `commands/references/plan/`, each read on entry. `plan.md` carries a re-read-after-compaction rule: after a context compaction the current phase's reference is read again before continuing.
+- `aimi-story-expander` gives each story field one home and a soft size budget, to reduce the repetition `field-overlap` and `story-oversize` now measure.
+- `install.sh` translates an allowlist of `commands/references/` files for OpenCode (`plan/*.md` in full mode; `cli-path-resolution.md`, `container-execution.md` and `user-communication.md` host literals only). Every other reference file stays verbatim. The split moved inline CLI resolution out of `plan.md`, so the moved text needed the same translation the command body gets.
+- The `story_merge_cases` golden corpus grew from 92 to 96 cases. The 53 cases staging two or more `NN` files gained an `audit-result.json` input and keep their recorded exit, stdout and stderr; `sem-prefixo-numerico` is re-recorded from exit 0 to exit 1 because a file without an `NN-` prefix staged beside others is now refused; four audit-gate cases are new.
+
+### Note
+- `commands/plan.md` in this release depends on the `apply-audit-patches` verb and on the `story-merge` audit gate. An installed plugin older than 1.150.0 has neither, so `/aimi:plan` run from this source tree against an older installed CLI fails at Phase 3d.5 until the plugin is updated.
+- `command-size-baseline.txt` drops its `plan.md` entry (the file is back under the shared 16384-byte ceiling) and raises `aimi-story-expander.md` from 45015 to 48125 bytes.
+
+## [1.149.0] - 2026-10-13
+
+Six defects seen in one multi-repo phase run (#164).
+
+### Added
+- `acknowledge-smell <story-id> --type <type> --reason <text> [--tasks-file <path>]`: records `acknowledged`, `acknowledgedReason` and `acknowledgedAt` on the `metadata.smellWarnings` entry matched by story and type, in one locked crossing. It refuses in agent mode before taking the lock, on a blank reason and on an unknown entry; a repeat call is a no-op. The completed-gate note names the verb instead of a hand edit.
+- `acknowledge-evidence --reason <text>`: records `metadata.evidenceAcknowledged {reason, acknowledgedAt, completed}` in one locked crossing. It refuses in agent mode before the lock, is idempotent, and lapses when the phase's completed-story count changes. The completion report and the phase handoff echo it.
+- `metadata.prototypeSuperseded`, an optional array of `{path, decision, note}`: when a decision recorded in `oqDecisions[]` changes something a loaded prototype depicts, `/aimi:plan` Phase 4 records it here and the prototype itself is kept, never regenerated. The key is omitted when empty, copied to every file of a split, validated by `validate-tasks` as rule R22, and surfaced by `get-story-context` so the story executor reads the entry next to the prototype and does not reproduce the superseded decision.
+- `aimi-cross-story-auditor` gains a seventh concern, cross-project contract orphan: a contract or wire symbol one project's story introduces that no story of the consuming project names is reported as an `unresolved[]` entry. It is advisory and never emits a patch.
+
+### Changed
+- `roadmap-set-status --status completed` now refuses a phase that has completed stories and no proven discriminating verification evidence, aggregated across every member tasks file, until `acknowledge-evidence` records a reason. Previously such a phase closed with an "unchecked" note.
+- `probe-plan` probes each split tasks file in the project repository its stories name, one group per `project`, at that file's own `metadata.baseRef`, including when `AIMI_ROOT` is a plain non-git parent folder. A project that is not a repository, or does not resolve, is reported as `unmeasured` while the other groups are still probed.
+- `story-merge` verify-coverage follows `npm|bun|pnpm|yarn run <name>`, `run-script <name>` and `<pm> test` through the story project's `package.json` scripts (visited set, depth cap 5, whole-token match). Cycles, over-cap chains, undefined scripts and an unreadable `package.json` are reported as not evaluated, never as findings or clean.
+
+### Fixed
+- `validate-tasks` resolved every story's `implementation.files` against the layout root, so the missing-directory warning fired on every entry of a multi-repo plan. Entries now resolve under the story's confined `project` directory; a project that escapes the root is never traversed and reports its entries through the same warning. Severity and warning text are unchanged.
+
 ## [1.148.0] - 2026-10-09
 
 ### Added

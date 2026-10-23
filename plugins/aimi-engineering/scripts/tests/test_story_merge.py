@@ -4,7 +4,7 @@ THE GOLDEN FILE IS THE POINT OF THIS SUITE, same as it is for test_roadmap.py.
 
 `golden_from_jq.json`'s `story_merge_cases` was captured by running the jq
 implementation that used to live in aimi-cli.sh over 92 adversarial cases,
-BEFORE it was deleted. Unlike the earlier captures it also records each case's
+BEFORE it was deleted (four audit-gate cases were added later; 96 now). Unlike the earlier captures it also records each case's
 INPUT, which makes every one of them replayable: test_the_port_reproduces_the_jq
 below re-runs the whole corpus through the CLI and compares every field. That
 test is the evidence the port changed nothing, and it is why the rest of this
@@ -1016,6 +1016,206 @@ def test_verify_coverage_records_a_story_whose_citations_are_not_in_the_vocabula
     )
 
 
+def _write_package_json(directory, scripts):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": scripts}), encoding="utf-8"
+    )
+
+
+def _expands_story(story_id, cited, verify, project=None):
+    story = {
+        "id": story_id,
+        "acceptanceCriteria": ["Running `" + cited + "` must be green."],
+        "implementation": {"verify": verify},
+    }
+    if project is not None:
+        story["project"] = project
+    return story
+
+
+def _assert_partition(stories, result):
+    findings, undetermined, clean, not_evaluated = result
+    ids = (
+        [f["id"] for f in findings]
+        + list(undetermined)
+        + list(clean)
+        + [n["id"] for n in not_evaluated]
+    )
+    assert len(ids) == len(stories)
+    assert sorted(ids) == sorted(s["id"] for s in stories)
+
+
+def test_verify_coverage_expands_a_chain_through_bun_run_verify_clean(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run lint && bun run check:foo", "lint": "eslint .", "check:foo": "node foo.js"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert clean == ["US-001"]
+    assert findings == undetermined == not_evaluated == []
+
+
+def test_verify_coverage_expands_a_chain_that_never_reaches_the_command_is_a_finding(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run lint", "lint": "eslint .", "check:foo": "node foo.js"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert findings == [{"id": "US-001", "commands": ["npm run check:foo"]}]
+    assert undetermined == clean == not_evaluated == []
+
+
+def test_verify_coverage_expands_matches_a_whole_token_never_a_substring(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "bun run check:foo-extra",
+            "check:foo-extra": "node extra.js",
+            "check:foo": "node foo.js",
+        },
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings([story], str(tmp_path))
+    assert findings == [{"id": "US-001", "commands": ["npm run check:foo"]}]
+    assert clean == not_evaluated == []
+
+    # A non-runner command is matched as a whole token over the expanded bodies too.
+    _write_package_json(
+        tmp_path, {"verify": "tsc --noEmit-strict", "other": "tsc --noEmit"}
+    )
+    (tmp_path / "CLAUDE.md").write_text("```bash\ntsc --noEmit\n```\n", encoding="utf-8")
+    story = _expands_story("US-002", "tsc --noEmit", "bun run verify")
+    findings, _, clean, _ = SM.verify_coverage_findings([story], str(tmp_path))
+    assert findings == [{"id": "US-002", "commands": ["tsc --noEmit"]}]
+    _write_package_json(tmp_path, {"verify": "tsc --noEmit && echo done"})
+    findings, _, clean, _ = SM.verify_coverage_findings([story], str(tmp_path))
+    assert clean == ["US-002"] and findings == []
+
+
+def test_verify_coverage_expands_a_cycle_is_cannot_determine(tmp_path):
+    _write_package_json(
+        tmp_path,
+        {"verify": "bun run a", "a": "bun run b", "b": "bun run a", "check:foo": "x"},
+    )
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert findings == undetermined == clean == []
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "cycle" in not_evaluated[0]["reason"]
+    assert "spanClasses" not in not_evaluated[0]
+    _assert_partition([story], result)
+
+
+def test_verify_coverage_expands_a_chain_deeper_than_five_is_cannot_determine(tmp_path):
+    scripts = {"verify": "bun run s1", "check:foo": "node foo.js"}
+    for index in range(1, 7):
+        scripts["s%d" % index] = "bun run s%d" % (index + 1)
+    scripts["s7"] = "bun run check:foo"
+    _write_package_json(tmp_path, scripts)
+    story = _expands_story("US-001", "npm run check:foo", "bun run verify")
+    result = SM.verify_coverage_findings([story], str(tmp_path))
+    findings, _, clean, not_evaluated = result
+    assert findings == clean == []
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "deeper than 5" in not_evaluated[0]["reason"]
+
+    # Control: a chain of exactly five scripts is still followed.
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "bun run s1",
+            "s1": "bun run s2",
+            "s2": "bun run s3",
+            "s3": "bun run s4",
+            "s4": "bun run check:foo",
+            "check:foo": "node foo.js",
+        },
+    )
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings([story], str(tmp_path))
+    assert clean == ["US-001"] and findings == not_evaluated == []
+
+
+def test_verify_coverage_expands_a_missing_package_json_is_cannot_determine(tmp_path):
+    (tmp_path / "Makefile").write_text("lint:\n\techo hi\n", encoding="utf-8")
+    stories = [
+        _expands_story("US-001", "make lint", "bun run verify"),
+        _expands_story("US-002", "make lint", "make lint"),
+        _expands_story("US-003", "make lint", "echo nothing"),
+    ]
+    result = SM.verify_coverage_findings(stories, str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert [n["id"] for n in not_evaluated] == ["US-001"]
+    assert "package.json" in not_evaluated[0]["reason"]
+    assert clean == ["US-002"]
+    assert findings == [{"id": "US-003", "commands": ["make lint"]}]
+    assert undetermined == []
+    _assert_partition(stories, result)
+    assert SM.repo_command_vocabulary(str(tmp_path / "nowhere")) is None
+
+    # A script the verify names that package.json does not define.
+    _write_package_json(tmp_path, {"lint": "eslint ."})
+    findings, _, clean, not_evaluated = SM.verify_coverage_findings(
+        [_expands_story("US-004", "npm run lint", "bun run verify")], str(tmp_path)
+    )
+    assert findings == clean == []
+    assert "'verify' is not defined" in not_evaluated[0]["reason"]
+
+
+def test_verify_coverage_expands_each_story_against_its_own_projects_package_json(tmp_path):
+    _write_package_json(
+        tmp_path / "apps" / "web", {"verify": "bun run check:foo", "check:foo": "node w.js"}
+    )
+    _write_package_json(
+        tmp_path / "apps" / "api", {"verify": "bun run lint", "lint": "x", "check:foo": "node a.js"}
+    )
+    stories = [
+        _expands_story("US-001", "npm run check:foo", "bun run verify", project="apps/web"),
+        _expands_story("US-002", "npm run check:foo", "bun run verify", project="apps/api"),
+    ]
+    result = SM.verify_coverage_findings(stories, str(tmp_path))
+    findings, undetermined, clean, not_evaluated = result
+    assert clean == ["US-001"]
+    assert findings == [{"id": "US-002", "commands": ["npm run check:foo"]}]
+    assert undetermined == not_evaluated == []
+    _assert_partition(stories, result)
+
+
+@pytest.mark.parametrize(
+    "cited, verify",
+    [
+        ("npm test", "pnpm test"),
+        ("npm test", "yarn run test"),
+        ("npm run check:foo", "npm run-script check:foo"),
+        ("npm run check:foo", "pnpm run check:foo"),
+        ("npm run check:foo", "yarn run check:foo"),
+        ("npm run check:foo", "bun run verify"),
+        ("npm test", "npm run verify"),
+    ],
+)
+def test_verify_coverage_expands_runner_equivalence(tmp_path, cited, verify):
+    _write_package_json(
+        tmp_path,
+        {
+            "verify": "yarn test && pnpm run check:foo",
+            "test": "vitest run",
+            "check:foo": "node foo.js",
+        },
+    )
+    story = _expands_story("US-001", cited, verify)
+    findings, undetermined, clean, not_evaluated = SM.verify_coverage_findings(
+        [story], str(tmp_path)
+    )
+    assert clean == ["US-001"], (findings, not_evaluated)
+    assert findings == undetermined == not_evaluated == []
+
+
 def test_verify_coverage_da_veredicto_a_toda_story_que_entrou(tmp_path):
     """The invariant this story delivers: the four lists PARTITION the input.
 
@@ -1386,8 +1586,26 @@ def test_a_sidecar_is_an_exact_name_or_a_name_ending_in_outline_json():
         assert not SM.is_sidecar(name), name
 
 
-def _merge(tmp_path, files, args=None):
-    """Run a real story-merge over a staging directory built from `files`."""
+def _audit_sidecar(files, **extra):
+    """The audit-result.json an audited staging directory carries, built from
+    the NN story files in `files` -- the one helper every multi-story test uses."""
+    import re
+
+    idx = sorted(
+        {n[:2] for n in files if re.fullmatch(r"[0-9]{2}-.*\.json", n) and not n.endswith("-outline.json")}
+    )
+    return json.dumps({"patches": [], "unresolved": [], "auditedIdx": idx, **extra})
+
+
+def _merge(tmp_path, files, args=None, audit=True):
+    """Run a real story-merge over a staging directory built from `files`.
+
+    With two or more files staged the directory needs a matching audit-result.json
+    to be merged at all, so one is added unless the caller supplies its own or
+    passes audit=False."""
+    files = dict(files)
+    if audit and len(files) >= 2 and "audit-result.json" not in files:
+        files["audit-result.json"] = _audit_sidecar(files)
     root = str(tmp_path)
     staging = os.path.join(root, ".aimi", "stg")
     os.makedirs(os.path.join(root, ".aimi", "tasks"), exist_ok=True)
@@ -1511,9 +1729,15 @@ def test_every_file_is_validated_before_any_file_is_loaded():
     assert CASES["indice-duplicado"]["files"] == {}
 
 
-def test_a_file_with_no_numeric_prefix_is_ordered_but_not_index_checked():
-    stories = _doc("sem-prefixo-numerico", ".aimi/tasks/out-tasks.json")["userStories"]
+def test_a_file_with_no_numeric_prefix_is_ordered_but_not_index_checked(tmp_path):
+    """The loader still orders such files and skips the index check. Through the
+    CLI the recording is now a refusal (the audit gate cannot cover a file the
+    audit never globs), so the loader's own behaviour is asserted directly."""
+    for name, title in (("beta.json", "B"), ("alpha.json", "A")):
+        (tmp_path / name).write_text(json.dumps(_staging_story(title)), encoding="utf-8")
+    stories = SM.read_staging(SM.staging_files(str(tmp_path)))
     assert [s["title"] for s in stories] == ["A", "B"], "alpha.json before beta.json"
+    assert CASES["sem-prefixo-numerico"]["exit"] == 1
 
 
 def test_ids_follow_file_order_not_the_digits_in_the_names():
@@ -1857,3 +2081,574 @@ def test_not_evaluated_cap_golden_corpus_has_no_phase_4_3_text():
     for case in GOLDEN["story_merge_cases"]:
         blob = json.dumps(case)
         assert "NOT EVALUATED" not in blob and "Phase 4.3" not in blob, case["label"]
+
+
+# ---------------------------------------------------------------------------
+# The cross-story audit gate
+# ---------------------------------------------------------------------------
+
+
+def _two(extra=None):
+    files = {"01-a.json": _staging_story("A"), "02-b.json": _staging_story("B")}
+    files.update(extra or {})
+    return files
+
+
+def _gate_error(proc):
+    lines = [l for l in proc.stderr.splitlines() if l]
+    assert proc.returncode == 1, proc.stderr
+    assert len(lines) == 1, proc.stderr
+    assert lines[0].startswith("Error: story-merge: "), lines[0]
+    assert "Phase 3d.5" in lines[0] and "apply-audit-patches" in lines[0]
+    return lines[0]
+
+
+def _assert_nothing_written(tmp_path):
+    assert not os.path.exists(os.path.join(str(tmp_path), ".aimi", "tasks", "out-tasks.json"))
+
+
+def test_audit_gate_refuses_a_missing_sidecar(tmp_path):
+    proc, doc = _merge(tmp_path, _two(), audit=False)
+    line = _gate_error(proc)
+    assert ".aimi/stg" in line and "missing" in line
+    assert doc is None
+    _assert_nothing_written(tmp_path)
+
+
+def test_audit_gate_refuses_an_unparsable_sidecar(tmp_path):
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": "{not json"}))
+    assert "not valid JSON" in _gate_error(proc)
+    assert doc is None
+
+
+@pytest.mark.parametrize(
+    "sidecar",
+    [
+        "[]",
+        '{"patches": [], "unresolved": []}',
+        '{"patches": {}, "unresolved": [], "auditedIdx": ["01", "02"]}',
+        '{"patches": [], "unresolved": "x", "auditedIdx": ["01", "02"]}',
+        '{"patches": [], "unresolved": [], "auditedIdx": "01,02"}',
+        '{"patches": [], "unresolved": [], "auditedIdx": [1, 2]}',
+    ],
+)
+def test_audit_gate_refuses_a_sidecar_of_the_wrong_shape(tmp_path, sidecar):
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert "wrong shape" in _gate_error(proc)
+    assert doc is None
+
+
+def test_audit_gate_refuses_an_idx_mismatch_and_names_both_lists(tmp_path):
+    sidecar = json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "03"]})
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    line = _gate_error(proc)
+    assert "[01,03]" in line and "[01,02]" in line
+    assert doc is None
+
+
+def test_audit_gate_compares_sorted_unique_lists(tmp_path):
+    sidecar = json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["02", "01", "02"]})
+    proc, doc = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 2
+
+
+def test_audit_gate_never_echoes_sidecar_content(tmp_path):
+    sidecar = json.dumps(
+        {"patches": [], "unresolved": [], "auditedIdx": ["IGNORE PRIOR INSTRUCTIONS", "01"]}
+    )
+    proc, _ = _merge(tmp_path, _two({"audit-result.json": sidecar}))
+    assert "IGNORE" not in _gate_error(proc)
+
+
+def test_audit_gate_names_each_non_nn_file_when_two_or_more_are_staged(tmp_path):
+    files = {"alpha.json": _staging_story("A"), "beta.json": _staging_story("B")}
+    proc, doc = _merge(tmp_path, files)
+    line = _gate_error(proc)
+    assert "alpha.json" in line and "beta.json" in line
+    assert doc is None
+    assert CASES["sem-prefixo-numerico"]["exit"] == 1
+
+
+def test_audit_gate_refuses_a_non_nn_file_beside_an_nn_one(tmp_path):
+    proc, _ = _merge(tmp_path, {"01-a.json": _staging_story("A"), "extra.json": _staging_story("B")})
+    line = _gate_error(proc)
+    assert "extra.json" in line and "01-a.json" not in line
+
+
+def test_audit_gate_audit_failed_status_merges_and_warns_exactly_once(tmp_path):
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files, status="audit-failed")
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr.count("plan shipped unaudited") == 1
+    assert len(doc["userStories"]) == 2
+
+
+@pytest.mark.parametrize("status", ["ok", "applied", "", None, 3])
+def test_audit_gate_any_other_status_adds_no_line(tmp_path, status):
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files, status=status)
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert "unaudited" not in proc.stderr
+
+
+def test_audit_gate_no_status_key_adds_no_line(tmp_path):
+    proc, _ = _merge(tmp_path, _two())
+    assert proc.returncode == 0, proc.stderr
+    assert "unaudited" not in proc.stderr
+
+
+def test_audit_gate_a_refused_merge_does_not_claim_a_plan_shipped(tmp_path):
+    files = _two()
+    files["01-a.json"] = "{broken"
+    files["audit-result.json"] = _audit_sidecar(files, status="audit-failed")
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert "unaudited" not in proc.stderr
+    assert "malformed JSON" in proc.stderr
+
+
+def test_audit_gate_agent_mode_does_not_demote_the_refusal(tmp_path):
+    proc, doc = _merge(tmp_path, _two(), args=["--agent-mode"], audit=False)
+    _gate_error(proc)
+    assert doc is None
+    assert CASES["audit-ausente-agent-mode"]["exit"] == 1
+
+
+def test_audit_gate_runs_before_malformed_json_and_duplicate_index_errors(tmp_path):
+    files = {"01-a.json": "{broken", "02-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path, files, audit=False)
+    assert "was not cross-story audited" in _gate_error(proc)
+    files = {"01-a.json": _staging_story("A"), "01-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path / "dup", files, audit=False)
+    assert "was not cross-story audited" in _gate_error(proc)
+
+
+def test_audit_gate_a_duplicate_index_with_a_sidecar_still_reports_the_duplicate(tmp_path):
+    files = {"01-a.json": _staging_story("A"), "01-b.json": _staging_story("B")}
+    proc, _ = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert "duplicate index '01'" in proc.stderr
+
+
+def test_audit_gate_a_single_story_is_not_gated(tmp_path):
+    proc, doc = _merge(tmp_path, {"01-a.json": _staging_story("A")}, audit=False)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 1
+
+
+def test_audit_gate_a_directory_with_a_sidecar_but_one_story_is_not_gated(tmp_path):
+    files = {"01-a.json": _staging_story("A"), "outline.json": "{}", "metadata.json": "{}"}
+    proc, doc = _merge(tmp_path, files, audit=False)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 1
+
+
+def test_audit_gate_uses_the_staged_set_the_verb_audited_against(tmp_path):
+    """A symlinked NN file is invisible to staged_idx_map and to staging_files
+    alike, so it neither needs auditing nor makes the gate disagree."""
+    files = _two()
+    files["audit-result.json"] = _audit_sidecar(files)
+    root = str(tmp_path)
+    os.makedirs(os.path.join(root, ".aimi", "stg"))
+    target = os.path.join(root, ".aimi", "stg", "elsewhere.txt")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("{}")
+    os.symlink(target, os.path.join(root, ".aimi", "stg", "03-link.json"))
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 2
+
+
+def test_audit_gate_has_no_escape_hatch_flag_or_env(tmp_path):
+    for flag in ("--skip-audit", "--no-audit"):
+        proc, _ = _merge(tmp_path, _two(), args=[flag], audit=False)
+        assert proc.returncode == 1
+        assert "unknown flag" in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Advisory story smells: field-overlap and story-oversize
+# ---------------------------------------------------------------------------
+#
+# Measured: no story_merge_cases recording fires either smell, so the golden
+# corpus is neither edited nor regenerated for them (test below pins that).
+
+_OVERLAP_APPROACH = (
+    "Add the threshold constants to the merge module then implement the two pure helpers "
+    "that compute the overlap ratio and the serialized size and finally call the reporting "
+    "pair from every writer after the identifiers are remapped so the figures use final "
+    "identifiers"
+)
+_OVERLAP_TASKS = [
+    "Add the threshold constants to the merge module then implement the two pure helpers",
+    "that compute the overlap ratio and the serialized size and finally call the reporting pair",
+    "from every writer after the identifiers are remapped so the figures use final identifiers",
+]
+_UNRELATED_TASKS = [
+    "Draft the glossary entry for the new vocabulary",
+    "Rename the fixture directory under the examples folder",
+    "Backfill the changelog paragraph describing behaviour",
+]
+
+
+def _smelly(title, tasks=None, approach=None, notes="", files=None):
+    story = _staging_story(title)
+    story["implementation"]["approach"] = _OVERLAP_APPROACH if approach is None else approach
+    if files is not None:
+        story["implementation"]["files"] = files
+    if tasks is not None:
+        story["tasks"] = tasks
+    story["notes"] = notes
+    return story
+
+
+def _types(doc, kind):
+    return [e for e in doc["metadata"].get("smellWarnings", []) if e["type"] == kind]
+
+
+def test_field_overlap_fires_when_tasks_restate_the_approach():
+    story = _smelly("A", tasks=_OVERLAP_TASKS)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) == 1.0
+    (entry,) = SM.advisory_story_smells([story])
+    assert entry["type"] == "field-overlap" and entry["storyId"] == "US-001"
+    assert entry["ratio"] == 1.0 and entry["ngram"] == SM.FIELD_OVERLAP_NGRAM
+    assert isinstance(entry["message"], str) and entry["message"]
+    assert set(entry) == {"type", "storyId", "ratio", "ngram", "message"}
+
+
+def test_field_overlap_ratio_is_recorded_rounded_to_three_places():
+    tasks = [_OVERLAP_TASKS[0], "one two three four five", "six seven eight nine ten"]
+    story = _smelly("A", tasks=tasks)
+    story["id"] = "US-001"
+    raw = SM.field_overlap_ratio(story)
+    assert 0 < raw < 1
+    if raw >= SM.FIELD_OVERLAP_THRESHOLD:
+        (entry,) = SM.advisory_story_smells([story])
+        assert entry["ratio"] == round(raw, 3)
+
+
+def test_field_overlap_stays_quiet_below_the_threshold_and_for_unrelated_tasks():
+    story = _smelly("A", tasks=_UNRELATED_TASKS)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) < SM.FIELD_OVERLAP_THRESHOLD
+    assert SM.advisory_story_smells([story]) == []
+
+
+@pytest.mark.parametrize(
+    "tasks,approach",
+    [
+        (None, None),  # no tasks at all
+        (_OVERLAP_TASKS[:2], None),  # only two tasks
+        (_OVERLAP_TASKS, "Add the threshold constants to the merge module"),  # approach < 200
+        (["a b c", "d e f", "g h i"], None),  # no entry reaches one n-gram
+        ("not a list", None),
+    ],
+    ids=["no-tasks", "two-tasks", "short-approach", "no-ngram", "tasks-not-a-list"],
+)
+def test_field_overlap_never_fires_outside_its_gates(tasks, approach):
+    story = _smelly("A", tasks=tasks, approach=approach)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) is None
+    assert SM.advisory_story_smells([story]) == []
+
+
+def test_field_overlap_ngrams_never_span_two_tasks_entries():
+    """Three three-word entries whose concatenation IS a run of the approach: a
+    n-gram that crossed entries would match; per-entry building yields none."""
+    approach = (
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi "
+        "rho sigma tau upsilon phi chi psi omega alpha beta gamma delta epsilon zeta eta theta "
+        "iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega again"
+    )
+    assert len(approach) >= 200
+    story = _smelly("A", tasks=["alpha beta gamma", "delta epsilon zeta", "eta theta iota"], approach=approach)
+    assert SM.field_overlap_ratio(story) is None
+
+
+def test_field_overlap_tokenizes_unicode_letters_so_portuguese_works():
+    approach = (
+        "Implementar a validação da configuração antes de gravar o arquivo de saída e "
+        "registrar cada decisão tomada durante a execução para que a revisão posterior "
+        "encontre o histórico completo sem precisar reconstruir nada a partir do código"
+    )
+    tasks = [
+        "Implementar a validação da configuração antes de gravar",
+        "o arquivo de saída e registrar cada decisão tomada",
+        "durante a execução para que a revisão posterior encontre",
+    ]
+    story = _smelly("A", tasks=tasks, approach=approach)
+    story["id"] = "US-001"
+    assert SM.field_overlap_ratio(story) == 1.0
+    assert SM._words("Ação, REVISÃO_final 42") == ["ação", "revisão", "final", "42"]
+
+
+def _sized(story_id, size_hint):
+    story = _staging_story("S" + story_id)
+    story["id"] = "US-" + story_id
+    story["notes"] = "x" * size_hint
+    return story
+
+
+def test_story_bytes_is_the_compact_utf8_size_without_working_keys_and_wave():
+    story = _sized("001", 10)
+    base = SM.story_bytes(story)
+    story["wave"] = 3
+    story["_fe"] = True
+    story["referenceInventory"] = ["ignored"]
+    assert SM.story_bytes(story) == base
+    expected = json.dumps(
+        {k: v for k, v in _sized("001", 10).items()}, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    assert base == len(expected)
+    story["notes"] = "ação"
+    assert SM.story_bytes(story) == len(
+        json.dumps(
+            {k: v for k, v in story.items() if k not in ("wave", "_fe", "referenceInventory")},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def test_story_bytes_survives_a_lone_surrogate_in_staging_text():
+    story = _sized("001", 1)
+    story["notes"] = "broken \ud800 text"
+    assert SM.story_bytes(story) > 0
+
+
+def test_story_oversize_fires_above_the_floor_even_for_a_lone_story():
+    story = _sized("001", SM.STORY_OVERSIZE_FLOOR_BYTES + 100)
+    (entry,) = SM.advisory_story_smells([story])
+    assert entry["type"] == "story-oversize" and entry["storyId"] == "US-001"
+    assert entry["bytes"] == SM.story_bytes(story) > SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert entry["medianBytes"] == entry["bytes"]
+    assert entry["floorBytes"] == SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert set(entry) == {"type", "storyId", "bytes", "medianBytes", "floorBytes", "message"}
+    assert isinstance(entry["medianBytes"], int)
+
+
+def test_story_oversize_fires_on_the_median_rule_in_a_plan_of_three_or_more():
+    small = SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES // 8
+    stories = [_sized("001", small), _sized("002", small), _sized("003", SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES * 2)]
+    assert SM.story_bytes(stories[2]) < SM.STORY_OVERSIZE_FLOOR_BYTES
+    entries = SM.advisory_story_smells(stories)
+    assert [e["storyId"] for e in entries] == ["US-003"]
+    assert entries[0]["medianBytes"] == SM.story_bytes(stories[0])
+
+
+def test_story_oversize_needs_three_stories_for_the_median_rule():
+    stories = [_sized("001", 50), _sized("002", SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES * 2)]
+    assert SM.advisory_story_smells(stories) == []
+
+
+def test_story_oversize_ignores_a_lone_large_story_under_the_minimum():
+    """Three stories, one more than 2x the median, but under the small minimum:
+    a tiny plan's relatively-large story is not oversize."""
+    stories = [_sized("001", 50), _sized("002", 50), _sized("003", 900)]
+    assert SM.story_bytes(stories[2]) > 2 * SM.story_bytes(stories[0])
+    assert SM.story_bytes(stories[2]) <= SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES
+    assert SM.advisory_story_smells(stories) == []
+
+
+def test_the_advisory_helpers_tolerate_skeletal_stories():
+    assert SM.advisory_story_smells([{"id": "US-001"}, {"id": "US-002", "tasks": 3, "implementation": []}]) == []
+    assert SM.advisory_story_smells([]) == []
+
+
+def test_the_thresholds_are_named_constants_beside_one_calibration_marker():
+    for name in (
+        "SMELL_CALIBRATION_AS_OF",
+        "FIELD_OVERLAP_NGRAM",
+        "FIELD_OVERLAP_THRESHOLD",
+        "STORY_OVERSIZE_FLOOR_BYTES",
+        "STORY_OVERSIZE_MEDIAN_MIN_BYTES",
+    ):
+        assert hasattr(SM, name), name
+    assert (SM.FIELD_OVERLAP_NGRAM, SM.FIELD_OVERLAP_THRESHOLD) == (4, 0.30)
+    assert SM.STORY_OVERSIZE_MEDIAN_MIN_BYTES == 4096
+
+
+def _three_with_both_smells():
+    return {
+        "01-a.json": _smelly("A", tasks=_UNRELATED_TASKS),
+        "02-b.json": _smelly("B", tasks=_OVERLAP_TASKS),
+        "03-c.json": _smelly("C", tasks=_UNRELATED_TASKS, notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200)),
+    }
+
+
+def test_a_merge_reports_both_smells_with_final_ids_and_keeps_every_story(tmp_path):
+    proc, doc = _merge(tmp_path, _three_with_both_smells())
+    assert proc.returncode == 0, proc.stderr
+    assert [s["id"] for s in doc["userStories"]] == ["US-001", "US-002", "US-003"]
+    (overlap,) = _types(doc, "field-overlap")
+    (oversize,) = _types(doc, "story-oversize")
+    assert overlap["storyId"] == "US-002" and overlap["ratio"] == 1.0 and overlap["ngram"] == 4
+    assert oversize["storyId"] == "US-003"
+    assert oversize["bytes"] > oversize["floorBytes"] == SM.STORY_OVERSIZE_FLOOR_BYTES
+    assert oversize["medianBytes"] < oversize["bytes"]
+    assert proc.stderr.count("field-overlap smell detected") == 1
+    assert proc.stderr.count("story-oversize smell detected") == 1
+    assert "  Story US-002: " in proc.stderr and "  Story US-003: " in proc.stderr
+
+
+def test_a_merge_with_neither_smell_says_nothing_and_adds_no_metadata(tmp_path):
+    files = {"01-a.json": _smelly("A", tasks=_UNRELATED_TASKS), "02-b.json": _smelly("B")}
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert "field-overlap" not in proc.stderr and "story-oversize" not in proc.stderr
+    assert not _types(doc, "field-overlap") and not _types(doc, "story-oversize")
+
+
+def test_a_single_story_merge_can_still_carry_an_oversize_entry(tmp_path):
+    files = {"01-a.json": _smelly("A", notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200))}
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert [e["storyId"] for e in _types(doc, "story-oversize")] == ["US-001"]
+
+
+def _split_files(project_a=None, project_b=None):
+    def tag(story, project):
+        if project is not None:
+            story["project"] = project
+        return story
+
+    return {
+        "01-a.json": tag(_smelly("A", files=["src/server/a.ts"]), project_a),
+        "02-b.json": tag(_smelly("B", tasks=_OVERLAP_TASKS, files=["src/web/components/b.tsx"]), project_b),
+        "03-c.json": tag(
+            _smelly("C", files=["src/server/c.ts"], notes="n" * (SM.STORY_OVERSIZE_FLOOR_BYTES + 200)),
+            project_a,
+        ),
+        "04-d.json": tag(_smelly("D", files=["src/web/components/d.tsx"]), project_b),
+    }
+
+
+def _split_docs(tmp_path):
+    tasks = tmp_path / ".aimi" / "tasks"
+    docs = []
+    for name in sorted(os.listdir(tasks)):
+        if name.endswith("-tasks.json"):
+            with open(tasks / name, encoding="utf-8") as handle:
+                docs.append(json.load(handle))
+    return docs
+
+
+def _plan_median(docs):
+    sizes = [SM.story_bytes(s) for d in docs for s in d["userStories"]]
+    sizes.sort()
+    middle = len(sizes) // 2
+    return int(sizes[middle] if len(sizes) % 2 else (sizes[middle - 1] + sizes[middle]) / 2)
+
+
+def _assert_same_entries_everywhere(docs):
+    assert len(docs) == 2
+    sets = [
+        [e for e in d["metadata"].get("smellWarnings", []) if e["type"] in ("field-overlap", "story-oversize")]
+        for d in docs
+    ]
+    assert sets[0] == sets[1] and len(sets[0]) == 2
+    by_type = {e["type"]: e for e in sets[0]}
+    all_ids = {s["id"] for d in docs for s in d["userStories"]}
+    for entry in by_type.values():
+        assert entry["storyId"] in all_ids
+    # The entry names the id the story carries in the file that holds it.
+    titles = {s["id"]: s["title"] for d in docs for s in d["userStories"]}
+    assert titles[by_type["field-overlap"]["storyId"]] == "B"
+    assert titles[by_type["story-oversize"]["storyId"]] == "C"
+    assert by_type["story-oversize"]["medianBytes"] == _plan_median(docs)
+
+
+def test_a_side_split_gives_every_file_the_same_entries_with_remapped_ids(tmp_path):
+    proc, _ = _merge(tmp_path, _split_files(), args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(tmp_path)
+    _assert_same_entries_everywhere(docs)
+    # The backend file renumbers after the frontend block: ids are post-remap.
+    ids = [s["id"] for d in docs for s in d["userStories"]]
+    assert sorted(ids) == ["US-001", "US-002", "US-003", "US-004"]
+    assert proc.stderr.count("story-oversize smell detected") == 1
+
+
+def test_a_project_split_gives_every_file_the_same_entries_with_remapped_ids(tmp_path):
+    proc, _ = _merge(
+        tmp_path, _split_files("services/api", "apps/web"), args=["--split", "full-stack"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(tmp_path)
+    _assert_same_entries_everywhere(docs)
+    assert proc.stderr.count("field-overlap smell detected") == 1
+
+
+def _no_agent_env():
+    return {k: v for k, v in os.environ.items() if k not in ("CI", "AIMI_AGENT_MODE")}
+
+
+@pytest.mark.parametrize("kind,story_id", [("field-overlap", "US-002"), ("story-oversize", "US-003")])
+def test_acknowledge_smell_round_trips_on_both_new_types(tmp_path, kind, story_id):
+    proc, _ = _merge(tmp_path, _three_with_both_smells())
+    assert proc.returncode == 0, proc.stderr
+    path = str(tmp_path / ".aimi" / "tasks" / "out-tasks.json")
+    ack = subprocess.run(
+        ["bash", CLI, "acknowledge-smell", story_id, "--type", kind,
+         "--reason", "reviewed by hand", "--tasks-file", path],
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=120, env=_no_agent_env(),
+    )
+    assert ack.returncode == 0, ack.stderr
+    with open(path, encoding="utf-8") as handle:
+        doc = json.load(handle)
+    (entry,) = [e for e in _types(doc, kind) if e["storyId"] == story_id]
+    assert entry["acknowledged"] is True and entry["acknowledgedReason"] == "reviewed by hand"
+    other = "story-oversize" if kind == "field-overlap" else "field-overlap"
+    assert all("acknowledged" not in e for e in _types(doc, other))
+
+
+def test_no_golden_case_records_either_new_smell():
+    """Measured, not assumed: the corpus is untouched because nothing in it fires."""
+    for label, case in CASES.items():
+        blob = case["stderr"] + case["stdout"] + "".join(case["files"].values())
+        assert "field-overlap" not in blob and "story-oversize" not in blob, label
+
+
+def test_roadmap_py_never_mentions_the_advisory_types():
+    with open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8") as handle:
+        text = handle.read()
+    assert "field-overlap" not in text and "story-oversize" not in text
+
+
+def test_the_164_plan_fires_neither_smell():
+    """Calibration gate: skipped when the gitignored .aimi/ plan is not on this
+    checkout (CI, a fresh clone)."""
+    sys.path.insert(0, HERE)
+    import calibrate_story_smells as CAL
+
+    plans = [
+        (p, s)
+        for p, s in CAL.tasks_plans(None)
+        if "fix-issue-164-multi-repo-plan-execute-defects" in os.path.basename(p)
+    ]
+    if not plans:
+        pytest.skip("the #164 plan file is not present on this checkout")
+    for path, stories in plans:
+        assert CAL.fired(stories) == [], path
+
+
+def test_the_calibration_script_counts_only_numbered_story_inputs():
+    sys.path.insert(0, HERE)
+    import calibrate_story_smells as CAL
+
+    total = sum(len(stories) for _, stories in CAL.golden_plans())
+    expected = 0
+    for case in CASES.values():
+        for name, content in (case["input"] or {}).items():
+            if SM.is_sidecar(name) or not SM._NN_STORY.fullmatch(name):
+                continue
+            try:
+                value = json.loads(content)
+            except ValueError:
+                continue
+            expected += len([e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)])
+    assert total == expected > 0

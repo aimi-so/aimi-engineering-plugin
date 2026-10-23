@@ -53,7 +53,7 @@ invisible to the stricter of the two readers.
 | Section | Backs | Consumers |
 | --- | --- | --- |
 | `BusinessSpec § 1` | Purpose / overview | `brainstorm.md` Purpose auto-pass, `plan.md`, `commands/references/business-spec-authoring.md` |
-| `BusinessSpec § 2` | The canonical screen/view list (see *Screen List* below) | `plan.md` screen-per-story decomposition and validation (around lines 2711, 3498), `deepen.md` missing-AC gate (around line 226) |
+| `BusinessSpec § 2` | The canonical screen/view list (see *Screen List* below) | `references/plan/phase-3d-expander-prompt.md` screen-per-story decomposition and `references/plan/phase-4-checklist.md` validation, `deepen.md` missing-AC gate (around line 226) |
 | `BusinessSpec § 3` | Business rules, each with an `RN-NN` id | `plan.md` `businessRules`, `deepen.md` rule-id annotation gate, `skills/story-executor/SKILL.md` Rule-ID citation rule, `commands/references/business-spec-authoring.md` |
 | `BusinessSpec § 4` | Data models / entities; one story per non-trivial entity | `plan.md` `dataModels`, `aimi-design-bundle-researcher.md` verbatim passthrough |
 | `BusinessSpec § 4.1` | A numbered subsection of § 4 | `aimi-design-bundle-researcher.md` (citation-example use only) |
@@ -78,9 +78,10 @@ invisible to the stricter of the two readers.
 ## The Screen List: One Canonical Section
 
 `BusinessSpec § 2` is the single canonical section for the screen/view list.
-Three call sites already agree on this: `plan.md`'s screen-per-story
-decomposition (around line 2711), `plan.md`'s validation pass (around line
-3498), and `deepen.md`'s missing-AC gate (around line 226).
+Three call sites already agree on this: the screen-per-story decomposition in
+`references/plan/phase-3d-expander-prompt.md`, the validation pass in
+`references/plan/phase-4-checklist.md`, and `deepen.md`'s missing-AC gate
+(around line 226).
 
 A different, incorrect citation is still live in `brainstorm.md` and `plan.md`,
 in the bundle-prototype-generation skip message emitted when `view_source` is

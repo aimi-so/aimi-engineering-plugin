@@ -183,7 +183,7 @@ def test_recorded_files_are_exactly_the_ones_the_story_names():
         "execute.md",
         "references/container-execution.md",
         "review.md",
-        "plan.md",
+        "references/plan/phase-3e-story-merge.md",
         "references/execution-mode.md",
     }
     assert {s["file"] for s in SITES} == named
@@ -216,4 +216,4 @@ def test_comment_states_the_never_regenerate_rule():
 def test_no_existing_golden_block_was_touched():
     # A sentinel from a block this story must not modify -- a change here
     # would mean the golden file's earlier content drifted, not just grew.
-    assert len(GOLDEN["story_merge_cases"]) == 92
+    assert len(GOLDEN["story_merge_cases"]) == 96

@@ -47,9 +47,11 @@ syntax	skills/agent-browser/SKILL.md	Navigation (block 1)	# usage listing: `agen
 #
 #   plan.md     PROJECT_PATH   — the per-entry base-branch block under "Derive
 #       and Patch Metadata Fields" reads $PROJECT_PATH, which only the Phase 3e
-#       validation loop ~100 lines earlier ever assigns. Note this variable
-#       moved here from the `unassigned` list when that loop was added: making
-#       a block a real loop makes its outputs loop-scoped, so loop-less
+#       validation loop ever assigns. That block and that loop now sit in two
+#       different files (references/plan/phase-4-metadata-identity.md and
+#       phase-3e-story-merge.md), so the finding is listed as an `unassigned`
+#       row for the reading file, with the same SUSPECTED LIVE DEFECT reason.
+#       Making a block a real loop makes its outputs loop-scoped, so loop-less
 #       downstream consumers start failing too.
 #
 # This is listed so the suite can be green and enforcing today. It should
@@ -59,7 +61,6 @@ syntax	skills/agent-browser/SKILL.md	Navigation (block 1)	# usage listing: `agen
 # was the sibling entry here: it was the exact defect described above, fixed
 # by folding SPLIT_WORKTREE_PATH into the same per-member JSON record that
 # Derive and Validate Split Branch Names assigns inside its own loop.
-loop-scope	plan.md	PROJECT_PATH	# SUSPECTED LIVE DEFECT: only the Phase 3e validation loop ~100 lines earlier assigns it. Fix and delete, do not renew
 
 # --- unassigned -------------------------------------------------------------
 # Names read by a block that nothing in the same file ever assigns. Most are
@@ -86,11 +87,50 @@ unassigned	next.md	CONTAINER_ROOT	# supplied by the orchestrator that invokes th
 unassigned	next.md	PROJECT_PATH	# supplied by the orchestrator that invokes this flow, never by next.md itself
 unassigned	open-pr.md	INCLUDE_BACKEND_SPEC	# flag the prose decides -- `<if $INCLUDE_BACKEND_SPEC=1, append ...>` -- not a shell assignment
 unassigned	open-pr.md	s	# single letter from pseudo-code, not a shell variable
-unassigned	plan.md	entry	# ${entry.idx} inside a commented pseudo-code line; never a shell expansion
-unassigned	plan.md	overflow	# ${overflow} inside a commented pseudo-code line; never a shell expansion
-unassigned	plan.md	ROOT	# search root the surrounding prose assigns before this block runs
-unassigned	plan.md	token	# ${token} inside a commented pseudo-code line; never a shell expansion
-unassigned	plan.md	topicSlug	# ${topicSlug} inside an illustrative staging/tasks path the prose fills in
+unassigned	references/plan/phase-0-bundle-prototype-and-spec.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-bundle-prototype-and-spec.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-bundle-prototype-and-spec.md	PHASE_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-design-bundle-detection.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-design-bundle-detection.md	brainstormBundleRoot	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-design-bundle-detection.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-design-bundle-detection.md	PHASE_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-design-bundle-detection.md	ROADMAP_MODE	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-issue-confirmation.md	FEATURE_DESCRIPTION	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-roadmap-materialization.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-roadmap-materialization.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-roadmap-mode-detection.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-roadmap-mode-detection.md	FEATURE_DESCRIPTION	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-absent-phase.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-absent-phase.md	PHASE_OVERRIDE	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-bare-and-gates.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-bare-and-gates.md	INTERACTIVE_MODE	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-bare-and-gates.md	PHASE_VERDICTS_JSON	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-bare-and-gates.md	ROADMAP_JSON	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-rolling-wave-select.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-0-scope-context-classification.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-1-local-research.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-1-local-research.md	PHASE_TOPIC_SLUG	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-2-4-codebase-cross-check.md	ROOT	# search root the surrounding prose assigns before this block runs (entry moved with its block from plan.md)
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	PHASE_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	RUN_TS	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	SELECTED_PHASE_ID	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	entry	# ${entry.idx} inside a commented pseudo-code line; never a shell expansion
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	overflow	# ${overflow} inside a commented pseudo-code line; never a shell expansion
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	token	# ${token} inside a commented pseudo-code line; never a shell expansion
+unassigned	references/plan/phase-3a-3b-setup-and-outline.md	topicSlug	# ${topicSlug} inside an illustrative staging/tasks path the prose fills in
+unassigned	references/plan/phase-3c-outline-gate.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3d5-audit-apply-gate.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3d5-audit-spawn.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3e-story-merge.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3e-story-merge.md	SELECTED_PHASE_ID	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3e-story-merge.md	TASKS_PATH	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-3e-story-merge.md	featureSlug	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-4-metadata-context.md	MERGE_RETURN	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-4-metadata-identity.md	AIMI_ROOT	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
+unassigned	references/plan/phase-4-metadata-identity.md	PROJECT_PATH	# assigned by the Phase 3e validation loop, which now sits in phase-3e-story-merge.md so no loop in this file sets it; SUSPECTED LIVE DEFECT carried over from the plan.md loop-scope row. Fix and delete, do not renew
+unassigned	references/plan/phase-45-validation.md	MERGE_RETURN	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
 unassigned	references/container-execution.md	AIMI_ROOT	# reference file describing the mechanics; the calling command assigns this
 unassigned	references/container-execution.md	CONTAINER_BASE	# reference file describing the mechanics; the calling command assigns this
 unassigned	references/container-execution.md	EXEC_BRANCH	# reference file describing the mechanics; the calling command assigns this
@@ -120,4 +160,4 @@ argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)	# parses
 argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
 argument-gate	execute.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
 argument-gate	open-pr.md	Parse --branch Argument (block 1)	# parses $ARGUMENTS for a branch name and hands it to aimi-cli.sh, which validates it again
-argument-gate	plan.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
+argument-gate	references/plan/step-0-environment-setup.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
