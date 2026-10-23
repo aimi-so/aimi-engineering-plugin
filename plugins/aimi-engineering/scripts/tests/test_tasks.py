@@ -1629,9 +1629,14 @@ def test_the_suspicious_content_screen_has_one_definition_for_its_three_call_sit
     """The jq wrote this regex out three times -- title, description, tasks[] --
     and three copies of a prompt-injection screen are three chances to fix two of
     them. The same collapse clamp_max_concurrency got, for the same reason."""
+    # The definition moved to sanitize.py so the patch matcher can share it;
+    # tasks.py keeps the import and the three call sites.
+    with open(os.path.join(SCRIPTS, "sanitize.py"), encoding="utf-8") as handle:
+        sanitize_source = handle.read()
+    assert len(re.findall(r"^SUSPICIOUS = \($", sanitize_source, re.M)) == 1
     source = _source()
-    assert len(re.findall(r"^SUSPICIOUS = \($", source, re.M)) == 1
-    assert source.count("SUSPICIOUS") == 4, "one definition plus three call sites"
+    assert len(re.findall(r"^SUSPICIOUS = \($", source, re.M)) == 0
+    assert source.count("SUSPICIOUS") == 4, "one import plus three call sites"
     for label in ("titulo-suspeito", "descricao-suspeita", "tasks-suspeito"):
         assert _verdict(label + "-stories")["valid"] is False, label
 
