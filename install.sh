@@ -181,23 +181,27 @@ fm_get() {
 }
 
 # ---------------------------------------------------------------------------
-# translate_command_body — rewrite command body for OpenCode compatibility
-# Prepends agent invocation preamble and fixes subagent_type references
+# translate_config_dir_literal — the Claude Code config-dir token to its
+# OpenCode spelling. Shared by command bodies and full-mode references so the
+# two cannot spell it differently.
 # ---------------------------------------------------------------------------
-translate_command_body() {
+translate_config_dir_literal() {
   local body="$1"
-
-  # --- CLI path rewriting (applies to all commands) ---
-  # Replace Claude config dir references with OpenCode config dir
   body="${body//\$\{CLAUDE_CONFIG_DIR:-\$HOME\/.claude\}/\$\{OPENCODE_CONFIG_DIR:-\$HOME\/.config\/opencode\}}"
+  printf '%s' "$body"
+}
 
-  # Coverage re-verified (US-003): the single-line Per-Call Resolution form
-  # documented in commands/references/cli-path-resolution.md — the same two
-  # statements above, joined by `;` into one line — needs no new rule here.
-  # This function was sourced in isolation, fed that literal joined line, and
-  # returned it with only the CLAUDE_CONFIG_DIR token swapped and every other
-  # byte (including the `;`) unchanged: the substring rewrite above is
-  # already agnostic to where a statement boundary falls.
+# ---------------------------------------------------------------------------
+# translate_host_literals — the host-literal substitutions every translated
+# file receives: plugin root variable, /plugin install message, the four
+# AskUserQuestion rules and the Task -> aimi-task rewrite. translate_command_body
+# and translate_reference_body both call it, so a command and a reference can
+# never disagree about what a picker or a spawn becomes on OpenCode.
+# Callers append a sentinel before capturing the output (see below) because
+# command substitution strips trailing newlines.
+# ---------------------------------------------------------------------------
+translate_host_literals() {
+  local body="$1"
 
   # Replace plugin root variable with the OpenCode-side AIMI_PLUGIN_DIR
   # (CLAUDE_PLUGIN_ROOT is injected by Claude Code only; AIMI_PLUGIN_DIR is
@@ -272,10 +276,9 @@ translate_command_body() {
   # do: no substitution here matches a subcommand or flag name.
   #
   # This is also why those pickers live in the command bodies and NOT in
-  # commands/references/forge-contract.md. Reference files never reach this
-  # function: they are delivered by the verbatim whole-tree copy below and both
-  # command-install loops skip the "references" subdirectory by name. A picker
-  # written into a reference file would reach OpenCode untranslated, naming a
+  # commands/references/forge-contract.md. That file is not on the reference
+  # allowlist (REFERENCE_ALLOWLIST_* below), so it reaches OpenCode through the
+  # whole-tree copy untranslated, and a picker written into it would name a
   # tool that host does not have. forge-contract.md therefore carries the
   # account-selection contract in prose with no AskUserQuestion literal at all.
   body="${body//Use \*\*AskUserQuestion\*\*/Use the **question** tool}"
@@ -297,6 +300,35 @@ translate_command_body() {
   # invocation — previously the preamble told the model to translate Task →
   # aimi-task at call time, and the model sometimes forgot.
   body="${body//Task subagent_type=\"aimi-engineering:/aimi-task subagent_type=\"aimi-engineering:}"
+
+  printf '%s' "$body"
+}
+
+# ---------------------------------------------------------------------------
+# translate_command_body — rewrite command body for OpenCode compatibility
+# Prepends agent invocation preamble and fixes subagent_type references
+# ---------------------------------------------------------------------------
+translate_command_body() {
+  local body="$1"
+
+  # --- CLI path rewriting (applies to all commands) ---
+  # Replace Claude config dir references with OpenCode config dir
+  body=$(translate_config_dir_literal "$body"; printf x)
+  body="${body%x}"
+
+  # Coverage re-verified (US-003): the single-line Per-Call Resolution form
+  # documented in commands/references/cli-path-resolution.md — the same two
+  # statements above, joined by `;` into one line — needs no new rule here.
+  # This function was sourced in isolation, fed that literal joined line, and
+  # returned it with only the CLAUDE_CONFIG_DIR token swapped and every other
+  # byte (including the `;`) unchanged: the substring rewrite above is
+  # already agnostic to where a statement boundary falls.
+
+  # Host literals shared with references (plugin root, install message,
+  # AskUserQuestion, Task -> aimi-task). The trailing sentinel keeps trailing
+  # newlines through the command substitution.
+  body=$(translate_host_literals "$body"; printf x)
+  body="${body%x}"
 
   # --- Agent invocation preamble (only for commands referencing named agents) ---
   case "$body" in
@@ -402,6 +434,61 @@ Run all aimi-task invocations in parallel as instructed by the command below.
 }
 
 # ---------------------------------------------------------------------------
+# Reference allowlist — which commands/references/ files are translated.
+#
+# commands/references/ is delivered by install_plugin_source's whole-tree copy
+# and is verbatim by default. A file is translated only when it is named here,
+# because most references document Claude Code behaviour on purpose. Patterns
+# are relative to commands/references/ and may be globs.
+#
+# interactivity.md is absent ON PURPOSE: it documents the exact strings the
+# rewrite targets (AskUserQuestion and friends), so translating it would
+# erase what it exists to say.
+# ---------------------------------------------------------------------------
+# full mode: host literals plus the config-dir rewrite, the same treatment a
+# command body gets (minus the agent preamble, which stays command-only).
+REFERENCE_ALLOWLIST_FULL=(
+  # plan/*.md is a glob so split files added later need no edit here; they
+  # carry inline CLI resolution moved out of plan.md.
+  "plan/*.md"
+)
+# literals mode: host literals only. The config-dir token is left alone so
+# the file can keep documenting the Claude Code cache path verbatim.
+REFERENCE_ALLOWLIST_LITERALS=(
+  # documents both hosts' CLI resolution; must keep the Claude Code cache path
+  "cli-path-resolution.md"
+  # carries Task spawn examples for container execution
+  "container-execution.md"
+  # carries picker (AskUserQuestion) wording rules
+  "user-communication.md"
+)
+
+# ---------------------------------------------------------------------------
+# translate_reference_body — rewrite a commands/references/ file body.
+# $1 is the mode ("full" or "literals"), $2 the body. References never get the
+# agent-invocation preamble or the general-purpose -> general swap; those are
+# command-entry-point behaviour (translate_command_body).
+# ---------------------------------------------------------------------------
+translate_reference_body() {
+  local mode="$1"
+  local body="$2"
+
+  case "$mode" in
+    full)
+      body=$(translate_config_dir_literal "$body"; printf x)
+      body="${body%x}"
+      ;;
+    literals) ;;
+    *) die "translate_reference_body: unknown mode '$mode'" ;;
+  esac
+
+  body=$(translate_host_literals "$body"; printf x)
+  body="${body%x}"
+
+  printf '%s' "$body"
+}
+
+# ---------------------------------------------------------------------------
 # translate_command — convert Claude command .md to OpenCode command .md
 # ---------------------------------------------------------------------------
 translate_command() {
@@ -486,11 +573,14 @@ install_plugin_source() {
 
   mkdir -p "$plugin_dst"
   # Copy everything except .git
-  # This is a whole-tree copy, not a per-file allowlist: commands/references/*.md
+  # This is a whole-tree copy, not a per-file allowlist: commands/references/**
   # (cli-path-resolution.md, scope-contexts.md, ui-signals.md, visual-variants.md, ...)
-  # is carried verbatim by this cp -R with no code change needed when new reference
-  # files are added — install_commands' subdirectory loops deliberately skip
-  # "references" (see below) because this copy already delivers them (verified US-006).
+  # arrives verbatim, with no code change needed when new reference files are
+  # added — install_commands' subdirectory loops deliberately skip "references"
+  # (see below) because this copy already delivers them (verified US-006).
+  # The files named in REFERENCE_ALLOWLIST_* are then rewritten in place by
+  # install_references, which runs right after this function; everything else
+  # stays byte-identical to the source.
   cp -R "$src/." "$plugin_dst/"
 
   # Ensure scripts are executable
@@ -502,6 +592,59 @@ install_plugin_source() {
   printf '%s\n' "$version" > "$plugin_dst/.installed-version"
 
   ok "Plugin source installed to $plugin_dst (v$version)"
+}
+
+# ---------------------------------------------------------------------------
+# install_references — translate the allowlisted commands/references/ files
+# in place inside the installed plugin copy. Dry-run lists the matches from
+# the source tree and writes nothing. A re-install is idempotent because
+# install_plugin_source re-copies the verbatim source first.
+# ---------------------------------------------------------------------------
+install_references() {
+  local src="$1"
+  local target_dir="$2"
+  local base mode pattern f rel body translated
+  local count=0
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    base="$src/commands/references"
+  else
+    base="$target_dir/plugins/$PLUGIN_NAME/commands/references"
+  fi
+  [ -d "$base" ] || return 0
+
+  for mode in full literals; do
+    local patterns=()
+    if [ "$mode" = "full" ]; then
+      patterns=("${REFERENCE_ALLOWLIST_FULL[@]}")
+    else
+      patterns=("${REFERENCE_ALLOWLIST_LITERALS[@]}")
+    fi
+    for pattern in "${patterns[@]}"; do
+      # Unquoted on purpose: the pattern is a glob relative to $base.
+      for f in "$base"/$pattern; do
+        [ -f "$f" ] || continue
+        rel="${f#"$base"/}"
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run]   Would translate reference: $rel"
+        else
+          body=$(cat "$f"; printf x)
+          body="${body%x}"
+          translated=$(translate_reference_body "$mode" "$body"; printf x)
+          translated="${translated%x}"
+          # Same path, same inode: the file keeps its mode.
+          printf '%s' "$translated" > "$f"
+          [ "$VERBOSE" -eq 1 ] && log "    translated reference: $rel"
+        fi
+        count=$((count + 1))
+      done
+    done
+  done
+
+  if [ "$DRY_RUN" -eq 0 ]; then
+    ok "Translated $count reference file(s)"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -1022,6 +1165,7 @@ install_opencode() {
   fi
 
   install_plugin_source "$src" "$target_dir"
+  install_references "$src" "$target_dir"
   install_commands "$src" "$target_dir"
   install_agents "$src" "$target_dir"
   install_skills "$src" "$target_dir"
