@@ -151,6 +151,12 @@ Each fact has exactly one home field. Write it there once and let every other fi
 
 **One criterion may list test cases, and only one.** A story's `acceptanceCriteria` allows exactly one criterion that enumerates test cases; every other criterion states a behaviour and leaves the case list out. Scatter the cases across several criteria and each one grows past the budget below while repeating its neighbours.
 
+**A `verify` delegates to the tests the story itself creates and never rebuilds their fixtures through the CLI.** When the story adds a test module, the verify runs that module; re-creating its fixtures by hand in the verify duplicates the module it should be running, and the two copies drift apart.
+
+**An acceptance criterion never lists test names.** A criterion that names tests states coverage, which is a step and belongs in `tasks[]`: write the task as `cases test_x_* cover each criterion` and leave the criterion to state the behaviour.
+
+**A planning measurement lives in `notes`, and any count appears in exactly one field.** A measured figure is evidence, not an instruction; a count restated in a criterion, the approach and a task goes stale in three places when the measurement is retaken.
+
 **`tasks[]` entries are short verb-object phrases of about 120 characters.** They name a step, not its reasoning, and they do not paraphrase `implementation.approach`: if an entry could be read aloud as a sentence of the approach, it is the approach, and the checklist should name only the step that acts on it. The 5000-character ceiling in the `tasks[]` section below is a hard cap and not a target.
 
 **`notes` admits only a fact that no other field and no `metadata.decisions` entry carries.** A `<design_decisions>` entry is never copied into `notes`: the decision already reaches the executor through `metadata.decisions`, and a second copy there is a second place to go stale. When nothing qualifies, omit `notes`.
@@ -214,6 +220,17 @@ Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fix
 **A story's own `implementation.verify` must NEVER name the `verify-probe` verb.** The executor probes a story by RUNNING that story's own verify segments (`skills/story-executor/SKILL.md` step 1.5), so a verify that calls the verb back re-enters the probe: the CLI refuses instead of answering, and the story then fails for a reason that has nothing to do with its own code. The same loop closes between two stories — A's verify probing B while B's probes A, two ids and neither equal to the other — so write neither shape.
 
 A story that must exercise the verb has two ways out: probe from a verify that does not itself call it (a sibling story's, or a throwaway fixture's), or call `probe_verify()` in `tasks.py` directly, which is not guarded. Point at the refusal rather than restating it — `_VERIFY_PROBE_REENTRY` in `plugins/aimi-engineering/scripts/tasks.py` is the one place that states the problem in full and names both exits, and it is the text whoever trips this actually reads.
+
+## Verify that fails when any line fails
+
+**A multi-line `implementation.verify` must fail when any one of its lines fails.** The executor runs it as one script and the script's exit status is the status of its LAST command, so a failing line in the middle is swallowed unless the script stops there. Either open with `set -e` (or `set -euo pipefail`), or chain every line after the first with `&&`. `verify_composition_findings` in `plugins/aimi-engineering/scripts/tasks.py` is the predicate that decides, and `/aimi:plan` refuses a verify it reports, so a verify that passes on its last line alone never reaches the executor.
+
+Four companion rules keep a guarded verify honest, each with its own reason:
+
+- **No `grep -q` on the right of a pipe under `pipefail`.** `grep -q` exits at its first match and closes the pipe, the writer on the left dies of SIGPIPE, and `pipefail` turns that into a failure of a check that matched. Count instead with `grep -c ... || true` and test the number.
+- **`grep -c` with zero matches aborts a command substitution under `set -e`,** because it exits 1 when it counts nothing. End it with `|| true` so the count `0` reaches the test that is meant to judge it.
+- **`grep` on a directory operand needs `-r`.** Without it `grep` reports `Is a directory` and exits non-zero, which reads as "no match" and fails or passes for the wrong reason.
+- **Every `! grep` has a positive twin.** A negated `grep` passes when the file is missing, misspelled or empty, so pair it with a `grep` that asserts the thing that should be there.
 
 ## Guard-rail segments
 

@@ -186,6 +186,8 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   throwaway fixture, or calls 'probe_verify()' in tasks.py, which is not
   guarded — the CLI's refusal message is where both ways out are stated.
 
+  IMPORTANT — a multi-line 'verify' must fail on any failing line: open with 'set -e' or chain with '&&'; no 'grep -q' after a pipe under pipefail; 'grep -r' for a directory; every '! grep' needs a positive twin.
+
   IMPORTANT — dependsOn encoding:
   Use 'outline:NN' tokens (zero-padded, matching the outline index) to express
   dependencies. Do NOT invent US-NNN IDs. story-merge will remap every
