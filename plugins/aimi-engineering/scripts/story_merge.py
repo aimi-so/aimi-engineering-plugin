@@ -2637,6 +2637,126 @@ def write_project_split(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# The verify refusal and validate-staging
+# ---------------------------------------------------------------------------
+#
+# ONE helper decides whether a story's implementation.verify can swallow a
+# failing line, and both callers use it: `validate-staging`, which /aimi:plan runs
+# while stories are still being expanded, and the story-merge refusal below, which
+# is the second gate because an audit patch that replaces a verify lands after the
+# expansion-time check. Two copies of the rule could disagree about one story.
+#
+# The rule itself (tasks.py's verify_composition_findings) is imported INSIDE the
+# function body: tasks.py imports story_merge at module level, so a top-level
+# import here would close a cycle. roadmap.py's function-local imports are the
+# precedent. A finding can quote a model-written verify, so every finding passes
+# through rm_sanitize before it reaches stdout or stderr.
+
+_FINDING_MAXLEN = 500
+
+
+def verify_refusal_findings(story):
+    """Sanitized findings for one story's verify; [] for a clean or absent one."""
+    if not isinstance(story, dict):
+        return []
+    from tasks import verify_composition_findings
+
+    return [
+        rm_sanitize(finding, _FINDING_MAXLEN)
+        for finding in verify_composition_findings(_implementation_verify(story))
+    ]
+
+
+def _depends_on_tokens(entries):
+    tokens = set()
+    for entry in entries:
+        deps = entry.get("dependsOn")
+        if isinstance(deps, list):
+            tokens.update(dep for dep in deps if isinstance(dep, str))
+    return tokens
+
+
+def validate_staging(staging_dir, outline=None):
+    """{idx: [finding, ...]} for the staged `NN-*.json` files that fail a rule.
+
+    Files come from audit_patches.staged_idx_map -- the glob the audit gate uses,
+    so sidecars and symlinks are excluded -- and a file that is not valid JSON is
+    skipped, never fatal: its shape is Schema Validation step 2's business. With
+    an outline, every producer -> consumer edge outline_contract reports (an
+    `ext:` consume never makes one) requires `outline:<from>` in the `dependsOn`
+    of the story staged as `<to>`; that is the only producer lookup there is.
+    """
+    edges = []
+    if outline is not None:
+        from outline_contract import validate_outline
+
+        edges = validate_outline(outline)["edges"]
+    report = {}
+    for idx, path in sorted(staged_idx_map(staging_dir).items()):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        entries = [e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)]
+        findings = []
+        for entry in entries:
+            findings.extend(verify_refusal_findings(entry))
+        if entries:
+            tokens = _depends_on_tokens(entries)
+            for edge in edges:
+                if edge["to"] == idx and "outline:" + edge["from"] not in tokens:
+                    findings.append(
+                        rm_sanitize(
+                            "consumes " + str(edge["name"]) + ", which outline entry "
+                            + edge["from"] + " produces, but dependsOn lacks outline:"
+                            + edge["from"],
+                            _FINDING_MAXLEN,
+                        )
+                    )
+        if findings:
+            report[idx] = findings
+    return report
+
+
+def verify_refusal_lines(stories):
+    """One refusal line per story whose verify swallows a failing line."""
+    lines = []
+    for story in stories:
+        for finding in verify_refusal_findings(story):
+            lines.append(
+                "  Story "
+                + story["id"]
+                + " (staged "
+                + str(story.get("_stagedIdx", ""))
+                + "): implementation.verify "
+                + finding
+            )
+    return lines
+
+
+def run_validate_staging(args):
+    """The validate-only mode: print {idx: findings} and exit 1 when non-empty."""
+    staging_dir = _flag(args, "--staging-dir", "")
+    outline_path = _flag(args, "--outline", "")
+    outline = None
+    if outline_path:
+        try:
+            with open(outline_path, "r", encoding="utf-8") as handle:
+                outline = json.load(handle)
+        except (OSError, ValueError):
+            die("Error: validate-staging: --outline is not readable JSON: " + outline_path)
+        if not isinstance(outline, list):
+            die("Error: validate-staging: --outline must hold a JSON array: " + outline_path)
+    try:
+        report = validate_staging(staging_dir, outline)
+    except (AuditRefusal, OSError) as refusal:
+        die("Error: validate-staging: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2 if report else None) + "\n")
+    return 1 if report else 0
+
+
 def _flag(argv, name, default=None):
     if name in argv:
         i = argv.index(name)
@@ -2658,6 +2778,8 @@ def _flags_all(argv, name):
 
 def main(argv):
     args = argv[1:]
+    if "--validate-staging" in args:
+        return run_validate_staging(args)
     staging_dir = _flag(args, "--staging-dir", "")
     output_path = _flag(args, "--output", "")
     split_mode = _flag(args, "--split", "legacy")
@@ -2682,6 +2804,17 @@ def main(argv):
 
     stories = read_staging(paths)
     assign_ids(stories)
+    # The second gate for a verify that can swallow a failing line (the first is
+    # validate-staging during expansion). It sits after assign_ids so it can name
+    # US-NNN and ahead of every remap and sweep so a refusal writes nothing. No
+    # agent_mode branch: an audit patch can introduce the verify this refuses.
+    swallowing = verify_refusal_lines(stories)
+    if swallowing:
+        die_list(
+            "Error: story-merge: implementation.verify would swallow a failing line"
+            " (start it with set -e or chain its lines with &&):",
+            swallowing,
+        )
     # Computed ONCE, while every story still carries its _stagedIdx, and reused by
     # --foundation below so the two can never resolve an idx differently.
     idx_map = outline_map(stories)

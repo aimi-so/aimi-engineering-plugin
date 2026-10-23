@@ -5019,6 +5019,46 @@ test_apply_audit_patches() {
   rm -rf "$stg" "$stg2"
 }
 
+test_validate_staging() {
+  echo ""
+  echo "=== validate-staging: swallowing verify, producer edge, refusals ==="
+
+  local bad=".aimi/.vs-bad-$$" good=".aimi/.vs-good-$$"
+  mkdir -p "$bad" "$good"
+  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"'
+  printf '%s' "${head}"'true\nfalse\ntrue\n"}}' > "$bad/01-a.json"
+  printf '%s' "${head}"'set -e\ntrue\nfalse\n"}}' > "$bad/02-b.json"
+  printf '%s' "${head}"'tsc --noEmit"}}' > "$good/01-a.json"
+  printf '%s' "${head}"'tsc --noEmit"}}' > "$good/02-b.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","produces":["sym:foo"]},{"idx":"02","title":"B","summary":"s","consumes":["sym:foo"]}]' > "$good/outline.json"
+
+  local output exit_code
+  output=$("$CLI" validate-staging --staging-dir "$bad" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-staging: a swallowing multi-line verify exits 1"
+  assert_eq "01" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output")" "validate-staging: the report is keyed by the staged idx and leaves the guarded story out"
+  assert_contains "swallow a failing line" "$output" "validate-staging: the finding names the rule"
+
+  output=$("$CLI" validate-staging --staging-dir "$good" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: a clean directory exits 0 and prints an empty object"
+
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_eq "1|02" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output")" "validate-staging: --outline reports the consumer that lacks its producer's outline token"
+
+  sed -i 's/"dependsOn":\[\]/"dependsOn":["outline:01"]/' "$good/02-b.json"
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: the same story with the token present is clean"
+
+  printf '%s' '{not json' > "$good/03-c.json"
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: a staged file that is not valid JSON is skipped, never fatal"
+
+  output=$("$CLI" validate-staging --staging-dir "/tmp" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-staging: an escaping --staging-dir exits 1"
+  assert_contains "escapes project root" "$output" "validate-staging: the escape is refused by confinement before the module runs"
+
+  rm -rf "$bad" "$good"
+}
+
 test_validate_outline() {
   echo ""
   echo "=== validate-outline: contract check, waves, refusals ==="
@@ -8853,6 +8893,7 @@ main() {
   test_story_merge_happy_path
   test_story_merge_missing_dir
   test_apply_audit_patches
+  test_validate_staging
   test_validate_outline
   test_story_merge_malformed_json
   test_story_merge_duplicate_index

@@ -108,4 +108,6 @@ $AIMI_CLI roadmap-set-status --feature "$featureSlug" --phase "$SELECTED_PHASE_I
 
 Proceed to Phase 4.
 
+**Verify refusal.** `story-merge` refuses, with exit 1 and nothing written, a staged story whose multi-line `implementation.verify` can swallow a failing line (no leading `set -e`, and a later line not chained with `&&`). The stderr names the story's `US-NNN` id and the staged idx, and the staging directory is left intact. The refusal is never demoted in agent mode: `--agent-mode` changes nothing about it, and it has no flag or environment escape (specFlow:CriticalQ6). It is the second place the rule runs, because an audit patch that replaces a verify lands after the Phase 3d check. To retry, fix the verify (delete the staged file and re-run the expander for that idx, or apply an audit patch through `apply-audit-patches`) and call `story-merge` again.
+
 On **failure** (non-zero exit): do NOT proceed, and do NOT call `roadmap-set-status`. Surface the error to the user. The staging directory is preserved for inspection. Do not attempt to write tasks.json manually.
