@@ -2886,3 +2886,216 @@ def test_outline_ref_working_idx_never_reaches_the_written_file(tmp_path):
     proc, doc = _merge(tmp_path, _gap_files())
     assert proc.returncode == 0, proc.stderr
     assert "_stagedIdx" not in json.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
+# US-NNN references in story text, re-rendered after a split
+# ---------------------------------------------------------------------------
+#
+# Story text is written against the ids the merge assigned BEFORE the split. Each
+# output file then renumbers from US-001, so an unrewritten "US-003" names a
+# different story, or none. The fixtures below stage stories whose text cites
+# pre-split ids and read back what each output file carries.
+
+_FE_FILES = ["src/web/components/x.tsx"]
+_BE_FILES = ["src/server/x.ts"]
+
+
+def _text_story(title, files, project=None, **fields):
+    story = _staging_story(title)
+    story["implementation"]["files"] = list(files)
+    if project is not None:
+        story["project"] = project
+    for key, value in fields.items():
+        if key in ("approach", "verify", "guardRails"):
+            story["implementation"][key] = value
+        else:
+            story[key] = value
+    return story
+
+
+def _all_stories(tmp_path):
+    return {s["title"]: s for d in _split_docs(tmp_path) for s in d["userStories"]}
+
+
+def _side_citing_files(**fields):
+    """Pre-split ids: 01 fe (US-001), 02 be (US-002), 03 fe (US-003), 04 be (US-004).
+    After the SIDE split: fe holds US-001, US-002 (were 01, 03); be holds US-003,
+    US-004 (were 02, 04)."""
+    return {
+        "01-a.json": _text_story("Alpha", _FE_FILES),
+        "02-b.json": _text_story("Bravo", _BE_FILES),
+        "03-c.json": _text_story("Charlie", _FE_FILES, **fields),
+        "04-d.json": _text_story("Delta", _BE_FILES),
+    }
+
+
+def test_split_text_side_same_file_target_reads_as_its_new_id_alone(tmp_path):
+    files = _side_citing_files(notes="builds on US-003 and US-001")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    # Charlie was US-003 and is US-002 now; Alpha stays US-001 in the same file.
+    assert _all_stories(tmp_path)["Charlie"]["notes"] == "builds on US-002 and US-001"
+
+
+def test_split_text_side_cross_file_target_carries_the_side_label(tmp_path):
+    files = _side_citing_files(
+        notes="needs US-002",
+        tasks=["call US-004 first", "plain"],
+        acceptanceCriteria=["Typecheck passes", "matches US-002 contract"],
+        approach="after US-002 and US-004 land",
+        gate={
+            "type": "decision",
+            "status": "pending",
+            "prompt": "is US-004 ready?",
+            "options": ["US-002", "no"],
+        },
+    )
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    c = _all_stories(tmp_path)["Charlie"]
+    # Bravo (US-002) became backend US-003; Delta (US-004) became backend US-004.
+    assert c["notes"] == "needs US-003 (backend)"
+    assert c["tasks"] == ["call US-004 (backend) first", "plain"]
+    assert c["acceptanceCriteria"] == ["Typecheck passes", "matches US-003 (backend) contract"]
+    assert c["implementation"]["approach"] == "after US-003 (backend) and US-004 (backend) land"
+    assert c["gate"]["prompt"] == "is US-004 (backend) ready?"
+    assert c["gate"]["options"] == ["US-003 (backend)", "no"]
+
+
+def test_split_text_side_a_backend_story_names_a_frontend_target(tmp_path):
+    files = _side_citing_files()
+    files["02-b.json"]["notes"] = "consumed by US-003"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert _all_stories(tmp_path)["Bravo"]["notes"] == "consumed by US-002 (frontend)"
+
+
+def test_split_text_swapped_ids_in_one_block_do_not_chain(tmp_path):
+    """02 (frontend) becomes US-001 and 01 (backend) becomes US-002: a swap. A
+    chained substitution would rewrite the first result a second time."""
+    files = {
+        "01-a.json": _text_story("Alpha", _BE_FILES),
+        "02-b.json": _text_story("Bravo", _FE_FILES, notes="US-002 then US-001"),
+    }
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _all_stories(tmp_path)
+    assert stories["Bravo"]["id"] == "US-001" and stories["Alpha"]["id"] == "US-002"
+    assert stories["Bravo"]["notes"] == "US-001 then US-002 (backend)"
+
+
+def _project_citing_files(**fields):
+    """Pre-split ids: 01 and 03 in services/api, 02 and 04 in the root group.
+    Groups sort "." before "services/api", so the root block is US-001, US-002
+    (were 02, 04) and the api block US-003, US-004 (were 01, 03)."""
+    return {
+        "01-a.json": _text_story("Alpha", _BE_FILES, project="services/api"),
+        "02-b.json": _text_story("Bravo", _BE_FILES, project="."),
+        "03-c.json": _text_story("Charlie", _BE_FILES, project="services/api", **fields),
+        "04-d.json": _text_story("Delta", _BE_FILES, project="."),
+    }
+
+
+def test_split_text_project_labels_name_the_project_and_read_root_for_dot(tmp_path):
+    files = _project_citing_files(notes="uses US-002, US-004 and US-001")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _all_stories(tmp_path)
+    # Charlie is in services/api: its own file holds Alpha (now US-003).
+    assert stories["Charlie"]["id"] == "US-004"
+    assert stories["Charlie"]["notes"] == "uses US-001 (root), US-002 (root) and US-003"
+
+
+def test_split_text_project_names_a_non_root_project_for_a_cross_file_target(tmp_path):
+    files = _project_citing_files()
+    files["02-b.json"]["notes"] = "wraps US-003"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert _all_stories(tmp_path)["Bravo"]["notes"] == "wraps US-004 (services/api)"
+
+
+@pytest.mark.parametrize("axis", ["side", "project"])
+def test_split_text_verify_and_guardrails_take_the_id_only(tmp_path, axis):
+    import tasks as T
+
+    verify = "set -e\ngrep -q US-002 f && test -f US-004\ngrep -q US-002 g"
+    rails = ["grep -q US-002 f", "test -f US-004", "grep -q US-002 g"]
+    before = [s for _, s in T.verify_segments(verify)]
+    assert all(rail in before for rail in rails), "fixture must start with equal text"
+    if axis == "side":
+        files = _side_citing_files(verify=verify, guardRails=rails)
+        expected = ["grep -q US-003 f", "test -f US-004", "grep -q US-003 g"]
+        title = "Charlie"
+    else:
+        files = _project_citing_files(verify=verify, guardRails=rails)
+        expected = ["grep -q US-001 f", "test -f US-002", "grep -q US-001 g"]
+        title = "Charlie"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    implementation = _all_stories(tmp_path)[title]["implementation"]
+    assert implementation["guardRails"] == expected
+    assert "(" not in implementation["verify"]
+    segments = [s for _, s in T.verify_segments(implementation["verify"])]
+    assert all(rail in segments for rail in implementation["guardRails"])
+
+
+def test_split_text_leaves_boundaries_unknown_ids_and_idless_text_alone(tmp_path):
+    text = "US-0011 XUS-001 US-099 US-12 nothing here"
+    files = _side_citing_files(notes=text, tasks=[text], acceptanceCriteria=[text])
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    c = _all_stories(tmp_path)["Charlie"]
+    assert c["notes"] == text and c["tasks"] == [text] and c["acceptanceCriteria"] == [text]
+
+
+def test_split_text_matches_an_id_next_to_punctuation(tmp_path):
+    files = _side_citing_files(notes="(US-002), US-004. [US-001]:US-003")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        _all_stories(tmp_path)["Charlie"]["notes"]
+        == "(US-003 (backend)), US-004 (backend). [US-001]:US-002"
+    )
+
+
+def test_split_text_adds_no_key_and_keeps_the_key_order(tmp_path):
+    files = _side_citing_files(notes="see US-002")
+    plain = _side_citing_files()
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    with_refs = _all_stories(tmp_path)["Charlie"]
+    other = tmp_path / "other"
+    other.mkdir()
+    proc, _ = _merge(other, plain, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(other)
+    without_refs = {s["title"]: s for d in docs for s in d["userStories"]}["Charlie"]
+    assert list(with_refs) == list(without_refs)
+    assert list(with_refs["implementation"]) == list(without_refs["implementation"])
+    assert "gate" not in with_refs and "guardRails" not in with_refs["implementation"]
+
+
+def test_split_text_without_a_split_the_text_is_byte_identical(tmp_path):
+    files = _side_citing_files(
+        notes="see US-002 and US-004",
+        approach="after US-002",
+        verify="grep -q US-002 f",
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    c = _by_title(doc)["Charlie"]
+    assert c["notes"] == "see US-002 and US-004"
+    assert c["implementation"]["approach"] == "after US-002"
+    assert c["implementation"]["verify"] == "grep -q US-002 f"
+
+
+def test_split_text_render_is_single_pass_over_a_swap_unit():
+    story = {"id": "US-001", "notes": "US-001 US-002", "tasks": ["US-002"]}
+    SM._render_split_refs(
+        story,
+        {"US-001": "US-002", "US-002": "US-001"},
+        {"US-001": {"newId": "US-002", "side": "backend"}, "US-002": {"newId": "US-001", "side": "backend"}},
+        "side",
+    )
+    assert story["notes"] == "US-002 US-001" and story["tasks"] == ["US-001"]

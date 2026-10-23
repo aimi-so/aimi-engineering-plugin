@@ -496,16 +496,60 @@ def remap_outline_tokens(stories, mapping=None):
         story["dependsOn"] = remapped
 
 
+def _rewrite_story_text(story, sub):
+    """Apply `sub(text, path, shell)` to every text field a story reference can sit in.
+
+    The one walk both text passes share -- the outline:NN pass before the split and
+    the US-NNN pass after it -- so they cannot disagree on which fields they own.
+    Covers implementation.approach, implementation.verify,
+    implementation.guardRails[], tasks[], notes, acceptanceCriteria[], gate.prompt
+    and gate.options[], in that order. `path` is the field path ("tasks[1]"), and
+    `shell` is true for verify and guardRails only: those two are shell text, and a
+    pass that adds anything but a bare id to them can break the script.
+
+    A field is assigned only when its text changed, so no key is created and no
+    order moves.
+    """
+
+    def field(container, key, path, shell=False):
+        value = container.get(key)
+        if isinstance(value, str):
+            rewritten = sub(value, path, shell)
+            if rewritten != value:
+                container[key] = rewritten
+
+    def entries(container, key, path, shell=False):
+        values = container.get(key)
+        if not isinstance(values, list):
+            return
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                rewritten = sub(value, path + "[" + str(index) + "]", shell)
+                if rewritten != value:
+                    values[index] = rewritten
+
+    implementation = story.get("implementation")
+    if isinstance(implementation, dict):
+        field(implementation, "approach", "implementation.approach")
+        field(implementation, "verify", "implementation.verify", True)
+        entries(implementation, "guardRails", "implementation.guardRails", True)
+    entries(story, "tasks", "tasks")
+    field(story, "notes", "notes")
+    entries(story, "acceptanceCriteria", "acceptanceCriteria")
+    gate = story.get("gate")
+    if isinstance(gate, dict):
+        field(gate, "prompt", "gate.prompt")
+        entries(gate, "options", "gate.options")
+
+
 def remap_story_text_tokens(stories, mapping):
     """Resolve every OUTLINE_TOKEN in a story's text fields by staged filename idx.
 
-    Covers implementation.approach, tasks[], notes, acceptanceCriteria[],
-    implementation.verify, implementation.guardRails[], gate.prompt and
-    gate.options[]. verify and guardRails go through the SAME helper, so a
-    guardRails entry that equalled a verify segment before the merge still does
-    after it. A field is assigned only when its text changed, so no key is
-    created and no order moves, and a second application changes nothing (a story
-    id contains no "outline:").
+    The fields are those `_rewrite_story_text` walks. verify and guardRails go
+    through the SAME helper as the rest, so a guardRails entry that equalled a
+    verify segment before the merge still does after it. A field is assigned only
+    when its text changed, so no key is created and no order moves, and a second
+    application changes nothing (a story id contains no "outline:").
 
     Returns one "US-NNN <field path>: outline:NN" line per token whose idx has no
     staged file; such a token is left in place here and the caller refuses the
@@ -513,47 +557,20 @@ def remap_story_text_tokens(stories, mapping):
     """
     unmapped = []
 
-    def sub(text, story_id, path):
-        def replace(match):
-            target = mapping.get(match.group(1))
-            if target is None:
-                unmapped.append(story_id + " " + path + ": " + match.group(0))
-                return match.group(0)
-            return target
-
-        return OUTLINE_TOKEN.sub(replace, text)
-
-    def field(container, key, story_id, path):
-        value = container.get(key)
-        if isinstance(value, str):
-            rewritten = sub(value, story_id, path)
-            if rewritten != value:
-                container[key] = rewritten
-
-    def entries(container, key, story_id, path):
-        values = container.get(key)
-        if not isinstance(values, list):
-            return
-        for index, value in enumerate(values):
-            if isinstance(value, str):
-                rewritten = sub(value, story_id, path + "[" + str(index) + "]")
-                if rewritten != value:
-                    values[index] = rewritten
-
     for story in stories:
         story_id = story["id"]
-        implementation = story.get("implementation")
-        if isinstance(implementation, dict):
-            field(implementation, "approach", story_id, "implementation.approach")
-            field(implementation, "verify", story_id, "implementation.verify")
-            entries(implementation, "guardRails", story_id, "implementation.guardRails")
-        entries(story, "tasks", story_id, "tasks")
-        field(story, "notes", story_id, "notes")
-        entries(story, "acceptanceCriteria", story_id, "acceptanceCriteria")
-        gate = story.get("gate")
-        if isinstance(gate, dict):
-            field(gate, "prompt", story_id, "gate.prompt")
-            entries(gate, "options", story_id, "gate.options")
+
+        def sub(text, path, shell, story_id=story_id):
+            def replace(match):
+                target = mapping.get(match.group(1))
+                if target is None:
+                    unmapped.append(story_id + " " + path + ": " + match.group(0))
+                    return match.group(0)
+                return target
+
+            return OUTLINE_TOKEN.sub(replace, text)
+
+        _rewrite_story_text(story, sub)
     return unmapped
 
 
@@ -2043,12 +2060,57 @@ def write_legacy(stories, output_path, staging_dir, smells, phase_metadata=None)
 # ---------------------------------------------------------------------------
 
 
-def _remap_block(stories, id_map):
+# One pattern for what a story-id reference looks like inside story text: "US-"
+# and exactly three digits, with no word character before it and no digit after.
+# XUS-001 and US-0011 are not references, so a longer number or an embedded id is
+# never half-rewritten -- the same boundary rule OUTLINE_TOKEN applies to its own
+# token.
+STORY_ID_REF = re.compile(r"(?<!\w)US-[0-9]{3}(?![0-9])")
+
+
+def _render_split_refs(story, id_map, global_map, axis_key):
+    """Re-render the US-NNN references in one story's text after a split.
+
+    Story text was written against the pre-split ids, which stop naming the same
+    story once the split renumbers each output file. One substitution per field,
+    single-pass, so ids that swap inside one block never chain. The target is found
+    in this file's own id_map first (same file: the new id alone), then in
+    global_map (another file: the new id plus a label naming where it went, the
+    target's `axis_key` -- "frontend"/"backend" on the SIDE axis, the project key on
+    the PROJECT axis, with "." read as "root"). Any other id is returned unchanged.
+
+    verify and guardRails get the id only: a parenthesis there is a shell syntax
+    error, and both receive the identical substitution, so every guardRails entry
+    still equals a segment of the rewritten verify.
+    """
+
+    def sub(text, path, shell):
+        def replace(match):
+            old = match.group(0)
+            if old in id_map:
+                return id_map[old]
+            target = global_map.get(old)
+            if target is None:
+                return old
+            if shell:
+                return target["newId"]
+            label = target[axis_key]
+            return target["newId"] + " (" + ("root" if label == "." else str(label)) + ")"
+
+        return STORY_ID_REF.sub(replace, text)
+
+    _rewrite_story_text(story, sub)
+
+
+def _remap_block(stories, id_map, global_map=None, axis_key=None):
     """Rewrite ids and dependsOn inside one output file, recording what was lost.
 
     A dependsOn entry that fails to resolve against this file's OWN id map is by
     construction resolvable in another file -- the outline:NN remap and its
     unresolved check ran before this -- so it is dropped here and named later.
+
+    With a global_map and the axis key it was built under, the same pass also
+    re-renders the US-NNN references in each story's text (see _render_split_refs).
     """
     for story in stories:
         pre = _list(story.get("dependsOn"))
@@ -2058,6 +2120,8 @@ def _remap_block(stories, id_map):
         story["dependsOn"] = [id_map[dep] for dep in pre if id_map.get(dep) is not None]
         story["__droppedDeps"] = dropped
         story["__becameRoot"] = had_deps and story["dependsOn"] == []
+        if global_map is not None:
+            _render_split_refs(story, id_map, global_map, axis_key)
 
 
 def _dropped_banner(warnings, kind, axis_note):
@@ -2157,8 +2221,8 @@ def write_side_split(stories, output_path, staging_dir, smells, phase_aware):
             "title": story.get("title"),
         }
 
-    _remap_block(frontend, fe_map)
-    _remap_block(backend, be_map)
+    _remap_block(frontend, fe_map, global_map, "side")
+    _remap_block(backend, be_map, global_map, "side")
 
     cross = []
     for side, group in (("frontend", frontend), ("backend", backend)):
@@ -2348,7 +2412,7 @@ def write_project_split(
             }
 
     for block in blocks:
-        _remap_block(block["stories"], block["idmap"])
+        _remap_block(block["stories"], block["idmap"], global_map, "project")
         compute_waves(block["stories"])
 
     # This axis keys every entry by `project` at BOTH the top level and in every
