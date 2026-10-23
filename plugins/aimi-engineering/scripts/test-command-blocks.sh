@@ -1348,6 +1348,10 @@ check_references_carry_no_picker() {
     find "$COMMANDS_DIR/references" -name '*.md' | sort | while IFS= read -r f; do
       rel="${f##*/}"
       [ "$rel" = "$PICKER_LITERAL_EXEMPT" ] && continue
+      # references/plan/ is the one subtree install.sh DOES run through the
+      # full command-body translation (install_references' allowlist), so a
+      # picker there is rewritten for OpenCode like one in a command body.
+      case "$f" in "$COMMANDS_DIR"/references/plan/*) continue ;; esac
       grep -nF '**AskUserQuestion**' "$f" 2>/dev/null | cut -c1-160 | sed "s|^|references/$rel:|"
     done
   )"
