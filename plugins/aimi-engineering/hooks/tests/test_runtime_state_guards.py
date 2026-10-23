@@ -46,6 +46,17 @@ def _make_write_input(file_path: str) -> str:
     return json.dumps(payload)
 
 
+def _make_edit_input(file_path: str) -> str:
+    """Return a JSON-encoded PreToolUse payload for an Edit tool call."""
+    payload = {
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": file_path,
+        },
+    }
+    return json.dumps(payload)
+
+
 def _make_skill_input(skill_name: str) -> str:
     """Return a JSON-encoded PreToolUse payload for a Skill tool call."""
     payload = {
@@ -600,6 +611,122 @@ def test_runtime_guard_bypass_env_allows_golden_corpus(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert output.strip() == "" or "deny" not in output
+
+
+# ---------------------------------------------------------------------------
+# staged story files (.aimi/.tasks-staging/<run>/NN-*.json)
+# ---------------------------------------------------------------------------
+
+
+def _staging_run(root: Path) -> Path:
+    run = root / ".aimi" / ".tasks-staging" / "run-1"
+    run.mkdir(parents=True)
+    return run
+
+
+def _staged_story_setup(tmp_path, monkeypatch) -> Path:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return _staging_run(tmp_path)
+
+
+def test_staged_story_new_file_write_allowed(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-new-story.json"
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    assert exit_code == 0
+    assert "deny" not in output
+
+
+def test_staged_story_edit_denied(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json"
+    target.write_text("{}")
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_edit_input(str(target)))
+
+    assert exit_code == 0
+    result = _parse_deny_output(output)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_staged_story_write_over_existing_denied_reason_names_both_routes(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "02-story.json"
+    target.write_text("{}")
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+
+    assert exit_code == 0
+    result = _parse_deny_output(output)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    message = result["hookSpecificOutput"]["userMessage"]
+    assert "apply-audit-patches" in message
+    assert "delete the file and re-run the expander" in message
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["metadata.json", "outline.json", "audit-result.json", "03-research-outline.json"],
+)
+def test_staged_story_sidecars_stay_writable(tmp_path, monkeypatch, name):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / name
+    target.write_text("{}")
+
+    for make in (_make_edit_input, _make_write_input):
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target)))
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+def test_staged_story_same_name_outside_tasks_staging_allowed(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    other = tmp_path / ".aimi" / "elsewhere" / "run-1"
+    other.mkdir(parents=True)
+    target = other / "01-story.json"
+    target.write_text("{}")
+
+    for make in (_make_edit_input, _make_write_input):
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target)))
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+def test_staged_story_worktree_nested_run_dir_judged_like_main_checkout(tmp_path, monkeypatch):
+    # cwd is the main checkout; the run dir lives under a worktree's own .aimi.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
+    main_checkout = tmp_path / "main"
+    main_checkout.mkdir()
+    monkeypatch.chdir(main_checkout)
+    run = _staging_run(main_checkout / ".worktrees" / "wt-1")
+
+    new_file = run / "01-new.json"
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(new_file)))
+    assert exit_code == 0
+    assert "deny" not in output
+
+    existing = run / "02-existing.json"
+    existing.write_text("{}")
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_edit_input(str(existing)))
+    assert exit_code == 0
+    assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_staged_story_env_bypass_allows_edit(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("AIMI_RUNTIME_STATE_GUARD", "off")
+    target = run / "01-story.json"
+    target.write_text("{}")
+
+    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_edit_input(str(target)))
+
+    assert exit_code == 0
+    assert "deny" not in output
 
 
 # ---------------------------------------------------------------------------

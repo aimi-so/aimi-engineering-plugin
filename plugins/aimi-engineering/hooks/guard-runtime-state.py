@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
+"""PreToolUse guard for aimi runtime state (Write/Edit tool path).
+
+This is a rail against ACCIDENTAL hand edits of files the aimi runtime owns.
+It is not a security boundary. Things that pass straight through it:
+
+  * Bash commands -- `rm`, `sed -i`, `jq ... > file` and the like are never
+    seen, because the hook is registered on the Write|Edit matcher only.
+  * OpenCode -- `install.sh` wires no hooks, so none of these blocks run there.
+  * The environment bypass -- AIMI_RUNTIME_STATE_GUARD=off disables every block.
+
+Each block exists to point the caller at the sanctioned route (an aimi-cli verb,
+or for a staged story file `apply-audit-patches` / re-running the expander);
+none of them is meant to stop a determined operator.
+"""
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +31,27 @@ from hook_utils import safe_hook, find_aimi_dir, deny  # noqa: E402
 # absolute path would pin the guard to one tree and miss every worktree copy.
 # Comparing parts (not str.endswith) keeps "myscripts/tests/..." from matching.
 _GOLDEN_CORPUS_PARTS = ("scripts", "tests", "golden_from_jq.json")
+
+# A staged story file: `<any>/.aimi/.tasks-staging/<run>/NN-*.json`.  The name
+# rule is the one story_merge.py's is_sidecar applies in the other direction --
+# metadata.json, outline.json, audit-result.json and any `*-outline.json` are
+# sidecars, not stories -- so the hook and the merge agree on what a story is.
+_STAGED_STORY_NAME = re.compile(r"^[0-9]{2}-.*\.json$")
+_STAGING_PARTS = (".aimi", ".tasks-staging")
+
+
+def _is_staged_story(target: Path) -> bool:
+    """True when *target* names a story file inside a staging run directory.
+
+    Judged by the path components of the resolved target alone (`.aimi`,
+    `.tasks-staging`, run dir, file name), never by cwd, so a run directory
+    under a worktree's own `.aimi` is treated like the main checkout's.
+    """
+    parts = target.parts
+    if len(parts) < 4 or tuple(parts[-4:-2]) != _STAGING_PARTS:
+        return False
+    name = parts[-1]
+    return bool(_STAGED_STORY_NAME.match(name)) and not name.endswith("-outline.json")
 
 
 def _deny_path(path: str, reason: str, exit_code: int = 0) -> None:
@@ -103,6 +139,24 @@ def main(tool_input: dict) -> None:
             "commit message, never by editing this file by hand",
             exit_code=2,
         )
+
+    # Blocked: a hand edit of a staged story file.  It sits before the .aimi/
+    # walk-up because it depends on the target alone.  A Write that CREATES a
+    # not-yet-existing file is the story expander's own output and passes; any
+    # other tool (Edit, or a later-added edit-class tool) and a Write over an
+    # existing file are refused.  exists() is not atomic with the write that
+    # follows it -- accepted for an accident guard.
+    if _is_staged_story(target):
+        tool_name = tool_input.get("tool_name")
+        if tool_name != "Write" or target.exists():
+            _deny_path(
+                str(target),
+                "A staged story is already expanded and audited, so a hand "
+                "edit would drift it out of consistency with its siblings. "
+                "Route post-expansion changes through apply-audit-patches, or "
+                "delete the file and re-run the expander",
+                # provenance: plan story discipline, staged-story guard
+            )
 
     # Find .aimi/ directory by walking up from cwd.
     cwd = Path(os.getcwd()).resolve()
