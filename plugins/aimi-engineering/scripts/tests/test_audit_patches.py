@@ -261,13 +261,22 @@ SCHEMA_CASES = [
     ("field-not-allowed", patch(field="title", value="x")),
     ("field-not-allowed", patch(field="implementation.files", op="replace")),
     ("op-field-mismatch", patch(field="gate.prompt", op="add")),
-    ("op-field-mismatch", patch(field="tasks", op="replace")),
+    ("op-field-mismatch", patch(field="tasks", op="move")),
     ("op-field-mismatch", patch(field="notes", op="remove")),
+    ("op-field-mismatch", patch(field="implementation.verify", op="add")),
+    ("op-field-mismatch", patch(field="implementation.guardRails", op="add")),
+    ("op-field-mismatch", patch(field="acceptanceCriteria", op="remove")),
+    ("op-field-mismatch", patch(field="notes", op=["add"])),
     ("value-not-string", patch(field="tasks", value=["a"])),
     ("value-not-string", patch(field="implementation.approach", op="replace", value={"a": 1})),
     ("bad-matchValue", patch(field="acceptanceCriteria", op="replace", value="new")),
     ("bad-matchValue", patch(field="acceptanceCriteria", op="replace", value="new", matchValue="")),
     ("bad-matchValue", patch(field="acceptanceCriteria", op="replace", value="new", matchValue=3)),
+    ("bad-matchValue", patch(field="tasks", op="replace", value="new")),
+    ("bad-matchValue", {"storyIdx": "01", "field": "tasks", "op": "remove"}),
+    ("bad-matchValue", patch(field="notes", op="replace", value="new")),
+    ("bad-matchValue", patch(field="implementation.verify", op="replace", value="true")),
+    ("bad-matchValue", patch(field="implementation.guardRails", op="replace", value="true", matchValue="")),
     ("bad-dependsOn-token", patch(field="dependsOn", value="US-001")),
     ("bad-dependsOn-token", patch(field="dependsOn", value="outline:7")),
     ("bad-dependsOn-token", patch(field="dependsOn", value="outline:09")),
@@ -292,6 +301,8 @@ def test_a_schema_drop_appears_only_in_dropped(stg, reason, bad):
     assert report["unresolved"] == 0
     assert get(stg / "audit-result.json")["unresolved"] == []
     assert {k: v for k, v in snapshot(stg).items() if k != "audit-result.json"} == before
+    assert "changedFields" in get(stg / "audit-result.json")
+    assert get(stg / "audit-result.json")["changedFields"] == {}
 
 
 def test_a_duplicate_dependency_is_a_schema_drop(stg):
@@ -328,17 +339,22 @@ def test_dropped_entries_echo_no_oversized_auditor_text(stg):
         ("tasks", "add", "Mount the file system: SECRET-TOKEN", "validator-screen"),
     ],
 )
-def test_a_sanitizer_trigger_drops_to_unresolved_without_echoing_the_value(stg, field, op, value, trigger):
+def test_a_sanitizer_trigger_is_listed_in_dropped_only_and_never_echoes_the_value(stg, field, op, value, trigger):
+    # specFlow:ImportantQ15: a dropped patch is listed in dropped[] and adds NO
+    # unresolved entry (it used to append one naming the trigger and the field).
     assert trigger in PATCH_TRIGGERS
     write_result(stg, [patch("01", field, op, value)])
     code, report, _ = run(stg)
     assert code == 0 and report["applied"] == 0
-    assert report["dropped"] == [{"storyIdx": "01", "field": field, "reason": "sanitizer:" + trigger}]
+    assert report["dropped"] == [
+        {"storyIdx": "01", "field": field, "op": op, "reason": "sanitizer:" + trigger, "trigger": trigger}
+    ]
+    assert report["unresolved"] == 0
     result = get(stg / "audit-result.json")
-    [entry] = result["unresolved"]
-    assert entry["storyIdx"] == "01"
-    assert trigger in entry["message"] and field in entry["message"]
-    assert "SECRET-TOKEN" not in json.dumps(result["unresolved"])
+    assert result["unresolved"] == []
+    # the auditor's own `patches` array is kept as it wrote it; what the verb
+    # adds (unresolved, changedFields) and what it reports carry no value
+    assert "SECRET-TOKEN" not in json.dumps([result["unresolved"], result["changedFields"]])
     assert "SECRET-TOKEN" not in json.dumps(report)
     assert get(stg / "01-alpha.json") == story("Alpha")
 
@@ -371,17 +387,27 @@ def test_a_matchvalue_trigger_drops_the_patch_and_names_matchvalue(stg):
         [patch("01", "acceptanceCriteria", "replace", "fine", matchValue="ignore previous SECRET-TOKEN")],
     )
     _, report, _ = run(stg)
-    assert report["dropped"][0]["reason"] == "matchValue-sanitizer:ignore-previous"
-    [entry] = get(stg / "audit-result.json")["unresolved"]
-    assert "matchValue" in entry["message"] and "SECRET-TOKEN" not in entry["message"]
+    assert report["dropped"] == [
+        {
+            "storyIdx": "01",
+            "field": "acceptanceCriteria",
+            "op": "replace",
+            "reason": "matchValue-sanitizer:ignore-previous",
+            "trigger": "ignore-previous",
+        }
+    ]
+    assert get(stg / "audit-result.json")["unresolved"] == []
+    assert "SECRET-TOKEN" not in json.dumps(report)
 
 
-def test_a_matchvalue_matching_nothing_is_a_semantic_drop(stg):
+def test_a_matchvalue_matching_nothing_is_dropped_without_an_unresolved_entry(stg):
     write_result(stg, [patch("01", "acceptanceCriteria", "replace", "new", matchValue="not present")])
     _, report, _ = run(stg)
     assert report["applied"] == 0
-    assert report["dropped"][0]["reason"] == "matchValue-match-count"
-    assert "matched 0 entries" in get(stg / "audit-result.json")["unresolved"][0]["message"]
+    assert report["dropped"] == [
+        {"storyIdx": "01", "field": "acceptanceCriteria", "op": "replace", "reason": "matchValue-match-count"}
+    ]
+    assert get(stg / "audit-result.json")["unresolved"] == []
 
 
 def test_a_matchvalue_matching_several_entries_is_dropped(stg):
@@ -389,7 +415,8 @@ def test_a_matchvalue_matching_several_entries_is_dropped(stg):
     write_result(stg, [patch("01", "acceptanceCriteria", "replace", "new", matchValue="same")])
     _, report, _ = run(stg)
     assert report["applied"] == 0
-    assert "matched 2 entries" in get(stg / "audit-result.json")["unresolved"][0]["message"]
+    assert [d["reason"] for d in report["dropped"]] == ["matchValue-match-count"]
+    assert get(stg / "audit-result.json")["unresolved"] == []
     assert get(stg / "01-alpha.json")["acceptanceCriteria"] == ["same", "same"]
 
 
@@ -407,7 +434,7 @@ def test_tasks_over_the_cap_are_dropped_and_earlier_ones_land(stg):
     assert report["applied"] == 1
     assert report["dropped"][0]["reason"] == "tasks-cap"
     assert len(get(stg / "01-alpha.json")["tasks"]) == 50
-    assert "50" in get(stg / "audit-result.json")["unresolved"][0]["message"]
+    assert get(stg / "audit-result.json")["unresolved"] == []
 
 
 def test_post_patch_validation_rolls_back_only_the_offending_patch(stg):
@@ -417,13 +444,13 @@ def test_post_patch_validation_rolls_back_only_the_offending_patch(stg):
     write_result(stg, [patch("01", "notes", value="n"), patch("01", "tasks", value="ok")])
     _, report, _ = run(stg)
     assert report["applied"] == 1
-    assert report["dropped"] == [{"storyIdx": "01", "field": "notes", "reason": "post-validation"}]
+    assert report["dropped"] == [{"storyIdx": "01", "field": "notes", "op": "add", "reason": "post-validation"}]
     assert get(stg / "01-alpha.json")["tasks"] == ["first", "ok"]
     assert get(stg / "01-alpha.json")["notes"] == ["not", "a", "string"]
-    assert get(stg / "audit-result.json")["unresolved"][0]["storyIdx"] == "01"
+    assert get(stg / "audit-result.json")["unresolved"] == []
 
 
-def test_an_invalid_story_makes_every_patch_to_it_a_semantic_drop(stg):
+def test_an_invalid_story_makes_every_patch_to_it_a_post_validation_drop(stg):
     doc = story("Alpha")
     del doc["verification"]
     put(stg / "01-alpha.json", doc)
@@ -463,6 +490,331 @@ def test_notes_accumulate_paragraph_by_paragraph(stg):
     write_result(stg, [patch("01", "notes", value="one"), patch("01", "notes", value="two")])
     run(stg)
     assert get(stg / "01-alpha.json")["notes"] == "existing\n\n---\n\none\n\n---\n\ntwo"
+
+
+# --- replace and remove ---------------------------------------------------------------
+
+
+VERIFY = "set -e\ntest -f old.txt\ntest -f keep.txt"
+
+
+def with_verify(stg, verify=VERIFY, rails=("test -f keep.txt",), **extra):
+    impl = {"approach": "a", "verify": verify}
+    if rails is not None:
+        impl["guardRails"] = list(rails)
+    put(stg / "01-alpha.json", story("Alpha", implementation=impl, **extra))
+
+
+def only_reasons(report):
+    return [d["reason"] for d in report["dropped"]]
+
+
+def test_tasks_replace_and_remove_match_one_whole_element_and_leave_no_old_copy(stg):
+    put(stg / "01-alpha.json", story("Alpha", tasks=["first", "second", "third"]))
+    write_result(
+        stg,
+        [
+            patch("01", "tasks", "replace", "primeiro", matchValue="first"),
+            {"storyIdx": "01", "field": "tasks", "op": "remove", "matchValue": "second"},
+        ],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 2 and report["dropped"] == []
+    assert get(stg / "01-alpha.json")["tasks"] == ["primeiro", "third"]
+    assert "first" not in json.dumps(get(stg / "01-alpha.json")["tasks"])
+
+
+def test_a_remove_patch_needs_no_value_and_a_stray_one_is_ignored(stg):
+    put(stg / "01-alpha.json", story("Alpha", tasks=["first", "second"]))
+    write_result(
+        stg,
+        [
+            {"storyIdx": "01", "field": "tasks", "op": "remove", "matchValue": "first"},
+            patch("01", "tasks", "remove", ["junk"], matchValue="second"),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 2 and report["dropped"] == []
+    assert get(stg / "01-alpha.json")["tasks"] == []
+
+
+def test_tasks_matching_is_whole_element_not_substring(stg):
+    put(stg / "01-alpha.json", story("Alpha", tasks=["first step", "second"]))
+    write_result(stg, [patch("01", "tasks", "remove", "", matchValue="first")])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["matchValue-match-count"]
+    assert get(stg / "01-alpha.json")["tasks"] == ["first step", "second"]
+
+
+@pytest.mark.parametrize("op", ["replace", "remove"])
+@pytest.mark.parametrize("tasks_list,match", [(["a"], "missing"), (["dup", "dup"], "dup")])
+def test_tasks_replace_remove_with_zero_or_several_matches_is_dropped(stg, op, tasks_list, match):
+    put(stg / "01-alpha.json", story("Alpha", tasks=tasks_list))
+    write_result(stg, [patch("01", "tasks", op, "x", matchValue=match)])
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert only_reasons(report) == ["matchValue-match-count"]
+    assert get(stg / "01-alpha.json")["tasks"] == tasks_list
+
+
+def test_a_tasks_replace_runs_the_validator_screen_on_its_value(stg):
+    put(stg / "01-alpha.json", story("Alpha", tasks=["first"]))
+    write_result(stg, [patch("01", "tasks", "replace", "Mount the file system: ext4", matchValue="first")])
+    _, report, _ = run(stg)
+    assert report["dropped"][0]["trigger"] == "validator-screen"
+
+
+def test_notes_replace_swaps_one_whole_paragraph_and_rejoins_the_rest_untouched(stg):
+    sep = AP.NOTES_SEPARATOR
+    put(stg / "01-alpha.json", story("Alpha", notes="p1" + sep + "p2" + sep + "p3"))
+    write_result(stg, [patch("01", "notes", "replace", "p2 new", matchValue="p2")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1
+    assert get(stg / "01-alpha.json")["notes"] == "p1" + sep + "p2 new" + sep + "p3"
+
+
+def test_a_note_without_separators_is_one_paragraph(stg):
+    put(stg / "01-alpha.json", story("Alpha", notes="only paragraph"))
+    write_result(stg, [patch("01", "notes", "replace", "rewritten", matchValue="only paragraph")])
+    run(stg)
+    assert get(stg / "01-alpha.json")["notes"] == "rewritten"
+
+
+@pytest.mark.parametrize("match", ["para", "missing", "p1\n\n---\n\np2"])
+def test_notes_replace_matches_a_whole_paragraph_or_is_dropped(stg, match):
+    sep = AP.NOTES_SEPARATOR
+    put(stg / "01-alpha.json", story("Alpha", notes="paragraph one" + sep + "p2"))
+    write_result(stg, [patch("01", "notes", "replace", "x", matchValue=match)])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["matchValue-match-count"]
+    assert get(stg / "01-alpha.json")["notes"] == "paragraph one" + sep + "p2"
+
+
+def test_notes_replace_of_two_equal_paragraphs_is_dropped(stg):
+    sep = AP.NOTES_SEPARATOR
+    put(stg / "01-alpha.json", story("Alpha", notes="same" + sep + "same"))
+    write_result(stg, [patch("01", "notes", "replace", "x", matchValue="same")])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["matchValue-match-count"]
+
+
+def test_verify_replace_is_a_substring_and_carries_the_substitution_into_the_rails(stg):
+    with_verify(stg, rails=("test -f keep.txt", "test -f old.txt"))
+    write_result(stg, [patch("01", "implementation.verify", "replace", "test -f new.txt", matchValue="test -f old.txt")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1 and report["dropped"] == []
+    impl = get(stg / "01-alpha.json")["implementation"]
+    assert impl["verify"] == "set -e\ntest -f new.txt\ntest -f keep.txt"
+    assert impl["guardRails"] == ["test -f keep.txt", "test -f new.txt"]
+    assert "old.txt" not in json.dumps(impl)
+
+
+def test_verify_replace_without_guardrails_just_replaces(stg):
+    with_verify(stg, rails=None)
+    write_result(stg, [patch("01", "implementation.verify", "replace", "test -d dir", matchValue="test -f old.txt")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1
+    assert get(stg / "01-alpha.json")["implementation"]["verify"] == "set -e\ntest -d dir\ntest -f keep.txt"
+
+
+@pytest.mark.parametrize("match", ["nowhere", "test -f"])
+def test_verify_replace_needs_the_match_to_occur_exactly_once(stg, match):
+    with_verify(stg)
+    before = get(stg / "01-alpha.json")
+    write_result(stg, [patch("01", "implementation.verify", "replace", "true", matchValue=match)])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["matchValue-match-count"]
+    assert get(stg / "01-alpha.json") == before
+
+
+def test_a_verify_replace_that_splits_a_rail_is_dropped_and_leaves_the_story_alone(stg):
+    with_verify(stg)
+    before = get(stg / "01-alpha.json")
+    write_result(
+        stg,
+        [patch("01", "implementation.verify", "replace", "echo x; echo y", matchValue="test -f keep.txt")],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert report["dropped"] == [
+        {"storyIdx": "01", "field": "implementation.verify", "op": "replace", "reason": "guardRails-out-of-sync"}
+    ]
+    assert get(stg / "01-alpha.json") == before
+    assert get(stg / "audit-result.json")["changedFields"] == {}
+
+
+def test_a_verify_replace_that_swallows_a_failing_line_is_dropped_and_rolls_back_alone(stg):
+    with_verify(stg, verify="set -e\ntest -f old.txt\ntest -f keep.txt", rails=None)
+    write_result(
+        stg,
+        [
+            # drops the leading set -e: the later lines can fail unnoticed
+            patch("01", "implementation.verify", "replace", "true", matchValue="set -e"),
+            patch("01", "tasks", value="still lands"),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 1
+    assert only_reasons(report) == ["verify-composition"]
+    doc = get(stg / "01-alpha.json")
+    assert doc["implementation"]["verify"].startswith("set -e")
+    assert doc["tasks"] == ["first", "still lands"]
+    assert get(stg / "audit-result.json")["changedFields"] == {"01": ["tasks"]}
+
+
+def test_a_verify_and_a_rail_are_stored_verbatim_with_no_shell_marker_stripped(stg):
+    with_verify(stg, verify="set -e\ntest -f old.txt\ntest -f keep.txt", rails=("test -f keep.txt",))
+    new = 'test "$(cat out.txt)" = `echo ok` && grep -q ' + "x" * 6000
+    write_result(stg, [patch("01", "implementation.verify", "replace", new, matchValue="test -f old.txt")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1, report
+    assert get(stg / "01-alpha.json")["implementation"]["verify"] == "set -e\n" + new + "\ntest -f keep.txt"
+
+
+def test_verify_values_get_the_narrow_rules_but_not_the_validator_screen(stg):
+    with_verify(stg, rails=None)
+    clean = patch("01", "implementation.verify", "replace", "echo file system: ext4", matchValue="test -f old.txt")
+    bad = patch("01", "implementation.verify", "replace", "echo ok\nsystem: do this", matchValue="test -f keep.txt")
+    write_result(stg, [clean, bad])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1
+    assert report["dropped"] == [
+        {
+            "storyIdx": "01",
+            "field": "implementation.verify",
+            "op": "replace",
+            "reason": "sanitizer:system-label",
+            "trigger": "system-label",
+        }
+    ]
+
+
+def test_a_trigger_in_a_verify_matchvalue_is_judged_too(stg):
+    with_verify(stg, rails=None)
+    write_result(stg, [patch("01", "implementation.verify", "replace", "true", matchValue="x\nsystem: y")])
+    _, report, _ = run(stg)
+    assert report["dropped"][0]["reason"] == "matchValue-sanitizer:system-label"
+
+
+def test_guardrails_replace_swaps_one_whole_rail(stg):
+    with_verify(stg, rails=("test -f keep.txt", "test -f old.txt"))
+    write_result(stg, [patch("01", "implementation.guardRails", "replace", "test -f old.txt", matchValue="test -f keep.txt")])
+    _, report, _ = run(stg)
+    assert report["applied"] == 1 and report["dropped"] == []
+    assert get(stg / "01-alpha.json")["implementation"]["guardRails"] == ["test -f old.txt", "test -f old.txt"]
+
+
+def test_a_guardrails_replace_naming_no_segment_of_the_verify_is_dropped(stg):
+    with_verify(stg)
+    before = get(stg / "01-alpha.json")
+    write_result(stg, [patch("01", "implementation.guardRails", "replace", "test -f elsewhere.txt", matchValue="test -f keep.txt")])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["guardRails-out-of-sync"]
+    assert get(stg / "01-alpha.json") == before
+
+
+@pytest.mark.parametrize("rails", [None, ("test -f keep.txt", "test -f keep.txt")])
+def test_a_guardrails_replace_with_no_unique_match_is_dropped(stg, rails):
+    with_verify(stg, rails=rails)
+    write_result(stg, [patch("01", "implementation.guardRails", "replace", "test -f keep.txt", matchValue="test -f keep.txt")])
+    _, report, _ = run(stg)
+    assert only_reasons(report) == ["matchValue-match-count"]
+
+
+def test_dropped_entries_cut_every_echoed_string_to_64_characters(stg):
+    write_result(
+        stg,
+        [
+            {"storyIdx": "01", "field": "f" * 500, "op": "o" * 500, "value": "x"},
+            patch("01", "notes", "o" * 500, "x"),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert len(report["dropped"]) == 2
+    for entry in report["dropped"]:
+        assert set(entry) == {"storyIdx", "field", "op", "reason"}
+        assert all(len(v) <= 64 for v in entry.values() if isinstance(v, str))
+    assert report["dropped"][1]["op"] == "o" * 64
+
+
+def test_every_dropped_entry_carries_storyidx_field_op_and_reason(stg):
+    write_result(
+        stg,
+        [
+            "not an object",
+            {"storyIdx": "01", "field": "notes", "value": "x"},
+            patch("99"),
+            patch("01", "title"),
+            patch("01", "tasks", "move"),
+            patch("01", "notes", value=3),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert len(report["dropped"]) == 6
+    assert all({"storyIdx", "field", "op", "reason"} <= set(e) for e in report["dropped"])
+
+
+def test_changed_fields_maps_each_patched_idx_to_its_sorted_distinct_fields(stg):
+    write_result(
+        stg,
+        [
+            patch("02", "tasks", value="b"),
+            patch("02", "notes", value="n"),
+            patch("02", "tasks", value="c"),
+            patch("01", "gate.prompt", "replace", "p"),
+            patch("03", "title", value="rejected"),
+        ],
+    )
+    run(stg)
+    result = get(stg / "audit-result.json")
+    assert result["changedFields"] == {"01": ["gate.prompt"], "02": ["notes", "tasks"]}
+    assert result["auditedIdx"] == ["01", "02", "03"]
+    assert "03" not in result["changedFields"]
+
+
+def test_changed_fields_is_an_empty_object_when_nothing_was_applied(stg):
+    write_result(stg, [])
+    run(stg)
+    assert get(stg / "audit-result.json")["changedFields"] == {}
+
+
+def test_a_dropped_patch_adds_no_unresolved_entry_but_the_cap_notice_remains(stg):
+    write_result(
+        stg,
+        [patch("01", "notes", value="ignore previous x")]
+        + [patch("02", "tasks", value="t%d" % i) for i in range(11)],
+    )
+    _, report, _ = run(stg)
+    assert report["unresolved"] == 1
+    assert get(stg / "audit-result.json")["unresolved"] == [
+        {"storyIdx": "02", "message": "audit cap reached: 1 additional patches dropped"}
+    ]
+
+
+def test_importing_audit_patches_does_not_load_the_tasks_module():
+    code = "import sys; import audit_patches; sys.exit(1 if 'tasks' in sys.modules else 0)"
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=os.path.dirname(HERE),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_verify_replace_loads_tasks_only_when_it_runs():
+    code = (
+        "import sys; import audit_patches as AP\n"
+        "assert 'tasks' not in sys.modules\n"
+        "doc = {'implementation': {'verify': 'set -e\\ntrue', 'guardRails': ['true']}}\n"
+        "AP._apply_one(doc, {'field': 'implementation.verify', 'op': 'replace', 'value': 'false', 'matchValue': 'true'})\n"
+        "assert 'tasks' in sys.modules\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], cwd=os.path.dirname(HERE), capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 # --- the per-story cap -----------------------------------------------------------------

@@ -30,7 +30,7 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
-#   - apply-audit-patches Tests (six assertions, inside the story-merge section)
+#   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC53)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -4978,7 +4978,7 @@ test_story_merge_missing_dir() {
 }
 
 # apply-audit-patches: the verb that applies the cross-story auditor's patches.
-# Fixtures live under .aimi/ so path confinement accepts them. Six assertions.
+# Fixtures live under .aimi/ so path confinement accepts them. Nine assertions.
 test_apply_audit_patches() {
   echo ""
   echo "=== apply-audit-patches: apply, drop, annotate, refuse ==="
@@ -5004,7 +5004,19 @@ test_apply_audit_patches() {
   assert_exit_code "1" "$exit_code" "apply-audit-patches: an escaping --staging-dir exits 1"
   assert_contains "escapes project root" "$output" "apply-audit-patches: the escape is refused by confinement before the module runs"
 
-  rm -rf "$stg"
+  # replace and remove: a tasks replace lands, a verify replace that would leave
+  # a guard rail as two segments is dropped, and changedFields names what moved.
+  local stg2=".aimi/.audit-staging-aap2-$$"
+  mkdir -p "$stg2"
+  printf '%s\n' '{"title":"S01","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"tasks":["old step","drop me"],"implementation":{"approach":"a","verify":"set -e\ntest -f a.txt\ntest -f b.txt","guardRails":["test -f b.txt"]},"verification":{"strategy":"test","status":"pending"}}' > "$stg2/01-story.json"
+  printf '%s\n' '{"title":"S02","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"verification":{"strategy":"test","status":"pending"}}' > "$stg2/02-story.json"
+  printf '%s\n' '{"patches":[{"storyIdx":"01","field":"tasks","op":"replace","value":"new step","matchValue":"old step"},{"storyIdx":"01","field":"tasks","op":"remove","matchValue":"drop me"},{"storyIdx":"01","field":"implementation.verify","op":"replace","value":"echo x; echo y","matchValue":"test -f b.txt"}],"unresolved":[]}' > "$stg2/audit-result.json"
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg2" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "2|new step" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["applied"]) + "|" + ",".join(json.load(open(sys.argv[2]))["tasks"]))' "$output" "$stg2/01-story.json")" "apply-audit-patches: a tasks replace and a tasks remove land, leaving only the corrected step"
+  assert_eq "guardRails-out-of-sync|0" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["dropped"][0]["reason"] + "|" + str(d["unresolved"]))' "$output")" "apply-audit-patches: a verify replace that splits a guard rail is dropped and adds no unresolved entry"
+  assert_eq "tasks" "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["changedFields"]["01"]))' "$stg2/audit-result.json")" "apply-audit-patches: changedFields lists only the fields an applied patch changed"
+
+  rm -rf "$stg" "$stg2"
 }
 
 test_validate_outline() {
