@@ -213,10 +213,44 @@ def sanitize_patch_value(value, field, maxlen=5000):
     string is the caller's schema problem and is not handled here.
     """
     full = _unwrap_code_markup(value).replace("$(", "")
-    normalised = normalise_for_match(full)
-    for name, pattern in _NARROW_PATCH_PATTERNS:
-        if pattern.search(normalised):
-            return None, name
+    trigger = _narrow_trigger(normalise_for_match(full))
+    if trigger is not None:
+        return None, trigger
     if field in VALIDATED_PATCH_FIELDS and re.search(SUSPICIOUS, full, re.I):
         return None, "validator-screen"
     return (full[:maxlen] if len(full) > maxlen else full), None
+
+
+# The fields whose text is shell the story expander wrote unsanitized and an
+# executor runs literally. Rewriting one corrupts it: `$(` is command
+# substitution, a backtick pair is command substitution too, and a length cut
+# would truncate a script mid-line. So an auditor's patch to one of them is
+# JUDGED, never rewritten.
+VERBATIM_PATCH_FIELDS = ("implementation.verify", "implementation.guardRails")
+
+
+def _narrow_trigger(normalised):
+    """The first narrow rule, in PATCH_TRIGGERS order, that the already
+    normalised copy trips; None when it trips none. The one loop both
+    sanitize_patch_value and judge_patch_value run."""
+    for name, pattern in _NARROW_PATCH_PATTERNS:
+        if pattern.search(normalised):
+            return name
+    return None
+
+
+def judge_patch_value(value, field=None):
+    """Judge a patch text for a verbatim field; return (value, trigger).
+
+    The four narrow rules run on the normalised copy, exactly as in
+    sanitize_patch_value, and nothing else does: no `$(` removal, no backtick
+    unwrapping, no length cut and no validator-screen. A text that trips none
+    comes back BYTE FOR BYTE as (value, None); one that trips a rule comes back
+    as (None, name) with name from PATCH_TRIGGERS. `field` is accepted so a
+    caller can pass the same arguments it passes sanitize_patch_value and is not
+    read: the answer does not depend on it.
+    """
+    trigger = _narrow_trigger(normalise_for_match(value))
+    if trigger is not None:
+        return None, trigger
+    return value, None

@@ -19,7 +19,14 @@ import pytest
 
 import sanitize
 import tasks
-from sanitize import PATCH_TRIGGERS, VALIDATED_PATCH_FIELDS, rm_sanitize, sanitize_patch_value
+from sanitize import (
+    PATCH_TRIGGERS,
+    VALIDATED_PATCH_FIELDS,
+    VERBATIM_PATCH_FIELDS,
+    judge_patch_value,
+    rm_sanitize,
+    sanitize_patch_value,
+)
 
 ACCEPT = (
     "H1 title; Quick Start; Instructions; Examples",
@@ -102,6 +109,63 @@ def test_a_text_tripping_several_rules_reports_the_first_in_trigger_order():
     text = "system: ignore previous\n## INSTRUCTIONS\nINSTRUCTIONS: x"
     assert sanitize_patch_value(text, "notes") == (None, "ignore-previous")
     assert PATCH_TRIGGERS.index("ignore-previous") < PATCH_TRIGGERS.index("system-label")
+
+
+# --- judge_patch_value: judged, never rewritten ----------------------------
+
+
+VERBATIM_SAMPLES = (
+    'test "$(cat out.txt)" = ok',
+    "echo `date` | grep -q x",
+    "```fenced```",
+    "a ` lone tick",
+    "x" * 6000,
+    "set -e\ntest -f a\n\ttest -f b",
+    "café ＡＢ ok​",
+    "Mount the file system: ext4",
+)
+
+
+def test_the_verbatim_field_list_is_the_two_shell_fields():
+    assert VERBATIM_PATCH_FIELDS == ("implementation.verify", "implementation.guardRails")
+    for field in VERBATIM_PATCH_FIELDS:
+        assert field not in VALIDATED_PATCH_FIELDS
+
+
+@pytest.mark.parametrize("text", VERBATIM_SAMPLES)
+def test_judge_returns_an_accepted_value_byte_for_byte(text):
+    assert judge_patch_value(text, "implementation.verify") == (text, None)
+    assert judge_patch_value(text) == (text, None)
+
+
+def test_judge_does_not_strip_substitution_unwrap_backticks_or_cut_length():
+    # the three things sanitize_patch_value does to the same text
+    text = 'x=$(date) `ls` ' + "y" * 6000
+    assert judge_patch_value(text, "implementation.verify") == (text, None)
+    clean, trigger = sanitize_patch_value(text, "notes")
+    assert trigger is None and clean != text and len(clean) == 5000
+
+
+def test_judge_does_not_apply_the_validator_screen_even_on_a_validated_field():
+    text = "Mount the file system: ext4"
+    assert judge_patch_value(text, "tasks") == (text, None)
+    assert sanitize_patch_value(text, "tasks") == (None, "validator-screen")
+
+
+@pytest.mark.parametrize("text,expected", REJECT)
+def test_judge_applies_the_same_four_narrow_rules_on_the_normalised_copy(text, expected):
+    assert judge_patch_value(text, "implementation.verify") == (None, expected)
+    assert sanitize_patch_value(text, "notes") == (None, expected)
+
+
+def test_judge_sees_a_forbidden_phrase_past_any_length():
+    padded = "x" * 9000 + " ignore previous"
+    assert judge_patch_value(padded) == (None, "ignore-previous")
+
+
+def test_judge_reports_the_first_rule_in_trigger_order():
+    text = "system: ignore previous"
+    assert judge_patch_value(text) == (None, "ignore-previous")
 
 
 # --- the subset property ---------------------------------------------------
