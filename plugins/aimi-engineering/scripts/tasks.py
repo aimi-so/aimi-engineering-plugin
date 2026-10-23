@@ -2262,6 +2262,30 @@ def _endpoints(doc):
     return endpoints
 
 
+def _story_project_base(story, project_root):
+    """The directory a story's relative paths are relative to, or `None` when
+    that directory cannot be named inside the project root.
+
+    A story's entries are relative to ITS project, not to the layout root: in a
+    multi-repo layout `project` names the child repository the story's files
+    live in. Absent, non-string, "" or "." keeps the root as the base (the
+    single-repo behaviour, byte for byte). A project that escapes the root --
+    `..` segments or an absolute path -- is never traversed: the caller reports
+    every entry through its own refusal. The leading "/" is checked first
+    because confined_spec_path joins with a string, so `/etc` would become
+    `<root>//etc` and look lexically inside the root.
+
+    R17 and R23 both ask this, so the derivation lives once.
+    """
+    project = _report_project(story)
+    if project in (None, "", "."):
+        return project_root
+    if project.startswith("/"):
+        return None
+    project_path, project_inside = confined_spec_path(project_root, project)
+    return project_path if project_inside else None
+
+
 def validate_tasks(docs, tasks_file, project_root, fields, warn):
     """R2 through R15, in the order bash ran them, over the parsed stream.
 
@@ -2435,23 +2459,7 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             files = jq_index(implementation, "files", ".userStories[].implementation")
             if not isinstance(files, list):
                 continue
-            # A story's entries are relative to ITS project, not to the
-            # layout root: in a multi-repo layout `project` names the child
-            # repository the story's files live in. Absent, non-string, "" or
-            # "." keeps the root as the base (the single-repo behaviour, byte
-            # for byte). A project that escapes the root -- `..` segments or an
-            # absolute path -- is never traversed: every entry is reported
-            # through the same warning. The leading "/" is checked first because
-            # confined_spec_path joins with a string, so `/etc` would become
-            # `<root>//etc` and look lexically inside the root.
-            project = _report_project(story)
-            if project in (None, "", "."):
-                base = project_root
-            elif project.startswith("/"):
-                base = None
-            else:
-                project_path, project_inside = confined_spec_path(project_root, project)
-                base = project_path if project_inside else None
+            base = _story_project_base(story, project_root)
             unopenable = []
             for entry in files:
                 if not isinstance(entry, str):
@@ -2674,6 +2682,41 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                         tasks_file + ": metadata.prototypeSuperseded[" + str(index)
                         + "].path escapes the project root: " + given
                     )
+
+    # R23 -- an implementation.verify that cannot fail. Appended AFTER R22 for
+    # R17's reason: a rule below the last one can only add lines after
+    # everything already recorded. WARNINGS only, R16's and R17's reasoning
+    # held: a verify is a script an author wrote on purpose, and what these two
+    # predicates catch is a shape that usually is not what was meant, not a
+    # document the validator may refuse. (1) A multi-line verify whose exit
+    # status is only its LAST line's, because nothing stops the script at a
+    # failing line. (2) A `grep` aimed at a directory with no -r, which exits 2
+    # and which a leading `!` then turns into a pass. Both read the same
+    # decomposition verify-probe uses, and neither expands or runs anything.
+    #
+    # The grep base is the story's project the way R17 derives it, through the
+    # one helper both call; a project that escapes the root has no base, so only
+    # the composition finding applies there. `implementation` is read only once
+    # jq_type says "object" -- R17's guard, reused -- and a non-string verify is
+    # not this rule's to judge.
+    for doc in docs:
+        for story in _stories(doc):
+            implementation = jq_index(story, "implementation", ".userStories[]")
+            if jq_type(implementation) != "object":
+                continue
+            verify = jq_index(implementation, "verify", ".userStories[].implementation")
+            if not isinstance(verify, str):
+                continue
+            findings = verify_composition_findings(verify)
+            base = _story_project_base(story, project_root)
+            if base is not None:
+                findings = findings + verify_grep_directory_findings(verify, base)
+            for finding in findings:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": implementation.verify " + finding
+                )
 
     return errors
 
@@ -6840,6 +6883,357 @@ def verify_words(segment):
     if buf:
         words.append("".join(buf))
     return words
+
+
+# ---------------------------------------------------------------------------
+# What a multi-line verify can hide (R23, issue #167)
+#
+# Two predicates over the same decomposition verify_segments, verify_words and
+# verify_changes_directory already give the probe. Both are SCANNERS: nothing
+# is expanded or run, and a path is looked at only through confined_spec_path.
+# They sit inside the region the guard test for the scanner slices, so no code
+# line in them may contain that guard's forbidden word.
+# ---------------------------------------------------------------------------
+
+# grep options that take a value, short (one letter each) and long.
+_VERIFY_GREP_SHORT_VALUE = "efmABCD"
+_VERIFY_GREP_LONG_VALUE = (
+    "regexp", "file", "max-count", "after-context", "before-context", "context",
+    "devices", "label", "binary-files", "exclude", "exclude-from", "exclude-dir",
+    "include", "group-separator",
+)
+_VERIFY_GREP_NAMES = ("grep", "egrep", "fgrep")
+
+# A redirection word: an optional fd, then an operator. The second pattern is
+# the operator ALONE, whose target is the next word.
+_VERIFY_REDIRECT = re.compile(r"^(\d*|&)(>>?|<<<|<|>&|<&)")
+_VERIFY_REDIRECT_BARE = re.compile(r"^(\d*|&)(>>?|<<<|<|>&|<&)$")
+
+
+def _verify_errexit_change(segment):
+    """What a `set` segment does to errexit: True (enables it), False (turns it
+    off) or None (not a `set`, or one that leaves it alone). The last mention
+    in the segment wins, as it does in a shell."""
+    words = verify_words(segment)
+    if not words or words[0] != "set":
+        return None
+    state = None
+    i = 1
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word == "--":
+            break
+        if len(word) < 2 or word[0] not in "-+":
+            continue
+        switch_on = word[0] == "-"
+        for letter in word[1:]:
+            if letter == "e":
+                state = switch_on
+            elif letter == "o" and i < len(words) and words[i][:1] not in ("-", "+"):
+                if words[i] == "errexit":
+                    state = switch_on
+                i += 1
+    return state
+
+
+def _verify_snippet(segment):
+    squeezed = " ".join(segment.split())
+    return squeezed if len(squeezed) <= 60 else squeezed[:57] + "..."
+
+
+def verify_composition_findings(text):
+    """Findings for a multi-line verify whose failing line can go unnoticed.
+
+    A verify is run as one script and its exit status is the status of its LAST
+    command, so a failing line in the middle is swallowed unless the script
+    stops there: a leading `set -e` (or `-o errexit`) does it, and so does
+    chaining every later line with `&&` or `||`. Returns a list of finding
+    strings, empty when clean -- at most one, since one story's verify is one
+    script. `[]` for non-string input, for text with no newline once stripped,
+    for a single segment, and for text verify_unterminated reports as not
+    parsing at all (its segments are then fused and say nothing reliable).
+    """
+    if not isinstance(text, str) or "\n" not in text.strip():
+        return []
+    if verify_unterminated(text):
+        return []
+    segments = verify_segments(text)
+    if len(segments) < 2:
+        return []
+    unchained = [item for item in segments[1:] if item[0] not in ("&&", "||")]
+    if not unchained:
+        return []
+
+    prefix = "is multi-line and can swallow a failing line: "
+    guarded = _verify_errexit_change(segments[0][1]) is True
+    if guarded:
+        for _sep, segment in segments[1:]:
+            if _verify_errexit_change(segment) is False:
+                return [
+                    prefix + "errexit is switched off by \""
+                    + _verify_snippet(segment)
+                    + "\", so a later line can fail unnoticed"
+                ]
+        return []
+    return [
+        prefix + "no leading set -e and \"" + _verify_snippet(unchained[0][1])
+        + "\" is not chained with && -- only the last line's exit status counts;"
+        " start with set -e or chain the lines with &&"
+    ]
+
+
+def _verify_pipe_stages(words):
+    """The words of one segment regrouped by pipeline stage: split on an
+    unquoted `|` (or `|&`), including one glued to a neighbour. A `|` inside
+    quotes, `$(...)`, `(...)` or backticks belongs to its word."""
+    stages = [[]]
+    for word in words:
+        piece = []
+        quote = None
+        depth = 0
+        tick = False
+        i = 0
+        n = len(word)
+        while i < n:
+            ch = word[i]
+            if quote is not None:
+                piece.append(ch)
+                if quote == '"' and ch == "\\" and i + 1 < n:
+                    piece.append(word[i + 1])
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch == "\\" and i + 1 < n:
+                piece.append(ch)
+                piece.append(word[i + 1])
+                i += 2
+                continue
+            elif ch in ("'", '"'):
+                quote = ch
+                piece.append(ch)
+            elif ch == "`":
+                tick = not tick
+                piece.append(ch)
+            elif ch == "(":
+                depth += 1
+                piece.append(ch)
+            elif ch == ")":
+                depth = depth - 1 if depth else 0
+                piece.append(ch)
+            elif ch == "|" and not depth and not tick:
+                if piece:
+                    stages[-1].append("".join(piece))
+                    piece = []
+                stages.append([])
+                if i + 1 < n and word[i + 1] == "&":
+                    i += 1
+            else:
+                piece.append(ch)
+            i += 1
+        if piece:
+            stages[-1].append("".join(piece))
+    return stages
+
+
+def _verify_substitutions(segment):
+    """The text inside each OUTERMOST `$(...)` of a segment (not `$((...))`,
+    and not one inside single quotes). A nested one is the inner text's own to
+    report when that text is scanned in turn."""
+    found = []
+    quote = None
+    i = 0
+    n = len(segment)
+    while i < n:
+        ch = segment[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'" and quote is None:
+            quote = "'"
+            i += 1
+            continue
+        if ch == '"':
+            quote = None if quote == '"' else '"'
+            i += 1
+            continue
+        if segment.startswith("$(", i) and not segment.startswith("$((", i):
+            j = i + 2
+            depth = 1
+            inner_quote = None
+            while j < n and depth:
+                c = segment[j]
+                if inner_quote:
+                    if c == "\\" and inner_quote == '"' and j + 1 < n:
+                        j += 2
+                        continue
+                    if c == inner_quote:
+                        inner_quote = None
+                elif c == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                elif c in ("'", '"'):
+                    inner_quote = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                j += 1
+            found.append(segment[i + 2:j - 1] if depth == 0 else segment[i + 2:])
+            i = j
+            continue
+        i += 1
+    return found
+
+
+def _verify_literal_operand(word):
+    """A word's text when it is a plain literal, `None` when the shell would
+    expand it into something this scanner cannot name: a variable, a command
+    substitution, a glob, brace expansion, a leading `~`, a redirection."""
+    out = []
+    quote = None
+    i = 0
+    n = len(word)
+    while i < n:
+        ch = word[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                out.append(ch)
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch in "$`":
+                return None
+            elif ch == "\\" and i + 1 < n:
+                out.append(word[i + 1])
+                i += 1
+            else:
+                out.append(ch)
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "\\" and i + 1 < n:
+            out.append(word[i + 1])
+            i += 1
+        elif ch in "$`*?[{}()<>&;" or (ch == "~" and i == 0):
+            return None
+        else:
+            out.append(ch)
+        i += 1
+    return None if quote else "".join(out)
+
+
+def _verify_grep_operands(stage):
+    """The file operands of one pipeline stage when it is a `grep` that would
+    search a path WITHOUT recursing, `[]` for anything else.
+
+    Options are parsed rather than guessed at: a short cluster is read letter
+    by letter, stopping at the first one that takes a value (`-e`, `-f`, `-m`,
+    `-A`, `-B`, `-C`, `-D`; the value is the rest of the cluster or the next
+    word); a long option that takes a value consumes the next word unless it
+    carries `=`; `--` ends the options. `-e`/`-f`/`--regexp`/`--file` supply the
+    pattern, otherwise the first non-option word IS the pattern and is not a
+    file. Any of `-r`, `-R`, `--recursive`, `--dereference-recursive`, `-d` or
+    `--directories` means the author already chose what to do with a directory,
+    so the stage reports nothing. A heredoc ends the stage: its body is stdin.
+    """
+    words = list(stage)
+    while words and (words[0] == "!" or _VERIFY_ASSIGN.match(words[0])):
+        words.pop(0)
+    if not words or words[0] not in _VERIFY_GREP_NAMES:
+        return []
+    operands = []
+    pattern_given = False
+    options_done = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if word.startswith("<<") and not word.startswith("<<<"):
+            break
+        if _VERIFY_REDIRECT.match(word):
+            if _VERIFY_REDIRECT_BARE.match(word):
+                i += 1
+            continue
+        if options_done or word == "-" or not word.startswith("-"):
+            operands.append(word)
+            continue
+        if word == "--":
+            options_done = True
+            continue
+        if word.startswith("--"):
+            name, has_value, _value = word[2:].partition("=")
+            if name in ("recursive", "dereference-recursive", "directories"):
+                return []
+            if name in ("regexp", "file"):
+                pattern_given = True
+            if name in _VERIFY_GREP_LONG_VALUE and not has_value:
+                i += 1
+            continue
+        letters = word[1:]
+        for index, letter in enumerate(letters):
+            if letter in "rRd":
+                return []
+            if letter in _VERIFY_GREP_SHORT_VALUE:
+                if letter in "ef":
+                    pattern_given = True
+                if index + 1 >= len(letters):
+                    i += 1
+                break
+    if not pattern_given and operands:
+        operands = operands[1:]
+    return operands
+
+
+def verify_grep_directory_findings(text, base_dir, _depth=0):
+    """One finding per literal relative `grep` operand that is an existing
+    directory, when that grep carries no option saying what to do with one.
+
+    `grep needle dir` does not search `dir`: it says "Is a directory" and exits
+    2, and a verify written `! grep -q needle dir` reads that 2 as success, so
+    the assertion passes whatever `dir` holds. Looks through a leading `!`,
+    leading `VAR=` words, every pipeline stage and every `$(...)`
+    substitution (depth capped at 3), and stops at the first segment that
+    changes directory, because after it `base_dir` is no longer where the
+    script stands. Never reads the pattern as a file, and ignores stdin, globs,
+    variable operands, absolute paths and anything that escapes `base_dir`.
+    The only filesystem question asked is one `confined_spec_path` has already
+    answered `inside` for.
+    """
+    if not isinstance(text, str) or not isinstance(base_dir, str):
+        return []
+    if _depth == 0 and verify_unterminated(text):
+        return []
+    findings = []
+    for _sep, segment in verify_segments(text):
+        if verify_changes_directory(segment):
+            break
+        for stage in _verify_pipe_stages(verify_words(segment)):
+            for operand in _verify_grep_operands(stage):
+                literal = _verify_literal_operand(operand)
+                if not literal or literal.startswith("/"):
+                    continue
+                path, inside = confined_spec_path(base_dir, literal)
+                if inside and os.path.isdir(path):
+                    findings.append(
+                        "greps a directory without -r: "
+                        + " ".join(literal.split())
+                        + " -- grep exits 2 on a directory, which a leading ! reads"
+                        " as success; add -r or name the files"
+                    )
+        if _depth < 3:
+            for inner in _verify_substitutions(segment):
+                findings.extend(
+                    verify_grep_directory_findings(inner, base_dir, _depth + 1)
+                )
+    return findings
 
 
 def verify_reads(segment):
