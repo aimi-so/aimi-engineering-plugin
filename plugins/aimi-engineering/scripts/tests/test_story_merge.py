@@ -2652,3 +2652,237 @@ def test_the_calibration_script_counts_only_numbered_story_inputs():
                 continue
             expected += len([e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)])
     assert total == expected > 0
+
+
+# ---------------------------------------------------------------------------
+# outline:NN resolves by the staged FILENAME idx, in every story text field
+# ---------------------------------------------------------------------------
+#
+# A skipped expansion leaves a gap in the staged filenames (01, 02, 04 here).
+# outline:NN is the idx in that filename; resolving it by position in the merged
+# array would repoint outline:04 at nothing and outline:03 at the wrong story.
+
+
+def _gap_files(**fields):
+    """Three staged stories under 01, 02 and 04 -- 03 was never expanded. `fields`
+    maps a staged file name to a dict merged over that story."""
+    files = {}
+    for name, title in (("01-a.json", "A"), ("02-b.json", "B"), ("04-d.json", "D")):
+        story = _staging_story(title)
+        story.update(fields.get(name, {}))
+        files[name] = story
+    return files
+
+
+def _by_title(doc):
+    return {s["title"]: s for s in doc["userStories"]}
+
+
+def test_outline_ref_resolves_by_staged_filename_idx_across_a_gap(tmp_path):
+    files = _gap_files(**{"01-a.json": {"notes": "see outline:04 and outline:02"}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    stories = _by_title(doc)
+    assert stories["D"]["id"] == "US-003"
+    assert stories["A"]["notes"] == "see US-003 and US-002"
+
+
+def test_outline_ref_dependson_resolves_by_staged_filename_idx(tmp_path):
+    files = _gap_files(**{"02-b.json": {"dependsOn": ["outline:04"]}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert _by_title(doc)["B"]["dependsOn"] == ["US-003"]
+
+
+def test_outline_ref_dependson_on_an_unstaged_idx_keeps_its_refusal_wording(tmp_path):
+    files = _gap_files(**{"02-b.json": {"dependsOn": ["outline:03"]}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1 and doc is None
+    assert "Error: story-merge: unresolved outline reference(s):" in proc.stderr
+    assert "US-002: UNRESOLVED_OUTLINE:03" in proc.stderr
+
+
+def test_outline_ref_rewrites_every_text_field(tmp_path):
+    files = _gap_files(
+        **{
+            "01-a.json": {
+                "notes": "n outline:04",
+                "tasks": ["wire outline:04", "plain"],
+                "acceptanceCriteria": ["Typecheck passes", "calls outline:02 first"],
+                "implementation": {
+                    "files": ["src/x.ts"],
+                    "approach": "after outline:04 lands",
+                    "verify": "grep -q outline:04 f",
+                    "guardRails": ["grep -q outline:04 f"],
+                },
+                "gate": {
+                    "type": "decision",
+                    "status": "pending",
+                    "prompt": "ready for outline:04?",
+                    "options": ["outline:04", "outline:02", "no"],
+                },
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    a = _by_title(doc)["A"]
+    assert a["notes"] == "n US-003"
+    assert a["tasks"] == ["wire US-003", "plain"]
+    assert a["acceptanceCriteria"] == ["Typecheck passes", "calls US-002 first"]
+    assert a["implementation"]["approach"] == "after US-003 lands"
+    assert a["implementation"]["verify"] == "grep -q US-003 f"
+    assert a["implementation"]["guardRails"] == ["grep -q US-003 f"]
+    assert a["gate"]["prompt"] == "ready for US-003?"
+    assert a["gate"]["options"] == ["US-003", "US-002", "no"]
+    assert "outline:" not in json.dumps(doc)
+
+
+def test_outline_ref_guardrails_still_equal_verify_segments(tmp_path):
+    import tasks as T
+
+    verify = "set -e\ngrep -q outline:04 f && test -f outline:02\ngrep -q outline:04 g"
+    rails = ["grep -q outline:04 f", "test -f outline:02", "grep -q outline:04 g"]
+    before = [s for _, s in T.verify_segments(verify)]
+    assert all(rail in before for rail in rails), "fixture must start with equal text"
+    files = _gap_files(
+        **{
+            "01-a.json": {
+                "implementation": {"files": ["src/x.ts"], "verify": verify, "guardRails": rails}
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    implementation = _by_title(doc)["A"]["implementation"]
+    segments = [s for _, s in T.verify_segments(implementation["verify"])]
+    assert implementation["guardRails"] == [
+        "grep -q US-003 f",
+        "test -f US-002",
+        "grep -q US-003 g",
+    ]
+    assert all(rail in segments for rail in implementation["guardRails"])
+
+
+def test_outline_ref_token_is_two_digits_not_followed_by_a_digit():
+    assert SM.OUTLINE_TOKEN.fullmatch("outline:04")
+    assert SM.OUTLINE_TOKEN.search("x outline:04.") and SM.OUTLINE_TOKEN.search("(outline:12)")
+    assert SM.OUTLINE_TOKEN.search("outline:041") is None
+    assert SM.OUTLINE_TOKEN.search("outline:7") is None
+    assert SM.OUTLINE_TOKEN.search("outline:") is None
+    assert SM.OUTLINE_TOKEN.search("US-003 and US-12") is None
+
+
+def test_outline_ref_longer_and_shorter_numbers_are_left_untouched(tmp_path):
+    files = _gap_files(**{"01-a.json": {"notes": "outline:041 outline:7 outline:04"}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert _by_title(doc)["A"]["notes"] == "outline:041 outline:7 US-003"
+
+
+def test_outline_ref_text_pass_is_idempotent():
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01", "notes": "see outline:04", "tasks": ["t outline:02"]},
+        {"id": "US-002", "_stagedIdx": "02"},
+        {"id": "US-003", "_stagedIdx": "04"},
+    ]
+    mapping = SM.outline_map(stories)
+    assert mapping == {"01": "US-001", "02": "US-002", "04": "US-003"}
+    assert SM.remap_story_text_tokens(stories, mapping) == []
+    once = json.dumps(stories)
+    assert SM.remap_story_text_tokens(stories, mapping) == []
+    assert json.dumps(stories) == once
+    assert stories[0]["notes"] == "see US-003" and stories[0]["tasks"] == ["t US-002"]
+
+
+def test_outline_ref_a_pass_creates_no_key_and_assigns_nothing_unchanged():
+    story = {"id": "US-001", "_stagedIdx": "01", "title": "T", "tasks": ["plain"]}
+    before = json.dumps(story)
+    assert SM.remap_story_text_tokens([story], {"01": "US-001"}) == []
+    assert json.dumps(story) == before
+
+
+def test_outline_ref_unstaged_idx_in_text_refuses_naming_story_and_field(tmp_path):
+    files = _gap_files(
+        **{
+            "02-b.json": {
+                "implementation": {
+                    "files": ["src/x.ts"],
+                    "verify": "test -f outline:03",
+                    "approach": "fine",
+                }
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert doc is None, "nothing is written"
+    assert "US-002 implementation.verify: outline:03" in proc.stderr
+    assert not (tmp_path / ".aimi" / "tasks" / "out-tasks.json").exists()
+
+
+def test_outline_ref_unmapped_lines_name_the_indexed_field_path():
+    stories = [
+        {
+            "id": "US-007",
+            "_stagedIdx": "01",
+            "tasks": ["a", "b outline:09"],
+            "implementation": {"guardRails": ["outline:08"]},
+            "gate": {"options": ["outline:05"]},
+        }
+    ]
+    assert SM.remap_story_text_tokens(stories, {"01": "US-007"}) == [
+        "US-007 implementation.guardRails[0]: outline:08",
+        "US-007 tasks[1]: outline:09",
+        "US-007 gate.options[0]: outline:05",
+    ]
+    assert stories[0]["tasks"][1] == "b outline:09", "never dropped, never resolved by position"
+
+
+def test_outline_ref_position_never_resolves_a_token():
+    """Three stories staged as 01, 02, 04: position 3 exists, idx 03 does not."""
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01"},
+        {"id": "US-002", "_stagedIdx": "02"},
+        {"id": "US-003", "_stagedIdx": "04"},
+    ]
+    mapping = SM.outline_map(stories)
+    assert "03" not in mapping and mapping["04"] == "US-003"
+
+
+def test_outline_ref_an_unnumbered_file_is_never_a_target():
+    stories = [{"id": "US-001", "_stagedIdx": ""}, {"id": "US-002", "_stagedIdx": "02"}]
+    assert SM.outline_map(stories) == {"02": "US-002"}
+
+
+def test_outline_ref_first_story_per_idx_wins():
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01"},
+        {"id": "US-002", "_stagedIdx": "01"},
+    ]
+    assert SM.outline_map(stories) == {"01": "US-001"}
+
+
+def test_outline_ref_hand_built_stories_fall_back_to_list_position():
+    stories = [{"id": "US-001"}, {"id": "US-002"}]
+    assert SM.outline_map(stories) == {"01": "US-001", "02": "US-002"}
+
+
+def test_outline_ref_foundation_resolves_through_the_filename_idx(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files(), ["--foundation", "04"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _by_title(doc)
+    assert stories["D"]["id"] == "US-003"
+    assert "US-003" in stories["A"]["dependsOn"] and "US-003" in stories["B"]["dependsOn"]
+
+
+def test_outline_ref_foundation_idx_whose_file_was_skipped_is_not_present(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files(), ["--foundation", "03"])
+    assert proc.returncode == 1 and doc is None
+    assert "--foundation 03 not present among staging files" in proc.stderr
+
+
+def test_outline_ref_working_idx_never_reaches_the_written_file(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files())
+    assert proc.returncode == 0, proc.stderr
+    assert "_stagedIdx" not in json.dumps(doc)
