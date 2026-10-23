@@ -267,7 +267,7 @@ There is no flag for publishing. Finishing the work and publishing it are two se
 |---|---|---|
 | Commands | 12 | Slash commands for each stage |
 | Skills | 24 | Packaged conventions and workflows |
-| Agents | 33 | 15 review, 8 workflow, 7 research, 2 design, 1 shared reference |
+| Agents | 33 | 16 review, 7 workflow, 7 research, 2 design, 1 shared reference |
 
 The full catalogue, with what each one is for: [docs/agents-and-skills.md](docs/agents-and-skills.md).
 

@@ -72,7 +72,7 @@ These are invoked by commands, not by you.
 | `aimi-design-bundle-researcher` | Reads BusinessSpec and DesignSpec bundles into structured findings |
 | `aimi-foundation-architect` | Proposes a stack-adaptive Clean Architecture foundation for new repositories |
 
-### Review (15)
+### Review (16)
 
 | Agent | What it does |
 |-------|--------------|
@@ -91,6 +91,7 @@ These are invoked by commands, not by you.
 | `aimi-kieran-typescript-reviewer` | TypeScript type safety and modern patterns |
 | `aimi-kieran-python-reviewer` | Pythonic patterns, type safety, maintainability |
 | `aimi-julik-frontend-races-reviewer` | JavaScript race conditions and DOM lifecycle bugs |
+| `aimi-cross-story-auditor` | Audits staged stories for drift between them; emits patches, writes no file |
 
 ### Design (2)
 
@@ -99,12 +100,11 @@ These are invoked by commands, not by you.
 | `aimi-design-implementation-reviewer` | Compares the live UI against Figma or a prototype |
 | `aimi-design-iterator` | Refines a UI through screenshot, analyze, improve cycles |
 
-### Workflow (8)
+### Workflow (7)
 
 | Agent | What it does |
 |-------|--------------|
 | `aimi-bug-reproduction-validator` | Reproduces and validates bug reports, any language or framework |
-| `aimi-cross-story-auditor` | Audits staged stories for drift between them; emits patches, writes no file |
 | `aimi-learnings-triage` | Read-only triage of friction events; returns a grouped report without marking anything |
 | `aimi-scope-negative-verifier` | Re-checks a claim that something is absent, using data-flow analysis rather than a name search |
 | `aimi-scope-positive-verifier` | Re-checks a claim that something already exists, the same way |

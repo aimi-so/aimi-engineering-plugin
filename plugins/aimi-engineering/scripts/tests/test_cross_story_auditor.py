@@ -9,7 +9,7 @@ from pathlib import Path
 from plan_text import plan_text
 
 ROOT = Path(__file__).resolve().parents[2]
-AGENT_TEXT = (ROOT / "agents" / "workflow" / "aimi-cross-story-auditor.md").read_text(encoding="utf-8")
+AGENT_TEXT = (ROOT / "agents" / "review" / "aimi-cross-story-auditor.md").read_text(encoding="utf-8")
 # plan.md is a router; Phase 3d.5 lives in commands/references/plan/. plan_text()
 # puts the references first, so the heading below resolves to the moved section.
 PLAN_TEXT = plan_text()
