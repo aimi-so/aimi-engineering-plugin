@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.151.0] - 2026-10-23
+
+Plan stories that cite each other correctly, and a plan pipeline that can be re-run on an edited outline without expanding everything again (#167).
+
+### Added
+- `validate-outline --outline <path>` (`scripts/outline_contract.py`): checks the `produces`/`consumes` contract tokens (`[ext:]sym|path|cli|http:<name>`) on an outline's entries and derives the expansion waves, printing `{valid, errors, waves, edges, counts}` and exiting 1 for an invalid outline. The outline gate refuses Approve while an error stands, and Phase 3d dispatches expanders wave by wave, at most 8 at once, handing each consumer a data-wrapped slice of its producers' validated staged stories.
+- `validate-staging --staging-dir <dir> [--outline <path>]` (`scripts/story_merge.py`): reports staged stories that cannot be merged as written, keyed by staged idx: a multi-line `implementation.verify` that can swallow a failing line, and, with an outline, a consumer whose `dependsOn` lacks its producer's `outline:NN` token. It runs as step 2b of Phase 3d's validation and feeds the retry loop.
+- `outline-shift --staging-dir <dir> --old <path> --new <path>` (`scripts/outline_contract.py`): after an outline edit that follows expansion, matches entries by exact title, renames the shifted staged files with their `outline:NN` tokens rewritten in one pass, deletes the file of a removed entry and the stale `audit-result.json`, and reports which stories still need an expander (`reexpand`, `expand`). The Failure Budget and the Unresolved Gate gain an interactive-only `Edit outline` option that uses it.
+- `validate-tasks` rule R23 (a warning, never an error): a multi-line `implementation.verify` with no `set -e` header and unchained lines, and a `grep` aimed at a directory without `-r`. Both predicates read the decomposition `verify-probe` already uses and run nothing.
+- Four advisory `smellWarnings` types from `story-merge`: `audit-duplication` (an audit patch changed both `tasks` and `implementation.approach` and they now overlap), `stale-sibling-note` (an older `notes` paragraph cites another story of the plan), `leftover-outline-token` (an `outline:` token survived the remap outside `dependsOn`) and `ac-test-enumeration` (a criterion names three or more tests). Their thresholds are named constants in `story_merge.py`; `SMELL_CALIBRATION_AS_OF` is now `"9fcfa44 2026-10-23"`, and `calibrate_story_smells.py --check` covers all six smell types.
+- `apply-audit-patches` writes `changedFields` (`{idx: [field names]}`) into `audit-result.json`, the record `audit-duplication` reads.
+- `judge_patch_value` in `sanitize.py`, and `VERBATIM_PATCH_FIELDS`: the shell fields `implementation.verify` and `implementation.guardRails` are judged by the four narrow injection rules and stored byte for byte, never rewritten.
+
+### Changed
+- **`aimi-cross-story-auditor` now runs on the review model category.** The agent file moved from `agents/workflow/` to `agents/review/` and Phase 3d.5 spawns it as `aimi-engineering:review:aimi-cross-story-auditor` with `AGENT_MODELS.review` (it was `AGENT_MODELS.workflow`). A user who assigned the review and workflow categories different models will see the audit run on the review one. The OpenCode agent name is unchanged. The auditor also gained a ninth concern, outline contract conformance, and emits the widened patch vocabulary below.
+- `apply-audit-patches` takes a set of ops per field (`OPS_FOR_FIELD`): `tasks` accepts `add`, `replace` and `remove`, `notes` accepts `add` and a one-paragraph `replace`, and `implementation.verify` and `implementation.guardRails` accept `replace`. A `verify` replace carries its substitution into every guard rail that contains the matched text, and is dropped as `guardRails-out-of-sync` or `verify-composition` when the result would not hold. A dropped patch is now listed only in `dropped[]`, as `{storyIdx, field, op, reason[, trigger]}`, and no longer adds an `unresolved` entry; the `audit cap reached` notice is kept.
+- `story-merge` resolves `outline:NN` in every story text field, not only `dependsOn`: `implementation.approach`, `verify`, `guardRails[]`, `tasks[]`, `notes`, `acceptanceCriteria[]` and `gate.prompt`/`options[]`. `NN` is the staged filename idx, never a position, and a token naming an idx with no staged file refuses the merge. `--foundation NN` resolves the same way, so an idx whose file was skipped is reported as not present. After `--split full-stack`, `US-NNN` references in story text are re-rendered against the per-file ids, with a frontend/backend or project label for a target in another file.
+- `story-merge` refuses, with no `--agent-mode` exemption, a story whose multi-line `implementation.verify` can swallow a failing line. The check runs before any remap or sweep, because an audit patch can introduce such a verify after expansion.
+- `aimi-story-expander` writes verifies that fail when any line fails, and outline entries carry `produces`/`consumes` contract tokens authored at Phase 3b.
+- `commands/references/plan/` is 44 files totalling 427973 bytes (407572 in 1.150.0); `commands/plan.md` is unchanged at 16362 bytes. `aimi-cross-story-auditor.md` has its own size budget in `command-size-baseline.txt`, and `story_merge_cases` is 96 cases.
+- Both `CLAUDE.md` files describe the above: the text-token remap, the widened `apply-audit-patches` rules, the three new verbs, the six advisory smells, and the auditor's model category.
+
+### Note
+- `commands/plan.md` in this release calls `validate-outline`, `validate-staging` and `outline-shift`. An installed plugin older than 1.151.0 has none of them, so `/aimi:plan` run from this source tree against an older installed CLI fails at the first call to one until the plugin is updated.
+
 ## [1.150.0] - 2026-10-23
 
 Cross-story audit made mandatory and enforced, and `commands/plan.md` split into a router plus per-phase references (#165).
