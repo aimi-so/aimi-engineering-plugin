@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Calibration for story_merge's two advisory smells (field-overlap, story-oversize).
+"""Calibration for story_merge's six advisory smells.
+
+The six are field-overlap, story-oversize, audit-duplication, stale-sibling-note,
+leftover-outline-token and ac-test-enumeration.
 
 Default mode prints the measurement tables the constants in story_merge.py were
 chosen from. `--check` prints nothing unless it fails: it exits 1 when the
-current constants fire on any golden story_merge case, or on the #164 reference
-plan, and 0 otherwise. The constants are imported from story_merge, never
+current constants fire on any golden story_merge case, or when the set of types
+firing on the #164 reference plan is not exactly EXPECTED_REFERENCE_TYPES, and 0
+otherwise. The constants are imported from story_merge, never
 repeated here, so the table and the merge cannot disagree.
 
 Sources:
@@ -39,6 +43,21 @@ import story_merge as SM  # noqa: E402
 
 GOLDEN = os.path.join(HERE, "golden_from_jq.json")
 DEFAULT_PLAN_GLOB = "*fix-issue-164-multi-repo-plan-execute-defects*"
+SMELL_TYPES = (
+    "field-overlap",
+    "story-oversize",
+    "audit-duplication",
+    "stale-sibling-note",
+    "leftover-outline-token",
+    "ac-test-enumeration",
+)
+# What the #164 plan fires, measured by this script. That plan predates the text
+# remap, so its prose still carries outline:NN tokens (11 fields across 5
+# stories) and leftover-outline-token is the one type that fires; it has no
+# stale sibling note, no test enumeration, no audit record, and stays under both
+# overlap and size bars. --check requires exactly this set, so a constant that
+# starts firing a second type there, or stops firing this one, fails.
+EXPECTED_REFERENCE_TYPES = frozenset({"leftover-outline-token"})
 _NN_STORY = re.compile(r"[0-9]{2}-.*\.json", re.S)
 
 
@@ -161,11 +180,8 @@ def table(label, plans):
             print("   overlap n=%d: max %.2f p95 %.2f" % (n, max(at_n), percentile(at_n, 0.95)))
     entries = [e for _, stories in plans for e in fired(stories)]
     print(
-        "   fires at current constants: field-overlap %d, story-oversize %d"
-        % (
-            sum(1 for e in entries if e["type"] == "field-overlap"),
-            sum(1 for e in entries if e["type"] == "story-oversize"),
-        )
+        "   fires at current constants: "
+        + ", ".join("%s %d" % (t, sum(1 for e in entries if e["type"] == t)) for t in SMELL_TYPES)
     )
     multi = [stories for _, stories in plans if len(stories) >= 3]
     ratio_over_median = 0
@@ -205,10 +221,22 @@ def main(argv):
     for label, stories in golden:
         for entry in fired(stories):
             failures.append("golden case %s: %s on %s" % (label, entry["type"], entry["storyId"]))
+    if not reference_plan:
+        print(
+            "calibrate_story_smells: the #164 reference plan (%s) was not found under .aimi/;"
+            " its half of --check did not run" % args.plan,
+            file=sys.stderr,
+        )
     for path, stories in reference_plan:
-        for entry in fired(stories):
+        firing = {e["type"] for e in fired(stories)}
+        if firing != EXPECTED_REFERENCE_TYPES:
             failures.append(
-                "%s: %s on %s" % (os.path.basename(path), entry["type"], entry["storyId"])
+                "%s: fires %s, expected exactly %s"
+                % (
+                    os.path.basename(path),
+                    sorted(firing) or "nothing",
+                    sorted(EXPECTED_REFERENCE_TYPES),
+                )
             )
     for line in failures:
         print("calibrate_story_smells: FIRES " + line, file=sys.stderr)

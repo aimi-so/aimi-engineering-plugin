@@ -57,7 +57,7 @@ import statistics
 import sys
 import time
 
-from audit_patches import AuditRefusal, staged_idx_map
+from audit_patches import NOTES_SEPARATOR, AuditRefusal, staged_idx_map
 from sanitize import rm_sanitize
 
 # The two caps the jq applied, at the two places it applied them. A title
@@ -383,6 +383,34 @@ def require_audit(staging_dir, paths):
         )
     status = result.get("status")
     return status if isinstance(status, str) else None
+
+
+def read_changed_fields(staging_dir):
+    """The audit's changed-field record: {staged idx: [field names]}, or {}.
+
+    apply-audit-patches writes `changedFields` into audit-result.json, one entry
+    per staged idx that received an applied patch. This is the ONE tolerant
+    reader of it: a missing file, a document that does not parse, a missing key
+    or a value of the wrong shape all answer {} and say nothing, because the
+    only consumer is an advisory smell and a smell must never block a merge.
+    require_audit has already refused a malformed result for a multi-story
+    directory, so for those this only ever sees a well-formed object.
+    """
+    try:
+        with open(os.path.join(staging_dir, "audit-result.json"), "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    changed = result.get("changedFields") if isinstance(result, dict) else None
+    if not isinstance(changed, dict):
+        return {}
+    record = {}
+    for idx, fields in changed.items():
+        if isinstance(idx, str) and isinstance(fields, list):
+            names = [f for f in fields if isinstance(f, str)]
+            if names:
+                record[idx] = names
+    return record
 
 
 def read_staging(paths):
@@ -1842,6 +1870,7 @@ _WORKING_KEYS = (
     "_side",
     "__droppedDeps",
     "__becameRoot",
+    "_auditChanged",
 )
 
 
@@ -1858,10 +1887,11 @@ def _for_output(stories):
 
 
 # ---------------------------------------------------------------------------
-# Advisory story smells: tasks[]/approach overlap and oversized stories
+# Advisory story smells: overlap, size, audit duplication, stale notes, outline
+# leftovers and test enumeration
 # ---------------------------------------------------------------------------
 #
-# Both are reported into metadata.smellWarnings and on stderr, and neither ever
+# All six are reported into metadata.smellWarnings and on stderr, and none ever
 # drops a story, blocks the merge or changes its exit status. They are computed
 # inside each writer, AFTER the id remap, so storyId is the id that lands on
 # disk -- the orphan-symbol and verify-coverage entries are built in main
@@ -1874,25 +1904,37 @@ def _for_output(stories):
 # update SMELL_CALIBRATION_AS_OF and the firing counts when you do.
 #
 # SMELL_CALIBRATION_AS_OF = the commit the constants were measured on, and the date.
+# The figures below were taken on top of that commit with the four newest types
+# in place, so the marker names the base the working tree stood on.
 # Measured firing counts at the values below (calibrate_story_smells.py, default
 # mode, run at that commit; plan files are live, so their figures are as of that run):
 #   golden corpus (86 staged cases, 167 stories, bytes max 369):
-#       field-overlap 0, story-oversize 0
-#   the #164 plan, .aimi/tasks/2026-10-13-fix-issue-164-multi-repo-plan-execute-defects-tasks.json
-#   (7 stories, 6496-11570 bytes, median 7372; overlap n=4 max 0.23):
-#       field-overlap 0, story-oversize 0   <- the gate `--check` enforces
-#   every tasks file under .aimi/ (70 files, 419 stories, bytes p50 12354 p90 22268;
-#   overlap n=4 over 405 eligible stories p50 0.11 p90 0.25 p95 0.29 max 0.45):
+#       all six types 0 (field-overlap, story-oversize, audit-duplication,
+#       stale-sibling-note, leftover-outline-token, ac-test-enumeration)
+#   the #164 plan, found under .aimi/ (it is archived now: the script globs
+#   .aimi/**, so it still finds it) (7 stories, 6496-11570 bytes, median 7372;
+#   overlap n=4 max 0.23):
+#       field-overlap 0, story-oversize 0, audit-duplication 0,
+#       stale-sibling-note 0, ac-test-enumeration 0,
+#       leftover-outline-token 5 (US-002, 004, 005, 006, 007: 11 fields; the plan
+#       predates the text remap)   <- the set `--check` enforces, exactly
+#   every tasks file under .aimi/ (71 files, 433 stories, bytes p50 11903 p90 22183;
+#   overlap n=4 over 419 eligible stories p50 0.10 p90 0.24 p95 0.29 max 0.45):
 #       field-overlap 16, story-oversize 210 (floor 14336 would flag 160, 16384
-#       would flag 109); the 2x-median rule alone flags 2 of 419.
-#   This includes the plan being executed when these were measured (the #165 plan:
-#   13 stories, 5385-15230 bytes, median 8344, overlap max 0.09), whose largest
-#   story (15230 bytes) fires story-oversize at 12288. That is expected and
-#   advisory, not a calibration failure: the gate pins the #164 plan, not that one.
+#       would flag 109); the 2x-median rule alone flags 2 of 433.
+#       stale-sibling-note 3, leftover-outline-token 174, ac-test-enumeration 28.
+#       audit-duplication 0 there: no stored plan carries the audit's changed-field
+#       record, so only a live merge can fire it.
+#   This includes plans being executed when these were measured, whose largest
+#   story fires story-oversize at 12288. That is expected and advisory, not a
+#   calibration failure: the gate pins the #164 plan, not those.
 # 12288 is the smallest 1 KiB step above the #164 plan's maximum (11570); 0.30 at
 # n=4 is the p95 of history and sits above that plan's 0.23 maximum. n=3 is too
 # noisy (max 0.31 there, 0.52 overall) and n=5 loses the signal (p95 0.23).
-SMELL_CALIBRATION_AS_OF = "4b261f8 2026-10-23"
+# AUDIT_DUPLICATION_THRESHOLD 0.20 is the p83 of the same distribution (72 of 419
+# eligible stories reach it, 37 reach 0.25, 16 reach 0.30): the check only runs
+# for a story an audit patch changed in both fields, so it can sit below 0.30.
+SMELL_CALIBRATION_AS_OF = "9fcfa44 2026-10-23"
 FIELD_OVERLAP_NGRAM = 4
 FIELD_OVERLAP_THRESHOLD = 0.30
 FIELD_OVERLAP_MIN_TASKS = 3
@@ -1901,6 +1943,24 @@ STORY_OVERSIZE_FLOOR_BYTES = 12288
 STORY_OVERSIZE_MEDIAN_FACTOR = 2
 STORY_OVERSIZE_MEDIAN_MIN_STORIES = 3
 STORY_OVERSIZE_MEDIAN_MIN_BYTES = 4096
+# audit-duplication asks the field-overlap question only of a story an audit patch
+# already changed in BOTH tasks and implementation.approach, so the prior that the
+# overlap is the audit's doing is far stronger than for a story picked at random,
+# and the bar can sit below FIELD_OVERLAP_THRESHOLD. 0.20 is the p83 of history
+# (72 of 419 eligible stories reach it; 37 reach 0.25, 16 reach 0.30).
+AUDIT_DUPLICATION_THRESHOLD = 0.20
+AUDIT_DUPLICATION_FIELDS = ("tasks", "implementation.approach")
+# A citation of a sibling inside the older paragraphs of `notes`: US-NNN, or the
+# prose form `story NN`. An outline token in notes has already been rewritten to
+# US-NNN by the remap before this runs.
+STALE_NOTE_SIBLING_PATTERN = re.compile(r"\bUS-([0-9]{3})\b|\b(?i:story) ([0-9]{1,3})\b")
+# `outline:` followed by one or more digits. OUTLINE_TOKEN owns exactly two
+# digits not followed by a third, so a one-digit `outline:7` or a longer
+# `outline:041` is text the remap does not own and leaves in place.
+LEFTOVER_OUTLINE_PATTERN = re.compile(r"outline:[0-9]+")
+# A criterion listing test functions states coverage, which belongs in tasks[].
+AC_TEST_ENUMERATION_PATTERN = re.compile(r"\btest_[a-z0-9_]+")
+AC_TEST_ENUMERATION_MIN = 3
 
 _WORD_RE = re.compile(r"[^\W_]+")
 
@@ -1950,11 +2010,12 @@ def story_bytes(story):
 
 
 def advisory_story_smells(stories):
-    """The field-overlap and story-oversize entries for a plan's stories.
+    """The advisory entries for a plan's stories, in a fixed type order.
 
     `stories` is every story of the plan -- on a split, the union of all output
-    files -- so the median is plan-wide. Returns the combined entries, field-
-    overlap first.
+    files -- so the median is plan-wide. Returns field-overlap, story-oversize,
+    audit-duplication, stale-sibling-note, leftover-outline-token and
+    ac-test-enumeration entries, in that order.
     """
     stories = [s for s in stories if isinstance(s, dict)]
     overlap = []
@@ -2002,7 +2063,154 @@ def advisory_story_smells(stories):
                     + ")",
                 }
             )
-    return overlap + oversize
+    return (
+        overlap
+        + oversize
+        + audit_duplication_smells(stories)
+        + stale_sibling_note_smells(stories)
+        + leftover_outline_token_smells(stories)
+        + ac_test_enumeration_smells(stories)
+    )
+
+
+def audit_duplication_smells(stories):
+    """Stories an audit patch left with tasks[] restating implementation.approach.
+
+    Fires only when the audit's changed-field record (the `_auditChanged` working
+    key main attaches from audit-result.json) lists BOTH tasks and
+    implementation.approach for the story AND field_overlap_ratio reaches
+    AUDIT_DUPLICATION_THRESHOLD. No record, a record naming one of the two, or a
+    story the ratio is not defined for yields nothing.
+    """
+    entries = []
+    for story in stories:
+        changed = story.get("_auditChanged")
+        if not isinstance(changed, list) or not all(f in changed for f in AUDIT_DUPLICATION_FIELDS):
+            continue
+        ratio = field_overlap_ratio(story)
+        if ratio is None or ratio < AUDIT_DUPLICATION_THRESHOLD:
+            continue
+        rounded = round(ratio, 3)
+        entries.append(
+            {
+                "type": "audit-duplication",
+                "storyId": story.get("id"),
+                "ratio": rounded,
+                "ngram": FIELD_OVERLAP_NGRAM,
+                "message": "an audit patch changed both tasks and implementation.approach, and"
+                " tasks[] now restates the approach ("
+                + str(rounded)
+                + " of its "
+                + str(FIELD_OVERLAP_NGRAM)
+                + "-word sequences also occur in it)",
+            }
+        )
+    return entries
+
+
+def _sibling_id(match):
+    if match.group(1):
+        return "US-" + match.group(1)
+    return "US-" + _pad(int(match.group(2)), 3)
+
+
+def stale_sibling_note_smells(stories):
+    """Older `notes` paragraphs that cite a different story of the merged set.
+
+    Scans every paragraph before the last NOTES_SEPARATOR; the final paragraph
+    (the one an audit appended) and a note with no separator are never scanned.
+    A citation counts only when it names a story that exists in this plan and is
+    not the story carrying the note.
+    """
+    ids = {s.get("id") for s in stories}
+    entries = []
+    for story in stories:
+        notes = story.get("notes")
+        if not isinstance(notes, str) or NOTES_SEPARATOR not in notes:
+            continue
+        cited = set()
+        for paragraph in notes.split(NOTES_SEPARATOR)[:-1]:
+            for match in STALE_NOTE_SIBLING_PATTERN.finditer(paragraph):
+                sibling = _sibling_id(match)
+                if sibling in ids and sibling != story.get("id"):
+                    cited.add(sibling)
+        if cited:
+            ordered = sorted(cited)
+            entries.append(
+                {
+                    "type": "stale-sibling-note",
+                    "storyId": story.get("id"),
+                    "cited": ordered,
+                    "message": "notes written before the audit cite "
+                    + ", ".join(ordered)
+                    + ", which may no longer describe that story",
+                }
+            )
+    return entries
+
+
+def _string_fields(value, path):
+    """(field path, text) for every string under `value`; list entries share the list's path."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield from _string_fields(child, path + "." + str(key) if path else str(key))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _string_fields(child, path)
+
+
+def leftover_outline_token_smells(stories):
+    """Stories where an `outline:` + digits survived the remap in a non-dependsOn field."""
+    entries = []
+    for story in stories:
+        fields = set()
+        for key, value in story.items():
+            if key == "dependsOn" or key in _WORKING_KEYS or key.startswith("_"):
+                continue
+            for path, text in _string_fields(value, key):
+                if LEFTOVER_OUTLINE_PATTERN.search(text):
+                    fields.add(path)
+        if fields:
+            ordered = sorted(fields)
+            entries.append(
+                {
+                    "type": "leftover-outline-token",
+                    "storyId": story.get("id"),
+                    "fields": ordered,
+                    "message": "an outline: token survived the remap in " + ", ".join(ordered),
+                }
+            )
+    return entries
+
+
+def ac_test_enumeration_smells(stories):
+    """One entry per acceptance criterion naming AC_TEST_ENUMERATION_MIN or more distinct tests."""
+    entries = []
+    for story in stories:
+        criteria = story.get("acceptanceCriteria")
+        if not isinstance(criteria, list):
+            continue
+        for index, criterion in enumerate(criteria):
+            if not isinstance(criterion, str):
+                continue
+            count = len(set(AC_TEST_ENUMERATION_PATTERN.findall(criterion)))
+            if count >= AC_TEST_ENUMERATION_MIN:
+                entries.append(
+                    {
+                        "type": "ac-test-enumeration",
+                        "storyId": story.get("id"),
+                        "index": index,
+                        "count": count,
+                        "message": "acceptanceCriteria["
+                        + str(index)
+                        + "] names "
+                        + str(count)
+                        + " distinct tests; coverage belongs in tasks[]",
+                    }
+                )
+    return entries
 
 
 def report_advisory_story_smells(entries):
@@ -2017,6 +2225,26 @@ def report_advisory_story_smells(entries):
             "story-oversize",
             "Warning: story-merge: story-oversize smell detected (advisory; story is far above"
             " the plan's norm):",
+        ),
+        (
+            "audit-duplication",
+            "Warning: story-merge: audit-duplication smell detected (advisory; an audit patch"
+            " left tasks[] restating implementation.approach):",
+        ),
+        (
+            "stale-sibling-note",
+            "Warning: story-merge: stale-sibling-note smell detected (advisory; an older notes"
+            " paragraph cites another story):",
+        ),
+        (
+            "leftover-outline-token",
+            "Warning: story-merge: leftover-outline-token smell detected (advisory; an outline:"
+            " token survived the remap):",
+        ),
+        (
+            "ac-test-enumeration",
+            "Warning: story-merge: ac-test-enumeration smell detected (advisory; a criterion"
+            " lists test names):",
         ),
     ):
         lines = [
@@ -2801,6 +3029,8 @@ def main(argv):
         die("Error: story-merge: no *.json files found in " + staging_dir)
 
     audit_status = require_audit(staging_dir, paths)
+    # Read here, while the staging directory still exists: the writers delete it.
+    audit_changed = read_changed_fields(staging_dir)
 
     stories = read_staging(paths)
     assign_ids(stories)
@@ -2830,6 +3060,12 @@ def main(argv):
             text_unresolved,
         )
     for story in stories:
+        # Keyed by the staged filename idx the way outline_map is, and attached
+        # as a working key (stripped from output) so the smell pass can ask which
+        # fields an audit patch changed without reopening the staging directory.
+        changed = audit_changed.get(story.get("_stagedIdx"))
+        if changed:
+            story["_auditChanged"] = changed
         story.pop("_srcIdx", None)
         story.pop("_stagedIdx", None)
 
