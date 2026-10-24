@@ -62,11 +62,12 @@ The working-memory `unresolved[]` list (`{storyIdx: string, message: string}`) i
 …
 ```
 
-with exactly three options, verbatim:
+with exactly four options, verbatim:
 
 ```
 Apply anyway — proceed to story-merge without acting on these findings
 Defer with reason — annotate the affected stories and proceed
+Edit outline — change the outline and re-expand only what the edit affects
 Abort — stop before story-merge; nothing is written this run
 ```
 
@@ -92,9 +93,11 @@ Abort — stop before story-merge; nothing is written this run
 
   It annotates the `notes` of each staged story an entry names (the `_audit` sentinel, or an idx with no staged file, is never annotated) and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
 
+- **[Edit outline]:** follow the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md` (Read it first). It ends by re-running Phase 3d.5 in full, so this gate fires again on the new `unresolved[]`; no `oqDecisions[]` entry is recorded for this choice.
+
 - **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
 
-**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
 
 ```
 agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review

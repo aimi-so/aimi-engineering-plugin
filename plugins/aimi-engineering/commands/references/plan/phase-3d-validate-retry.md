@@ -51,7 +51,10 @@ After every wave has completed (see Wave Dispatch and Producer Slice Block Prepa
     Skip failed — proceed to story-merge without them
     Retry with hint — provide additional context for failed stories, then re-expand
     Abort — stop plan generation
+    Edit outline — change the outline and re-expand only what the edit affects   [interactive mode only]
   ```
+  **Edit outline** (specFlow:CriticalQ3) follows the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md`; Read it before acting on the choice.
+
   When `INTERACTIVE_MODE=agent`, auto-select **Skip failed**, which skips the held-back closure too instead of expanding it blind, and emit one log line:
   ```
   [plan] Pass 2: N expansion(s) permanently failed, M held back (agent-mode: skipping)

@@ -31,6 +31,7 @@ set -uo pipefail
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
 #   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
+#   - outline-shift Tests (seven assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC53)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -5094,6 +5095,37 @@ test_validate_outline() {
   rm -rf "$dir"
 }
 
+test_outline_shift() {
+  echo ""
+  echo "=== outline-shift: renumber staged stories after an outline edit ==="
+
+  local dir=".aimi/.outline-os-$$"
+  mkdir -p "$dir/run"
+  printf '%s' '[{"idx":"01","title":"Alpha","summary":"s","produces":["sym:alpha"]},{"idx":"02","title":"Beta","summary":"s","consumes":["sym:alpha"]},{"idx":"03","title":"Gamma","summary":"s"}]' > "$dir/old.json"
+  printf '%s' '[{"idx":"01","title":"Beta","summary":"s","consumes":["sym:alpha"]},{"idx":"02","title":"Gamma","summary":"s"}]' > "$dir/new.json"
+  printf '%s' '{"title":"Alpha","dependsOn":[]}' > "$dir/run/01-alpha.json"
+  printf '%s' '{"title":"Beta","dependsOn":["outline:01"]}' > "$dir/run/02-beta.json"
+  printf '%s' '{"title":"Gamma","dependsOn":["outline:02"],"notes":"wire after outline:02"}' > "$dir/run/03-gamma.json"
+  printf '%s' '{"auditedIdx":["01","02","03"]}' > "$dir/run/audit-result.json"
+
+  local output exit_code
+  output=$("$CLI" outline-shift --staging-dir "$dir/run" --old "$dir/old.json" --new "$dir/new.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "outline-shift: a shift that moves two files and removes one exits 0"
+  assert_eq "02>01,03>02|01|01|-|true" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(",".join(r["from"] + ">" + r["to"] for r in d["renamed"]) + "|" + ",".join(d["removed"]) + "|" + ",".join(r["idx"] for r in d["reexpand"]) + "|" + (",".join(d["expand"]) or "-") + "|" + str(d["auditInvalidated"]).lower())' "$output")" "outline-shift: the report lists the renames, the removed entry, the one story to re-expand and the invalidated audit"
+  assert_eq "01-beta.json 02-gamma.json" "$(ls "$dir/run" | tr '\n' ' ' | sed 's/ $//')" "outline-shift: the shifted files carry their new names, the removed one is deleted and the stale audit is gone"
+  assert_eq "wire after outline:01" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notes"])' "$dir/run/02-gamma.json")" "outline-shift: outline tokens in a kept story are rewritten to the new numbering"
+  assert_eq "absent" "$([ -e "$dir/run/audit-result.json" ] && echo present || echo absent)" "outline-shift: a shift that changed something deletes audit-result.json"
+
+  output=$("$CLI" outline-shift --staging-dir "/tmp" --old "$dir/old.json" --new "$dir/new.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "escapes project root" "$output" "outline-shift: an escaping --staging-dir is refused by confinement"
+
+  printf '%s' '{"title":"Stray"}' > "$dir/run/09-stray.json"
+  output=$("$CLI" outline-shift --staging-dir "$dir/run" --old "$dir/new.json" --new "$dir/new.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "09-stray.json" "$output" "outline-shift: a staged file matching no --old entry is refused, naming the file"
+
+  rm -rf "$dir"
+}
+
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
 test_story_merge_malformed_json() {
   echo ""
@@ -8895,6 +8927,7 @@ main() {
   test_apply_audit_patches
   test_validate_staging
   test_validate_outline
+  test_outline_shift
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_audit_gate

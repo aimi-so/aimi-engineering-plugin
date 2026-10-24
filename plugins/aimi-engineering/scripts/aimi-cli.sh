@@ -15498,6 +15498,69 @@ cmd_validate_outline() {
 }
 
 # ============================================================================
+# outline-shift: renumber staged stories after an outline edit
+# Usage: aimi-cli.sh outline-shift --staging-dir <dir> --old <path> --new <path>
+# ============================================================================
+#
+# Modelled on cmd_apply_audit_patches: no tasks file and so no lock. Bash keeps
+# the flags and the path confinement -- all three paths are confined before
+# python3 starts, so an escaping argument is refused without outline_contract.py
+# ever running -- and check_python3, which refuses rather than degrading: a verb
+# that answered "nothing to do" without the interpreter would leave stale
+# staged files looking current. The matching, the renames and the token rewrite
+# are outline_contract.py's, behind one crossing.
+cmd_outline_shift() {
+  local usage="usage: aimi-cli.sh outline-shift --staging-dir <dir> --old <path> --new <path>"
+  local staging_dir="" old_path="" new_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir|--old|--new)
+        if [ $# -lt 2 ]; then
+          echo "Error: outline-shift: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        case "$1" in
+          --staging-dir) staging_dir="$2" ;;
+          --old) old_path="$2" ;;
+          --new) new_path="$2" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        echo "Error: outline-shift: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: outline-shift: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ -z "$old_path" ]; then
+    echo "Error: outline-shift: --old <path> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ -z "$new_path" ]; then
+    echo "Error: outline-shift: --new <path> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+  validate_path_in_project "$old_path"
+  validate_path_in_project "$new_path"
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: outline-shift: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  python3 "$(_aimi_script_py outline_contract.py)" --shift --staging-dir "$staging_dir" --old "$old_path" --new "$new_path"
+}
+
+# ============================================================================
 # split-detect — the read side of metadata.splitGroup
 # ============================================================================
 #
@@ -17482,6 +17545,16 @@ COMMANDS:
                               and errors[] of {code, idx, message}, and exits 1. An
                               unreadable --outline (missing, not JSON, not an array) is
                               refused on stderr with exit 1 and nothing on stdout.
+    outline-shift --staging-dir <dir> --old <path> --new <path>
+                              After an outline edit that follows expansion, renumber the
+                              staged NN-*.json files without an LLM: entries are matched by
+                              exact title, shifted files are renamed and their outline:NN
+                              tokens rewritten in one pass, a removed entry's file is
+                              deleted. Prints {renamed[{from,to,file}], removed[],
+                              reexpand[{idx,reason}], expand[], auditInvalidated}; only the
+                              idx in reexpand and expand need an expander. A change deletes
+                              <dir>/audit-result.json. Refuses (exit 1, nothing changed) a
+                              staged file matching no --old entry or two sharing an idx.
     validate-staging --staging-dir <dir> [--outline <path>]
                               Check the staged NN-*.json story files before they are merged.
                               Prints {} and exits 0 when clean; otherwise prints an object
@@ -19031,6 +19104,7 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;
