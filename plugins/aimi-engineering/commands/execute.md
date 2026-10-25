@@ -2960,6 +2960,9 @@ while true:
                   its own get-story-context call, so the spawned executor reads this orchestrator's
                   file even when a sibling split orchestrator's init-session call last wrote the
                   shared pointer
+                - AIMI_ROOT = this run's already-resolved AIMI_ROOT (the directory holding `.aimi/`)
+                  ← passed in, never re-derived inside a worktree, which has no `.aimi/` of its own;
+                  the executor exports it beside TASKS_FILE_PATH for both verify runs
                 - SCRATCH_PREFIX = PLAN_DISC + "-" + full_story.id  ← the executor's scratchpad
                   namespace, handed over ALREADY COMPOSED rather than left to be chosen. `PLAN_DISC`
                   is READ here and never recomposed nor re-sanitized: `### Plan Discriminator` under

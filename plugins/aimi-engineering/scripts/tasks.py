@@ -6698,6 +6698,11 @@ _VERIFY_TIMEOUT = 600
 # because both are the same fact.
 VERIFY_PROBE_ACTIVE_ENV = "AIMI_VERIFY_PROBE_ACTIVE"
 
+# The directory holding `.aimi/`, exported to every probed segment beside
+# TASKS_FILE_PATH so a verify reads "$AIMI_ROOT/.aimi/..." without a relative
+# hop that breaks inside a worktree (which has no `.aimi/` of its own).
+AIMI_ROOT_ENV = "AIMI_ROOT"
+
 # What the refusal says. A message that reported only "failed" would send the
 # reader looking for a broken assertion, when what happened is that the verify
 # being probed names the probe -- so it names the recursion, and it names the
@@ -7893,7 +7898,7 @@ def _probe_segment_script(segment, snapshot, restore, aborted):
     return "\n".join(lines)
 
 
-def probe_verify(text, cwd, skip_matching=None, timeout=None):
+def probe_verify(text, cwd, skip_matching=None, timeout=None, aimi_root=None):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
     EVERY SEGMENT RUNS ONCE, IN ORDER, AND THE SHELL IT LEAVES BEHIND IS
@@ -8091,8 +8096,18 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     # see it. Restored on the way out so a second call in the same process (the
     # tests, and any caller driving this function directly) is not itself read
     # as a nested one.
+    #
+    # `aimi_root` IS WRITTEN THROUGH THE SAME CHANNEL AND RESTORED THE SAME WAY.
+    # When given it overwrites whatever AIMI_ROOT the caller's environment
+    # already held (a stale value must not decide what a verify reads), and it
+    # lands before `assigned` is seeded so a segment reading `$AIMI_ROOT` is
+    # resolved rather than reported missing. With none given the environment
+    # is left exactly as it was.
     previous_marker = os.environ.get(VERIFY_PROBE_ACTIVE_ENV)
+    previous_root = os.environ.get(AIMI_ROOT_ENV)
     os.environ[VERIFY_PROBE_ACTIVE_ENV] = "1"
+    if aimi_root is not None:
+        os.environ[AIMI_ROOT_ENV] = aimi_root
     try:
         return _probe_verify_segments(text, cwd, skip_matching, timeout)
     finally:
@@ -8100,6 +8115,11 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
             os.environ.pop(VERIFY_PROBE_ACTIVE_ENV, None)
         else:
             os.environ[VERIFY_PROBE_ACTIVE_ENV] = previous_marker
+        if aimi_root is not None:
+            if previous_root is None:
+                os.environ.pop(AIMI_ROOT_ENV, None)
+            else:
+                os.environ[AIMI_ROOT_ENV] = previous_root
 
 
 def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
@@ -8138,7 +8158,8 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     # The state a segment can be PROVEN to have: what a carried assignment
     # binds, seeded with the environment this process already holds --
     # `subprocess.run` hands that same environment to every segment, so `$HOME`
-    # and an exported `$TASKS_FILE_PATH` are resolved, not missing. It is not
+    # and an exported `$TASKS_FILE_PATH` or `$AIMI_ROOT` are resolved, not
+    # missing. It is not
     # read back out of the snapshot; probe_verify's docstring says why.
     assigned = set(os.environ)
     # THE ONE PATH THIS MODULE NAMES RATHER THAN RECEIVES, and it is written
@@ -8390,6 +8411,20 @@ def guard_rails_for_story(path, story_id):
     return []
 
 
+def _aimi_root_flag(argv, verb):
+    """`--aimi-root`'s value, or None when the flag is absent. A value that is
+    not an absolute path is refused: a relative root would resolve against each
+    segment's own working directory and name a different place per segment.
+    The test is a leading slash, not an os.path call -- the structural count of
+    those in this module is pinned."""
+    value = _flag(argv, "--aimi-root")
+    if value is None:
+        return None
+    if not value.startswith("/"):
+        die("Error: %s: --aimi-root must be an absolute path, got: %s" % (verb, value))
+    return value
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -8479,10 +8514,12 @@ def op_verify_probe(argv):
     cwd = _flag(argv, "--cwd")
     previous_file = _flag(argv, "--previous-file")
     skip_matching = _flag(argv, "--skip-matching")
+    aimi_root = _aimi_root_flag(argv, "verify-probe")
     if not path or story_id is None:
         die(
             "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
-            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>]"
+            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>] "
+            "[--aimi-root <absolute dir>]"
         )
     # The regex is validated HERE rather than left to `re.compile` inside the
     # probe, because this is the argument-handling half of the verb: a caller
@@ -8498,7 +8535,9 @@ def op_verify_probe(argv):
                 "expression: %s" % err
             )
     text = verify_text_for_story(path, story_id)
-    results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
+    results = probe_verify(
+        text, cwd or os.getcwd(), skip_matching=skip_matching, aimi_root=aimi_root
+    )
     _match_previous(_read_previous_probe(previous_file), results)
     # `guardRail` is added HERE and not in probe_verify: the label is the
     # story's own declaration, read from the document, while probe_verify
@@ -8579,7 +8618,7 @@ def _probe_plan_why(entry):
     return "no verdict could be reached"
 
 
-def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
+def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching, aimi_root=None):
     """The per-story loop. Returns (stories, unlabelled, unmeasured)."""
     stories_out, unlabelled, unmeasured = [], [], []
     for doc in docs:
@@ -8621,8 +8660,13 @@ def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
                         "why": "project directory %s does not exist at the base commit" % probe_dir,
                     })
                     continue
+            # The keyword is passed only when there is a root to hand over, so
+            # a caller (or a test double) that predates it sees the call it
+            # always saw.
+            root_kwargs = {} if aimi_root is None else {"aimi_root": aimi_root}
             results = probe_verify(
-                verify, git_tree + "/" + rel, skip_matching=skip_matching
+                verify, git_tree + "/" + rel, skip_matching=skip_matching,
+                **root_kwargs
             )
             rails = set(guard_rails_for_story(path, sid)) if isinstance(sid, str) else set()
             for entry in results:
@@ -8666,10 +8710,11 @@ def op_probe_plan(argv):
     cwd = _flag(argv, "--cwd") or os.getcwd()
     ref = _flag(argv, "--ref")
     run_suites = "--run-suites" in argv
+    aimi_root = _aimi_root_flag(argv, "probe-plan")
     if not path:
         die(
             "Usage: tasks.py probe-plan --tasks-file <path> [--cwd <dir>] "
-            "[--ref <sha>] [--run-suites]"
+            "[--ref <sha>] [--run-suites] [--aimi-root <absolute dir>]"
         )
     docs = read_docs(path, "probe-plan")
     if not ref:
@@ -8692,7 +8737,8 @@ def op_probe_plan(argv):
         return 0
     if top[0] != 0:
         grouped = _probe_plan_project_groups(
-            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+            aimi_root=aimi_root,
         )
         if grouped is None:
             _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
@@ -8701,7 +8747,8 @@ def op_probe_plan(argv):
         return 0
     toplevel = top[1].strip()
     outcome = _probe_plan_in_repo(
-        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+        aimi_root=aimi_root,
     )
     if outcome[0] == "not-probed":
         _emit(_probe_plan_not_probed(ref, outcome[1]))
@@ -8721,7 +8768,7 @@ def _probe_plan_payload(ref, stories_out, unlabelled, unmeasured):
     }
 
 
-def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
+def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching, aimi_root=None):
     """The resolve-ref / worktree-add / per-story sequence against ONE
     repository. `toplevel` is its root and `cwd` a directory inside it whose
     prefix the stories' own relative paths hang from. Returns
@@ -8746,7 +8793,7 @@ def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
             return ("not-probed", "git worktree add failed: " + detail)
         try:
             stories_out, unlabelled, unmeasured = _probe_plan_stories(
-                docs, path, git_tree, sha, prefix, skip_matching,
+                docs, path, git_tree, sha, prefix, skip_matching, aimi_root=aimi_root,
             )
         finally:
             removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
@@ -8756,7 +8803,7 @@ def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
     return ("ok", stories_out, unlabelled, unmeasured)
 
 
-def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
+def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching, aimi_root=None):
     """The invocation directory is not inside a git repository, which is the
     multi-repo layout: AIMI_ROOT is a plain parent holding one repository per
     project. Each story's own `project` names the repository it is probed in,
@@ -8826,7 +8873,8 @@ def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
                 for i in members
             ]
             outcome = _probe_plan_in_repo(
-                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching
+                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching,
+                aimi_root=aimi_root,
             )
             if outcome[0] == "not-probed":
                 reason = "project %s could not be probed: %s" % (project, outcome[1])
