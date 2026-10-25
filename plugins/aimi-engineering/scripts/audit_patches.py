@@ -31,7 +31,12 @@ private copy of its patterns here -- and its `clean` result is stored as
 returned. The two fields that hold shell (`implementation.verify` and
 `implementation.guardRails`) go through `judge_patch_value` instead, which
 judges and never rewrites: a script the expander wrote unsanitized would only be
-corrupted by a rewrite.
+corrupted by a rewrite. The two path fields (`implementation.files`,
+`implementation.outputs`) take the plain sanitizer path and then one more
+judgment, the shared path rule, on every add or replace value; a `matchValue`
+is only sanitized, never path-judged, so an entry that already holds `..` can
+still be named in order to be removed. Moving a wrong entry from one field to
+the other is two patches, each judged on its own.
 
 Every refusal is computed before the first write. Writes are staged to temp
 files beside their targets first and renamed second, the audit result LAST, so
@@ -53,6 +58,9 @@ when the matcher fired. It NEVER echoes a patch value or matchValue.
               does not exist.
   refused     well-formed, refused on its content: a sanitizer trigger, tasks[]
               over its cap, a matchValue that matched zero or several entries,
+              an implementation.files / implementation.outputs value that the
+              shared path rule refuses (`bad-path`; the value is judged by
+              tasks.implementation_path_problem and never echoed),
               a patch that leaves a guard rail broken that was in sync before it
               (a rail that stops being exactly one top-level segment of the
               verify), a verify that can swallow a failing line, a post-patch
@@ -118,8 +126,12 @@ ALLOWED_FIELDS = (
     "implementation.approach",
     "implementation.verify",
     "implementation.guardRails",
+    "implementation.files",
+    "implementation.outputs",
     "gate.prompt",
 )
+# The fields whose values are repository paths, judged by the shared path rule.
+PATH_FIELDS = ("implementation.files", "implementation.outputs")
 OPS_FOR_FIELD = {
     "dependsOn": frozenset({"add"}),
     "tasks": frozenset({"add", "replace", "remove"}),
@@ -128,6 +140,8 @@ OPS_FOR_FIELD = {
     "implementation.approach": frozenset({"replace"}),
     "implementation.verify": frozenset({"replace"}),
     "implementation.guardRails": frozenset({"replace"}),
+    "implementation.files": frozenset({"replace", "remove"}),
+    "implementation.outputs": frozenset({"add", "replace", "remove"}),
     "gate.prompt": frozenset({"replace"}),
 }
 # (field, op) pairs that locate the text they change by an exact `matchValue`.
@@ -139,6 +153,10 @@ NEEDS_MATCH_VALUE = frozenset(
         ("acceptanceCriteria", "replace"),
         ("implementation.verify", "replace"),
         ("implementation.guardRails", "replace"),
+        ("implementation.files", "replace"),
+        ("implementation.files", "remove"),
+        ("implementation.outputs", "replace"),
+        ("implementation.outputs", "remove"),
     }
 )
 MAX_PATCHES_PER_STORY = 10
@@ -375,6 +393,14 @@ def plan_patches(patches, idx_map, docs):
                 if trigger is not None:
                     plan.drop(idx, field, op, "matchValue-sanitizer:" + _trigger_name(trigger), trigger)
                     continue
+            if field in PATH_FIELDS and op != "remove":
+                # Lazy for the reason _broken_rails gives: importing this module
+                # must not load tasks. The matchValue is deliberately not judged.
+                from tasks import implementation_path_problem
+
+                if implementation_path_problem(field, clean) is not None:
+                    plan.drop(idx, field, op, "bad-path")
+                    continue
 
         candidates.setdefault(idx, []).append(
             {"field": field, "op": op, "value": clean, "matchValue": match_value}
@@ -518,6 +544,27 @@ def _apply_one(doc, patch):
 
         if verify_composition_findings(impl["verify"]):
             raise _Drop("verify-composition")
+    elif field in PATH_FIELDS:
+        key = field.split(".", 1)[1]
+        # Only an outputs add may create what is absent; every other op names
+        # an existing entry.
+        creates = field == "implementation.outputs" and op == "add"
+        impl = doc.setdefault("implementation", {}) if creates else doc.get("implementation")
+        if not isinstance(impl, dict):
+            raise _Drop("post-validation")
+        entries = impl.setdefault(key, []) if creates and key not in impl else impl.get(key)
+        if not isinstance(entries, list):
+            raise _Drop("post-validation")
+        if op == "add":
+            if value in entries:
+                raise _Drop("post-validation")
+            entries.append(value)
+        else:
+            hit = _single_hit(entries, patch["matchValue"])
+            if op == "replace":
+                entries[hit] = value
+            else:
+                del entries[hit]
     elif field == "implementation.guardRails":
         impl = doc.get("implementation")
         if not isinstance(impl, dict):
@@ -578,6 +625,10 @@ def _valid_story(doc, field, op, value):
         impl = doc.get("implementation")
         rails = impl.get("guardRails") if isinstance(impl, dict) else None
         return isinstance(rails, list) and all(_nonempty_str(e) for e in rails)
+    if field in PATH_FIELDS:
+        impl = doc.get("implementation")
+        entries = impl.get(field.split(".", 1)[1]) if isinstance(impl, dict) else None
+        return isinstance(entries, list) and all(isinstance(e, str) for e in entries)
     if field == "gate.prompt":
         gate = doc.get("gate")
         return isinstance(gate, dict) and _nonempty_str(gate.get("prompt"))
