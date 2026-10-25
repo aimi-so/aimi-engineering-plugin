@@ -55,14 +55,13 @@ The split row is not a new derivation — it is exactly what `commands/execute.m
 
 `EXEC_OWNS_ROOT = PHASE_MODE or CONTAINER_MODE` (true for phase, container, and split; false for inline). `EXEC_KEEPS_BRANCH = true` unconditionally, in every mode, today.
 
-**`project_roots` is a distinct, orthogonal concept and is never absorbed into `EXEC_ROOT`.** Four consumers keep reading `project_roots[group_key]` (or the resolved project path it is built from) directly, independent of whichever mode's `EXEC_ROOT` a run is using:
+**`project_roots` is a distinct, orthogonal concept and is never absorbed into `EXEC_ROOT`.** Three consumers keep reading `project_roots[group_key]` (or the resolved project path it is built from) directly, independent of whichever mode's `EXEC_ROOT` a run is using:
 
 1. `PROJECT_PATH` passed to each story-executor Task and its worktree boundary (Step 4's per-story spawn loop).
 2. `PROJECT_GUIDELINES_MAP` keying (Step 3.3, Per-Project Guidelines).
 3. `detect-default-branch`/`setup-branch` scoping (Step 2, Per-Project Branch Setup).
-4. Post-Loop Cleanup's One-time migration safeguard, which must keep scanning `project_root` even in container/phase mode — it looks for worktrees stranded OUTSIDE the container by a run predating container mode.
 
-None of these four reads `EXEC_ROOT` in its place: "which repository" (`project_roots`) and "which checkout of it this run is executing against" (`EXEC_ROOT`) are independent questions, and all four consumers above need the former regardless of the latter.
+None of these three reads `EXEC_ROOT` in its place: "which repository" (`project_roots`) and "which checkout of it this run is executing against" (`EXEC_ROOT`) are independent questions, and all three consumers above need the former regardless of the latter.
 
 ### Main Working Tree Untouched Invariant
 

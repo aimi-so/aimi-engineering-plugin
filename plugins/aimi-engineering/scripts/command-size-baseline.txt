@@ -49,11 +49,11 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	435235
+execute.md	433165
 brainstorm.md	144724
 open-pr.md	84576
 references/forge-contract.md	45757
-references/container-execution.md	34388
+references/container-execution.md	34176
 references/visual-variants.md	27154
 next.md	22176
 references/cli-path-resolution.md	37540

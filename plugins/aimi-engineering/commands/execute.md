@@ -133,7 +133,7 @@ The `case` guard prepends `p` when the sanitized stem would not start alphanumer
 
 `PLAN_DISC` governs one more shared namespace, and that one is not a git namespace at all: the **scratchpad directory**. Every agent in a session is handed the same scratchpad path, and it outlives the session — it is shared across runs and therefore across PLANS, so a filename chosen for what it MEANS rather than for who owns it is a filename two writers pick independently. Measured in the 2026-09-08 known-gap `orq-scratchpad-compartilhado-entre-executores`: two of five executors in one wave ran a sibling's file believing it was their own, and this orchestrator was itself one of the writers — it left a `v.sh` in that same directory. A rule that reaches only the spawned executors would leave the polluter out, so it reaches here too: **every file this orchestrator writes into the scratchpad is named `[PLAN_DISC]-orch-<whatever>`.** The executors' half of the same rule is `SCRATCH_PREFIX`, composed in Step 4's spawn block below and carried into `${CLAUDE_PLUGIN_ROOT}/skills/story-executor/SKILL.md`'s `<task_pointer>`.
 
-Every cleanup sweep in this document scans the prefixed pattern, because no placement of a discriminator preserves the old glob — measured in both directions, `feat/a-STEM-US-001` and `STEM-feat/a-US-001` both fail `feat/a-US-*`. The un-prefixed shape is legacy and keeps exactly one home per sweep family: Post-Loop Cleanup's **One-time migration safeguard** for the flat/container shape, and the legacy pass beside the phase/container sweep for the `EXEC_BRANCH` one.
+Every cleanup sweep in this document scans the prefixed pattern, because no placement of a discriminator preserves the old glob — measured in both directions, `feat/a-STEM-US-001` and `STEM-feat/a-US-001` both fail `feat/a-US-*`. The un-prefixed shape is legacy and keeps exactly one home: the legacy pass beside Post-Loop Cleanup's phase/container sweep, for the `EXEC_BRANCH` shape inside a container. The flat-mode sweep of `project_root` for that shape was retired in 1.151.1, as its own removal marker scheduled.
 
 `PLAN_DISC` governs a THIRD shared namespace, after the worktree name and the scratchpad directory above: **`.aimi/known-gaps/`**, one flat directory shared by every plan. A known-gap file is named `${GAP_DATE}-[full_story.id]-[PLAN_DISC].md` (Step 4, mark-stories-complete) for the identical reason the other two are prefixed/suffixed — story ids restart at `US-001` in every plan, so `<date>-<story.id>.md` is a path two plans compose identically on the same day, and the writer is a plain `>` redirect that truncates whichever run loses the race with no error and no trace. Measured at 3b871aa on 2026-09-10: 33 of the 121 `.md` files already under `.aimi/known-gaps/` carry the collidable `<YYYY-MM-DD>-US-NNN.md` shape. The same defect was fixed once already, on a sibling artifact, in exactly this way: `.aimi/known-gaps/2026-09-07-US-002-nome-do-probe-colide-entre-planos.md` records `verify-probe`'s own artifact colliding the same way in `.aimi/tasks/`, fixed by keying the name on the tasks file's own stem — `probe_verify()` in `scripts/tasks.py` does exactly that, and this reuses the same identity rather than inventing a second scheme.
 
@@ -3574,20 +3574,6 @@ for each unique group_key with at least one story scheduled this run:
     # For each worktree matching "[EXEC_BRANCH[group_key]]-US-*":
     $WORKTREE_MGR remove [worktree_name]
 ```
-
-**One-time migration safeguard (flat/container mode only):** additionally run one sweep pass per project group with CWD = `[project_root]` itself — the pre-upgrade, un-containerized location — scanning the un-prefixed legacy `"[branchName]-US-*"` pattern:
-
-```
-for each unique project_root (including CWD for the DEFAULT group):
-    cd [project_root]
-    $WORKTREE_MGR list
-    # For each worktree matching "[branchName]-US-*":
-    $WORKTREE_MGR remove [worktree_name]
-```
-
-Once this step's container-mode branch scans only `CONTAINER_PATHS[group_key]`, a story worktree stranded directly under `project_root/.worktrees/` by an execution from before container mode shipped would otherwise never be swept by either cleanup pass again. This extra pass closes that gap; it is a no-op once no such pre-upgrade worktrees remain. It closes the wider gap too: the un-prefixed shape is what EVERY run composed before the plan discriminator, pre-container runs included, so the set this pass sweeps strictly CONTAINS the one it was originally written for. That containment is why the safeguard is re-justified here rather than joined by a second subsection saying almost the same thing.
-
-**Removal marker:** this pass now exists for the plan discriminator (see `### Plan Discriminator` under Multi-Repo Handling), not for container mode: what it sweeps is the un-prefixed legacy shape no run can compose any more, and the pre-container strays it was written for are a subset of that. Delete this subsection outright once the plugin reaches **1.150.0**, which is seventeen minor releases of runway from the 1.133.0 this was written against. The marker it replaced named a version that had already gone by — it told the reader to delete this subsection at a release twenty-three minor versions BEHIND that same 1.133.0 — which is the argument for retargeting the paragraph onto the reason it now exists for rather than stacking a second marker beside a dead one. An unbounded extra list-and-parse pass per project group on every future run stops paying for itself once no un-prefixed worktree can plausibly still exist.
 
 **Flat/inline mode (`PHASE_MODE=false`, `CONTAINER_MODE=false`):** unchanged.
 

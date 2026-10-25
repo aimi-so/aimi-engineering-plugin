@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.151.1] - 2026-10-25
+
+### Removed
+- `/aimi:execute` Post-Loop Cleanup's one-time migration safeguard: the flat/container sweep of each `project_root` for story worktrees named in the un-prefixed `[branchName]-US-*` shape. Its own removal marker scheduled it for deletion at 1.150.0. The legacy pass for the `EXEC_BRANCH` shape inside a container stays, and `references/container-execution.md` now lists three consumers of the execution context instead of four.
+
 ## [1.151.0] - 2026-10-23
 
 Plan stories that cite each other correctly, and a plan pipeline that can be re-run on an edited outline without expanding everything again (#167).
