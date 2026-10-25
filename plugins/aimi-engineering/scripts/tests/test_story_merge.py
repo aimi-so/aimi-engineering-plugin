@@ -2270,6 +2270,239 @@ def test_audit_gate_has_no_escape_hatch_flag_or_env(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The verify refusal: validate-staging and the story-merge gate
+# ---------------------------------------------------------------------------
+#
+# One helper (verify_refusal_findings) serves both callers, so these cases pin the
+# verb and the merge to the same rule rather than to two copies of it.
+
+_SWALLOWING_VERIFY = "true\nfalse\ntrue\n"
+_GUARDED_VERIFY = "set -e\ntrue\nfalse\ntrue\n"
+_CHAINED_VERIFY = "true &&\nfalse &&\ntrue\n"
+
+
+def _verify_story(title, verify, deps=None):
+    story = _staging_story(title, deps)
+    story["implementation"]["verify"] = verify
+    return story
+
+
+def _stage(tmp_path, files, name="stg"):
+    directory = os.path.join(str(tmp_path), ".aimi", name)
+    os.makedirs(directory, exist_ok=True)
+    for fname, value in files.items():
+        with open(os.path.join(directory, fname), "w", encoding="utf-8") as handle:
+            handle.write(value if isinstance(value, str) else json.dumps(value))
+    return directory
+
+
+def _validate_staging(tmp_path, args):
+    return subprocess.run(
+        ["bash", CLI, "validate-staging"] + args,
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_verify_refusal_validate_staging_reports_a_swallowing_verify_by_idx(tmp_path):
+    _stage(
+        tmp_path,
+        {
+            "01-a.json": _verify_story("A", _SWALLOWING_VERIFY),
+            "02-b.json": _verify_story("B", _GUARDED_VERIFY),
+        },
+    )
+    proc = _validate_staging(tmp_path, ["--staging-dir", ".aimi/stg"])
+    assert proc.returncode == 1, proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["01"]
+    assert len(report["01"]) == 1 and "swallow a failing line" in report["01"][0]
+
+
+def test_verify_refusal_validate_staging_is_clean_for_a_passing_directory(tmp_path):
+    _stage(
+        tmp_path,
+        {
+            "01-a.json": _verify_story("A", _GUARDED_VERIFY),
+            "02-b.json": _verify_story("B", _CHAINED_VERIFY),
+            "03-c.json": _verify_story("C", "tsc --noEmit"),
+            "outline.json": "[]",
+        },
+    )
+    proc = _validate_staging(tmp_path, ["--staging-dir", ".aimi/stg"])
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {}
+
+
+def test_verify_refusal_validate_staging_skips_a_file_that_is_not_json(tmp_path):
+    _stage(
+        tmp_path,
+        {"01-a.json": "{not json", "02-b.json": _verify_story("B", _SWALLOWING_VERIFY)},
+    )
+    proc = _validate_staging(tmp_path, ["--staging-dir", ".aimi/stg"])
+    assert proc.returncode == 1, proc.stderr
+    assert list(json.loads(proc.stdout)) == ["02"]
+
+
+_OUTLINE = [
+    {"idx": "01", "title": "A", "summary": "s", "produces": ["sym:foo"]},
+    {"idx": "02", "title": "B", "summary": "s", "consumes": ["sym:foo", "ext:path:src/old.py"]},
+]
+
+
+def test_verify_refusal_validate_staging_reports_a_missing_producer_edge(tmp_path):
+    _stage(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-b.json": _staging_story("B"),
+            "outline.json": _OUTLINE,
+        },
+    )
+    proc = _validate_staging(
+        tmp_path, ["--staging-dir", ".aimi/stg", "--outline", ".aimi/stg/outline.json"]
+    )
+    assert proc.returncode == 1, proc.stderr
+    report = json.loads(proc.stdout)
+    assert list(report) == ["02"]
+    assert "outline:01" in report["02"][0] and "sym:foo" in report["02"][0]
+
+
+def test_verify_refusal_validate_staging_is_clean_when_the_producer_token_is_present(tmp_path):
+    _stage(
+        tmp_path,
+        {
+            "01-a.json": _staging_story("A"),
+            "02-b.json": _staging_story("B", ["outline:01"]),
+            "outline.json": _OUTLINE,
+        },
+    )
+    proc = _validate_staging(
+        tmp_path, ["--staging-dir", ".aimi/stg", "--outline", ".aimi/stg/outline.json"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {}
+
+
+def test_verify_refusal_an_ext_consume_needs_no_producer_edge(tmp_path):
+    outline = [
+        {"idx": "01", "title": "A", "summary": "s"},
+        {"idx": "02", "title": "B", "summary": "s", "consumes": ["ext:sym:already_there"]},
+    ]
+    _stage(
+        tmp_path,
+        {"01-a.json": _staging_story("A"), "02-b.json": _staging_story("B"), "outline.json": outline},
+    )
+    proc = _validate_staging(
+        tmp_path, ["--staging-dir", ".aimi/stg", "--outline", ".aimi/stg/outline.json"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {}
+
+
+def test_verify_refusal_validate_staging_wrapper_refusals(tmp_path):
+    _stage(tmp_path, {"01-a.json": _staging_story("A")})
+    escaping = _validate_staging(tmp_path, ["--staging-dir", "/tmp"])
+    assert escaping.returncode == 1 and "escapes project root" in escaping.stderr
+    escaping = _validate_staging(
+        tmp_path, ["--staging-dir", ".aimi/stg", "--outline", "/etc/hostname"]
+    )
+    assert escaping.returncode == 1 and "escapes project root" in escaping.stderr
+    missing = _validate_staging(tmp_path, [])
+    assert missing.returncode == 1 and "usage: aimi-cli.sh validate-staging" in missing.stderr
+    unknown = _validate_staging(tmp_path, ["--staging-dir", ".aimi/stg", "--bogus"])
+    assert unknown.returncode == 1 and "unknown flag" in unknown.stderr
+    assert "usage: aimi-cli.sh validate-staging" in unknown.stderr
+
+
+def test_verify_refusal_wrapper_crosses_into_python_once_and_is_in_help(tmp_path):
+    with open(CLI, encoding="utf-8") as handle:
+        text = handle.read()
+    body = text[text.index("cmd_validate_staging() {"):]
+    body = body[: body.index("\n}\n")]
+    assert body.count("python3 ") == 1
+    assert "check_python3" in body
+    assert body.index("validate_path_in_project") < body.index("check_python3")
+    helped = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True, timeout=60)
+    assert "validate-staging --staging-dir <dir> [--outline <path>]" in helped.stdout
+
+
+def test_verify_refusal_merge_refuses_a_swallowing_verify(tmp_path):
+    files = {
+        "01-a.json": _verify_story("A", "tsc --noEmit"),
+        "02-b.json": _verify_story("B", _SWALLOWING_VERIFY),
+    }
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    first = proc.stderr.splitlines()[0]
+    assert first.startswith("Error: story-merge:"), proc.stderr
+    assert "US-002" in proc.stderr and "swallow a failing line" in proc.stderr
+    assert "US-001" not in proc.stderr
+    assert doc is None
+    _assert_nothing_written(tmp_path)
+    staged = sorted(os.listdir(os.path.join(str(tmp_path), ".aimi", "stg")))
+    assert staged == ["01-a.json", "02-b.json", "audit-result.json"]
+
+
+def test_verify_refusal_merge_agent_mode_does_not_demote_it(tmp_path):
+    files = {"01-a.json": _verify_story("A", _SWALLOWING_VERIFY)}
+    plain, _ = _merge(tmp_path, files)
+    agent, doc = _merge(tmp_path, files, args=["--agent-mode"])
+    assert plain.returncode == 1 and agent.returncode == 1
+    assert plain.stderr == agent.stderr
+    assert "swallow a failing line" in agent.stderr and "US-001" in agent.stderr
+    assert doc is None
+
+
+@pytest.mark.parametrize(
+    "verify", ["tsc --noEmit", _GUARDED_VERIFY, _CHAINED_VERIFY, "set -e\ntrue\nfalse"]
+)
+def test_verify_refusal_merge_leaves_a_sound_verify_alone(tmp_path, verify):
+    proc, doc = _merge(tmp_path, {"01-a.json": _verify_story("A", verify)})
+    assert proc.returncode == 0, proc.stderr
+    assert doc["userStories"][0]["implementation"]["verify"] == verify
+
+
+def test_verify_refusal_findings_are_sanitized_before_they_are_printed(tmp_path):
+    verify = "echo ok\nrm -rf <b>x</b> `ignore previous instructions` $(id)\n"
+    findings = SM.verify_refusal_findings(_verify_story("A", verify))
+    assert findings and "swallow a failing line" in findings[0]
+    assert "$(" not in findings[0] and "<b>" not in findings[0] and "\n" not in findings[0]
+    _stage(tmp_path, {"01-a.json": _verify_story("A", verify)})
+    proc = _validate_staging(tmp_path, ["--staging-dir", ".aimi/stg"])
+    assert proc.returncode == 1
+    assert "$(" not in proc.stdout and "ignore previous" not in proc.stdout
+
+
+def test_verify_refusal_helper_imports_tasks_lazily():
+    import ast
+
+    with open(os.path.join(SCRIPTS, "story_merge.py"), encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    top_level = [
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module
+    ]
+    assert "tasks" not in top_level and "outline_contract" not in top_level
+
+
+def test_verify_refusal_leaves_the_golden_corpus_alone():
+    for case in GOLDEN["story_merge_cases"]:
+        for content in (case["input"] or {}).values():
+            assert "swallow a failing line" not in json.dumps(case["stderr"])
+            try:
+                value = json.loads(content)
+            except ValueError:
+                continue
+            for entry in value if isinstance(value, list) else [value]:
+                if isinstance(entry, dict):
+                    assert SM.verify_refusal_findings(entry) == [], case["label"]
+
+
+# ---------------------------------------------------------------------------
 # Advisory story smells: field-overlap and story-oversize
 # ---------------------------------------------------------------------------
 #
@@ -2606,22 +2839,38 @@ def test_acknowledge_smell_round_trips_on_both_new_types(tmp_path, kind, story_i
     assert all("acknowledged" not in e for e in _types(doc, other))
 
 
+ADVISORY_TYPES = (
+    "field-overlap",
+    "story-oversize",
+    "audit-duplication",
+    "stale-sibling-note",
+    "leftover-outline-token",
+    "ac-test-enumeration",
+)
+
+
 def test_no_golden_case_records_either_new_smell():
-    """Measured, not assumed: the corpus is untouched because nothing in it fires."""
+    """Measured, not assumed: the corpus is untouched because nothing in it fires.
+    Covers all six advisory type names."""
     for label, case in CASES.items():
         blob = case["stderr"] + case["stdout"] + "".join(case["files"].values())
-        assert "field-overlap" not in blob and "story-oversize" not in blob, label
+        for name in ADVISORY_TYPES:
+            assert name not in blob, (label, name)
 
 
 def test_roadmap_py_never_mentions_the_advisory_types():
-    with open(os.path.join(SCRIPTS, "roadmap.py"), encoding="utf-8") as handle:
-        text = handle.read()
-    assert "field-overlap" not in text and "story-oversize" not in text
+    for module in ("roadmap.py", "tasks.py"):
+        with open(os.path.join(SCRIPTS, module), encoding="utf-8") as handle:
+            text = handle.read()
+        for name in ADVISORY_TYPES:
+            assert name not in text, (module, name)
 
 
-def test_the_164_plan_fires_neither_smell():
-    """Calibration gate: skipped when the gitignored .aimi/ plan is not on this
-    checkout (CI, a fresh clone)."""
+def test_the_164_plan_fires_exactly_the_calibrated_smells():
+    """Calibration gate: the #164 plan is read wherever it sits under .aimi/ (it is
+    archived now, under .aimi/archive/, and the calibration glob is recursive).
+    Skipped only when the gitignored plan is on no .aimi/ at all (CI, a fresh
+    clone)."""
     sys.path.insert(0, HERE)
     import calibrate_story_smells as CAL
 
@@ -2631,9 +2880,11 @@ def test_the_164_plan_fires_neither_smell():
         if "fix-issue-164-multi-repo-plan-execute-defects" in os.path.basename(p)
     ]
     if not plans:
-        pytest.skip("the #164 plan file is not present on this checkout")
+        pytest.skip("the #164 plan file is not present under any .aimi/ on this checkout")
     for path, stories in plans:
-        assert CAL.fired(stories) == [], path
+        assert {e["type"] for e in CAL.fired(stories)} == set(CAL.EXPECTED_REFERENCE_TYPES), path
+        # It predates the text remap, so leftover-outline-token is among them.
+        assert "leftover-outline-token" in CAL.EXPECTED_REFERENCE_TYPES
 
 
 def test_the_calibration_script_counts_only_numbered_story_inputs():
@@ -2652,3 +2903,805 @@ def test_the_calibration_script_counts_only_numbered_story_inputs():
                 continue
             expected += len([e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)])
     assert total == expected > 0
+
+
+# ---------------------------------------------------------------------------
+# Advisory story smells, second group: audit-duplication, stale-sibling-note,
+# leftover-outline-token, ac-test-enumeration
+# ---------------------------------------------------------------------------
+
+_SEP = "\n\n---\n\n"
+
+
+def _sibling_story(story_id, **fields):
+    story = _staging_story("S" + story_id)
+    story["id"] = story_id
+    story.update(fields)
+    return story
+
+
+def _banded_tasks():
+    """tasks[] whose overlap with _OVERLAP_APPROACH sits between the audit bar and the field-overlap bar."""
+    filler = ["Filler a%d b%d c%d d%d e%d f%d g%d h%d" % ((i,) * 8) for i in range(7)]
+    return [_OVERLAP_TASKS[0]] + filler
+
+
+def test_the_new_patterns_and_thresholds_are_named_constants():
+    for name in (
+        "AUDIT_DUPLICATION_THRESHOLD",
+        "STALE_NOTE_SIBLING_PATTERN",
+        "LEFTOVER_OUTLINE_PATTERN",
+        "AC_TEST_ENUMERATION_PATTERN",
+    ):
+        assert hasattr(SM, name), name
+    assert SM.AUDIT_DUPLICATION_THRESHOLD <= SM.FIELD_OVERLAP_THRESHOLD
+    assert "4b261f8" not in SM.SMELL_CALIBRATION_AS_OF
+
+
+def test_audit_duplication_fires_when_the_audit_changed_both_fields_and_the_text_overlaps():
+    story = _smelly("A", tasks=_OVERLAP_TASKS)
+    story["id"] = "US-001"
+    story["_auditChanged"] = ["implementation.approach", "tasks"]
+    (entry,) = [e for e in SM.advisory_story_smells([story]) if e["type"] == "audit-duplication"]
+    assert entry["storyId"] == "US-001" and entry["ratio"] == 1.0 and entry["ngram"] == SM.FIELD_OVERLAP_NGRAM
+    assert set(entry) == {"type", "storyId", "ratio", "ngram", "message"}
+    assert "restates" in entry["message"]
+
+
+def test_audit_duplication_uses_a_lower_bar_than_field_overlap():
+    story = _smelly("A", tasks=_banded_tasks())
+    story["id"] = "US-001"
+    ratio = SM.field_overlap_ratio(story)
+    assert SM.AUDIT_DUPLICATION_THRESHOLD <= ratio < SM.FIELD_OVERLAP_THRESHOLD
+    story["_auditChanged"] = ["tasks", "implementation.approach"]
+    assert [e["type"] for e in SM.advisory_story_smells([story])] == ["audit-duplication"]
+    del story["_auditChanged"]
+    assert SM.advisory_story_smells([story]) == []
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [None, [], ["tasks"], ["implementation.approach"], ["notes", "acceptanceCriteria"], "tasks", {"tasks": 1}],
+    ids=["no-record", "empty", "only-tasks", "only-approach", "other-fields", "not-a-list", "not-a-list-dict"],
+)
+def test_audit_duplication_needs_both_changed_fields(changed):
+    story = _smelly("A", tasks=_banded_tasks())
+    story["id"] = "US-001"
+    if changed is not None:
+        story["_auditChanged"] = changed
+    assert SM.advisory_story_smells([story]) == []
+
+
+def test_audit_duplication_stays_quiet_when_the_text_does_not_overlap_or_is_not_eligible():
+    unrelated = _smelly("A", tasks=_UNRELATED_TASKS)
+    short = _smelly("B", tasks=_OVERLAP_TASKS[:2])
+    for story in (unrelated, short):
+        story["id"] = "US-001"
+        story["_auditChanged"] = ["tasks", "implementation.approach"]
+        assert SM.advisory_story_smells([story]) == []
+
+
+def test_read_changed_fields_is_tolerant_of_anything_unreadable(tmp_path):
+    def read(content):
+        d = tmp_path / "d"
+        d.mkdir(exist_ok=True)
+        target = d / "audit-result.json"
+        if content is None:
+            if target.exists():
+                target.unlink()
+        else:
+            target.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+        return SM.read_changed_fields(str(d))
+
+    assert read(None) == {}
+    assert read("not json {") == {}
+    assert read([1, 2]) == {}
+    assert read({"patches": []}) == {}
+    assert read({"changedFields": ["tasks"]}) == {}
+    assert read({"changedFields": "tasks"}) == {}
+    assert read({"changedFields": {"01": "tasks", "02": [1, None]}}) == {}
+    assert read({"changedFields": {"01": ["tasks", 3, "notes"], "02": []}}) == {"01": ["tasks", "notes"]}
+
+
+def _audit_with_changed(files, changed):
+    return _audit_sidecar(files, changedFields=changed)
+
+
+def test_audit_duplication_reaches_the_entry_through_a_merge_and_is_not_written_to_a_story(tmp_path):
+    files = {
+        "01-a.json": _smelly("A", tasks=_OVERLAP_TASKS),
+        "02-b.json": _smelly("B", tasks=_UNRELATED_TASKS),
+    }
+    files["audit-result.json"] = _audit_with_changed(files, {"01": ["implementation.approach", "tasks"]})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    (entry,) = _types(doc, "audit-duplication")
+    assert entry["storyId"] == "US-001"
+    assert proc.stderr.count("audit-duplication smell detected") == 1
+    assert "  Story US-001: " in proc.stderr
+    assert [s["id"] for s in doc["userStories"]] == ["US-001", "US-002"]
+    assert all("_auditChanged" not in s for s in doc["userStories"])
+
+
+@pytest.mark.parametrize(
+    "audit",
+    [
+        "absent",
+        "not json {",
+        json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "02"]}),
+        json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "02"], "changedFields": ["tasks"]}),
+        json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "02"], "changedFields": {"01": ["tasks"]}}),
+        json.dumps({"patches": [], "unresolved": [], "auditedIdx": ["01", "02"], "changedFields": {"02": ["tasks", "implementation.approach"]}}),
+    ],
+    ids=["absent", "malformed", "no-key", "list-value", "one-field", "other-story"],
+)
+def test_audit_duplication_without_a_usable_record_yields_no_entry_and_no_error(tmp_path, audit):
+    files = {"01-a.json": _smelly("A", tasks=_OVERLAP_TASKS)}
+    if audit != "absent":
+        files["audit-result.json"] = audit
+    proc, doc = _merge(tmp_path, files, audit=False)
+    assert proc.returncode == 0, proc.stderr
+    assert not _types(doc, "audit-duplication")
+    assert "audit-duplication" not in proc.stderr
+
+
+def test_stale_sibling_note_fires_for_an_older_paragraph_citing_another_story():
+    a = _sibling_story("US-001")
+    b = _sibling_story("US-002", notes="Coordinate with US-001 first." + _SEP + "Audit: reordered the steps.")
+    entries = SM.stale_sibling_note_smells([a, b])
+    assert [(e["type"], e["storyId"], e["cited"]) for e in entries] == [("stale-sibling-note", "US-002", ["US-001"])]
+    assert set(entries[0]) == {"type", "storyId", "cited", "message"}
+    assert "Coordinate" not in entries[0]["message"]
+
+
+def test_stale_sibling_note_reads_the_story_nn_form_and_every_older_paragraph():
+    stories = [_sibling_story("US-00%d" % n) for n in (1, 2, 3)]
+    stories[2]["notes"] = (
+        "Waits for story 2." + _SEP + "Also see US-001 before editing." + _SEP + "Audit: nothing about siblings."
+    )
+    (entry,) = SM.stale_sibling_note_smells(stories)
+    assert entry["cited"] == ["US-001", "US-002"]
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        "Depends on US-001 for the schema.",  # no separator: never scanned
+        "Plain." + _SEP + "Audit: see US-001 now.",  # only the final paragraph cites
+        "Mentions US-002 itself." + _SEP + "Audit.",  # its own id
+        "Mentions US-009 which is not here." + _SEP + "Audit.",  # not in the merged set
+        "Mentions story 9 which is not here." + _SEP + "Audit.",
+        "Mentions US-0011 and US-01." + _SEP + "Audit.",  # not a US-NNN
+        "",
+        None,
+    ],
+)
+def test_stale_sibling_note_stays_quiet(notes):
+    a = _sibling_story("US-001")
+    b = _sibling_story("US-002", notes=notes)
+    assert SM.stale_sibling_note_smells([a, b]) == []
+
+
+def test_stale_sibling_note_reaches_the_entry_through_a_merge_and_keeps_every_story(tmp_path):
+    files = {
+        "01-a.json": _smelly("A"),
+        "02-b.json": _smelly("B", notes="Coordinate with US-001 before landing." + _SEP + "Audit: reordered."),
+    }
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 2
+    (entry,) = _types(doc, "stale-sibling-note")
+    assert entry["storyId"] == "US-002" and entry["cited"] == ["US-001"]
+    assert proc.stderr.count("stale-sibling-note smell detected") == 1
+    assert "  Story US-002: " in proc.stderr
+
+
+def test_leftover_outline_token_names_every_affected_field_but_never_dependsOn():
+    story = _sibling_story(
+        "US-001",
+        dependsOn=["outline:03", "US-009"],
+        tasks=["Wire it per outline:7", "fine"],
+        notes="see outline:041 and outline:7",
+    )
+    story["implementation"]["approach"] = "Follow outline:7 before wiring it"
+    story["gate"] = {"prompt": "Choose per outline:12", "options": ["a", "b"]}
+    story["_auditChanged"] = ["tasks"]
+    (entry,) = SM.leftover_outline_token_smells([story])
+    assert entry["type"] == "leftover-outline-token" and entry["storyId"] == "US-001"
+    assert entry["fields"] == ["gate.prompt", "implementation.approach", "notes", "tasks"]
+    assert set(entry) == {"type", "storyId", "fields", "message"}
+    assert "Wire it" not in entry["message"]
+
+
+def test_leftover_outline_token_is_quiet_for_clean_text_and_for_dependsOn_alone():
+    story = _sibling_story("US-001", dependsOn=["outline:03"], notes="no tokens, just US-002")
+    assert SM.leftover_outline_token_smells([story]) == []
+
+
+def test_leftover_outline_token_reaches_the_entry_through_a_merge_and_not_for_a_resolved_token(tmp_path):
+    a = _smelly("A")
+    a["implementation"]["approach"] = "Follow outline:7 before wiring it"
+    a["tasks"] = ["Wire it per outline:7"]
+    b = _smelly("B")
+    b["dependsOn"] = ["outline:01"]
+    b["notes"] = "Built on outline:01."
+    proc, doc = _merge(tmp_path, {"01-a.json": a, "02-b.json": b})
+    assert proc.returncode == 0, proc.stderr
+    (entry,) = _types(doc, "leftover-outline-token")
+    assert entry["storyId"] == "US-001" and entry["fields"] == ["implementation.approach", "tasks"]
+    assert doc["userStories"][1]["notes"] == "Built on US-001."
+    assert proc.stderr.count("leftover-outline-token smell detected") == 1
+
+
+def test_ac_test_enumeration_fires_for_three_or_more_distinct_tests_in_one_criterion():
+    story = _sibling_story(
+        "US-001",
+        acceptanceCriteria=[
+            "Typecheck passes",
+            "test_alpha, test_beta and test_gamma_2 pass",
+            "test_one, test_one, test_two cover it",
+            "Covers my_test_x, latest_test_y and test_z",
+        ],
+    )
+    (entry,) = SM.ac_test_enumeration_smells([story])
+    assert entry["type"] == "ac-test-enumeration" and entry["storyId"] == "US-001"
+    assert entry["index"] == 1 and entry["count"] == 3
+    assert set(entry) == {"type", "storyId", "index", "count", "message"}
+    assert "test_alpha" not in entry["message"]
+
+
+def test_ac_test_enumeration_gives_one_entry_per_offending_criterion():
+    story = _sibling_story(
+        "US-001",
+        acceptanceCriteria=["test_a test_b test_c", "fine", "test_d, test_e, test_f, test_g"],
+    )
+    assert [(e["index"], e["count"]) for e in SM.ac_test_enumeration_smells([story])] == [(0, 3), (2, 4)]
+
+
+def test_ac_test_enumeration_reaches_the_entry_through_a_merge(tmp_path):
+    a = _smelly("A")
+    a["acceptanceCriteria"] = ["test_alpha, test_beta and test_gamma pass"]
+    proc, doc = _merge(tmp_path, {"01-a.json": a, "02-b.json": _smelly("B")})
+    assert proc.returncode == 0, proc.stderr
+    (entry,) = _types(doc, "ac-test-enumeration")
+    assert entry["storyId"] == "US-001" and entry["count"] == 3
+    assert proc.stderr.count("ac-test-enumeration smell detected") == 1
+    assert len(doc["userStories"]) == 2
+
+
+def _all_four_files():
+    a = _smelly("A", tasks=_OVERLAP_TASKS, files=["src/server/a.ts"])
+    a["implementation"]["approach"] = _OVERLAP_APPROACH + " Follow outline:7."
+    a["acceptanceCriteria"] = ["test_alpha, test_beta and test_gamma pass"]
+    b = _smelly(
+        "B",
+        files=["src/web/components/b.tsx"],
+        notes="Coordinate with US-001 before landing." + _SEP + "Audit: reordered.",
+    )
+    c = _smelly("C", files=["src/server/c.ts"])
+    d = _smelly("D", files=["src/web/components/d.tsx"])
+    files = {"01-a.json": a, "02-b.json": b, "03-c.json": c, "04-d.json": d}
+    files["audit-result.json"] = _audit_with_changed(files, {"01": ["implementation.approach", "tasks"]})
+    return files
+
+
+NEW_TYPES = ("audit-duplication", "stale-sibling-note", "leftover-outline-token", "ac-test-enumeration")
+
+
+def test_all_four_new_types_fire_together_without_dropping_a_story(tmp_path):
+    proc, doc = _merge(tmp_path, _all_four_files())
+    assert proc.returncode == 0, proc.stderr
+    assert len(doc["userStories"]) == 4
+    for kind in NEW_TYPES:
+        assert len(_types(doc, kind)) == 1, kind
+        assert proc.stderr.count(kind + " smell detected") == 1, kind
+
+
+def _new_entries(doc):
+    return [e for e in doc["metadata"].get("smellWarnings", []) if e["type"] in NEW_TYPES]
+
+
+def _assert_new_entries_identical_in_every_file(docs):
+    assert len(docs) == 2
+    first, second = _new_entries(docs[0]), _new_entries(docs[1])
+    assert first == second and sorted(e["type"] for e in first) == sorted(NEW_TYPES)
+    titles = {s["id"]: s["title"] for d in docs for s in d["userStories"]}
+    by_type = {e["type"]: e for e in first}
+    assert titles[by_type["audit-duplication"]["storyId"]] == "A"
+    assert titles[by_type["leftover-outline-token"]["storyId"]] == "A"
+    assert titles[by_type["ac-test-enumeration"]["storyId"]] == "A"
+    assert titles[by_type["stale-sibling-note"]["storyId"]] == "B"
+    assert all(e["cited"][0] in titles for e in first if e["type"] == "stale-sibling-note")
+
+
+def test_a_side_split_gives_every_file_the_same_new_entries(tmp_path):
+    files = _all_four_files()
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(tmp_path)
+    _assert_new_entries_identical_in_every_file(docs)
+    assert all("_auditChanged" not in s for d in docs for s in d["userStories"])
+
+
+def test_a_project_split_gives_every_file_the_same_new_entries(tmp_path):
+    files = _all_four_files()
+    for name, project in (("01-a.json", "services/api"), ("03-c.json", "services/api"),
+                          ("02-b.json", "apps/web"), ("04-d.json", "apps/web")):
+        files[name]["project"] = project
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    _assert_new_entries_identical_in_every_file(_split_docs(tmp_path))
+
+
+@pytest.mark.parametrize("kind", NEW_TYPES)
+def test_acknowledge_smell_round_trips_on_the_new_types(tmp_path, kind):
+    proc, doc = _merge(tmp_path, _all_four_files())
+    assert proc.returncode == 0, proc.stderr
+    (target,) = _types(doc, kind)
+    path = str(tmp_path / ".aimi" / "tasks" / "out-tasks.json")
+    ack = subprocess.run(
+        ["bash", CLI, "acknowledge-smell", target["storyId"], "--type", kind,
+         "--reason", "reviewed by hand", "--tasks-file", path],
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=120, env=_no_agent_env(),
+    )
+    assert ack.returncode == 0, ack.stderr
+    with open(path, encoding="utf-8") as handle:
+        after = json.load(handle)
+    (entry,) = _types(after, kind)
+    assert entry["acknowledged"] is True and entry["acknowledgedReason"] == "reviewed by hand"
+    assert all("acknowledged" not in e for e in _new_entries(after) if e["type"] != kind)
+
+
+def test_a_merge_with_none_of_the_new_smells_says_nothing(tmp_path):
+    proc, doc = _merge(tmp_path, {"01-a.json": _smelly("A"), "02-b.json": _smelly("B")})
+    assert proc.returncode == 0, proc.stderr
+    assert not _new_entries(doc)
+    for kind in NEW_TYPES:
+        assert kind not in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# outline:NN resolves by the staged FILENAME idx, in every story text field
+# ---------------------------------------------------------------------------
+#
+# A skipped expansion leaves a gap in the staged filenames (01, 02, 04 here).
+# outline:NN is the idx in that filename; resolving it by position in the merged
+# array would repoint outline:04 at nothing and outline:03 at the wrong story.
+
+
+def _gap_files(**fields):
+    """Three staged stories under 01, 02 and 04 -- 03 was never expanded. `fields`
+    maps a staged file name to a dict merged over that story."""
+    files = {}
+    for name, title in (("01-a.json", "A"), ("02-b.json", "B"), ("04-d.json", "D")):
+        story = _staging_story(title)
+        story.update(fields.get(name, {}))
+        files[name] = story
+    return files
+
+
+def _by_title(doc):
+    return {s["title"]: s for s in doc["userStories"]}
+
+
+def test_outline_ref_resolves_by_staged_filename_idx_across_a_gap(tmp_path):
+    files = _gap_files(**{"01-a.json": {"notes": "see outline:04 and outline:02"}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    stories = _by_title(doc)
+    assert stories["D"]["id"] == "US-003"
+    assert stories["A"]["notes"] == "see US-003 and US-002"
+
+
+def test_outline_ref_dependson_resolves_by_staged_filename_idx(tmp_path):
+    files = _gap_files(**{"02-b.json": {"dependsOn": ["outline:04"]}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert _by_title(doc)["B"]["dependsOn"] == ["US-003"]
+
+
+def test_outline_ref_dependson_on_an_unstaged_idx_keeps_its_refusal_wording(tmp_path):
+    files = _gap_files(**{"02-b.json": {"dependsOn": ["outline:03"]}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1 and doc is None
+    assert "Error: story-merge: unresolved outline reference(s):" in proc.stderr
+    assert "US-002: UNRESOLVED_OUTLINE:03" in proc.stderr
+
+
+def test_outline_ref_rewrites_every_text_field(tmp_path):
+    files = _gap_files(
+        **{
+            "01-a.json": {
+                "notes": "n outline:04",
+                "tasks": ["wire outline:04", "plain"],
+                "acceptanceCriteria": ["Typecheck passes", "calls outline:02 first"],
+                "implementation": {
+                    "files": ["src/x.ts"],
+                    "approach": "after outline:04 lands",
+                    "verify": "grep -q outline:04 f",
+                    "guardRails": ["grep -q outline:04 f"],
+                },
+                "gate": {
+                    "type": "decision",
+                    "status": "pending",
+                    "prompt": "ready for outline:04?",
+                    "options": ["outline:04", "outline:02", "no"],
+                },
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    a = _by_title(doc)["A"]
+    assert a["notes"] == "n US-003"
+    assert a["tasks"] == ["wire US-003", "plain"]
+    assert a["acceptanceCriteria"] == ["Typecheck passes", "calls US-002 first"]
+    assert a["implementation"]["approach"] == "after US-003 lands"
+    assert a["implementation"]["verify"] == "grep -q US-003 f"
+    assert a["implementation"]["guardRails"] == ["grep -q US-003 f"]
+    assert a["gate"]["prompt"] == "ready for US-003?"
+    assert a["gate"]["options"] == ["US-003", "US-002", "no"]
+    assert "outline:" not in json.dumps(doc)
+
+
+def test_outline_ref_guardrails_still_equal_verify_segments(tmp_path):
+    import tasks as T
+
+    verify = "set -e\ngrep -q outline:04 f && test -f outline:02\ngrep -q outline:04 g"
+    rails = ["grep -q outline:04 f", "test -f outline:02", "grep -q outline:04 g"]
+    before = [s for _, s in T.verify_segments(verify)]
+    assert all(rail in before for rail in rails), "fixture must start with equal text"
+    files = _gap_files(
+        **{
+            "01-a.json": {
+                "implementation": {"files": ["src/x.ts"], "verify": verify, "guardRails": rails}
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    implementation = _by_title(doc)["A"]["implementation"]
+    segments = [s for _, s in T.verify_segments(implementation["verify"])]
+    assert implementation["guardRails"] == [
+        "grep -q US-003 f",
+        "test -f US-002",
+        "grep -q US-003 g",
+    ]
+    assert all(rail in segments for rail in implementation["guardRails"])
+
+
+def test_outline_ref_token_is_two_digits_not_followed_by_a_digit():
+    assert SM.OUTLINE_TOKEN.fullmatch("outline:04")
+    assert SM.OUTLINE_TOKEN.search("x outline:04.") and SM.OUTLINE_TOKEN.search("(outline:12)")
+    assert SM.OUTLINE_TOKEN.search("outline:041") is None
+    assert SM.OUTLINE_TOKEN.search("outline:7") is None
+    assert SM.OUTLINE_TOKEN.search("outline:") is None
+    assert SM.OUTLINE_TOKEN.search("US-003 and US-12") is None
+
+
+def test_outline_ref_longer_and_shorter_numbers_are_left_untouched(tmp_path):
+    files = _gap_files(**{"01-a.json": {"notes": "outline:041 outline:7 outline:04"}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    assert _by_title(doc)["A"]["notes"] == "outline:041 outline:7 US-003"
+
+
+def test_outline_ref_text_pass_is_idempotent():
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01", "notes": "see outline:04", "tasks": ["t outline:02"]},
+        {"id": "US-002", "_stagedIdx": "02"},
+        {"id": "US-003", "_stagedIdx": "04"},
+    ]
+    mapping = SM.outline_map(stories)
+    assert mapping == {"01": "US-001", "02": "US-002", "04": "US-003"}
+    assert SM.remap_story_text_tokens(stories, mapping) == []
+    once = json.dumps(stories)
+    assert SM.remap_story_text_tokens(stories, mapping) == []
+    assert json.dumps(stories) == once
+    assert stories[0]["notes"] == "see US-003" and stories[0]["tasks"] == ["t US-002"]
+
+
+def test_outline_ref_a_pass_creates_no_key_and_assigns_nothing_unchanged():
+    story = {"id": "US-001", "_stagedIdx": "01", "title": "T", "tasks": ["plain"]}
+    before = json.dumps(story)
+    assert SM.remap_story_text_tokens([story], {"01": "US-001"}) == []
+    assert json.dumps(story) == before
+
+
+def test_outline_ref_unstaged_idx_in_text_refuses_naming_story_and_field(tmp_path):
+    files = _gap_files(
+        **{
+            "02-b.json": {
+                "implementation": {
+                    "files": ["src/x.ts"],
+                    "verify": "test -f outline:03",
+                    "approach": "fine",
+                }
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1
+    assert doc is None, "nothing is written"
+    assert "US-002 implementation.verify: outline:03" in proc.stderr
+    assert not (tmp_path / ".aimi" / "tasks" / "out-tasks.json").exists()
+
+
+def test_outline_ref_unmapped_lines_name_the_indexed_field_path():
+    stories = [
+        {
+            "id": "US-007",
+            "_stagedIdx": "01",
+            "tasks": ["a", "b outline:09"],
+            "implementation": {"guardRails": ["outline:08"]},
+            "gate": {"options": ["outline:05"]},
+        }
+    ]
+    assert SM.remap_story_text_tokens(stories, {"01": "US-007"}) == [
+        "US-007 implementation.guardRails[0]: outline:08",
+        "US-007 tasks[1]: outline:09",
+        "US-007 gate.options[0]: outline:05",
+    ]
+    assert stories[0]["tasks"][1] == "b outline:09", "never dropped, never resolved by position"
+
+
+def test_outline_ref_position_never_resolves_a_token():
+    """Three stories staged as 01, 02, 04: position 3 exists, idx 03 does not."""
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01"},
+        {"id": "US-002", "_stagedIdx": "02"},
+        {"id": "US-003", "_stagedIdx": "04"},
+    ]
+    mapping = SM.outline_map(stories)
+    assert "03" not in mapping and mapping["04"] == "US-003"
+
+
+def test_outline_ref_an_unnumbered_file_is_never_a_target():
+    stories = [{"id": "US-001", "_stagedIdx": ""}, {"id": "US-002", "_stagedIdx": "02"}]
+    assert SM.outline_map(stories) == {"02": "US-002"}
+
+
+def test_outline_ref_first_story_per_idx_wins():
+    stories = [
+        {"id": "US-001", "_stagedIdx": "01"},
+        {"id": "US-002", "_stagedIdx": "01"},
+    ]
+    assert SM.outline_map(stories) == {"01": "US-001"}
+
+
+def test_outline_ref_hand_built_stories_fall_back_to_list_position():
+    stories = [{"id": "US-001"}, {"id": "US-002"}]
+    assert SM.outline_map(stories) == {"01": "US-001", "02": "US-002"}
+
+
+def test_outline_ref_foundation_resolves_through_the_filename_idx(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files(), ["--foundation", "04"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _by_title(doc)
+    assert stories["D"]["id"] == "US-003"
+    assert "US-003" in stories["A"]["dependsOn"] and "US-003" in stories["B"]["dependsOn"]
+
+
+def test_outline_ref_foundation_idx_whose_file_was_skipped_is_not_present(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files(), ["--foundation", "03"])
+    assert proc.returncode == 1 and doc is None
+    assert "--foundation 03 not present among staging files" in proc.stderr
+
+
+def test_outline_ref_working_idx_never_reaches_the_written_file(tmp_path):
+    proc, doc = _merge(tmp_path, _gap_files())
+    assert proc.returncode == 0, proc.stderr
+    assert "_stagedIdx" not in json.dumps(doc)
+
+
+# ---------------------------------------------------------------------------
+# US-NNN references in story text, re-rendered after a split
+# ---------------------------------------------------------------------------
+#
+# Story text is written against the ids the merge assigned BEFORE the split. Each
+# output file then renumbers from US-001, so an unrewritten "US-003" names a
+# different story, or none. The fixtures below stage stories whose text cites
+# pre-split ids and read back what each output file carries.
+
+_FE_FILES = ["src/web/components/x.tsx"]
+_BE_FILES = ["src/server/x.ts"]
+
+
+def _text_story(title, files, project=None, **fields):
+    story = _staging_story(title)
+    story["implementation"]["files"] = list(files)
+    if project is not None:
+        story["project"] = project
+    for key, value in fields.items():
+        if key in ("approach", "verify", "guardRails"):
+            story["implementation"][key] = value
+        else:
+            story[key] = value
+    return story
+
+
+def _all_stories(tmp_path):
+    return {s["title"]: s for d in _split_docs(tmp_path) for s in d["userStories"]}
+
+
+def _side_citing_files(**fields):
+    """Pre-split ids: 01 fe (US-001), 02 be (US-002), 03 fe (US-003), 04 be (US-004).
+    After the SIDE split: fe holds US-001, US-002 (were 01, 03); be holds US-003,
+    US-004 (were 02, 04)."""
+    return {
+        "01-a.json": _text_story("Alpha", _FE_FILES),
+        "02-b.json": _text_story("Bravo", _BE_FILES),
+        "03-c.json": _text_story("Charlie", _FE_FILES, **fields),
+        "04-d.json": _text_story("Delta", _BE_FILES),
+    }
+
+
+def test_split_text_side_same_file_target_reads_as_its_new_id_alone(tmp_path):
+    files = _side_citing_files(notes="builds on US-003 and US-001")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    # Charlie was US-003 and is US-002 now; Alpha stays US-001 in the same file.
+    assert _all_stories(tmp_path)["Charlie"]["notes"] == "builds on US-002 and US-001"
+
+
+def test_split_text_side_cross_file_target_carries_the_side_label(tmp_path):
+    files = _side_citing_files(
+        notes="needs US-002",
+        tasks=["call US-004 first", "plain"],
+        acceptanceCriteria=["Typecheck passes", "matches US-002 contract"],
+        approach="after US-002 and US-004 land",
+        gate={
+            "type": "decision",
+            "status": "pending",
+            "prompt": "is US-004 ready?",
+            "options": ["US-002", "no"],
+        },
+    )
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    c = _all_stories(tmp_path)["Charlie"]
+    # Bravo (US-002) became backend US-003; Delta (US-004) became backend US-004.
+    assert c["notes"] == "needs US-003 (backend)"
+    assert c["tasks"] == ["call US-004 (backend) first", "plain"]
+    assert c["acceptanceCriteria"] == ["Typecheck passes", "matches US-003 (backend) contract"]
+    assert c["implementation"]["approach"] == "after US-003 (backend) and US-004 (backend) land"
+    assert c["gate"]["prompt"] == "is US-004 (backend) ready?"
+    assert c["gate"]["options"] == ["US-003 (backend)", "no"]
+
+
+def test_split_text_side_a_backend_story_names_a_frontend_target(tmp_path):
+    files = _side_citing_files()
+    files["02-b.json"]["notes"] = "consumed by US-003"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert _all_stories(tmp_path)["Bravo"]["notes"] == "consumed by US-002 (frontend)"
+
+
+def test_split_text_swapped_ids_in_one_block_do_not_chain(tmp_path):
+    """02 (frontend) becomes US-001 and 01 (backend) becomes US-002: a swap. A
+    chained substitution would rewrite the first result a second time."""
+    files = {
+        "01-a.json": _text_story("Alpha", _BE_FILES),
+        "02-b.json": _text_story("Bravo", _FE_FILES, notes="US-002 then US-001"),
+    }
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _all_stories(tmp_path)
+    assert stories["Bravo"]["id"] == "US-001" and stories["Alpha"]["id"] == "US-002"
+    assert stories["Bravo"]["notes"] == "US-001 then US-002 (backend)"
+
+
+def _project_citing_files(**fields):
+    """Pre-split ids: 01 and 03 in services/api, 02 and 04 in the root group.
+    Groups sort "." before "services/api", so the root block is US-001, US-002
+    (were 02, 04) and the api block US-003, US-004 (were 01, 03)."""
+    return {
+        "01-a.json": _text_story("Alpha", _BE_FILES, project="services/api"),
+        "02-b.json": _text_story("Bravo", _BE_FILES, project="."),
+        "03-c.json": _text_story("Charlie", _BE_FILES, project="services/api", **fields),
+        "04-d.json": _text_story("Delta", _BE_FILES, project="."),
+    }
+
+
+def test_split_text_project_labels_name_the_project_and_read_root_for_dot(tmp_path):
+    files = _project_citing_files(notes="uses US-002, US-004 and US-001")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    stories = _all_stories(tmp_path)
+    # Charlie is in services/api: its own file holds Alpha (now US-003).
+    assert stories["Charlie"]["id"] == "US-004"
+    assert stories["Charlie"]["notes"] == "uses US-001 (root), US-002 (root) and US-003"
+
+
+def test_split_text_project_names_a_non_root_project_for_a_cross_file_target(tmp_path):
+    files = _project_citing_files()
+    files["02-b.json"]["notes"] = "wraps US-003"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert _all_stories(tmp_path)["Bravo"]["notes"] == "wraps US-004 (services/api)"
+
+
+@pytest.mark.parametrize("axis", ["side", "project"])
+def test_split_text_verify_and_guardrails_take_the_id_only(tmp_path, axis):
+    import tasks as T
+
+    verify = "set -e\ngrep -q US-002 f && test -f US-004\ngrep -q US-002 g"
+    rails = ["grep -q US-002 f", "test -f US-004", "grep -q US-002 g"]
+    before = [s for _, s in T.verify_segments(verify)]
+    assert all(rail in before for rail in rails), "fixture must start with equal text"
+    if axis == "side":
+        files = _side_citing_files(verify=verify, guardRails=rails)
+        expected = ["grep -q US-003 f", "test -f US-004", "grep -q US-003 g"]
+        title = "Charlie"
+    else:
+        files = _project_citing_files(verify=verify, guardRails=rails)
+        expected = ["grep -q US-001 f", "test -f US-002", "grep -q US-001 g"]
+        title = "Charlie"
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    implementation = _all_stories(tmp_path)[title]["implementation"]
+    assert implementation["guardRails"] == expected
+    assert "(" not in implementation["verify"]
+    segments = [s for _, s in T.verify_segments(implementation["verify"])]
+    assert all(rail in segments for rail in implementation["guardRails"])
+
+
+def test_split_text_leaves_boundaries_unknown_ids_and_idless_text_alone(tmp_path):
+    text = "US-0011 XUS-001 US-099 US-12 nothing here"
+    files = _side_citing_files(notes=text, tasks=[text], acceptanceCriteria=[text])
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    c = _all_stories(tmp_path)["Charlie"]
+    assert c["notes"] == text and c["tasks"] == [text] and c["acceptanceCriteria"] == [text]
+
+
+def test_split_text_matches_an_id_next_to_punctuation(tmp_path):
+    files = _side_citing_files(notes="(US-002), US-004. [US-001]:US-003")
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    assert (
+        _all_stories(tmp_path)["Charlie"]["notes"]
+        == "(US-003 (backend)), US-004 (backend). [US-001]:US-002"
+    )
+
+
+def test_split_text_adds_no_key_and_keeps_the_key_order(tmp_path):
+    files = _side_citing_files(notes="see US-002")
+    plain = _side_citing_files()
+    proc, _ = _merge(tmp_path, files, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    with_refs = _all_stories(tmp_path)["Charlie"]
+    other = tmp_path / "other"
+    other.mkdir()
+    proc, _ = _merge(other, plain, args=["--split", "full-stack"])
+    assert proc.returncode == 0, proc.stderr
+    docs = _split_docs(other)
+    without_refs = {s["title"]: s for d in docs for s in d["userStories"]}["Charlie"]
+    assert list(with_refs) == list(without_refs)
+    assert list(with_refs["implementation"]) == list(without_refs["implementation"])
+    assert "gate" not in with_refs and "guardRails" not in with_refs["implementation"]
+
+
+def test_split_text_without_a_split_the_text_is_byte_identical(tmp_path):
+    files = _side_citing_files(
+        notes="see US-002 and US-004",
+        approach="after US-002",
+        verify="grep -q US-002 f",
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    c = _by_title(doc)["Charlie"]
+    assert c["notes"] == "see US-002 and US-004"
+    assert c["implementation"]["approach"] == "after US-002"
+    assert c["implementation"]["verify"] == "grep -q US-002 f"
+
+
+def test_split_text_render_is_single_pass_over_a_swap_unit():
+    story = {"id": "US-001", "notes": "US-001 US-002", "tasks": ["US-002"]}
+    SM._render_split_refs(
+        story,
+        {"US-001": "US-002", "US-002": "US-001"},
+        {"US-001": {"newId": "US-002", "side": "backend"}, "US-002": {"newId": "US-001", "side": "backend"}},
+        "side",
+    )
+    assert story["notes"] == "US-002 US-001" and story["tasks"] == ["US-001"]

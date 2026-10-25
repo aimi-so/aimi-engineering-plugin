@@ -4,7 +4,7 @@
 
 ## Phase 3d: Pass 2 — Parallel Story Expansion
 
-Dispatch one Task sub-agent per approved outline entry in parallel. Each sub-agent writes a single-story staging file. Collect results after all agents complete (or fail).
+Dispatch one Task sub-agent per approved outline entry, wave by wave (see Wave Dispatch and Producer Slice Block Preparation at the end of this file). Each sub-agent writes a single-story staging file. Collect each wave's results before the next wave starts.
 
 ### Staging File Naming
 
@@ -69,3 +69,33 @@ Wrap the returned excerpt exactly as Phase 1.7 wraps a full file — same tag, s
 Apply the identical sanitization Phase 1.7 already applies (escape any literal `</research_file` sequence to `&lt;/research_file`, and any literal `<research_file` sequence to `&lt;research_file`, before wrapping — the same rule at plan.md:1038, applied here to a slice instead of the whole file). Concatenate all of an entry's file excerpts (in `researchSectionsIndex` order) into that entry's `researchSectionBlock` variable, capping the concatenated result at **20 KB**; when the concatenation exceeds the cap, truncate to the first 20 KB and append `\n…[truncated; original is intact on disk]`. An entry whose every file yields zero selected anchors gets an empty `researchSectionBlock` — a normal, non-error outcome (the entry's subject matter may simply not be covered by any research file); Step 4's read-on-demand path remains available regardless. `extract-sections` itself is silent-skip on a miss (an anchor with no matching heading is dropped, not an error — see the CLI helper's own doc comment above `cmd_extract_sections`), so a zero-anchor result never aborts this step.
 
 **Step 4 — Read-on-demand fallback.** Regardless of whether `researchSectionBlock` is empty or populated, every sub-agent also receives the full `allResearchPaths` list plus an explicit instruction to Read any of those files in full when the section excerpt is insufficient for a needed acceptance-criterion detail. This is the "no hard information loss" guarantee required of this design: the excerpt is a lazy-loading optimization, never a hard cap on what the expander can see — Phase 1.7's on-disk ingestion remains the durable fallback source, exactly as before this change.
+
+### Wave Dispatch and Producer Slice Block Preparation
+
+An outline entry may consume a name another entry produces (the `produces`/`consumes` contract Phase 3b validated). The expander of the consumer is dispatched after the producer's story is staged and validated, and is handed a slice of that story, so a sibling reference names a real file or symbol instead of a guess.
+
+**Step 1 — Get the waves and the producer-to-consumer pairs from the verb, never from prose.** Run it on the approved `outline.json`:
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI validate-outline --outline "$RUN_DIR/outline.json"
+```
+
+On exit 0 keep `waves` (the same list Phase 3b stored as `outlineWaves`) and `edges` (`{from, to, name}`, `from` the producer). Any other exit is an invalid outline Phase 3c should not have approved: stop and surface the verb's message. Never re-derive either list yourself. A name carrying the `ext:` marker has no producer in the plan and no edge.
+
+**Step 2 — Dispatch wave by wave.** Dispatch the expanders of `waves[0]`, then `waves[1]`, in the order the verb printed them, at most 8 expanders at once inside a wave; the rest of that wave start as slots free (specFlow:ImportantQ17). A wave starts only after every earlier wave has passed Schema Validation and Retry, so every producer's staged file is on disk and validated when its consumer is spawned. An outline whose entries all declare empty contracts is one wave with no edges: it renders no `<producer_story>` block.
+
+**Step 3 — Build `producerStoryBlock` for each entry**, immediately before spawning it. The producers are the distinct `from` of the edges whose `to` is this entry's idx. For each producer, in ascending idx, read its validated staging file `<RUN_DIR>/<idx>-*.json` (a Read is not blocked by the staging guard, which denies only Edit and Write) and emit:
+
+```
+<producer_story idx="NN">
+title: <title>
+produces: <the producer's outline `produces` names, comma-joined>
+files: <implementation.files paths, comma-joined>
+</producer_story>
+```
+
+Take only structured fields: the idx, the title, the contract names and the `implementation.files` paths that are relative and free of `..` (drop any other path). Never copy `description`, `acceptanceCriteria`, `approach`, `tasks`, `notes` or any other free story text into the slice; that is what keeps the DATA boundary structural. Escape literal `</producer_story` and `<producer_story` sequences inside the emitted text to `&lt;/producer_story` and `&lt;producer_story`. Cap each producer's block at **8 KB per producer** and the concatenation at **24 KB per consumer**; past a cap, truncate and append `\n…[truncated; original is intact on disk]`. An entry with no producer gets an empty `producerStoryBlock`, a normal outcome.
+
+**A producer that failed permanently never reaches this step:** its dependent closure is held back, see Held-Back Dependents of a Failed Producer in the validate-and-retry file.

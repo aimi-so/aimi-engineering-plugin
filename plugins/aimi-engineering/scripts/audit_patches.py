@@ -28,7 +28,10 @@ nothing. The idx -> file map comes only from the `[0-9][0-9]-*.json` glob; no
 path is ever built from an auditor string. Value text goes through
 `sanitize_patch_value` (sanitize.py) with the patch's own field -- there is no
 private copy of its patterns here -- and its `clean` result is stored as
-returned.
+returned. The two fields that hold shell (`implementation.verify` and
+`implementation.guardRails`) go through `judge_patch_value` instead, which
+judges and never rewrites: a script the expander wrote unsanitized would only be
+corrupted by a rewrite.
 
 Every refusal is computed before the first write. Writes are staged to temp
 files beside their targets first and renamed second, the audit result LAST, so
@@ -38,19 +41,26 @@ a failure leaves either the old tree or a tree whose result file still says
 DROP CLASSES
 ============
 
-A patch the verb cannot apply is dropped, and the drop is classified:
+A patch the verb cannot apply is dropped. It appears in `dropped[]` and
+NOWHERE else: a dropped patch does not add an `unresolved` entry (the plan
+decided that as specFlow:ImportantQ15). Every entry names the patch's storyIdx,
+field and op and the reason, plus `trigger` -- a name from PATCH_TRIGGERS --
+when the matcher fired. It NEVER echoes a patch value or matchValue.
 
-  schema   the patch is malformed (not an object, missing keys, bad storyIdx,
-           field outside the allowlist, op/field mismatch, non-string value,
-           bad dependsOn token, replace of a gate.prompt that does not exist).
-           It appears in `dropped[]` only: a malformed patch carries no finding
-           worth a human's attention.
-  semantic the patch was well-formed and was refused on its content: a
-           sanitizer trigger, tasks[] over its cap, a matchValue that matched
-           zero or several entries, a post-patch validation failure. It appears
-           in `dropped[]` AND appends an `unresolved` entry, because a finding
-           was lost. That entry names the trigger and the field and NEVER
-           echoes the offending value.
+  malformed   not an object, missing keys, bad storyIdx, field outside the
+              allowlist, op outside the field's set, non-string value, missing
+              matchValue, bad dependsOn token, replace of a gate.prompt that
+              does not exist.
+  refused     well-formed, refused on its content: a sanitizer trigger, tasks[]
+              over its cap, a matchValue that matched zero or several entries,
+              guard rails that would no longer be segments of the verify, a
+              verify that can swallow a failing line, a post-patch validation
+              failure.
+
+The one `unresolved` entry this module still appends of its own is the cap
+notice (`audit cap reached: N additional patches dropped`): capped patches are
+counted in `capped`, not listed in `dropped[]`, so the notice is where a human
+learns they exist.
 
 REPORT
 ======
@@ -58,10 +68,15 @@ REPORT
 Apply mode prints one JSON object:
 
   applied     int   patches that landed in a story file
-  dropped     list  [{storyIdx, field, reason}] for every dropped patch
+  dropped     list  [{storyIdx, field, op, reason[, trigger]}], one per dropped
+              patch; every string is cut to 64 characters
   unresolved  int   length of the merged `unresolved` array now on disk
   capped      int   patches beyond the 10-per-storyIdx cap
   auditedIdx  list  the staged idx set, sorted
+
+The rewritten audit result also gains `changedFields`: {idx: sorted list of the
+distinct field names an applied patch changed}, with an entry only for an idx
+that received at least one applied patch.
 
 `--annotate-deferred --reason <text>` prints `{annotated, oqDecisions}` instead.
 Annotate mode is not idempotent by design: the orchestrator calls it once per
@@ -76,7 +91,12 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
-from sanitize import PATCH_TRIGGERS, sanitize_patch_value
+from sanitize import (
+    PATCH_TRIGGERS,
+    VERBATIM_PATCH_FIELDS,
+    judge_patch_value,
+    sanitize_patch_value,
+)
 
 
 class AuditRefusal(Exception):
@@ -91,16 +111,31 @@ ALLOWED_FIELDS = (
     "notes",
     "acceptanceCriteria",
     "implementation.approach",
+    "implementation.verify",
+    "implementation.guardRails",
     "gate.prompt",
 )
-OP_FOR_FIELD = {
-    "dependsOn": "add",
-    "tasks": "add",
-    "notes": "add",
-    "acceptanceCriteria": "replace",
-    "implementation.approach": "replace",
-    "gate.prompt": "replace",
+OPS_FOR_FIELD = {
+    "dependsOn": frozenset({"add"}),
+    "tasks": frozenset({"add", "replace", "remove"}),
+    "notes": frozenset({"add", "replace"}),
+    "acceptanceCriteria": frozenset({"replace"}),
+    "implementation.approach": frozenset({"replace"}),
+    "implementation.verify": frozenset({"replace"}),
+    "implementation.guardRails": frozenset({"replace"}),
+    "gate.prompt": frozenset({"replace"}),
 }
+# (field, op) pairs that locate the text they change by an exact `matchValue`.
+NEEDS_MATCH_VALUE = frozenset(
+    {
+        ("tasks", "replace"),
+        ("tasks", "remove"),
+        ("notes", "replace"),
+        ("acceptanceCriteria", "replace"),
+        ("implementation.verify", "replace"),
+        ("implementation.guardRails", "replace"),
+    }
+)
 MAX_PATCHES_PER_STORY = 10
 MAX_TASKS = 50
 NOTES_SEPARATOR = "\n\n---\n\n"
@@ -244,14 +279,18 @@ class _Plan:
         self.unresolved = []
         self.capped = 0
 
-    def schema_drop(self, patch, reason):
-        idx = patch.get("storyIdx") if isinstance(patch, dict) else None
-        field = patch.get("field") if isinstance(patch, dict) else None
-        self.dropped.append({"storyIdx": _echo(idx), "field": _echo(field), "reason": reason})
+    def drop(self, idx, field, op, reason, trigger=None):
+        """Record a dropped patch. Strings are cut to 64 characters; the entry
+        is built from validated names and a fixed reason, never from a value."""
+        entry = {"storyIdx": _echo(idx), "field": _echo(field), "op": _echo(op), "reason": reason}
+        if trigger is not None:
+            entry["trigger"] = _trigger_name(trigger)
+        self.dropped.append(entry)
 
-    def semantic_drop(self, idx, field, reason, message):
-        self.dropped.append({"storyIdx": idx, "field": field, "reason": reason})
-        self.unresolved.append({"storyIdx": idx, "message": message})
+    def drop_raw(self, patch, reason):
+        """A drop decided before the patch was known to be well-formed."""
+        get = patch.get if isinstance(patch, dict) else (lambda _key: None)
+        self.drop(get("storyIdx"), get("field"), get("op"), reason)
 
 
 def _trigger_name(trigger):
@@ -265,30 +304,34 @@ def plan_patches(patches, idx_map, docs):
     seen_deps = {}
     for patch in patches:
         if not isinstance(patch, dict):
-            plan.schema_drop(patch, "not-an-object")
+            plan.drop_raw(patch, "not-an-object")
             continue
-        if not all(key in patch for key in ("storyIdx", "field", "op", "value")):
-            plan.schema_drop(patch, "missing-keys")
+        # `value` is the one key a `remove` patch does not need.
+        if not all(key in patch for key in ("storyIdx", "field", "op")) or (
+            "value" not in patch and patch.get("op") != "remove"
+        ):
+            plan.drop_raw(patch, "missing-keys")
             continue
-        idx, field, op, value = (patch[k] for k in ("storyIdx", "field", "op", "value"))
+        idx, field, op = (patch[k] for k in ("storyIdx", "field", "op"))
+        value = patch.get("value")
         if not (isinstance(idx, str) and _IDX.fullmatch(idx) and idx in idx_map):
-            plan.schema_drop(patch, "bad-storyIdx")
+            plan.drop_raw(patch, "bad-storyIdx")
             continue
-        if not (isinstance(field, str) and field in ALLOWED_FIELDS):
-            plan.schema_drop(patch, "field-not-allowed")
+        if not (isinstance(field, str) and field in OPS_FOR_FIELD):
+            plan.drop_raw(patch, "field-not-allowed")
             continue
-        if op != OP_FOR_FIELD[field]:
-            plan.schema_drop(patch, "op-field-mismatch")
+        if not (isinstance(op, str) and op in OPS_FOR_FIELD[field]):
+            plan.drop_raw(patch, "op-field-mismatch")
             continue
-        if not isinstance(value, str):
-            plan.schema_drop(patch, "value-not-string")
+        if op != "remove" and not isinstance(value, str):
+            plan.drop_raw(patch, "value-not-string")
             continue
 
         match_value = None
-        if field == "acceptanceCriteria":
+        if (field, op) in NEEDS_MATCH_VALUE:
             match_value = patch.get("matchValue")
             if not (isinstance(match_value, str) and match_value):
-                plan.schema_drop(patch, "bad-matchValue")
+                plan.drop_raw(patch, "bad-matchValue")
                 continue
 
         clean = value
@@ -300,34 +343,30 @@ def plan_patches(patches, idx_map, docs):
                 idx, set(e for e in (existing if isinstance(existing, list) else []) if isinstance(e, str))
             )
             if not token or token.group(1) not in idx_map or token.group(1) == idx or value in present:
-                plan.schema_drop(patch, "bad-dependsOn-token")
+                plan.drop_raw(patch, "bad-dependsOn-token")
                 continue
             present.add(value)
         else:
-            clean, trigger = sanitize_patch_value(value, field)
-            if trigger is not None:
-                name = _trigger_name(trigger)
-                plan.semantic_drop(
-                    idx,
-                    field,
-                    "sanitizer:" + name,
-                    "audit patch dropped: sanitizer trigger " + name + " in field " + field,
-                )
-                continue
-            if match_value is not None:
-                _, trigger = sanitize_patch_value(match_value, field)
+            verbatim = field in VERBATIM_PATCH_FIELDS
+            if op != "remove":
+                if verbatim:
+                    clean, trigger = judge_patch_value(value, field)
+                else:
+                    clean, trigger = sanitize_patch_value(value, field)
                 if trigger is not None:
-                    name = _trigger_name(trigger)
-                    plan.semantic_drop(
-                        idx,
-                        field,
-                        "matchValue-sanitizer:" + name,
-                        "audit patch dropped: sanitizer trigger " + name + " in matchValue of field " + field,
-                    )
+                    plan.drop(idx, field, op, "sanitizer:" + _trigger_name(trigger), trigger)
+                    continue
+            if match_value is not None:
+                if verbatim:
+                    _, trigger = judge_patch_value(match_value, field)
+                else:
+                    _, trigger = sanitize_patch_value(match_value, field)
+                if trigger is not None:
+                    plan.drop(idx, field, op, "matchValue-sanitizer:" + _trigger_name(trigger), trigger)
                     continue
 
         candidates.setdefault(idx, []).append(
-            {"field": field, "value": clean, "matchValue": match_value}
+            {"field": field, "op": op, "value": clean, "matchValue": match_value}
         )
 
     for idx, group in candidates.items():
@@ -349,11 +388,11 @@ def plan_patches(patches, idx_map, docs):
 
 
 class _Drop(Exception):
-    def __init__(self, kind, reason, message=None):
+    """Raised inside _apply_one to refuse the patch it was applying."""
+
+    def __init__(self, reason):
         super().__init__(reason)
-        self.kind = kind  # "schema" or "semantic"
         self.reason = reason
-        self.message = message
 
 
 def _paragraph_append(existing, addition):
@@ -362,52 +401,112 @@ def _paragraph_append(existing, addition):
     return addition
 
 
+def _single_hit(entries, match_value):
+    """The index of the ONE element equal to match_value, else a drop."""
+    hits = [i for i, entry in enumerate(entries) if entry == match_value]
+    if len(hits) != 1:
+        raise _Drop("matchValue-match-count")
+    return hits[0]
+
+
+def _rails_in_sync(doc):
+    """Every guard rail is exactly one segment of the story's verify.
+
+    The rule lives in tasks.py (`_guard_rail_errors`, which cuts the verify with
+    `verify_segments`); this calls it rather than restating it. Imported here
+    and not at the top because tasks imports story_merge, which imports this
+    module, so a top-level import would be a cycle -- and importing it lazily
+    also keeps `import audit_patches` from loading the tasks module at all.
+    """
+    from tasks import _guard_rail_errors
+
+    return not _guard_rail_errors("story", doc)
+
+
 def _apply_one(doc, patch):
-    field, value = patch["field"], patch["value"]
+    field, op, value = patch["field"], patch["op"], patch["value"]
     if field == "dependsOn":
         deps = doc.get("dependsOn")
         if not isinstance(deps, list):
-            raise _Drop("semantic", "post-validation")
+            raise _Drop("post-validation")
         deps.append(value)
     elif field == "tasks":
         tasks = doc.setdefault("tasks", [])
         if not isinstance(tasks, list):
-            raise _Drop("semantic", "post-validation")
-        tasks.append(value)
-        if len(tasks) > MAX_TASKS:
-            raise _Drop(
-                "semantic",
-                "tasks-cap",
-                "audit patch dropped: tasks[] would exceed " + str(MAX_TASKS) + " entries (field tasks)",
-            )
+            raise _Drop("post-validation")
+        if op == "add":
+            tasks.append(value)
+            if len(tasks) > MAX_TASKS:
+                raise _Drop("tasks-cap")
+        else:
+            hit = _single_hit(tasks, patch["matchValue"])
+            if op == "replace":
+                tasks[hit] = value
+            else:
+                del tasks[hit]
     elif field == "notes":
         existing = doc.get("notes")
         if existing is not None and not isinstance(existing, str):
-            raise _Drop("semantic", "post-validation")
-        doc["notes"] = _paragraph_append(existing, value)
+            raise _Drop("post-validation")
+        if op == "add":
+            doc["notes"] = _paragraph_append(existing, value)
+        else:
+            if not isinstance(existing, str):
+                raise _Drop("post-validation")
+            paragraphs = existing.split(NOTES_SEPARATOR)
+            paragraphs[_single_hit(paragraphs, patch["matchValue"])] = value
+            doc["notes"] = NOTES_SEPARATOR.join(paragraphs)
     elif field == "acceptanceCriteria":
         criteria = doc.get("acceptanceCriteria")
         if not isinstance(criteria, list):
-            raise _Drop("semantic", "post-validation")
-        hits = [i for i, entry in enumerate(criteria) if entry == patch["matchValue"]]
-        if len(hits) != 1:
-            raise _Drop(
-                "semantic",
-                "matchValue-match-count",
-                "audit patch dropped: matchValue matched "
-                + str(len(hits))
-                + " entries in field acceptanceCriteria",
-            )
-        criteria[hits[0]] = value
+            raise _Drop("post-validation")
+        criteria[_single_hit(criteria, patch["matchValue"])] = value
     elif field == "implementation.approach":
         impl = doc.setdefault("implementation", {})
         if not isinstance(impl, dict):
-            raise _Drop("semantic", "post-validation")
+            raise _Drop("post-validation")
         impl["approach"] = value
+    elif field == "implementation.verify":
+        impl = doc.get("implementation")
+        verify = impl.get("verify") if isinstance(impl, dict) else None
+        if not isinstance(verify, str):
+            raise _Drop("post-validation")
+        match_value = patch["matchValue"]
+        if verify.count(match_value) != 1:
+            raise _Drop("matchValue-match-count")
+        # The same substitution lands in every rail that contains the matched
+        # text, so a rewritten assertion and its label move together.
+        rails = impl.get("guardRails")
+        if isinstance(rails, list):
+            impl["guardRails"] = [
+                entry.replace(match_value, value) if isinstance(entry, str) else entry
+                for entry in rails
+            ]
+        impl["verify"] = verify.replace(match_value, value)
+        if not _rails_in_sync(doc):
+            raise _Drop("guardRails-out-of-sync")
+        # Lazy for the reason _rails_in_sync gives.
+        from tasks import verify_composition_findings
+
+        if verify_composition_findings(impl["verify"]):
+            raise _Drop("verify-composition")
+    elif field == "implementation.guardRails":
+        impl = doc.get("implementation")
+        if not isinstance(impl, dict):
+            raise _Drop("post-validation")
+        rails = impl.get("guardRails")
+        if rails is None:
+            rails = []
+        if not isinstance(rails, list):
+            raise _Drop("post-validation")
+        rails[_single_hit(rails, patch["matchValue"])] = value
+        impl["guardRails"] = rails
+        if not _rails_in_sync(doc):
+            raise _Drop("guardRails-out-of-sync")
     else:  # gate.prompt
         gate = doc.get("gate")
         if not isinstance(gate, dict) or gate.get("prompt") is None:
-            raise _Drop("schema", "gate-prompt-absent")
+            raise _Drop("gate-prompt-absent")
         gate["prompt"] = value
 
 
@@ -415,7 +514,7 @@ def _nonempty_str(v):
     return isinstance(v, str) and v.strip() != ""
 
 
-def _valid_story(doc, field, value):
+def _valid_story(doc, field, op, value):
     """plan.md's post-patch check: required fields plus the patched field's type."""
     if not isinstance(doc, dict):
         return False
@@ -432,7 +531,8 @@ def _valid_story(doc, field, value):
     verification = doc.get("verification")
     if not (isinstance(verification, dict) and "strategy" in verification and "status" in verification):
         return False
-    if not _nonempty_str(value) and field != "dependsOn":
+    # A `remove` carries no replacement text, so there is none to be non-empty.
+    if op != "remove" and not _nonempty_str(value) and field != "dependsOn":
         return False
     if field == "tasks":
         tasks = doc.get("tasks")
@@ -442,6 +542,13 @@ def _valid_story(doc, field, value):
     if field == "implementation.approach":
         impl = doc.get("implementation")
         return isinstance(impl, dict) and _nonempty_str(impl.get("approach"))
+    if field == "implementation.verify":
+        impl = doc.get("implementation")
+        return isinstance(impl, dict) and _nonempty_str(impl.get("verify"))
+    if field == "implementation.guardRails":
+        impl = doc.get("implementation")
+        rails = impl.get("guardRails") if isinstance(impl, dict) else None
+        return isinstance(rails, list) and all(_nonempty_str(e) for e in rails)
     if field == "gate.prompt":
         gate = doc.get("gate")
         return isinstance(gate, dict) and _nonempty_str(gate.get("prompt"))
@@ -450,34 +557,31 @@ def _valid_story(doc, field, value):
 
 def apply_plan(plan, docs):
     """Apply each story's surviving patches in auditor order. Returns
-    ({idx: patched doc}, applied count); drops are recorded on the plan."""
+    ({idx: patched doc}, applied count, {idx: set of changed field names});
+    drops are recorded on the plan."""
     patched = {}
+    changed_fields = {}
     applied = 0
     for idx in plan.order:
         doc = docs[idx]
         changed = False
         for patch in plan.by_idx[idx]:
             candidate = copy.deepcopy(doc)
-            field = patch["field"]
+            field, op = patch["field"], patch["op"]
             try:
                 _apply_one(candidate, patch)
-                if not _valid_story(candidate, field, patch["value"]):
-                    raise _Drop("semantic", "post-validation")
+                if not _valid_story(candidate, field, op, patch["value"]):
+                    raise _Drop("post-validation")
             except _Drop as drop:
-                if drop.kind == "schema":
-                    plan.dropped.append({"storyIdx": idx, "field": field, "reason": drop.reason})
-                else:
-                    message = drop.message or (
-                        "audit patch dropped: post-patch validation failed in field " + field
-                    )
-                    plan.semantic_drop(idx, field, drop.reason, message)
+                plan.drop(idx, field, op, drop.reason)
                 continue
             doc = candidate
             changed = True
+            changed_fields.setdefault(idx, set()).add(field)
             applied += 1
         if changed:
             patched[idx] = doc
-    return patched, applied
+    return patched, applied, changed_fields
 
 
 # --- Writing --------------------------------------------------------------
@@ -541,7 +645,7 @@ def run_apply(staging_dir, result_path):
     plan = plan_patches(result.get("patches", []), idx_map, docs)
     for idx in plan.order:
         _need_doc(idx_map, docs, idx)
-    patched, applied = apply_plan(plan, docs)
+    patched, applied, changed_fields = apply_plan(plan, docs)
 
     unresolved = [_normalise_unresolved(e) for e in result.get("unresolved", [])]
     unresolved.extend(plan.unresolved)
@@ -552,6 +656,9 @@ def run_apply(staging_dir, result_path):
     rewritten["unresolved"] = unresolved
     rewritten["auditedIdx"] = audited
     rewritten["appliedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rewritten["changedFields"] = {
+        idx: sorted(changed_fields[idx]) for idx in sorted(changed_fields)
+    }
 
     writes = [(idx_map[idx], patched[idx]) for idx in plan.order if idx in patched]
     writes.append((result_path, rewritten))

@@ -766,13 +766,13 @@ install_commands() {
 # | workflow agent                       | translated as                          |
 # | ------------------------------------ | -------------------------------------- |
 # | aimi-bug-reproduction-validator      | aimi-bug-reproduction-validator        |
-# | aimi-cross-story-auditor             | aimi-cross-story-auditor               |
 # | aimi-learnings-triage                | aimi-learnings-triage                  |
 # | aimi-scope-negative-verifier         | aimi-scope-negative-verifier           |
 # | aimi-scope-positive-verifier         | aimi-scope-positive-verifier           |
 # | aimi-spec-flow-analyzer              | aimi-spec-flow-analyzer                |
 # | aimi-spec-flow-symbol-extractor      | aimi-spec-flow-symbol-extractor        |
 # | aimi-story-expander                  | aimi-story-expander                    |
+# The cross-story auditor lives under agents/review/aimi-cross-story-auditor.md and is translated as `aimi-cross-story-auditor` by the same "agents/*/*.md" glob.
 # ---------------------------------------------------------------------------
 install_agents() {
   local src="$1"

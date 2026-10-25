@@ -15396,6 +15396,171 @@ cmd_apply_audit_patches() {
 }
 
 # ============================================================================
+# validate-staging: report staged stories that cannot be merged as written
+# Usage: aimi-cli.sh validate-staging --staging-dir <dir> [--outline <path>]
+# ============================================================================
+#
+# Modelled on cmd_apply_audit_patches: no tasks file and so no lock. Bash keeps
+# the flags and the path confinement -- done before python3 starts, so an
+# escaping --staging-dir or --outline is refused without story_merge.py ever
+# running -- and check_python3, which refuses rather than degrading: a verb that
+# answers "{}" without the interpreter would turn a missing dependency into a
+# clean report. Every rule is story_merge.py's, in the same helper the story-merge
+# refusal uses, behind one crossing.
+cmd_validate_staging() {
+  local usage="usage: aimi-cli.sh validate-staging --staging-dir <dir> [--outline <path>]"
+  local staging_dir="" outline_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir|--outline)
+        if [ $# -lt 2 ]; then
+          echo "Error: validate-staging: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        case "$1" in
+          --staging-dir) staging_dir="$2" ;;
+          --outline) outline_path="$2" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        echo "Error: validate-staging: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: validate-staging: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+  if [ -n "$outline_path" ]; then
+    validate_path_in_project "$outline_path"
+  fi
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: validate-staging: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  local vs_args=(--validate-staging --staging-dir "$staging_dir")
+  if [ -n "$outline_path" ]; then
+    vs_args+=(--outline "$outline_path")
+  fi
+  python3 "$(_aimi_script_py story_merge.py)" "${vs_args[@]}"
+}
+
+# ============================================================================
+# validate-outline: check an outline's produces/consumes contract, derive waves
+# Usage: aimi-cli.sh validate-outline --outline <path>
+# ============================================================================
+#
+# Modelled on cmd_apply_audit_patches: no tasks file and so no lock. Bash keeps
+# the flags and the path confinement -- done before python3 starts, so an
+# escaping --outline is refused without outline_contract.py ever running -- and
+# check_python3, which refuses rather than degrading: a verb that answers
+# "valid" without the interpreter would turn a missing dependency into a
+# passing check. Every rule is outline_contract.py's, behind one crossing.
+cmd_validate_outline() {
+  local usage="usage: aimi-cli.sh validate-outline --outline <path>"
+  local outline_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --outline)
+        if [ $# -lt 2 ]; then
+          echo "Error: validate-outline: --outline needs a value ($usage)" >&2
+          exit 1
+        fi
+        outline_path="$2"
+        shift 2
+        ;;
+      *)
+        echo "Error: validate-outline: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$outline_path" ]; then
+    echo "Error: validate-outline: --outline <path> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$outline_path"
+
+  check_python3
+  python3 "$(_aimi_script_py outline_contract.py)" --outline "$outline_path"
+}
+
+# ============================================================================
+# outline-shift: renumber staged stories after an outline edit
+# Usage: aimi-cli.sh outline-shift --staging-dir <dir> --old <path> --new <path>
+# ============================================================================
+#
+# Modelled on cmd_apply_audit_patches: no tasks file and so no lock. Bash keeps
+# the flags and the path confinement -- all three paths are confined before
+# python3 starts, so an escaping argument is refused without outline_contract.py
+# ever running -- and check_python3, which refuses rather than degrading: a verb
+# that answered "nothing to do" without the interpreter would leave stale
+# staged files looking current. The matching, the renames and the token rewrite
+# are outline_contract.py's, behind one crossing.
+cmd_outline_shift() {
+  local usage="usage: aimi-cli.sh outline-shift --staging-dir <dir> --old <path> --new <path>"
+  local staging_dir="" old_path="" new_path=""
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --staging-dir|--old|--new)
+        if [ $# -lt 2 ]; then
+          echo "Error: outline-shift: $1 needs a value ($usage)" >&2
+          exit 1
+        fi
+        case "$1" in
+          --staging-dir) staging_dir="$2" ;;
+          --old) old_path="$2" ;;
+          --new) new_path="$2" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        echo "Error: outline-shift: unknown flag: $1 ($usage)" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$staging_dir" ]; then
+    echo "Error: outline-shift: --staging-dir <dir> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ -z "$old_path" ]; then
+    echo "Error: outline-shift: --old <path> is required ($usage)" >&2
+    exit 1
+  fi
+  if [ -z "$new_path" ]; then
+    echo "Error: outline-shift: --new <path> is required ($usage)" >&2
+    exit 1
+  fi
+
+  validate_path_in_project "$staging_dir"
+  validate_path_in_project "$old_path"
+  validate_path_in_project "$new_path"
+
+  if [ ! -d "$staging_dir" ]; then
+    echo "Error: outline-shift: staging directory does not exist: $staging_dir" >&2
+    exit 1
+  fi
+
+  check_python3
+  python3 "$(_aimi_script_py outline_contract.py)" --shift --staging-dir "$staging_dir" --old "$old_path" --new "$new_path"
+}
+
+# ============================================================================
 # split-detect — the read side of metadata.splitGroup
 # ============================================================================
 #
@@ -17371,6 +17536,35 @@ COMMANDS:
                               --annotate-deferred --reason <text> instead appends the
                               audit-deferred marker to the notes of every story an unresolved
                               entry names and prints {annotated, oqDecisions}.
+    validate-outline --outline <path>
+                              Check an outline.json array's produces/consumes contract
+                              ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
+                              consumes) and layer the entries into expansion waves. Prints
+                              {valid, errors, waves, edges, counts} and exits 0; an invalid
+                              outline still prints the object, with valid false, waves []
+                              and errors[] of {code, idx, message}, and exits 1. An
+                              unreadable --outline (missing, not JSON, not an array) is
+                              refused on stderr with exit 1 and nothing on stdout.
+    outline-shift --staging-dir <dir> --old <path> --new <path>
+                              After an outline edit that follows expansion, renumber the
+                              staged NN-*.json files without an LLM: entries are matched by
+                              exact title, shifted files are renamed and their outline:NN
+                              tokens rewritten in one pass, a removed entry's file is
+                              deleted. Prints {renamed[{from,to,file}], removed[],
+                              reexpand[{idx,reason}], expand[], auditInvalidated}; only the
+                              idx in reexpand and expand need an expander. A change deletes
+                              <dir>/audit-result.json. Refuses (exit 1, nothing changed) a
+                              staged file matching no --old entry or two sharing an idx.
+    validate-staging --staging-dir <dir> [--outline <path>]
+                              Check the staged NN-*.json story files before they are merged.
+                              Prints {} and exits 0 when clean; otherwise prints an object
+                              keyed by staged idx whose values list that story's findings and
+                              exits 1. A multi-line implementation.verify that can swallow a
+                              failing line is a finding (the rule story-merge refuses on).
+                              With --outline, a story that consumes a name another outline
+                              entry produces but whose dependsOn lacks that entry's
+                              outline:NN token is a finding too (ext: consumes need none).
+                              A staged file that is not valid JSON is skipped.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
                               completed} in one locked crossing, so a phase whose completed
@@ -18908,6 +19102,9 @@ main() {
     bundle-prototype-finalize) shift; cmd_bundle_prototype_finalize "$@" ;;
     story-merge)       shift; cmd_story_merge "$@" ;;
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
+    validate-outline) shift; cmd_validate_outline "$@" ;;
+    validate-staging) shift; cmd_validate_staging "$@" ;;
+    outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;
     roadmap-amend-phase)   shift; cmd_roadmap_amend_phase "$@" ;;

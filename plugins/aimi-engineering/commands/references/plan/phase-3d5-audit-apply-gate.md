@@ -8,16 +8,18 @@ Immediately after parsing the auditor's output, use the `Write` tool to write th
 
 ### Patch Validation and Application
 
-`apply-audit-patches` validates every patch, applies the survivors with one read and one atomic write per affected staging file, and stamps `audit-result.json` with `auditedIdx` (the staged idx set) and `appliedAt`. It enforces the idx lookup against the staged files only, the field and op allowlists, value sanitization, the 10-patch cap per story and post-patch validation with per-patch rollback; a refused patch with a finding behind it becomes an `unresolved` entry that never echoes the refused value. Its report is `{applied, dropped, unresolved, capped, auditedIdx}`.
+`apply-audit-patches` validates every patch, applies the survivors with one read and one atomic write per affected staging file, and stamps `audit-result.json` with `auditedIdx` (the staged idx set) and `appliedAt`. It enforces the idx lookup against the staged files only, a fixed op set per field (`dependsOn` takes `add`; `tasks` takes `add`, `replace` and `remove`; `notes` takes `add` and `replace`; `acceptanceCriteria`, `implementation.approach`, `implementation.verify`, `implementation.guardRails` and `gate.prompt` take `replace`), value sanitization, the 10-patch cap per story and post-patch validation with per-patch rollback. A `matchValue` must equal one whole `tasks` element, criterion, guard rail or `notes` paragraph (a chunk between `\n\n---\n\n`) and match exactly one. For `implementation.verify` it is a substring that must occur exactly once; its value replaces only that substring and lands identically in every `guardRails` entry containing it, and the patch is dropped as `guardRails-out-of-sync` when a rail stops equalling a verify segment, or as `verify-composition` when the new verify can swallow a failing line. Verify and guard-rail values are stored verbatim, never rewritten. Its report is `{applied, dropped, unresolved, capped, auditedIdx}`.
+
+`dropped` holds one entry per patch the verb refused: `{storyIdx, field, op, reason}`, plus `trigger` (the injection matcher's rule name, never the offending value) when the matcher refused it. **Dropped patches are not counted as unresolved:** a dropped patch adds no `unresolved` entry, and the only entry the verb adds of its own is the `audit cap reached` notice.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 AUDIT_REPORT=$($AIMI_CLI apply-audit-patches --staging-dir "$RUN_DIR" --result "$RUN_DIR/audit-result.json") || exit 1
-printf '%s' "$AUDIT_REPORT" | jq -c '{applied, unresolved, auditedIdx}'
+printf '%s' "$AUDIT_REPORT" | jq -c '{applied, dropped, unresolved, auditedIdx}'
 ```
 
-The line printed carries `applied` (patches landed), `unresolved` (the count now on disk) and `auditedIdx`. Read the merged `unresolved[]` array — the auditor's entries plus the verb's own — from `audit-result.json` with the Read tool; it becomes the working-memory `unresolved[]` list (schema `{storyIdx, message}`). A non-zero exit is an apply failure: take the Failure Fallback.
+The line printed carries `applied` (patches landed), `dropped` (the entries above), `unresolved` (the count now on disk) and `auditedIdx`. Relay each `dropped` entry to chat in one line, `[plan] Phase 3d.5: patch dropped — story <storyIdx> <field> <op>: <reason>`, with ` (<trigger>)` appended when it has one, so a finding the verb refused is visible even though it is not in `unresolved[]`. Read the merged `unresolved[]` array — the auditor's entries plus the verb's own — from `audit-result.json` with the Read tool; it becomes the working-memory `unresolved[]` list (schema `{storyIdx, message}`). A non-zero exit is an apply failure: take the Failure Fallback.
 
 ### Failure Fallback
 
@@ -60,11 +62,12 @@ The working-memory `unresolved[]` list (`{storyIdx: string, message: string}`) i
 …
 ```
 
-with exactly three options, verbatim:
+with exactly four options, verbatim:
 
 ```
 Apply anyway — proceed to story-merge without acting on these findings
 Defer with reason — annotate the affected stories and proceed
+Edit outline — change the outline and re-expand only what the edit affects
 Abort — stop before story-merge; nothing is written this run
 ```
 
@@ -90,9 +93,11 @@ Abort — stop before story-merge; nothing is written this run
 
   It annotates the `notes` of each staged story an entry names (the `_audit` sentinel, or an idx with no staged file, is never annotated) and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
 
+- **[Edit outline]:** follow the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md` (Read it first). It ends by re-running Phase 3d.5 in full, so this gate fires again on the new `unresolved[]`; no `oqDecisions[]` entry is recorded for this choice.
+
 - **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
 
-**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
 
 ```
 agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review

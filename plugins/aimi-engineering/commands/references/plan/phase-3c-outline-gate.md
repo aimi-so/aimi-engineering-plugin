@@ -10,6 +10,7 @@ Present the outline to the user and allow iterative editing before any expansion
 
 When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
 - Skip AskUserQuestion entirely.
+- `outlineContractErrors` is empty here: the Phase 3b Outline Contract Check already repaired once or stopped the run.
 - If `outlineWarnings` is non-empty, emit each warning as a chat log line **before** the auto-approve line:
   ```
   [warn] outline:<idx>: summary too short (<N> chars) — expand to clarify scope.
@@ -17,6 +18,10 @@ When `INTERACTIVE_MODE` is `agent` or `--non-interactive` was passed:
   [warn] ... and N more entries with potential outline gaps.
   ```
   (emit only the lines present in `outlineWarnings` — the examples above show the possible formats)
+- Emit the wave summary line **before** the auto-approve line (`W` is the number of `outlineWaves`; entries of one wave are space-separated, waves are separated by ` | `; no contracts at all reads as one wave):
+  ```
+  [plan] outline waves (W): 01 02 | 03 | 04
+  ```
 - Emit **exactly** this chat line (substitute actual N):
   ```
   [plan] outline auto-approved (non-interactive): N stories
@@ -34,6 +39,14 @@ Outline (N stories):
 02. <title> — <summary>
 …
 ```
+
+Append `[produces P, consumes C]` to each line from `outlineCounts`, then one wave line below the list (same format as above, `W` is the number of `outlineWaves`):
+
+```
+Waves (W): 01 02 | 03 | 04
+```
+
+When `outlineContractErrors` is non-empty (see the Phase 3b Outline Contract Check), show each as `[error] <code>: <message>` before the picker. **Approve is refused while any stands**: re-present the gate with the errors, and the wave line is omitted because there are no waves.
 
 When the outline contains more than 15 entries, prepend a warning line:
 ```
@@ -85,7 +98,7 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
 **For each edit operation:**
 
 - **Approve**: exit the loop, proceed to Phase 3d.
-- **Rename `<idx>`**: ask for the new title and summary; update `outline.json` entry at `idx`. Record in `oqDecisions[]`:
+- **Rename `<idx>`**: ask for the new title and summary, and for the entry's `produces` and `consumes` (offer the current ones as the default); update `outline.json` entry at `idx`. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<idx>",
@@ -94,8 +107,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "title: '<new-title>' / summary: '<new-summary>'"
   }
   ```
-  Increment `outlineEditCount`. Re-present the gate.
-- **Add**: ask for position (after which `idx`) and the new title/summary; insert the entry, renumber all subsequent `idx` values. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
+- **Add**: ask for position (after which `idx`), the new title/summary and the entry's `produces` and `consumes`; insert the entry, renumber all subsequent `idx` values. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<new-idx>",
@@ -104,8 +117,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "title: '<title>' / summary: '<summary>'"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
-- **Remove `<idx>`**: remove the entry; renumber subsequent `idx` values. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
+- **Remove `<idx>`**: remove the entry; renumber subsequent `idx` values. Contracts are kept by name, never by position: every other entry keeps its own `produces`/`consumes` arrays unchanged, because a token names a thing and not an `idx`, so nothing goes stale when `idx` moves. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:<idx>",
@@ -114,8 +127,8 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "removed: '<title>'"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate. If removing an entry causes zero stories remaining, present an error and ask the user to add at least one story before approving.
-- **Reorder**: ask for the new order as a comma-separated list of `idx` values; rebuild the array in the specified order, renumber `idx` from `01`. Record in `oqDecisions[]`:
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate. If removing an entry causes zero stories remaining, present an error and ask the user to add at least one story before approving.
+- **Reorder**: ask for the new order as a comma-separated list of `idx` values; rebuild the array in the specified order, renumber `idx` from `01` and nothing else: each entry carries its own `produces`/`consumes` along, by name. Record in `oqDecisions[]`:
   ```json
   {
     "anchor": "outline:edit:reorder",
@@ -124,9 +137,38 @@ No `oqDecisions[]` entry is recorded for a rejected edit. **Rename** of a protec
     "resolution": "new order: <comma-separated original idx values>"
   }
   ```
-  Increment `outlineEditCount`. Rewrite `outline.json`. Re-present the gate.
+  Increment `outlineEditCount`. Rewrite `outline.json`. Re-run the contract check. Re-present the gate.
 
 Loop until the user selects **Approve**.
+
+### Edit Outline After Expansion
+
+Reached from the `Edit outline` option of the Failure Budget (Phase 3d) and of the Phase 3d.5 Unresolved Gate, never otherwise. **Interactive only**: the option is not offered when `INTERACTIVE_MODE=agent` (specFlow:CriticalQ3). It lets the outline change after stories were expanded without throwing the expansion away: a pure index shift is renamed by a verb, and only the stories the edit really affects are expanded again.
+
+1. **Keep the outline as it was.** Copy it under a name that ends in `-outline.json`, so `story-merge` reads it as a sidecar and the staging guard's `NN-` pattern never meets it:
+
+   ```bash
+   cp "$RUN_DIR/outline.json" "$RUN_DIR/pre-edit-outline.json"
+   ```
+
+2. **Re-open the gate.** Run the Interactive Outline Gate Loop above on `outline.json` until the user approves: the foundation carve-out, the `oqDecisions[]` records and the contract check apply unchanged. The staged story files are not touched while the user edits.
+
+3. **Shift the staged files.** On Approve, run the verb. It matches entries by exact title, renames the shifted `NN-<slug>.json` files, rewrites their `outline:NN` tokens in one pass, deletes the file of a removed entry, deletes `audit-result.json` when anything changed, and prints `{renamed[{from,to,file}], removed[], reexpand[{idx,reason}], expand[], auditInvalidated}` (`removed` and `renamed[].from` are `pre-edit-outline.json` idx; every other idx is in the new numbering):
+
+   ```bash
+   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+   : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   SHIFT_REPORT=$($AIMI_CLI outline-shift --staging-dir "$RUN_DIR" --old "$RUN_DIR/pre-edit-outline.json" --new "$RUN_DIR/outline.json") || exit 1
+   printf '%s' "$SHIFT_REPORT" | jq -c '{renamed, removed, reexpand, expand, auditInvalidated}'
+   ```
+
+   A non-zero exit changed nothing: surface the verb's message, copy `pre-edit-outline.json` back over `outline.json`, and return to the gate that offered `Edit outline`.
+
+4. **Delete before re-spawning.** For every idx in `reexpand`, delete its staged file with Bash `rm -f "$RUN_DIR/<idx>-<slug>.json"` (the name is `renamed[].file` when the file moved, otherwise unchanged) before its expander is spawned: the staging guard denies a Write over an existing `NN-*.json`, and a kept file still carries a token to a removed entry that the new numbering now aliases. Never Edit or Write a staged file by hand. An `expand` idx has no file to delete.
+
+5. **Expand what is left.** Take the waves from `validate-outline` on the new `outline.json` (Wave Dispatch, Step 1), then expand the `reexpand` and `expand` idx in wave order, with the producer slices of Wave Dispatch Step 3 read from the kept, validated files. Each goes through Schema Validation and Retry in full, step 2b included. **At most one automatic pass per story**: a story that fails its retries is permanently failed and goes to the Failure Budget; it is not expanded again here, and expanding it does not queue its dependents. A failed producer holds back its closure as usual.
+
+6. **Audit again, from a clean slate.** Clear the Phase 3d.5 working-memory state (`unresolved[]`, `auditFailed`, the interim counts) and re-run Phase 3d.5 in full: Skip Condition, auditor spawn, `audit-result.json`, `apply-audit-patches`, Unresolved Gate. The pre-edit audit is never reused, which is why the verb deleted it.
 
 ### Phase 3c.5: Payload Estimate (Advisory)
 

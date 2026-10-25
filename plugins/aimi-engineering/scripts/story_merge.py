@@ -57,7 +57,7 @@ import statistics
 import sys
 import time
 
-from audit_patches import AuditRefusal, staged_idx_map
+from audit_patches import NOTES_SEPARATOR, AuditRefusal, staged_idx_map
 from sanitize import rm_sanitize
 
 # The two caps the jq applied, at the two places it applied them. A title
@@ -385,6 +385,34 @@ def require_audit(staging_dir, paths):
     return status if isinstance(status, str) else None
 
 
+def read_changed_fields(staging_dir):
+    """The audit's changed-field record: {staged idx: [field names]}, or {}.
+
+    apply-audit-patches writes `changedFields` into audit-result.json, one entry
+    per staged idx that received an applied patch. This is the ONE tolerant
+    reader of it: a missing file, a document that does not parse, a missing key
+    or a value of the wrong shape all answer {} and say nothing, because the
+    only consumer is an advisory smell and a smell must never block a merge.
+    require_audit has already refused a malformed result for a multi-story
+    directory, so for those this only ever sees a well-formed object.
+    """
+    try:
+        with open(os.path.join(staging_dir, "audit-result.json"), "r", encoding="utf-8") as handle:
+            result = json.load(handle)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    changed = result.get("changedFields") if isinstance(result, dict) else None
+    if not isinstance(changed, dict):
+        return {}
+    record = {}
+    for idx, fields in changed.items():
+        if isinstance(idx, str) and isinstance(fields, list):
+            names = [f for f in fields if isinstance(f, str)]
+            if names:
+                record[idx] = names
+    return record
+
+
 def read_staging(paths):
     """Validate every file, then load every story. Both passes, in that order.
 
@@ -422,12 +450,18 @@ def read_staging(paths):
         with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         entries = value if isinstance(value, list) else [value]
+        # The staged filename idx, taken with the same match the duplicate-index
+        # check uses: "" for an unnumbered file. outline:NN names THIS, never a
+        # position in the merged array, because a skipped expansion leaves a gap
+        # in the filenames that a position would silently close.
+        staged_idx = re.match(r"[0-9]*", _basename(path)).group(0)
         for entry in entries:
             if not isinstance(entry, dict):
                 die(
                     "Error: story-merge: staging file must hold a story object or an "
                     "array of story objects: " + _basename(path)
                 )
+            entry["_stagedIdx"] = staged_idx
             # Written and removed again rather than never written: an authored
             # _srcIdx was overwritten and deleted by the jq, so a staging file
             # carrying one must not smuggle it into the output either.
@@ -446,13 +480,39 @@ def assign_ids(stories):
         story["id"] = "US-" + _pad(position + 1, 3)
 
 
+# One pattern for what an outline reference looks like inside story text: the
+# literal "outline:" and exactly two digits that are not followed by a third.
+# outline:041 and outline:7 are not tokens, so a longer number or a bare digit is
+# never half-rewritten, and US-NNN text can never match. Compiled once here so the
+# pre-split pass below and the post-split pass in _remap_block cannot disagree.
+OUTLINE_TOKEN = re.compile(r"outline:([0-9]{2})(?![0-9])")
+
+
 def outline_map(stories):
-    """outline:NN is a 1-based position in the merged array, zero-padded to two."""
-    return {_pad(position + 1, 2): story["id"] for position, story in enumerate(stories)}
+    """{staged filename idx: story id}, the first story staged under each idx.
+
+    outline:NN is the zero-padded idx in the staged FILENAME (NN-slug.json), not a
+    position in the merged array: after a skipped expansion the two disagree, and
+    resolving by position repoints every later reference at the wrong story. An
+    unnumbered file has no idx and is never a target. A story dict carrying no
+    _stagedIdx key at all (a list built by hand, as a unit test does) falls back
+    to its 1-based list position; read_staging always sets the key, so a real run
+    never takes that branch.
+    """
+    mapping = {}
+    for position, story in enumerate(stories):
+        idx = story.get("_stagedIdx")
+        if idx is None:
+            idx = _pad(position + 1, 2)
+        if idx == "":
+            continue
+        mapping.setdefault(idx, story["id"])
+    return mapping
 
 
-def remap_outline_tokens(stories):
-    mapping = outline_map(stories)
+def remap_outline_tokens(stories, mapping=None):
+    if mapping is None:
+        mapping = outline_map(stories)
     for story in stories:
         remapped = []
         for dep in _list(story.get("dependsOn")):
@@ -462,6 +522,84 @@ def remap_outline_tokens(stories):
             else:
                 remapped.append(dep)
         story["dependsOn"] = remapped
+
+
+def _rewrite_story_text(story, sub):
+    """Apply `sub(text, path, shell)` to every text field a story reference can sit in.
+
+    The one walk both text passes share -- the outline:NN pass before the split and
+    the US-NNN pass after it -- so they cannot disagree on which fields they own.
+    Covers implementation.approach, implementation.verify,
+    implementation.guardRails[], tasks[], notes, acceptanceCriteria[], gate.prompt
+    and gate.options[], in that order. `path` is the field path ("tasks[1]"), and
+    `shell` is true for verify and guardRails only: those two are shell text, and a
+    pass that adds anything but a bare id to them can break the script.
+
+    A field is assigned only when its text changed, so no key is created and no
+    order moves.
+    """
+
+    def field(container, key, path, shell=False):
+        value = container.get(key)
+        if isinstance(value, str):
+            rewritten = sub(value, path, shell)
+            if rewritten != value:
+                container[key] = rewritten
+
+    def entries(container, key, path, shell=False):
+        values = container.get(key)
+        if not isinstance(values, list):
+            return
+        for index, value in enumerate(values):
+            if isinstance(value, str):
+                rewritten = sub(value, path + "[" + str(index) + "]", shell)
+                if rewritten != value:
+                    values[index] = rewritten
+
+    implementation = story.get("implementation")
+    if isinstance(implementation, dict):
+        field(implementation, "approach", "implementation.approach")
+        field(implementation, "verify", "implementation.verify", True)
+        entries(implementation, "guardRails", "implementation.guardRails", True)
+    entries(story, "tasks", "tasks")
+    field(story, "notes", "notes")
+    entries(story, "acceptanceCriteria", "acceptanceCriteria")
+    gate = story.get("gate")
+    if isinstance(gate, dict):
+        field(gate, "prompt", "gate.prompt")
+        entries(gate, "options", "gate.options")
+
+
+def remap_story_text_tokens(stories, mapping):
+    """Resolve every OUTLINE_TOKEN in a story's text fields by staged filename idx.
+
+    The fields are those `_rewrite_story_text` walks. verify and guardRails go
+    through the SAME helper as the rest, so a guardRails entry that equalled a
+    verify segment before the merge still does after it. A field is assigned only
+    when its text changed, so no key is created and no order moves, and a second
+    application changes nothing (a story id contains no "outline:").
+
+    Returns one "US-NNN <field path>: outline:NN" line per token whose idx has no
+    staged file; such a token is left in place here and the caller refuses the
+    merge, so it is never dropped and never resolved by position.
+    """
+    unmapped = []
+
+    for story in stories:
+        story_id = story["id"]
+
+        def sub(text, path, shell, story_id=story_id):
+            def replace(match):
+                target = mapping.get(match.group(1))
+                if target is None:
+                    unmapped.append(story_id + " " + path + ": " + match.group(0))
+                    return match.group(0)
+                return target
+
+            return OUTLINE_TOKEN.sub(replace, text)
+
+        _rewrite_story_text(story, sub)
+    return unmapped
 
 
 def unresolved_outline_refs(stories):
@@ -497,7 +635,7 @@ def _die_each(lines):
     sys.exit(1)
 
 
-def inject_foundation(stories, foundation_values):
+def inject_foundation(stories, foundation_values, mapping=None):
     """--foundation NN | <project>:NN, repeatable: one foundation PER project group.
 
     Each accepted foundation gains an edge from every OTHER story sharing its
@@ -561,7 +699,8 @@ def inject_foundation(stories, foundation_values):
         # is unambiguously the separator.
         parsed.append((raw, tail if sep else raw, head if sep else None))
 
-    mapping = outline_map(stories)
+    if mapping is None:
+        mapping = outline_map(stories)
 
     # Gate 1 -- indices resolving to nothing. Byte-identical to the pre-batch
     # single message when exactly one value is at fault.
@@ -1731,6 +1870,7 @@ _WORKING_KEYS = (
     "_side",
     "__droppedDeps",
     "__becameRoot",
+    "_auditChanged",
 )
 
 
@@ -1747,10 +1887,11 @@ def _for_output(stories):
 
 
 # ---------------------------------------------------------------------------
-# Advisory story smells: tasks[]/approach overlap and oversized stories
+# Advisory story smells: overlap, size, audit duplication, stale notes, outline
+# leftovers and test enumeration
 # ---------------------------------------------------------------------------
 #
-# Both are reported into metadata.smellWarnings and on stderr, and neither ever
+# All six are reported into metadata.smellWarnings and on stderr, and none ever
 # drops a story, blocks the merge or changes its exit status. They are computed
 # inside each writer, AFTER the id remap, so storyId is the id that lands on
 # disk -- the orphan-symbol and verify-coverage entries are built in main
@@ -1763,25 +1904,37 @@ def _for_output(stories):
 # update SMELL_CALIBRATION_AS_OF and the firing counts when you do.
 #
 # SMELL_CALIBRATION_AS_OF = the commit the constants were measured on, and the date.
+# The figures below were taken on top of that commit with the four newest types
+# in place, so the marker names the base the working tree stood on.
 # Measured firing counts at the values below (calibrate_story_smells.py, default
 # mode, run at that commit; plan files are live, so their figures are as of that run):
 #   golden corpus (86 staged cases, 167 stories, bytes max 369):
-#       field-overlap 0, story-oversize 0
-#   the #164 plan, .aimi/tasks/2026-10-13-fix-issue-164-multi-repo-plan-execute-defects-tasks.json
-#   (7 stories, 6496-11570 bytes, median 7372; overlap n=4 max 0.23):
-#       field-overlap 0, story-oversize 0   <- the gate `--check` enforces
-#   every tasks file under .aimi/ (70 files, 419 stories, bytes p50 12354 p90 22268;
-#   overlap n=4 over 405 eligible stories p50 0.11 p90 0.25 p95 0.29 max 0.45):
+#       all six types 0 (field-overlap, story-oversize, audit-duplication,
+#       stale-sibling-note, leftover-outline-token, ac-test-enumeration)
+#   the #164 plan, found under .aimi/ (it is archived now: the script globs
+#   .aimi/**, so it still finds it) (7 stories, 6496-11570 bytes, median 7372;
+#   overlap n=4 max 0.23):
+#       field-overlap 0, story-oversize 0, audit-duplication 0,
+#       stale-sibling-note 0, ac-test-enumeration 0,
+#       leftover-outline-token 5 (US-002, 004, 005, 006, 007: 11 fields; the plan
+#       predates the text remap)   <- the set `--check` enforces, exactly
+#   every tasks file under .aimi/ (71 files, 433 stories, bytes p50 11903 p90 22183;
+#   overlap n=4 over 419 eligible stories p50 0.10 p90 0.24 p95 0.29 max 0.45):
 #       field-overlap 16, story-oversize 210 (floor 14336 would flag 160, 16384
-#       would flag 109); the 2x-median rule alone flags 2 of 419.
-#   This includes the plan being executed when these were measured (the #165 plan:
-#   13 stories, 5385-15230 bytes, median 8344, overlap max 0.09), whose largest
-#   story (15230 bytes) fires story-oversize at 12288. That is expected and
-#   advisory, not a calibration failure: the gate pins the #164 plan, not that one.
+#       would flag 109); the 2x-median rule alone flags 2 of 433.
+#       stale-sibling-note 3, leftover-outline-token 174, ac-test-enumeration 28.
+#       audit-duplication 0 there: no stored plan carries the audit's changed-field
+#       record, so only a live merge can fire it.
+#   This includes plans being executed when these were measured, whose largest
+#   story fires story-oversize at 12288. That is expected and advisory, not a
+#   calibration failure: the gate pins the #164 plan, not those.
 # 12288 is the smallest 1 KiB step above the #164 plan's maximum (11570); 0.30 at
 # n=4 is the p95 of history and sits above that plan's 0.23 maximum. n=3 is too
 # noisy (max 0.31 there, 0.52 overall) and n=5 loses the signal (p95 0.23).
-SMELL_CALIBRATION_AS_OF = "4b261f8 2026-10-23"
+# AUDIT_DUPLICATION_THRESHOLD 0.20 is the p83 of the same distribution (72 of 419
+# eligible stories reach it, 37 reach 0.25, 16 reach 0.30): the check only runs
+# for a story an audit patch changed in both fields, so it can sit below 0.30.
+SMELL_CALIBRATION_AS_OF = "9fcfa44 2026-10-23"
 FIELD_OVERLAP_NGRAM = 4
 FIELD_OVERLAP_THRESHOLD = 0.30
 FIELD_OVERLAP_MIN_TASKS = 3
@@ -1790,6 +1943,24 @@ STORY_OVERSIZE_FLOOR_BYTES = 12288
 STORY_OVERSIZE_MEDIAN_FACTOR = 2
 STORY_OVERSIZE_MEDIAN_MIN_STORIES = 3
 STORY_OVERSIZE_MEDIAN_MIN_BYTES = 4096
+# audit-duplication asks the field-overlap question only of a story an audit patch
+# already changed in BOTH tasks and implementation.approach, so the prior that the
+# overlap is the audit's doing is far stronger than for a story picked at random,
+# and the bar can sit below FIELD_OVERLAP_THRESHOLD. 0.20 is the p83 of history
+# (72 of 419 eligible stories reach it; 37 reach 0.25, 16 reach 0.30).
+AUDIT_DUPLICATION_THRESHOLD = 0.20
+AUDIT_DUPLICATION_FIELDS = ("tasks", "implementation.approach")
+# A citation of a sibling inside the older paragraphs of `notes`: US-NNN, or the
+# prose form `story NN`. An outline token in notes has already been rewritten to
+# US-NNN by the remap before this runs.
+STALE_NOTE_SIBLING_PATTERN = re.compile(r"\bUS-([0-9]{3})\b|\b(?i:story) ([0-9]{1,3})\b")
+# `outline:` followed by one or more digits. OUTLINE_TOKEN owns exactly two
+# digits not followed by a third, so a one-digit `outline:7` or a longer
+# `outline:041` is text the remap does not own and leaves in place.
+LEFTOVER_OUTLINE_PATTERN = re.compile(r"outline:[0-9]+")
+# A criterion listing test functions states coverage, which belongs in tasks[].
+AC_TEST_ENUMERATION_PATTERN = re.compile(r"\btest_[a-z0-9_]+")
+AC_TEST_ENUMERATION_MIN = 3
 
 _WORD_RE = re.compile(r"[^\W_]+")
 
@@ -1839,11 +2010,12 @@ def story_bytes(story):
 
 
 def advisory_story_smells(stories):
-    """The field-overlap and story-oversize entries for a plan's stories.
+    """The advisory entries for a plan's stories, in a fixed type order.
 
     `stories` is every story of the plan -- on a split, the union of all output
-    files -- so the median is plan-wide. Returns the combined entries, field-
-    overlap first.
+    files -- so the median is plan-wide. Returns field-overlap, story-oversize,
+    audit-duplication, stale-sibling-note, leftover-outline-token and
+    ac-test-enumeration entries, in that order.
     """
     stories = [s for s in stories if isinstance(s, dict)]
     overlap = []
@@ -1891,7 +2063,154 @@ def advisory_story_smells(stories):
                     + ")",
                 }
             )
-    return overlap + oversize
+    return (
+        overlap
+        + oversize
+        + audit_duplication_smells(stories)
+        + stale_sibling_note_smells(stories)
+        + leftover_outline_token_smells(stories)
+        + ac_test_enumeration_smells(stories)
+    )
+
+
+def audit_duplication_smells(stories):
+    """Stories an audit patch left with tasks[] restating implementation.approach.
+
+    Fires only when the audit's changed-field record (the `_auditChanged` working
+    key main attaches from audit-result.json) lists BOTH tasks and
+    implementation.approach for the story AND field_overlap_ratio reaches
+    AUDIT_DUPLICATION_THRESHOLD. No record, a record naming one of the two, or a
+    story the ratio is not defined for yields nothing.
+    """
+    entries = []
+    for story in stories:
+        changed = story.get("_auditChanged")
+        if not isinstance(changed, list) or not all(f in changed for f in AUDIT_DUPLICATION_FIELDS):
+            continue
+        ratio = field_overlap_ratio(story)
+        if ratio is None or ratio < AUDIT_DUPLICATION_THRESHOLD:
+            continue
+        rounded = round(ratio, 3)
+        entries.append(
+            {
+                "type": "audit-duplication",
+                "storyId": story.get("id"),
+                "ratio": rounded,
+                "ngram": FIELD_OVERLAP_NGRAM,
+                "message": "an audit patch changed both tasks and implementation.approach, and"
+                " tasks[] now restates the approach ("
+                + str(rounded)
+                + " of its "
+                + str(FIELD_OVERLAP_NGRAM)
+                + "-word sequences also occur in it)",
+            }
+        )
+    return entries
+
+
+def _sibling_id(match):
+    if match.group(1):
+        return "US-" + match.group(1)
+    return "US-" + _pad(int(match.group(2)), 3)
+
+
+def stale_sibling_note_smells(stories):
+    """Older `notes` paragraphs that cite a different story of the merged set.
+
+    Scans every paragraph before the last NOTES_SEPARATOR; the final paragraph
+    (the one an audit appended) and a note with no separator are never scanned.
+    A citation counts only when it names a story that exists in this plan and is
+    not the story carrying the note.
+    """
+    ids = {s.get("id") for s in stories}
+    entries = []
+    for story in stories:
+        notes = story.get("notes")
+        if not isinstance(notes, str) or NOTES_SEPARATOR not in notes:
+            continue
+        cited = set()
+        for paragraph in notes.split(NOTES_SEPARATOR)[:-1]:
+            for match in STALE_NOTE_SIBLING_PATTERN.finditer(paragraph):
+                sibling = _sibling_id(match)
+                if sibling in ids and sibling != story.get("id"):
+                    cited.add(sibling)
+        if cited:
+            ordered = sorted(cited)
+            entries.append(
+                {
+                    "type": "stale-sibling-note",
+                    "storyId": story.get("id"),
+                    "cited": ordered,
+                    "message": "notes written before the audit cite "
+                    + ", ".join(ordered)
+                    + ", which may no longer describe that story",
+                }
+            )
+    return entries
+
+
+def _string_fields(value, path):
+    """(field path, text) for every string under `value`; list entries share the list's path."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield from _string_fields(child, path + "." + str(key) if path else str(key))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _string_fields(child, path)
+
+
+def leftover_outline_token_smells(stories):
+    """Stories where an `outline:` + digits survived the remap in a non-dependsOn field."""
+    entries = []
+    for story in stories:
+        fields = set()
+        for key, value in story.items():
+            if key == "dependsOn" or key in _WORKING_KEYS or key.startswith("_"):
+                continue
+            for path, text in _string_fields(value, key):
+                if LEFTOVER_OUTLINE_PATTERN.search(text):
+                    fields.add(path)
+        if fields:
+            ordered = sorted(fields)
+            entries.append(
+                {
+                    "type": "leftover-outline-token",
+                    "storyId": story.get("id"),
+                    "fields": ordered,
+                    "message": "an outline: token survived the remap in " + ", ".join(ordered),
+                }
+            )
+    return entries
+
+
+def ac_test_enumeration_smells(stories):
+    """One entry per acceptance criterion naming AC_TEST_ENUMERATION_MIN or more distinct tests."""
+    entries = []
+    for story in stories:
+        criteria = story.get("acceptanceCriteria")
+        if not isinstance(criteria, list):
+            continue
+        for index, criterion in enumerate(criteria):
+            if not isinstance(criterion, str):
+                continue
+            count = len(set(AC_TEST_ENUMERATION_PATTERN.findall(criterion)))
+            if count >= AC_TEST_ENUMERATION_MIN:
+                entries.append(
+                    {
+                        "type": "ac-test-enumeration",
+                        "storyId": story.get("id"),
+                        "index": index,
+                        "count": count,
+                        "message": "acceptanceCriteria["
+                        + str(index)
+                        + "] names "
+                        + str(count)
+                        + " distinct tests; coverage belongs in tasks[]",
+                    }
+                )
+    return entries
 
 
 def report_advisory_story_smells(entries):
@@ -1906,6 +2225,26 @@ def report_advisory_story_smells(entries):
             "story-oversize",
             "Warning: story-merge: story-oversize smell detected (advisory; story is far above"
             " the plan's norm):",
+        ),
+        (
+            "audit-duplication",
+            "Warning: story-merge: audit-duplication smell detected (advisory; an audit patch"
+            " left tasks[] restating implementation.approach):",
+        ),
+        (
+            "stale-sibling-note",
+            "Warning: story-merge: stale-sibling-note smell detected (advisory; an older notes"
+            " paragraph cites another story):",
+        ),
+        (
+            "leftover-outline-token",
+            "Warning: story-merge: leftover-outline-token smell detected (advisory; an outline:"
+            " token survived the remap):",
+        ),
+        (
+            "ac-test-enumeration",
+            "Warning: story-merge: ac-test-enumeration smell detected (advisory; a criterion"
+            " lists test names):",
         ),
     ):
         lines = [
@@ -1949,12 +2288,57 @@ def write_legacy(stories, output_path, staging_dir, smells, phase_metadata=None)
 # ---------------------------------------------------------------------------
 
 
-def _remap_block(stories, id_map):
+# One pattern for what a story-id reference looks like inside story text: "US-"
+# and exactly three digits, with no word character before it and no digit after.
+# XUS-001 and US-0011 are not references, so a longer number or an embedded id is
+# never half-rewritten -- the same boundary rule OUTLINE_TOKEN applies to its own
+# token.
+STORY_ID_REF = re.compile(r"(?<!\w)US-[0-9]{3}(?![0-9])")
+
+
+def _render_split_refs(story, id_map, global_map, axis_key):
+    """Re-render the US-NNN references in one story's text after a split.
+
+    Story text was written against the pre-split ids, which stop naming the same
+    story once the split renumbers each output file. One substitution per field,
+    single-pass, so ids that swap inside one block never chain. The target is found
+    in this file's own id_map first (same file: the new id alone), then in
+    global_map (another file: the new id plus a label naming where it went, the
+    target's `axis_key` -- "frontend"/"backend" on the SIDE axis, the project key on
+    the PROJECT axis, with "." read as "root"). Any other id is returned unchanged.
+
+    verify and guardRails get the id only: a parenthesis there is a shell syntax
+    error, and both receive the identical substitution, so every guardRails entry
+    still equals a segment of the rewritten verify.
+    """
+
+    def sub(text, path, shell):
+        def replace(match):
+            old = match.group(0)
+            if old in id_map:
+                return id_map[old]
+            target = global_map.get(old)
+            if target is None:
+                return old
+            if shell:
+                return target["newId"]
+            label = target[axis_key]
+            return target["newId"] + " (" + ("root" if label == "." else str(label)) + ")"
+
+        return STORY_ID_REF.sub(replace, text)
+
+    _rewrite_story_text(story, sub)
+
+
+def _remap_block(stories, id_map, global_map=None, axis_key=None):
     """Rewrite ids and dependsOn inside one output file, recording what was lost.
 
     A dependsOn entry that fails to resolve against this file's OWN id map is by
     construction resolvable in another file -- the outline:NN remap and its
     unresolved check ran before this -- so it is dropped here and named later.
+
+    With a global_map and the axis key it was built under, the same pass also
+    re-renders the US-NNN references in each story's text (see _render_split_refs).
     """
     for story in stories:
         pre = _list(story.get("dependsOn"))
@@ -1964,6 +2348,8 @@ def _remap_block(stories, id_map):
         story["dependsOn"] = [id_map[dep] for dep in pre if id_map.get(dep) is not None]
         story["__droppedDeps"] = dropped
         story["__becameRoot"] = had_deps and story["dependsOn"] == []
+        if global_map is not None:
+            _render_split_refs(story, id_map, global_map, axis_key)
 
 
 def _dropped_banner(warnings, kind, axis_note):
@@ -2063,8 +2449,8 @@ def write_side_split(stories, output_path, staging_dir, smells, phase_aware):
             "title": story.get("title"),
         }
 
-    _remap_block(frontend, fe_map)
-    _remap_block(backend, be_map)
+    _remap_block(frontend, fe_map, global_map, "side")
+    _remap_block(backend, be_map, global_map, "side")
 
     cross = []
     for side, group in (("frontend", frontend), ("backend", backend)):
@@ -2254,7 +2640,7 @@ def write_project_split(
             }
 
     for block in blocks:
-        _remap_block(block["stories"], block["idmap"])
+        _remap_block(block["stories"], block["idmap"], global_map, "project")
         compute_waves(block["stories"])
 
     # This axis keys every entry by `project` at BOTH the top level and in every
@@ -2479,6 +2865,126 @@ def write_project_split(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# The verify refusal and validate-staging
+# ---------------------------------------------------------------------------
+#
+# ONE helper decides whether a story's implementation.verify can swallow a
+# failing line, and both callers use it: `validate-staging`, which /aimi:plan runs
+# while stories are still being expanded, and the story-merge refusal below, which
+# is the second gate because an audit patch that replaces a verify lands after the
+# expansion-time check. Two copies of the rule could disagree about one story.
+#
+# The rule itself (tasks.py's verify_composition_findings) is imported INSIDE the
+# function body: tasks.py imports story_merge at module level, so a top-level
+# import here would close a cycle. roadmap.py's function-local imports are the
+# precedent. A finding can quote a model-written verify, so every finding passes
+# through rm_sanitize before it reaches stdout or stderr.
+
+_FINDING_MAXLEN = 500
+
+
+def verify_refusal_findings(story):
+    """Sanitized findings for one story's verify; [] for a clean or absent one."""
+    if not isinstance(story, dict):
+        return []
+    from tasks import verify_composition_findings
+
+    return [
+        rm_sanitize(finding, _FINDING_MAXLEN)
+        for finding in verify_composition_findings(_implementation_verify(story))
+    ]
+
+
+def _depends_on_tokens(entries):
+    tokens = set()
+    for entry in entries:
+        deps = entry.get("dependsOn")
+        if isinstance(deps, list):
+            tokens.update(dep for dep in deps if isinstance(dep, str))
+    return tokens
+
+
+def validate_staging(staging_dir, outline=None):
+    """{idx: [finding, ...]} for the staged `NN-*.json` files that fail a rule.
+
+    Files come from audit_patches.staged_idx_map -- the glob the audit gate uses,
+    so sidecars and symlinks are excluded -- and a file that is not valid JSON is
+    skipped, never fatal: its shape is Schema Validation step 2's business. With
+    an outline, every producer -> consumer edge outline_contract reports (an
+    `ext:` consume never makes one) requires `outline:<from>` in the `dependsOn`
+    of the story staged as `<to>`; that is the only producer lookup there is.
+    """
+    edges = []
+    if outline is not None:
+        from outline_contract import validate_outline
+
+        edges = validate_outline(outline)["edges"]
+    report = {}
+    for idx, path in sorted(staged_idx_map(staging_dir).items()):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                value = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        entries = [e for e in (value if isinstance(value, list) else [value]) if isinstance(e, dict)]
+        findings = []
+        for entry in entries:
+            findings.extend(verify_refusal_findings(entry))
+        if entries:
+            tokens = _depends_on_tokens(entries)
+            for edge in edges:
+                if edge["to"] == idx and "outline:" + edge["from"] not in tokens:
+                    findings.append(
+                        rm_sanitize(
+                            "consumes " + str(edge["name"]) + ", which outline entry "
+                            + edge["from"] + " produces, but dependsOn lacks outline:"
+                            + edge["from"],
+                            _FINDING_MAXLEN,
+                        )
+                    )
+        if findings:
+            report[idx] = findings
+    return report
+
+
+def verify_refusal_lines(stories):
+    """One refusal line per story whose verify swallows a failing line."""
+    lines = []
+    for story in stories:
+        for finding in verify_refusal_findings(story):
+            lines.append(
+                "  Story "
+                + story["id"]
+                + " (staged "
+                + str(story.get("_stagedIdx", ""))
+                + "): implementation.verify "
+                + finding
+            )
+    return lines
+
+
+def run_validate_staging(args):
+    """The validate-only mode: print {idx: findings} and exit 1 when non-empty."""
+    staging_dir = _flag(args, "--staging-dir", "")
+    outline_path = _flag(args, "--outline", "")
+    outline = None
+    if outline_path:
+        try:
+            with open(outline_path, "r", encoding="utf-8") as handle:
+                outline = json.load(handle)
+        except (OSError, ValueError):
+            die("Error: validate-staging: --outline is not readable JSON: " + outline_path)
+        if not isinstance(outline, list):
+            die("Error: validate-staging: --outline must hold a JSON array: " + outline_path)
+    try:
+        report = validate_staging(staging_dir, outline)
+    except (AuditRefusal, OSError) as refusal:
+        die("Error: validate-staging: " + rm_sanitize(str(refusal), _FINDING_MAXLEN))
+    sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2 if report else None) + "\n")
+    return 1 if report else 0
+
+
 def _flag(argv, name, default=None):
     if name in argv:
         i = argv.index(name)
@@ -2500,6 +3006,8 @@ def _flags_all(argv, name):
 
 def main(argv):
     args = argv[1:]
+    if "--validate-staging" in args:
+        return run_validate_staging(args)
     staging_dir = _flag(args, "--staging-dir", "")
     output_path = _flag(args, "--output", "")
     split_mode = _flag(args, "--split", "legacy")
@@ -2521,15 +3029,45 @@ def main(argv):
         die("Error: story-merge: no *.json files found in " + staging_dir)
 
     audit_status = require_audit(staging_dir, paths)
+    # Read here, while the staging directory still exists: the writers delete it.
+    audit_changed = read_changed_fields(staging_dir)
 
     stories = read_staging(paths)
     assign_ids(stories)
-    remap_outline_tokens(stories)
+    # The second gate for a verify that can swallow a failing line (the first is
+    # validate-staging during expansion). It sits after assign_ids so it can name
+    # US-NNN and ahead of every remap and sweep so a refusal writes nothing. No
+    # agent_mode branch: an audit patch can introduce the verify this refuses.
+    swallowing = verify_refusal_lines(stories)
+    if swallowing:
+        die_list(
+            "Error: story-merge: implementation.verify would swallow a failing line"
+            " (start it with set -e or chain its lines with &&):",
+            swallowing,
+        )
+    # Computed ONCE, while every story still carries its _stagedIdx, and reused by
+    # --foundation below so the two can never resolve an idx differently.
+    idx_map = outline_map(stories)
+    remap_outline_tokens(stories, idx_map)
     unresolved = unresolved_outline_refs(stories)
     if unresolved:
         die_list("Error: story-merge: unresolved outline reference(s):", unresolved)
+    text_unresolved = remap_story_text_tokens(stories, idx_map)
+    if text_unresolved:
+        die_list(
+            "Error: story-merge: outline reference(s) in story text name no staged file"
+            " (outline:NN is the staged filename index, never a position):",
+            text_unresolved,
+        )
     for story in stories:
+        # Keyed by the staged filename idx the way outline_map is, and attached
+        # as a working key (stripped from output) so the smell pass can ask which
+        # fields an audit patch changed without reopening the staging directory.
+        changed = audit_changed.get(story.get("_stagedIdx"))
+        if changed:
+            story["_auditChanged"] = changed
         story.pop("_srcIdx", None)
+        story.pop("_stagedIdx", None)
 
     # Earliest point at which every story carries its final US-NNN id, and still
     # ahead of --foundation, cycle detection and the sweeps: a refusal here costs
@@ -2546,7 +3084,7 @@ def main(argv):
         else None
     )
 
-    foundation_ids = inject_foundation(stories, foundation_values) if foundation_values else []
+    foundation_ids = inject_foundation(stories, foundation_values, idx_map) if foundation_values else []
 
     in_cycle = cycle_stories(stories)
     if in_cycle:

@@ -30,7 +30,8 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
-#   - apply-audit-patches Tests (six assertions, inside the story-merge section)
+#   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
+#   - outline-shift Tests (seven assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC53)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -4978,7 +4979,7 @@ test_story_merge_missing_dir() {
 }
 
 # apply-audit-patches: the verb that applies the cross-story auditor's patches.
-# Fixtures live under .aimi/ so path confinement accepts them. Six assertions.
+# Fixtures live under .aimi/ so path confinement accepts them. Nine assertions.
 test_apply_audit_patches() {
   echo ""
   echo "=== apply-audit-patches: apply, drop, annotate, refuse ==="
@@ -5004,7 +5005,125 @@ test_apply_audit_patches() {
   assert_exit_code "1" "$exit_code" "apply-audit-patches: an escaping --staging-dir exits 1"
   assert_contains "escapes project root" "$output" "apply-audit-patches: the escape is refused by confinement before the module runs"
 
-  rm -rf "$stg"
+  # replace and remove: a tasks replace lands, a verify replace that would leave
+  # a guard rail as two segments is dropped, and changedFields names what moved.
+  local stg2=".aimi/.audit-staging-aap2-$$"
+  mkdir -p "$stg2"
+  printf '%s\n' '{"title":"S01","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"tasks":["old step","drop me"],"implementation":{"approach":"a","verify":"set -e\ntest -f a.txt\ntest -f b.txt","guardRails":["test -f b.txt"]},"verification":{"strategy":"test","status":"pending"}}' > "$stg2/01-story.json"
+  printf '%s\n' '{"title":"S02","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"verification":{"strategy":"test","status":"pending"}}' > "$stg2/02-story.json"
+  printf '%s\n' '{"patches":[{"storyIdx":"01","field":"tasks","op":"replace","value":"new step","matchValue":"old step"},{"storyIdx":"01","field":"tasks","op":"remove","matchValue":"drop me"},{"storyIdx":"01","field":"implementation.verify","op":"replace","value":"echo x; echo y","matchValue":"test -f b.txt"}],"unresolved":[]}' > "$stg2/audit-result.json"
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg2" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "2|new step" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["applied"]) + "|" + ",".join(json.load(open(sys.argv[2]))["tasks"]))' "$output" "$stg2/01-story.json")" "apply-audit-patches: a tasks replace and a tasks remove land, leaving only the corrected step"
+  assert_eq "guardRails-out-of-sync|0" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["dropped"][0]["reason"] + "|" + str(d["unresolved"]))' "$output")" "apply-audit-patches: a verify replace that splits a guard rail is dropped and adds no unresolved entry"
+  assert_eq "tasks" "$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["changedFields"]["01"]))' "$stg2/audit-result.json")" "apply-audit-patches: changedFields lists only the fields an applied patch changed"
+
+  rm -rf "$stg" "$stg2"
+}
+
+test_validate_staging() {
+  echo ""
+  echo "=== validate-staging: swallowing verify, producer edge, refusals ==="
+
+  local bad=".aimi/.vs-bad-$$" good=".aimi/.vs-good-$$"
+  mkdir -p "$bad" "$good"
+  local head='{"title":"T","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"'
+  printf '%s' "${head}"'true\nfalse\ntrue\n"}}' > "$bad/01-a.json"
+  printf '%s' "${head}"'set -e\ntrue\nfalse\n"}}' > "$bad/02-b.json"
+  printf '%s' "${head}"'tsc --noEmit"}}' > "$good/01-a.json"
+  printf '%s' "${head}"'tsc --noEmit"}}' > "$good/02-b.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","produces":["sym:foo"]},{"idx":"02","title":"B","summary":"s","consumes":["sym:foo"]}]' > "$good/outline.json"
+
+  local output exit_code
+  output=$("$CLI" validate-staging --staging-dir "$bad" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-staging: a swallowing multi-line verify exits 1"
+  assert_eq "01" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output")" "validate-staging: the report is keyed by the staged idx and leaves the guarded story out"
+  assert_contains "swallow a failing line" "$output" "validate-staging: the finding names the rule"
+
+  output=$("$CLI" validate-staging --staging-dir "$good" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: a clean directory exits 0 and prints an empty object"
+
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_eq "1|02" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output")" "validate-staging: --outline reports the consumer that lacks its producer's outline token"
+
+  sed -i 's/"dependsOn":\[\]/"dependsOn":["outline:01"]/' "$good/02-b.json"
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: the same story with the token present is clean"
+
+  printf '%s' '{not json' > "$good/03-c.json"
+  output=$("$CLI" validate-staging --staging-dir "$good" --outline "$good/outline.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "0|{}" "$exit_code|$output" "validate-staging: a staged file that is not valid JSON is skipped, never fatal"
+
+  output=$("$CLI" validate-staging --staging-dir "/tmp" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-staging: an escaping --staging-dir exits 1"
+  assert_contains "escapes project root" "$output" "validate-staging: the escape is refused by confinement before the module runs"
+
+  rm -rf "$bad" "$good"
+}
+
+test_validate_outline() {
+  echo ""
+  echo "=== validate-outline: contract check, waves, refusals ==="
+
+  local dir=".aimi/.outline-vo-$$"
+  mkdir -p "$dir"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","produces":["sym:foo"]},{"idx":"02","title":"B","summary":"s","consumes":["sym:foo","ext:path:src/old.py"]}]' > "$dir/ok.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s","consumes":["sym:ghost"]}]' > "$dir/bad.json"
+  printf '%s' '[{"idx":"01","title":"A","summary":"s"},{"idx":"02","title":"B","summary":"s"}]' > "$dir/plain.json"
+  printf '%s' '{"idx":"01"}' > "$dir/object.json"
+
+  local output exit_code
+  output=$("$CLI" validate-outline --outline "$dir/ok.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "validate-outline: a valid outline exits 0"
+  assert_eq "true|01;02|01>02:sym:foo" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["valid"]).lower() + "|" + ";".join(",".join(w) for w in d["waves"]) + "|" + ";".join(e["from"] + ">" + e["to"] + ":" + e["name"] for e in d["edges"]))' "$output")" "validate-outline: waves put the consumer after its producer and edges name the token"
+
+  output=$("$CLI" validate-outline --outline "$dir/plain.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "01,02" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(",".join(d["waves"][0]) + ("" if len(d["waves"]) == 1 else "+more"))' "$output")" "validate-outline: an outline with no contract keys is one wave holding every idx"
+
+  output=$("$CLI" validate-outline --outline "$dir/bad.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "validate-outline: an invalid outline exits 1"
+  assert_eq "false|unproduced-consume|0" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(str(d["valid"]).lower() + "|" + d["errors"][0]["code"] + "|" + str(len(d["waves"])))' "$output")" "validate-outline: an invalid outline still prints the report with waves empty"
+
+  output=$("$CLI" validate-outline --outline "$dir/object.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "Error: validate-outline:" "$output" "validate-outline: a non-array outline is refused as an Error: validate-outline line"
+
+  output=$("$CLI" validate-outline --outline "/tmp" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "escapes project root" "$output" "validate-outline: an escaping --outline is refused by confinement"
+
+  output=$("$CLI" validate-outline 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "--outline <path> is required" "$output" "validate-outline: a missing --outline is refused"
+
+  rm -rf "$dir"
+}
+
+test_outline_shift() {
+  echo ""
+  echo "=== outline-shift: renumber staged stories after an outline edit ==="
+
+  local dir=".aimi/.outline-os-$$"
+  mkdir -p "$dir/run"
+  printf '%s' '[{"idx":"01","title":"Alpha","summary":"s","produces":["sym:alpha"]},{"idx":"02","title":"Beta","summary":"s","consumes":["sym:alpha"]},{"idx":"03","title":"Gamma","summary":"s"}]' > "$dir/old.json"
+  printf '%s' '[{"idx":"01","title":"Beta","summary":"s","consumes":["sym:alpha"]},{"idx":"02","title":"Gamma","summary":"s"}]' > "$dir/new.json"
+  printf '%s' '{"title":"Alpha","dependsOn":[]}' > "$dir/run/01-alpha.json"
+  printf '%s' '{"title":"Beta","dependsOn":["outline:01"]}' > "$dir/run/02-beta.json"
+  printf '%s' '{"title":"Gamma","dependsOn":["outline:02"],"notes":"wire after outline:02"}' > "$dir/run/03-gamma.json"
+  printf '%s' '{"auditedIdx":["01","02","03"]}' > "$dir/run/audit-result.json"
+
+  local output exit_code
+  output=$("$CLI" outline-shift --staging-dir "$dir/run" --old "$dir/old.json" --new "$dir/new.json" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "outline-shift: a shift that moves two files and removes one exits 0"
+  assert_eq "02>01,03>02|01|01|-|true" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(",".join(r["from"] + ">" + r["to"] for r in d["renamed"]) + "|" + ",".join(d["removed"]) + "|" + ",".join(r["idx"] for r in d["reexpand"]) + "|" + (",".join(d["expand"]) or "-") + "|" + str(d["auditInvalidated"]).lower())' "$output")" "outline-shift: the report lists the renames, the removed entry, the one story to re-expand and the invalidated audit"
+  assert_eq "01-beta.json 02-gamma.json" "$(ls "$dir/run" | tr '\n' ' ' | sed 's/ $//')" "outline-shift: the shifted files carry their new names, the removed one is deleted and the stale audit is gone"
+  assert_eq "wire after outline:01" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notes"])' "$dir/run/02-gamma.json")" "outline-shift: outline tokens in a kept story are rewritten to the new numbering"
+  assert_eq "absent" "$([ -e "$dir/run/audit-result.json" ] && echo present || echo absent)" "outline-shift: a shift that changed something deletes audit-result.json"
+
+  output=$("$CLI" outline-shift --staging-dir "/tmp" --old "$dir/old.json" --new "$dir/new.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "escapes project root" "$output" "outline-shift: an escaping --staging-dir is refused by confinement"
+
+  printf '%s' '{"title":"Stray"}' > "$dir/run/09-stray.json"
+  output=$("$CLI" outline-shift --staging-dir "$dir/run" --old "$dir/new.json" --new "$dir/new.json" 2>&1) && exit_code=0 || exit_code=$?
+  assert_contains "09-stray.json" "$output" "outline-shift: a staged file matching no --old entry is refused, naming the file"
+
+  rm -rf "$dir"
 }
 
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
@@ -8806,6 +8925,9 @@ main() {
   test_story_merge_happy_path
   test_story_merge_missing_dir
   test_apply_audit_patches
+  test_validate_staging
+  test_validate_outline
+  test_outline_shift
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_audit_gate
