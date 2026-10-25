@@ -637,7 +637,13 @@ def test_a_verify_replace_that_splits_a_rail_is_dropped_and_leaves_the_story_alo
     _, report, _ = run(stg)
     assert report["applied"] == 0
     assert report["dropped"] == [
-        {"storyIdx": "01", "field": "implementation.verify", "op": "replace", "reason": "guardRails-out-of-sync"}
+        {
+            "storyIdx": "01",
+            "field": "implementation.verify",
+            "op": "replace",
+            "reason": "guardRails-out-of-sync",
+            "rails": [0],
+        }
     ]
     assert get(stg / "01-alpha.json") == before
     assert get(stg / "audit-result.json")["changedFields"] == {}
@@ -710,6 +716,7 @@ def test_a_guardrails_replace_naming_no_segment_of_the_verify_is_dropped(stg):
     write_result(stg, [patch("01", "implementation.guardRails", "replace", "test -f elsewhere.txt", matchValue="test -f keep.txt")])
     _, report, _ = run(stg)
     assert only_reasons(report) == ["guardRails-out-of-sync"]
+    assert report["dropped"][0]["rails"] == [0]
     assert get(stg / "01-alpha.json") == before
 
 
@@ -719,6 +726,202 @@ def test_a_guardrails_replace_with_no_unique_match_is_dropped(stg, rails):
     write_result(stg, [patch("01", "implementation.guardRails", "replace", "test -f keep.txt", matchValue="test -f keep.txt")])
     _, report, _ = run(stg)
     assert only_reasons(report) == ["matchValue-match-count"]
+
+
+# --- guard rails: a drop is differential, and names only the rails it newly broke -------
+
+# A verify holding a multi-line function definition. A rail naming one line inside
+# the function body is not a top-level segment (issue 169); `check` and the last
+# line are.
+FUNC_VERIFY = "set -e\ncheck() {\n  test -f a.txt\n  test -f b.txt\n}\ncheck\ntest -f keep.txt"
+
+
+def with_func_verify(stg, rails, verify=FUNC_VERIFY):
+    with_verify(stg, verify=verify, rails=rails)
+
+
+def file_bytes(path):
+    with open(path, "rb") as handle:
+        return handle.read()
+
+
+def test_issue_169_one_bad_rail_no_longer_discards_the_patches_of_its_story(stg):
+    # rail 0 is a line inside the function body (broken before any patch);
+    # rail 1 is a whole top-level segment.
+    with_func_verify(stg, ("test -f a.txt", "test -f keep.txt"))
+    write_result(
+        stg,
+        [
+            patch("01", "implementation.verify", "replace", "test -f new.txt", matchValue="test -f keep.txt"),
+            patch("01", "implementation.guardRails", "replace", "check", matchValue="test -f new.txt"),
+            patch("01", "tasks", "add", "a new task"),
+        ],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 3
+    assert report["dropped"] == []
+    impl = get(stg / "01-alpha.json")["implementation"]
+    assert impl["verify"].endswith("check\ntest -f new.txt")
+    assert impl["guardRails"] == ["test -f a.txt", "check"]  # the bad rail is untouched
+    assert "a new task" in get(stg / "01-alpha.json")["tasks"]
+
+
+def test_a_guardrails_replace_that_fixes_one_of_two_broken_rails_lands(stg):
+    with_func_verify(stg, ("test -f a.txt", "test -f b.txt", "test -f keep.txt"))
+    write_result(
+        stg,
+        [patch("01", "implementation.guardRails", "replace", "check", matchValue="test -f a.txt")],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 1 and report["dropped"] == []
+    rails = get(stg / "01-alpha.json")["implementation"]["guardRails"]
+    assert rails == ["check", "test -f b.txt", "test -f keep.txt"]
+    from tasks import broken_rail_indices
+
+    assert broken_rail_indices(get(stg / "01-alpha.json")) == [1]  # the other stays broken
+
+
+def test_a_guardrails_replace_that_leaves_the_same_rail_broken_is_not_a_drop(stg):
+    # Swapping one broken rail for another broken one adds no NEW broken index.
+    with_func_verify(stg, ("test -f a.txt", "test -f keep.txt"))
+    write_result(
+        stg,
+        [patch("01", "implementation.guardRails", "replace", "test -f b.txt", matchValue="test -f a.txt")],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 1 and report["dropped"] == []
+
+
+def test_a_guardrails_replace_that_newly_breaks_a_rail_names_only_that_index(stg):
+    with_func_verify(stg, ("test -f a.txt", "test -f keep.txt"))
+    before = file_bytes(stg / "01-alpha.json")
+    write_result(
+        stg,
+        [patch("01", "implementation.guardRails", "replace", "test -f elsewhere.txt", matchValue="test -f keep.txt")],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert report["dropped"] == [
+        {
+            "storyIdx": "01",
+            "field": "implementation.guardRails",
+            "op": "replace",
+            "reason": "guardRails-out-of-sync",
+            "rails": [1],  # index 0 was already broken and is not named
+        }
+    ]
+    assert file_bytes(stg / "01-alpha.json") == before
+
+
+def test_a_verify_replace_splitting_a_good_rail_beside_a_broken_one_drops_with_that_index(stg):
+    with_func_verify(stg, ("test -f a.txt", "test -f keep.txt"))
+    before = file_bytes(stg / "01-alpha.json")
+    write_result(
+        stg,
+        [patch("01", "implementation.verify", "replace", "echo x; echo y", matchValue="test -f keep.txt")],
+    )
+    _, report, _ = run(stg)
+    assert report["applied"] == 0
+    assert report["dropped"][0]["reason"] == "guardRails-out-of-sync"
+    assert report["dropped"][0]["rails"] == [1]
+    assert file_bytes(stg / "01-alpha.json") == before
+
+
+def test_rails_are_an_ascending_list_of_ints_that_skips_an_unaffected_rail(stg):
+    verify = "set -e\ntest -f a.txt\ntest -f b.txt\ntest -f c.txt"
+    # rails 0 and 2 depend on the two lines the patch rewrites; rail 1 does not.
+    with_verify(stg, verify=verify, rails=("test -f b.txt", "test -f c.txt", "test -f a.txt"))
+    write_result(
+        stg,
+        [
+            patch(
+                "01",
+                "implementation.verify",
+                "replace",
+                "true; true\ntrue; true",
+                matchValue="test -f a.txt\ntest -f b.txt",
+            )
+        ],
+    )
+    _, report, _ = run(stg)
+    rails = report["dropped"][0]["rails"]
+    assert rails == [0, 2]
+    assert all(type(r) is int for r in rails)
+
+
+def test_the_rails_key_carries_no_rail_text_and_no_value(stg):
+    with_func_verify(stg, ("test -f a.txt", "test -f keep.txt"))
+    write_result(
+        stg,
+        [patch("01", "implementation.guardRails", "replace", "test -f SECRET-VALUE.txt", matchValue="test -f keep.txt")],
+    )
+    _, report, _ = run(stg)
+    entry = report["dropped"][0]
+    assert set(entry) == {"storyIdx", "field", "op", "reason", "rails"}
+    dumped = json.dumps(report)
+    for text in ("SECRET-VALUE", "keep.txt", "a.txt"):
+        assert text not in dumped
+
+
+def test_only_a_guardrails_out_of_sync_drop_carries_rails(stg):
+    with_verify(stg, verify="set -e\ntest -f old.txt\ntest -f keep.txt", rails=None)
+    write_result(
+        stg,
+        [
+            patch("01", "implementation.verify", "replace", "true", matchValue="set -e"),  # verify-composition
+            patch("01", "implementation.verify", "replace", "x", matchValue="nowhere"),  # matchValue-match-count
+            patch("01", "notes", "replace", "x", matchValue="nowhere"),  # matchValue-match-count
+            patch("99"),  # bad-storyIdx
+        ],
+    )
+    _, report, _ = run(stg)
+    assert only_reasons(report) == [
+        "bad-storyIdx",
+        "verify-composition",
+        "matchValue-match-count",
+        "matchValue-match-count",
+    ]
+    assert all("rails" not in entry for entry in report["dropped"])
+
+
+def test_plan_drop_writes_rails_as_a_sorted_list_of_real_ints_only():
+    plan = AP._Plan()
+    plan.drop("01", "implementation.verify", "replace", "guardRails-out-of-sync", rails=[3, 1, True, "2", 1.5, 1])
+    plan.drop("01", "notes", "add", "post-validation")
+    assert plan.dropped[0]["rails"] == [1, 3]
+    assert "rails" not in plan.dropped[1]
+
+
+def test_rail_positions_are_stable_across_a_guardrails_replace_and_a_verify_replace():
+    # An index names the same rail before and after, which is what makes the two
+    # broken-index sets comparable: a guardRails replace assigns in place and a
+    # verify replace rebuilds the rail list one to one.
+    doc = story(
+        implementation={
+            "approach": "a",
+            "verify": FUNC_VERIFY,
+            "guardRails": ["test -f a.txt", "test -f keep.txt", "check"],
+        }
+    )
+    guard = copy_of(doc)
+    AP._apply_one(
+        guard,
+        {"field": "implementation.guardRails", "op": "replace", "value": "test -f keep.txt", "matchValue": "check"},
+    )
+    assert guard["implementation"]["guardRails"] == ["test -f a.txt", "test -f keep.txt", "test -f keep.txt"]
+    verify = copy_of(doc)
+    AP._apply_one(
+        verify,
+        {"field": "implementation.verify", "op": "replace", "value": "test -f new.txt", "matchValue": "test -f keep.txt"},
+    )
+    assert len(verify["implementation"]["guardRails"]) == 3
+    assert verify["implementation"]["guardRails"][1] == "test -f new.txt"
+    assert verify["implementation"]["guardRails"][0] == "test -f a.txt"
+    assert verify["implementation"]["guardRails"][2] == "check"
+
+
+def copy_of(doc):
+    return json.loads(json.dumps(doc))
 
 
 def test_dropped_entries_cut_every_echoed_string_to_64_characters(stg):
