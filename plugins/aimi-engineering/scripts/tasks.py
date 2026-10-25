@@ -2440,6 +2440,190 @@ def _story_project_base(story, project_root):
     return project_path if project_inside else None
 
 
+# The lexical path rule for `implementation.files` and `implementation.outputs`.
+# It lives here, once: R17, R24 and every later caller (validate-staging, the
+# story-merge refusal, the audit patch check) call these functions and restate
+# nothing. It is LEXICAL on purpose -- string operations only, no filesystem
+# access and no os.path helper -- so the same verdict comes back whether the
+# entry names a file that exists, a directory that does not, or a repository
+# that is not checked out where the plan was written. The shared constants
+# below keep each reason and each remedy sentence spelled in one place.
+IMPLEMENTATION_FILES_FIELD = "implementation.files"
+IMPLEMENTATION_OUTPUTS_FIELD = "implementation.outputs"
+IMPLEMENTATION_PATH_FIELDS = (IMPLEMENTATION_FILES_FIELD, IMPLEMENTATION_OUTPUTS_FIELD)
+OUTPUTS_ROOT_PREFIX = ".aimi/"
+
+PATH_REASON_NOT_STRING = "is not a string"
+PATH_REASON_EMPTY = "is empty"
+PATH_REASON_ABSOLUTE = "is an absolute path"
+PATH_REASON_HOME = "starts with ~"
+PATH_REASON_DOTDOT = "has a .. segment"
+PATH_REASON_WHITESPACE = "contains whitespace"
+PATH_REASON_BACKSLASH = "contains a backslash"
+PATH_REASON_DOT = "has a . segment"
+PATH_REASON_NOT_AIMI = "does not start with .aimi/ followed by a path"
+
+FILES_ESCAPE_REMEDY = (
+    "a file outside the story's repository belongs in implementation.outputs "
+    "as a path starting with .aimi/ relative to the AIMI root"
+)
+FILES_PATH_REMEDY = (
+    "write a path relative to the story's repository, with no whitespace, "
+    "backslash, . or .. segment"
+)
+OUTPUTS_PATH_REMEDY = (
+    "write a path starting with .aimi/ relative to the AIMI root, with no "
+    "whitespace, backslash, ~, . or .. segment"
+)
+OUTPUTS_SHAPE_REMEDY = "write a list of strings, each a path starting with .aimi/"
+PATH_ECHO_MAXLEN = 60
+
+
+def _path_escape_reason(value):
+    """The reason a string leaves its repository, or `None` when it does not.
+
+    Absolute, `~`-led and `..`-bearing are the three ways a relative path stops
+    being relative to where it was written. Checked on the raw string, split on
+    "/" only: a backslash is its own refusal further down and is never read as
+    a separator here.
+    """
+    if value.startswith("/"):
+        return PATH_REASON_ABSOLUTE
+    if value.startswith("~"):
+        return PATH_REASON_HOME
+    if ".." in value.split("/"):
+        return PATH_REASON_DOTDOT
+    return None
+
+
+def implementation_path_escapes(value):
+    """True when a string names a place outside its repository (see above)."""
+    return isinstance(value, str) and _path_escape_reason(value) is not None
+
+
+def implementation_path_problem(field, value):
+    """A short reason `value` is not a valid entry of `field`, or `None`.
+
+    `field` is `implementation.files` or `implementation.outputs`; anything
+    else is the caller's bug and raises. The checks run in a fixed order so the
+    same bad value always gets the same reason: not a string, empty or
+    whitespace-only, an escape, whitespace anywhere, a backslash, a `.` segment
+    and -- for outputs alone -- a missing `.aimi/` prefix. A trailing slash is
+    allowed (a directory entry). Lexical only: the filesystem is never read.
+    """
+    if field not in IMPLEMENTATION_PATH_FIELDS:
+        raise ValueError("unknown implementation path field: " + repr(field))
+    if not isinstance(value, str):
+        return PATH_REASON_NOT_STRING
+    if value.strip() == "":
+        return PATH_REASON_EMPTY
+    escape = _path_escape_reason(value)
+    if escape is not None:
+        return escape
+    if any(char.isspace() for char in value):
+        return PATH_REASON_WHITESPACE
+    if "\\" in value:
+        return PATH_REASON_BACKSLASH
+    if "." in value.split("/"):
+        return PATH_REASON_DOT
+    if field == IMPLEMENTATION_OUTPUTS_FIELD:
+        if not value.startswith(OUTPUTS_ROOT_PREFIX) or not value[len(OUTPUTS_ROOT_PREFIX):].strip("/"):
+            return PATH_REASON_NOT_AIMI
+    return None
+
+
+def _path_echo(value):
+    """A model-written value, made safe to quote inside a finding.
+
+    Findings are read by people and by model prompts, so the echoed value loses
+    every backtick and `$(` (looped, so `$$((` cannot rebuild one), has each
+    whitespace character shown as a plain space, and is cut short.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    text = text.replace("`", "'")
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    text = re.sub(r"\s", " ", text)
+    if len(text) > PATH_ECHO_MAXLEN:
+        text = text[:PATH_ECHO_MAXLEN] + "..."
+    return text
+
+
+def _path_finding(field, index, value, reason, remedy):
+    return (
+        field + "[" + str(index) + "] " + reason
+        + " (value: " + _path_echo(value) + "); " + remedy + "."
+    )
+
+
+def _story_implementation(story):
+    if not isinstance(story, dict):
+        return None
+    implementation = story.get("implementation")
+    return implementation if isinstance(implementation, dict) else None
+
+
+def implementation_outputs_findings(story):
+    """One sentence per bad `implementation.outputs` entry of a story.
+
+    Absent, null and empty are valid. A value that is not a list of strings is
+    exactly one finding about the field as a whole, with no per-entry findings
+    layered on top of it.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    outputs = implementation.get("outputs")
+    if outputs is None:
+        return []
+    if not isinstance(outputs, list) or not all(isinstance(e, str) for e in outputs):
+        return [
+            IMPLEMENTATION_OUTPUTS_FIELD
+            + " is not a list of strings; " + OUTPUTS_SHAPE_REMEDY + "."
+        ]
+    findings = []
+    for index, entry in enumerate(outputs):
+        reason = implementation_path_problem(IMPLEMENTATION_OUTPUTS_FIELD, entry)
+        if reason is not None:
+            findings.append(
+                _path_finding(
+                    IMPLEMENTATION_OUTPUTS_FIELD, index, entry, reason,
+                    OUTPUTS_PATH_REMEDY,
+                )
+            )
+    return findings
+
+
+def implementation_path_findings(story):
+    """Every path-rule finding of a story: `files` first, then `outputs`.
+
+    A non-string `files` entry is skipped, as R17 skips it -- shape is the
+    schema check's business. A `files` escape carries the remedy that points at
+    `implementation.outputs`; every other `files` problem carries the plain
+    path remedy.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    findings = []
+    files = implementation.get("files")
+    if isinstance(files, list):
+        for index, entry in enumerate(files):
+            if not isinstance(entry, str):
+                continue
+            reason = implementation_path_problem(IMPLEMENTATION_FILES_FIELD, entry)
+            if reason is None:
+                continue
+            escapes = implementation_path_escapes(entry)
+            findings.append(
+                _path_finding(
+                    IMPLEMENTATION_FILES_FIELD, index, entry, reason,
+                    FILES_ESCAPE_REMEDY if escapes else FILES_PATH_REMEDY,
+                )
+            )
+    return findings + implementation_outputs_findings(story)
+
+
 def validate_tasks(docs, tasks_file, project_root, fields, warn):
     """R2 through R15, in the order bash ran them, over the parsed stream.
 
@@ -2614,9 +2798,20 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             if not isinstance(files, list):
                 continue
             base = _story_project_base(story, project_root)
+            escapes = []
             unopenable = []
             for entry in files:
                 if not isinstance(entry, str):
+                    continue
+                # An escape is judged by the lexical rule alone and is NEVER
+                # reported as a missing directory: the entry does not name a
+                # directory under the story's repository at all, so "the
+                # directory it lands in may not exist" would point the author
+                # at the wrong fix. It needs neither the project base nor the
+                # filesystem, which is why it comes before both.
+                if implementation_path_escapes(entry):
+                    if entry not in escapes:
+                        escapes.append(entry)
                     continue
                 if base is None:
                     inside = False
@@ -2627,6 +2822,14 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     continue
                 if entry not in unopenable:
                     unopenable.append(entry)
+            if escapes:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": implementation.files leaves the story's repository: "
+                    + ", ".join(_path_echo(entry) for entry in escapes)
+                    + " — move a file outside the repository to implementation.outputs"
+                )
             if unopenable:
                 warn(
                     tasks_file + ": "
@@ -2870,6 +3073,25 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     tasks_file + ": "
                     + jq_tostring(jq_index(story, "id", ".userStories[]"))
                     + ": implementation.verify " + finding
+                )
+
+    # R24 -- implementation.outputs, when present and not null, must be a list
+    # of strings each starting with .aimi/ and passing the shared path rule.
+    # Appended AFTER R23 for R17's reason: a rule below the last one can only
+    # add lines after everything already recorded, so a tasks file without the
+    # key validates byte for byte as before. An ERROR where R17 warns, and the
+    # difference is which way the document is wrong: an `outputs` entry is a
+    # declaration the plugin's own later checks read as a place to look, so a
+    # malformed one is a record its reader cannot use, not a question to the
+    # author. Absent and null do nothing, as R21 and R22 treat their keys. The
+    # finding text is implementation_outputs_findings', stated nowhere else.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in implementation_outputs_findings(story):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
                 )
 
     return errors
