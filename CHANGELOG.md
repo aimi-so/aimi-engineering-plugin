@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.152.0] - 2026-10-25
+
+Plan stories that keep out-of-repository files out of `implementation.files`, and guard rails that name a whole verify segment (#168, #169).
+
+### Added
+- `implementation.outputs` (optional on a story): paths relative to the AIMI root, each starting with `.aimi/`, for files a story writes outside its repository. The story executor creates each one itself, never stages or commits it, and never treats it as a commit-verification target. The story expander and the task format reference describe it, and `implementation.files` is now documented as in-repository paths only.
+- `validate-tasks` rule R24: a present `implementation.outputs` that is not a list of strings, or holds an entry the shared path rule refuses, is an error. A tasks file without the key validates exactly as before.
+- One lexical path rule (`implementation_path_problem`, `scripts/tasks.py`) shared by `validate-tasks`, `validate-staging`, the `story-merge` refusal and `apply-audit-patches`: no absolute or `~`-led path, no `..` or `.` segment, no whitespace or backslash, and for `outputs` the `.aimi/` prefix.
+- `apply-audit-patches` accepts `implementation.files` (`replace`, `remove`) and `implementation.outputs` (`add`, `replace`, `remove`), with `matchValue` locating the entry for a replace or remove. A value the path rule refuses is dropped as `bad-path` and never echoed. The cross-story auditor emits these ops, for example moving an out-of-repository file with a `files` remove plus an `outputs` add.
+- A `guardRails-out-of-sync` entry in `dropped[]` carries `rails`: the ascending integer indices of the guard rails that patch newly broke. The Phase 3d.5 report relays them as `(rails i,j)`.
+- `validate-staging` reports a guard rail that is not a whole top-level segment of the story's `verify`, naming `implementation.guardRails[<i>]`, what larger construct it sits in and the remedy, and reports an `implementation.files` or `implementation.outputs` entry the path rule refuses.
+- `verify-probe` and `probe-plan` export `AIMI_ROOT` (the directory holding `.aimi/`) to every segment they run, and the story executor exports it beside `TASKS_FILE_PATH` for both runs of a story's `implementation.verify`; `/aimi:execute` passes it in the task pointer.
+
+### Changed
+- `story-merge` refuses, with no `--agent-mode` exemption, a staged story with a guard rail that is not a whole verify segment, an `implementation.files` entry outside its repository or a malformed `implementation.outputs`, one line per finding naming the story and its staged idx. The check sits beside the verify refusal and writes nothing when it fires.
+- `apply-audit-patches` drops a `verify` or `guardRails` patch for `guardRails-out-of-sync` only when it newly breaks a rail. A rail that was already broken before the patch no longer discards every patch of its story.
+- `validate-tasks` rule R17 (a warning) now reports a `files` entry that leaves the repository as its own warning pointing at `implementation.outputs`, instead of reporting it as a directory that does not exist.
+- The story expander's retry loop is fed the rail and path findings, and the expander and the task-planner format reference say where an out-of-repository file goes and what a guard rail may name.
+- Both `CLAUDE.md` files describe the above: the widened `apply-audit-patches` rules and drop vocabulary, the two new `validate-staging` rules, the `story-merge` rail and path refusal, `implementation.outputs`, R24, the R17 wording and the verify environment.
+
+### Fixed
+- A story could list a file outside its repository (a path under `.aimi/`, an absolute path, a `..` path) in `implementation.files` and nothing flagged it before execution (#168). The expansion check, the audit patch check, `validate-tasks` and the merge now judge it, and the file is declared in `implementation.outputs` instead.
+- A guard rail that named a line inside a function, loop, block or heredoc, rather than the whole top-level segment, matched no segment of `verify` and surfaced late as a validation or probe failure (#169). It is now reported during expansion with its index and a remedy, refused at the merge, and no longer lets one stale rail discard every unrelated audit patch of its story.
+- A story `verify` that read `"$AIMI_ROOT/.aimi/..."` had no `AIMI_ROOT` in its environment, and inside a worktree, which has no `.aimi/` of its own, there was nothing relative to fall back on. It is now exported to the executor's verify runs and to `verify-probe` and `probe-plan`.
+
 ## [1.151.1] - 2026-10-25
 
 ### Removed
