@@ -59,6 +59,7 @@ next.md	22176
 references/cli-path-resolution.md	37503
 review.md	22577
 references/scope-contexts.md	20743
+plan.md	20319
 deepen.md	18696
 
 skills/story-executor/SKILL.md	67432

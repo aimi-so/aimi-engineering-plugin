@@ -162,4 +162,4 @@ argument-gate	design/polish.md	Extract --non-interactive Flag (block 1)	# parses
 argument-gate	design/polish.md	Extract --non-interactive Flag (block 2)	# parses $ARGUMENTS for a flag and hands it to aimi-cli.sh, which validates it again
 argument-gate	execute.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
 argument-gate	open-pr.md	Parse --branch Argument (block 1)	# parses $ARGUMENTS for a branch name and hands it to aimi-cli.sh, which validates it again
-argument-gate	references/plan/step-0-environment-setup.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
+argument-gate	plan.md	Parse --phase Override (block 1)	# parses $ARGUMENTS for a phase id and hands it to aimi-cli.sh, which validates it again
