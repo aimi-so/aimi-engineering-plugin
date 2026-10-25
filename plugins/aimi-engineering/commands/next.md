@@ -164,11 +164,11 @@ echo "BASE_BRANCH=$BASE_BRANCH"
 
 A non-zero exit here stops the run before any git or worktree call consumes the value. Step 4's block below must re-assign `BASE_BRANCH` with the literal value echoed here (`BASE_BRANCH=""` when `--base` was absent) — each Bash call is its own shell, so nothing assigned in this block survives into that one. When `--base` was not passed, the base is resolved by `resolve-base-branch`, which stacks on the current branch when it carries unmerged work relative to `$DEFAULT_BRANCH` rather than always defaulting to it.
 
-3. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention execute.md's flat mode uses (context.md decision 3):
+3. **Resolve `CONTAINER_ROOT`** — one container per project group, following the same convention `references/execute/step-2-flat-container.md` (Flat Container Mode) uses (context.md decision 3):
    - `CONTAINER_ROOT = PROJECT_PATH` (from Step 1b) when the story has a `project` field
    - `CONTAINER_ROOT = AIMI_ROOT` (i.e. `$PWD`) otherwise
 
-4. **Detect the default branch, then resolve the container's base.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors execute.md's Main-Repo-vs-Per-Project split. `DEFAULT_BRANCH` is computed unconditionally, regardless of `--base` — Step 5's completion report counts commits against it later. `CONTAINER_BASE` is then resolved by `resolve-base-branch` — the same shared primitive execute.md's Flat Container Mode and phase container use — scoped to `CONTAINER_ROOT` via `--project` the same way `DEFAULT_BRANCH` just was, with `--base "$BASE_BRANCH"` passed through only when the user supplied `--base`; when omitted, the resolver stacks on the current branch when it carries unmerged work, falling back to `$DEFAULT_BRANCH` otherwise — the same rule Step 1.6's own picker would apply for this repo:
+4. **Detect the default branch, then resolve the container's base.** Scope detection to `CONTAINER_ROOT` via `--project` only when Step 1b resolved a `PROJECT_PATH` — mirrors the Main-Repo-vs-Per-Project split of `references/execute/step-2-main-repo-branch-setup.md` and `references/execute/step-2-per-project-branch-setup.md`. `DEFAULT_BRANCH` is computed unconditionally, regardless of `--base` — Step 5's completion report counts commits against it later. `CONTAINER_BASE` is then resolved by `resolve-base-branch` — the same shared primitive `references/execute/step-2-flat-container.md` and the phase container use — scoped to `CONTAINER_ROOT` via `--project` the same way `DEFAULT_BRANCH` just was, with `--base "$BASE_BRANCH"` passed through only when the user supplied `--base`; when omitted, the resolver stacks on the current branch when it carries unmerged work, falling back to `$DEFAULT_BRANCH` otherwise — the same rule Step 1.6's own picker would apply for this repo:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -188,7 +188,7 @@ CONTAINER_BASE=$(echo "$BASE_JSON" | jq -r '.base')
 CONTAINER_BASE_REASON=$(echo "$BASE_JSON" | jq -r '.reason')
 ```
 
-5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo. This is execute.md's **Create or Reuse a Container** with `EXEC_ROOT="$CONTAINER_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, `CONTAINER_BASE` as computed above — see that section for the full reuse/idempotency behavior. `/aimi:next` captures the exit code inline instead of letting the Bash tool call surface it, since its own STOP messaging (below) never uses `AskUserQuestion`:
+5. **Create or reuse the container**, with CWD set to `CONTAINER_ROOT` so `worktree-manager.sh`'s own `git rev-parse --show-toplevel` resolves against the right repo. This is `references/container-execution.md`'s **Create or Reuse a Container** with `EXEC_ROOT="$CONTAINER_ROOT"`, `EXEC_BRANCH="$BRANCH_NAME"`, `CONTAINER_BASE` as computed above — see that section for the full reuse/idempotency behavior. `/aimi:next` captures the exit code inline instead of letting the Bash tool call surface it, since its own STOP messaging (below) never uses `AskUserQuestion`:
 
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)

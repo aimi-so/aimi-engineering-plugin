@@ -39,7 +39,7 @@ done <<< "$STAGED_PROJECTS"
 [ "$BAD_PROJECTS" -eq 0 ] || exit 1
 ```
 
-The `case` list and the regex are the same two checks `commands/execute.md` applies to `metadata.splitGroup.project` in its Step 0.9 split loop (`execute.md`, Invalid splitGroup.project) — keep them byte-identical so the two sites stay diffable. `"."` is the root group's own routing key and is always allowed; a blank or absent `.project` never reaches the loop.
+The `case` list and the regex are the same two checks `references/execute/step-0-9-split-flow.md` applies to `metadata.splitGroup.project` in its Step 0.9 split loop (Invalid splitGroup.project) — keep them byte-identical so the two sites stay diffable. `"."` is the root group's own routing key and is always allowed; a blank or absent `.project` never reaches the loop.
 
 **On failure:** report every offending value and **STOP**. Do not invoke `story-merge`, do not call `roadmap-set-status`, and do not delete `RUN_DIR` — the staging files are intact and the run is retryable once the offending `project` values are corrected.
 

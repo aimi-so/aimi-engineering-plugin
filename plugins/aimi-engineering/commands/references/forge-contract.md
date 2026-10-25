@@ -340,7 +340,7 @@ completely intact:
 
 | Verb | Exit code on `degraded` | Why |
 |---|---|---|
-| `forge-pr-create` | **non-zero** | Opening a PR has no fallback. `execute.md`'s per-repository loop needs a real non-zero exit for its own per-repository failure isolation. |
+| `forge-pr-create` | **non-zero** | Opening a PR has no fallback. `references/execute/phase-completion-offer-pull-request.md`'s per-repository loop needs a real non-zero exit for its own per-repository failure isolation. |
 | `forge-pr-edit` | **non-zero** | Same contract as `forge-pr-create`. |
 | `forge-pr-merge` | **non-zero** | Same contract as `forge-pr-create`/`forge-pr-edit`. Merging a PR/MR has no fallback either, so a caller's own per-repository failure isolation needs the identical real non-zero exit. |
 | `forge-issue-create` | **always `0`** | A failed backend issue must never block PR creation (`open-pr.md`'s documented soft-fail behavior). A caller branches on `status`, never on this verb's exit code. |
@@ -427,7 +427,7 @@ first-run model prompt uses (`cli-path-resolution.md`):
 
 Every other outcome proceeds silently on the active account. The two ask sites
 are `commands/open-pr.md`'s Step 1a (once per repository) and
-`commands/execute.md`'s **Offer a Pull Request** (once per participating
+`commands/references/execute/phase-completion-offer-pull-request.md`'s **Offer a Pull Request** (once per participating
 repository, naming the repository so a multi-repo run's prompts stay
 distinguishable). Both are translated command bodies, which is why the picker
 lives there and not in this file.
@@ -630,7 +630,7 @@ way a missing `jq` is:
 | Mode | When to use it | Behavior on absence |
 |---|---|---|
 | `quiet` | The caller already has its own fallback path and would only restate what the caller is about to do anyway. Matches `review.md`'s documented row: "gh CLI not installed → Fall back to git diff for branch comparison" — that fallback must not gain a spurious warning it doesn't have today. | No stderr output at all. |
-| `mandatory` | The operation genuinely has no fallback without the binary (e.g. "open a PR" with no forge CLI present at all). Matches `execute.md`'s existing `command -v gh` gate at the per-repository PR-creation step. | Exactly one stderr warning naming the missing binary, the detected forge (from `detect-forge`'s output — never a generic placeholder), and a manual next step. |
+| `mandatory` | The operation genuinely has no fallback without the binary (e.g. "open a PR" with no forge CLI present at all). Matches the gate at the per-repository PR-creation step of `references/execute/phase-completion-offer-pull-request.md`. | Exactly one stderr warning naming the missing binary, the detected forge (from `detect-forge`'s output — never a generic placeholder), and a manual next step. |
 
 In both modes the function returns a normal guarded exit code: `0` when the
 binary is present, `1` when it is not. It never lets a bare invocation of

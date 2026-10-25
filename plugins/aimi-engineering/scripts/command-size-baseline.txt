@@ -60,10 +60,10 @@ references/execute/step-1-7-claim-the-phase.md	18178
 references/execute/step-0-9-split-flow.md	17039
 brainstorm.md	144635
 open-pr.md	84576
-references/forge-contract.md	45757
-references/container-execution.md	34134
+references/forge-contract.md	45878
+references/container-execution.md	34557
 references/visual-variants.md	27154
-next.md	22176
+next.md	22371
 references/cli-path-resolution.md	37503
 review.md	22577
 references/scope-contexts.md	20743

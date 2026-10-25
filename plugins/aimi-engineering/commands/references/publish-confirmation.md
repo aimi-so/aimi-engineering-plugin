@@ -6,8 +6,8 @@ so. This file defines the contract only — it does not implement any completion
 path, and it does not itself gate, remove, or relocate a single existing
 publish call site.
 
-**Consumed by:** `commands/execute.md` (Phase Completion's **Offer a Pull
-Request**), `commands/next.md` (its container-mode completion step),
+**Consumed by:** `commands/references/execute/phase-completion-offer-pull-request.md`
+(Phase Completion's **Offer a Pull Request**), `commands/next.md` (its container-mode completion step),
 `commands/references/container-execution.md` (**Container Mode: Push the
 Branch**), and `commands/open-pr.md` (its `--merge` path, Step 1b's `found`
 branch). The first three each carry their own partial copy of this rule today

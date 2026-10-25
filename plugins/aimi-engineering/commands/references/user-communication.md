@@ -148,7 +148,7 @@ Checkable: grep the block for `outline:|File References|path token` — zero mat
 
 ### 4. Density — merge-conflict report
 
-Source: `execute.md:1491-1503`.
+Source: `references/execute/paired-split-merge-and-continue.md`, Merge Split Branches Into the Phase Branch.
 
 Before:
 ```

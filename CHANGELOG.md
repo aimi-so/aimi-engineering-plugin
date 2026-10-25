@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.153.0] - 2026-10-25
+
+`/aimi:execute` is a router: a run reads the step files its own state selects instead of the whole command.
+
+### Changed
+- `commands/execute.md` is a router over `commands/references/execute/` (40 step files). Each entry keeps a heading, an `Applies when:` condition with the default for the skipped case beside it, and a `Read` line; the step bodies moved verbatim. Spawned split tasks get a `Spawned Tasks` table and a `SPAWNED_SPLIT_TASK=<kind>` marker naming which entries they evaluate and which they skip, and the router carries the re-read-after-compaction rule, the Step 4 in-loop state rule and the STOP on a failed `Read`.
+- What a run loads, measured at this release from the merged tree with `scripts/tests/measure_execute_reads.py`: before, every invocation loaded `execute.md` whole, 433455 bytes. The router is now 32198 bytes. A flat inline run reads 201948 bytes, a flat container run 207142, a phase run 357831 and a phase run with a full-stack split 366990 (counting the wave-loop files its spawned sub-orchestrators read). The 40 step files total 436074 bytes, so router plus every file is 468272, larger than before: steps every run reads gain nothing, and the saving is the steps a given run skips. Re-measure with `wc -c` rather than quoting these. The transcript baseline (about 178k tokens median per `/aimi:execute` invocation, about 29% of a run's input tokens; `/aimi:plan`'s router cut its injection from about 148k to about 16k tokens) was measured outside the repo.
+- `install.sh` translates `commands/references/execute/*.md` like a command body (`REFERENCE_ALLOWLIST_FULL` gains `execute/*.md`), and `test-command-blocks.sh` Check 14 exempts `references/execute/` as it does `references/plan/`. `./install.sh --to opencode --dry-run` lists 87 references (44 plan, 40 execute, 3 literals).
+- Structural tests `test_execute_wiring.py` (with its reader `execute_text.py` and the `AIMI_EXECUTE_WIRING_ROOT` override) and `test_arguments_stay_in_command_bodies.py` pin the router, its step files and the rule that `$ARGUMENTS` is read only in a command body.
+- Citations of a moved `execute.md` section in `commands/` and both `CLAUDE.md` files name the step file holding it; the two line-number citations in `user-communication.md` and `container-execution.md` name a file and a section. `plugins/aimi-engineering/CLAUDE.md` gains `## Execute Router Layout` and a re-measured `commands/` jq census; the size budgets of the edited reference files are re-set.
+
+### Fixed
+- `plan.md` read `$ARGUMENTS` in three bash blocks that had been moved into `references/plan/`, where the host does not substitute it, so the flags a user typed were lost. The blocks are back in the command body.
+
 ## [1.152.0] - 2026-10-25
 
 Plan stories that keep out-of-repository files out of `implementation.files`, and guard rails that name a whole verify segment (#168, #169).
