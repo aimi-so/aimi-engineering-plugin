@@ -1301,6 +1301,35 @@ def _story_errors(story):
     return errors
 
 
+def _broken_guard_rails(implementation, rails):
+    """The one place a guard rail is tested for being a top-level segment.
+
+    Returns `(broken, texts)`: `broken` is `[(index, entry, kind)]` in index
+    order for every rail that is not exactly one segment of the story's own
+    implementation.verify, and `texts` the ordered segment texts the test was
+    made against (empty when verify is not a string). `kind` is `not-string`
+    for a non-string or empty entry, `no-verify` when verify is not a string
+    at all, and `not-segment` for a string that equals no segment. The
+    membership test is `verify_segments` reused rather than re-implemented,
+    and `_guard_rail_errors`, `broken_rail_indices` and `guard_rail_findings`
+    all read this list, so the three cannot disagree about which rails are
+    broken.
+    """
+    verify = implementation.get("verify") if isinstance(implementation, dict) else None
+    verified = isinstance(verify, str)
+    texts = [segment for _, segment in verify_segments(verify)] if verified else []
+    known = set(texts)
+    broken = []
+    for index, entry in enumerate(rails):
+        if not isinstance(entry, str) or entry == "":
+            broken.append((index, entry, "not-string"))
+        elif not verified:
+            broken.append((index, entry, "no-verify"))
+        elif entry not in known:
+            broken.append((index, entry, "not-segment"))
+    return broken, texts
+
+
 def _guard_rail_errors(story_id, story):
     """The implementation.guardRails rule, run last so no earlier error moves.
 
@@ -1310,6 +1339,8 @@ def _guard_rail_errors(story_id, story):
     first for the reason the note above gives: a bare jq_index on a scalar
     implementation would abort the whole run. An absent guardRails is no rule
     at all, so a document without the key validates byte for byte as before.
+    The segment test itself is `_broken_guard_rails`, shared with the two
+    readers below; this function only words its three messages.
     """
     implementation = jq_index(story, "implementation", STORY)
     if jq_type(implementation) != "object":
@@ -1319,16 +1350,139 @@ def _guard_rail_errors(story_id, story):
         return []
     if jq_type(rails) != "array":
         return [story_id + ": implementation.guardRails must be an array"]
-    verify = jq_index(implementation, "verify", STORY + ".implementation")
-    known = {segment for _, segment in verify_segments(verify)} if isinstance(verify, str) else set()
     errors = []
-    for index, entry in enumerate(rails):
+    for index, _entry, kind in _broken_guard_rails(implementation, rails)[0]:
         label = story_id + ": implementation.guardRails[" + str(index) + "]"
-        if not isinstance(entry, str) or entry == "":
+        if kind == "not-string":
             errors.append(label + " must be a non-empty string")
-        elif entry not in known:
+        else:
             errors.append(label + " matches no segment of implementation.verify")
     return errors
+
+
+def _guard_rail_subject(story):
+    """`(implementation, rails)` when a story carries a guardRails LIST, else None.
+
+    The public readers below take a plain dict and never raise, so each shape
+    check is an isinstance rather than the jq_index the validator uses. A
+    guardRails that is not a list is `_guard_rail_errors`' message to give and
+    these two report nothing for it.
+    """
+    if not isinstance(story, dict):
+        return None
+    implementation = story.get("implementation")
+    if not isinstance(implementation, dict):
+        return None
+    rails = implementation.get("guardRails")
+    if not isinstance(rails, list):
+        return None
+    return implementation, rails
+
+
+def broken_rail_indices(story):
+    """Ascending indices of the guardRails entries that are not exactly one
+    top-level segment of implementation.verify.
+
+    `[]` when implementation or guardRails is absent, or guardRails is not a
+    list. Duplicated rails are allowed: the test is membership.
+    """
+    subject = _guard_rail_subject(story)
+    if subject is None:
+        return []
+    return [index for index, _entry, _kind in _broken_guard_rails(*subject)[0]]
+
+
+_GUARD_RAIL_HEAD_CHARS = 40
+_GUARD_RAIL_FUNCTION = re.compile(r"(?:function\s+[\w.:-]+|[A-Za-z_][\w.:-]*\s*\(\s*\))")
+_GUARD_RAIL_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*['\"\\]?[A-Za-z_]")
+_GUARD_RAIL_REMEDY = (
+    "List the whole %s as the rail, or its top-level call line, never a line inside it."
+)
+
+
+def _guard_rail_head(entry):
+    """A short, single-line, retry-safe quote of a rail: no backtick, no
+    dollar followed by an open paren, whitespace collapsed, cut to a head."""
+    text = " ".join(entry.replace("`", "").split())
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    if len(text) > _GUARD_RAIL_HEAD_CHARS:
+        text = text[:_GUARD_RAIL_HEAD_CHARS].rstrip() + "..."
+    return text
+
+
+def _guard_rail_container_kind(segment):
+    """What kind of larger segment `segment` is, by its leading token or, for
+    a command that opens a heredoc, by the operator; None when it is neither."""
+    if _GUARD_RAIL_FUNCTION.match(segment):
+        return "function definition"
+    word = re.match(r"[A-Za-z]+", segment)
+    word = word.group(0) if word else ""
+    if word in ("for", "while", "until"):
+        return "for/while/until loop"
+    if word in ("if", "case"):
+        return "if/case block"
+    if segment.startswith("{"):
+        return "{ } group"
+    if segment.startswith("("):
+        return "( ) subshell"
+    if _GUARD_RAIL_HEREDOC.search(segment):
+        return "heredoc"
+    return None
+
+
+def guard_rail_findings(story):
+    """One plain sentence per broken guard rail, in index order.
+
+    Each names `implementation.guardRails[<i>]`. A rail found inside a larger
+    segment says what that segment is and gives the remedy; one that matches
+    nothing asks for the exact segment text; a non-string or empty entry and a
+    missing verify each have a sentence of their own. The text is built by
+    concatenation and the quoted head is cut short and stripped of backticks
+    and the dollar-open-paren pair, because the retry sanitizer drops both.
+    """
+    subject = _guard_rail_subject(story)
+    if subject is None:
+        return []
+    broken, texts = _broken_guard_rails(*subject)
+    findings = []
+    for index, entry, kind in broken:
+        label = "implementation.guardRails[" + str(index) + "]"
+        if kind == "not-string":
+            findings.append(
+                label + " is not a non-empty string. List the exact text of one"
+                " top-level segment of implementation.verify."
+            )
+            continue
+        if kind == "no-verify":
+            findings.append(
+                label + " cannot be checked because the story has no"
+                " implementation.verify string. Add the verify or remove the guard rail."
+            )
+            continue
+        head = _guard_rail_head(entry)
+        container = next((text for text in texts if entry in text and text != entry), None)
+        if container is None:
+            findings.append(
+                label + " (starts: " + head + ") matches no segment of"
+                " implementation.verify and sits inside none. Give the exact text"
+                " of one top-level segment."
+            )
+            continue
+        what = _guard_rail_container_kind(container)
+        if what is None:
+            findings.append(
+                label + " (starts: " + head + ") sits inside a larger segment of"
+                " implementation.verify rather than being a top-level segment. "
+                + _GUARD_RAIL_REMEDY % "segment"
+            )
+        else:
+            findings.append(
+                label + " (starts: " + head + ") sits inside a " + what
+                + " rather than being a top-level segment of implementation.verify. "
+                + _GUARD_RAIL_REMEDY % what
+            )
+    return findings
 
 
 def validate_stories(doc):
