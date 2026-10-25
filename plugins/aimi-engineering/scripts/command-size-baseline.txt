@@ -49,7 +49,9 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	433455
+execute.md	251843
+references/execute/paired-split-merge-and-continue.md	21738
+references/execute/step-1-7-claim-the-phase.md	18178
 brainstorm.md	144635
 open-pr.md	84576
 references/forge-contract.md	45757
