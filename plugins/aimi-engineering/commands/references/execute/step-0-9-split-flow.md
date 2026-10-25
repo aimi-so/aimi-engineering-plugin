@@ -163,7 +163,7 @@ Either way, every worktree or container lands at that record's `worktree` value 
 
 ### Parallel Execution for Split Files
 
-In a **single tool-call turn**, emit one foreground Task per plan record — `activeCount` Tasks in total (two for a legacy pair, three for a three-repo project split, N for N). Never one turn per record; that would serialize them. Each Task runs the full execute.md flow (Steps 1–5) scoped to its own file:
+In a **single tool-call turn**, emit one foreground Task per plan record — `activeCount` Tasks in total (two for a legacy pair, three for a three-repo project split, N for N). Never one turn per record; that would serialize them. Each Task reads the router and follows its Spawned Tasks table row for the marker below, scoped to its own file:
 
 ```
 For each record in SPLIT_PLAN, all Task( calls in one turn:
@@ -172,9 +172,19 @@ Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute split tasks: [that record's file basename]",
-    prompt: [Full execute.md flow (Steps 1–5) with:
+    prompt: [
+        SPAWNED_SPLIT_TASK=flat-split-child
+        Read the router at ROUTER_PATH and follow its Spawned Tasks table row for the marker above, with:
+        - ROUTER_PATH = [PLUGIN_ROOT plus commands/execute.md]
+        - PLUGIN_ROOT = [the plugin root, computed from the absolute path this step file's Read resolved to, minus commands/references/execute/<this file>.md]
         - WORKTREE_PATH = [that record's worktree]
         - $AIMI_CLI init-session --file [that record's file]
+        - AIMI_ROOT_IS_GIT_REPO = [the value Pass 1 derived]
+        - CONTAINER_MODE = [true when SPLIT_EXECUTION_MODE is container, else false]
+        - VISUAL_FOLLOW = [the value Step 0.7 set]
+        - PHASE_SPLIT_MODE = false
+        - AGENT_MODELS = [the value Resolve Agent Models echoed]
+        - BASE_BRANCH = [the value Parse --base Override echoed, or empty when --base was absent]
         - All subsequent steps (reset-orphaned, validate, wave loop, completion)
         - Scoped to that split file only
         - PROJECT_GUIDELINES = PROJECT_GUIDELINES
@@ -182,7 +192,7 @@ Task(
 )
 ```
 
-Each parallel Task receives the full execute.md flow:
+Each parallel Task follows the Spawned Tasks row for `flat-split-child` and so runs:
 - **init-session** with `--file <path>` targeting its specific file
 - **reset-orphaned** to recover any stuck stories in that file
 - **validate-stories** for content validation

@@ -73,7 +73,7 @@ Spawning parallel execution flows...
 
 Each line's `project`/`branch`/`repo` are read straight from that member's own `SPLIT_PLAN` record (fields `project`, `branch`, `toplevel`) — never re-derived. With exactly one participating repository (today's unchanged case), every `repo` value is the same `$PHASE_CONTAINER_PATH`, and the report reads exactly as before except for the added `repo:` field.
 
-In a **single tool-call turn**, emit one foreground Task per active split file — `PHASE_ACTIVE_COUNT` Tasks in total (two for a legacy pair, three for a three-way project split, N for N). Never one turn per member; that would serialize them. Each Task runs execute.md's **Steps 2–5 only** — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
+In a **single tool-call turn**, emit one foreground Task per active split file — `PHASE_ACTIVE_COUNT` Tasks in total (two for a legacy pair, three for a three-way project split, N for N). Never one turn per member; that would serialize them. Each Task reads the router and follows its Spawned Tasks table row for the marker below — never Step 1's Phase Mode Detection and never Step 1.7's Phase Claim, both of which are already resolved by this parent session; a sub-orchestrator that re-derived or re-claimed the phase itself would either double-claim it or (since it has a different session identity than the parent) fail the claim outright:
 
 ```
 For each active split file (loop over PHASE_ACTIVE_SPLIT_FILES, all Task( calls in one turn):
@@ -82,7 +82,17 @@ Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
     description: "Execute split for phase [PHASE_ID]: [split_file basename]",
-    prompt: [execute.md Steps 2–5, with the following pre-set — do not re-derive:
+    prompt: [
+        SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator
+        Read the router at ROUTER_PATH and follow its Spawned Tasks table row for the marker above, with the following pre-set — do not re-derive:
+        - ROUTER_PATH = [PLUGIN_ROOT plus commands/execute.md]
+        - PLUGIN_ROOT = [the plugin root, computed from the absolute path this step file's Read resolved to, minus commands/references/execute/<this file>.md]
+        - AIMI_ROOT_IS_GIT_REPO = [the value Step 1.5 derived]
+        - CONTAINER_MODE = false   (phase mode forces it)
+        - VISUAL_FOLLOW = [the value Step 0.7 set]
+        - PHASE_SPLIT_MODE = false
+        - AGENT_MODELS = [the value Resolve Agent Models echoed]
+        - BASE_BRANCH = [the value Parse --base Override echoed, or empty when --base was absent]
         - PHASE_MODE = true
         - PHASE_BRANCH = [that member's SPLIT_PLAN record: .branch]
         - PHASE_CONTAINER_PATH = [that member's SPLIT_PLAN record: .worktree — that member's

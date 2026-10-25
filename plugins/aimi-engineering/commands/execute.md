@@ -18,11 +18,20 @@ Every story runs in its own git worktree spawned as a fresh-context Task subagen
 
 ## Step Files
 
-Everything before Step 3 is a router: a heading, an `Applies when:` condition evaluable from state this file already holds (with the default for the skipped case beside it, so every variable a later step reads is still set), an optional `Covers:` line, and a `Read` line naming the step's file under `${CLAUDE_PLUGIN_ROOT}/commands/references/execute/`. When the condition holds, Read that file in full before running the step, and follow it as written. When it does not, skip the file and apply the default stated beside the condition. Entries appear in document order, which is not always execution order: "above" and "below" in a file's prose refer to this order. If a Read of a listed file fails, STOP and report the path; never treat a failed Read as the condition being false. **When the conversation resumes after a context compaction, re-read this router and the current step's file, and re-derive every value an earlier block echoed (`PLAN_DISC`, `PHASE_ID`, `PHASE_BRANCH`, `SPLIT_PLAN`, `BASE_BRANCH` and the like) by re-running the block that echoes it, before continuing.** A step file's text does not survive compaction; this router does.
+Everything before Step 3 is a router: a heading, an `Applies when:` condition evaluable from state this file already holds (with the default for the skipped case beside it, so every variable a later step reads is still set), an optional `Covers:` line, and a `Read` line naming the step's file under `${CLAUDE_PLUGIN_ROOT}/commands/references/execute/`. When the condition holds, Read that file in full before running the step, and follow it as written. When it does not, skip the file and apply the default stated beside the condition. Entries appear in document order, which is not always execution order: "above" and "below" in a file's prose refer to this order. If a Read of a listed file fails, STOP and report the path; never treat a failed Read as the condition being false. **When the conversation resumes after a context compaction, re-read this router and the current step's file, and re-derive every value an earlier block echoed (`PLAN_DISC`, `PHASE_ID`, `PHASE_BRANCH`, `SPLIT_PLAN`, `BASE_BRANCH` and the like) by re-running the block that echoes it, before continuing.** A step file's text does not survive compaction; this router does. Rebuild Step 4's wave, per-group `base_sha` and buffers from `$WORKTREE_MGR list`, `list-ready` and `status`, and default `is_first_story_in_session` to true, since no echoing block can restore them.
 
 The blocks that read `$ARGUMENTS` stay in this file rather than in a step file: `$ARGUMENTS` is substituted only in a command body, so a bash block under `commands/references/` that read it would see the literal text instead of what the user typed.
 
 Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
+
+## Spawned Tasks
+
+A spawned split task is a Task the orchestrator started for one member of a split; its prompt opens with a marker line `SPAWNED_SPLIT_TASK=<kind>` and holds nothing else of this conversation. It reads the router at ROUTER_PATH (the prompt names it), replaces every CLAUDE_PLUGIN_ROOT placeholder in the text it reads with PLUGIN_ROOT, and never runs Step 0: a spawned split task takes `AGENT_MODELS`, `BASE_BRANCH` and the other values from the pre-set state in its prompt, and every bash block it runs resolves `AIMI_CLI` for itself. The spawning orchestrator computes PLUGIN_ROOT from the absolute path a step-file Read resolved to (that path minus `commands/references/execute/<file>.md`) and ROUTER_PATH as PLUGIN_ROOT plus `commands/execute.md`, because the host expands the placeholder in the parent's copy while the child reads the file raw. For its kind the child evaluates the entries in the Evaluates cell, in document order, and skips the entries in the Skips cell; every entry heading sits in exactly one of the two cells of each row, and an entry whose `Applies when:` line holds is still skipped when its heading is in Skips.
+
+| Kind | Marker line | Evaluates | Skips |
+|---|---|---|---|
+| flat-split-child | `SPAWNED_SPLIT_TASK=flat-split-child` | Multi-Repo Handling; Step 1: Initialize Session; Execution Mode Detection (`EXECUTION_MODE` and `CONTAINER_MODE` come from the prompt); Step 1.5: Branch Freshness Check (for `DEFAULT_BRANCH`); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Finalize Step; Console Error Attribution; Step 5: Completion; If deadlock detected:; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Aggregated Completion (Split Mode); Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Phase Completion; Creates Verification; Phase Visual Gate; Write Handoff; Offer a Pull Request; Next Phase |
+| phase-split-sub-orchestrator | `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` | Multi-Repo Handling; Execution Mode Detection (Orphaned Story Recovery and Content Validation only); Step 3: Check for Pending Stories; Steps 3.1 and 3.2: Resolve Worktree Manager, Read Concurrency Setting; Step 3.3: Load Project Guidelines; Step 3.4: Open Visual Follow Session; Step 4: Wave Execution Loop; Post-Loop Cleanup; Console Error Attribution; Resuming Execution | Step 0.5: Archival Check; Step 0.7: Visual Follow Prompt; Step 0.9: Multi-File Auto-Detection; Per-Repo Branch and Container Setup for the Split; Aggregated Completion (Split Mode); Step 1: Initialize Session; Step 1.5: Branch Freshness Check; Step 1.6: Branch Base Selection; Resolve Session Identity; Create or Reuse the Phase Container; Detect a Full-Stack Split Inside This Phase; Create Phase Containers Per Project Group; Phase Container Dev Server Bootstrap; Phase-Mode Paired Split; Split Container Dev Server Bootstrap; Aggregated Completion Report (Phase-Mode Paired Split); Step 2: Branch Setup; Main Repo Branch Setup; Per-Project Branch Setup; Finalize Step; Phase Completion; Creates Verification; Phase Visual Gate; Write Handoff; Offer a Pull Request; Next Phase; Step 5: Completion; If deadlock detected: |
 
 ## Step 0: Resolve CLI Path
 
@@ -94,27 +103,27 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 ## Step 0.5: Archival Check
 
-Applies when: every run; it is the first thing after Step 0 and asks whether finished task files should be archived before a session starts.
+Applies when: not a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line); on every other run it is the first thing after Step 0 and asks whether finished task files should be archived before a session starts. Otherwise skip this file.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-5-archival-check.md in full.
 
 
 ## Step 0.7: Visual Follow Prompt
 
-Applies when: every run; it counts the visual stories, aborts on a malformed `verification` field and sets `VISUAL_FOLLOW`.
+Applies when: not a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line); on every other run it counts the visual stories, aborts on a malformed `verification` field and sets `VISUAL_FOLLOW`. A spawned split task takes `VISUAL_FOLLOW` from its prompt.
 After the count, when `VISUAL_STORIES` is greater than 0, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/visual-follow-lifecycle.md in full before the prompt, since the answer feeds the lifecycle it defines. When `VISUAL_STORIES` is 0 or empty skip it: `VISUAL_FOLLOW=false`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-7-visual-follow-prompt.md in full.
 
 
 ## Step 0.9: Multi-File Auto-Detection
 
-Applies when: every run; `split-detect` is a query whose answer (`mode`, `activeCount`) decides every file below it in Step 0.9.
+Applies when: not a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line); on every other run `split-detect` is a query whose answer (`mode`, `activeCount`) decides every file below it in Step 0.9. A spawned split task skips Step 0.9 whole.
 Covers: `### Split Detection`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-9-split-detection.md in full.
 
 
 ### Per-Repo Branch and Container Setup for the Split
 
-Applies when: `split-detect` answered a `mode` of `project-split` or `paired-split` with `activeCount` of 2 or more. When it did not, skip this file and the aggregated-completion file below: the run is a single-file run, so continue with Single-File Fallback.
+Applies when: not a spawned split task and `split-detect` answered a `mode` of `project-split` or `paired-split` with `activeCount` of 2 or more. When it did not, skip this file and the aggregated-completion file below: the run is a single-file run, so continue with Single-File Fallback.
 Covers: `#### Pass 1 — Derive and Validate Per-Repo Roots and Branches`, `#### Pass 2 — Create Worktrees or Containers`, `### Parallel Execution for Split Files`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-9-split-flow.md in full.
 
@@ -125,7 +134,7 @@ When `split-detect` reports `mode` = `single`, or reports a split whose `activeC
 
 ### Aggregated Completion (Split Mode)
 
-Applies when: the split flow above ran (`mode` of `project-split` or `paired-split` with `activeCount` of 2 or more) and its parallel Tasks have all completed. Otherwise skip this file: there is no split to report on, and Step 1 follows Single-File Fallback.
+Applies when: not a spawned split task, the split flow above ran (`mode` of `project-split` or `paired-split` with `activeCount` of 2 or more) and its parallel Tasks have all completed. Otherwise skip this file: there is no split to report on, and Step 1 follows Single-File Fallback.
 Covers: `#### Pass 3 — Aggregated Completion Report`, `#### Pass 4 — Clean Up Split Worktrees`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-0-9-aggregated-completion.md in full.
 
@@ -208,7 +217,7 @@ If `PHASE_OVERRIDE` is non-empty but does not match `^[0-9]+(\.[0-9]+)?$`, repor
 
 ### Resolve Session Identity
 
-Applies when: `PHASE_MODE=true`. When `PHASE_MODE=false` skip every Step 1.7 file below and go straight to Step 2, with `PHASE_SPLIT_MODE=false`.
+Applies when: `PHASE_MODE=true` and the prompt carries no `SPAWNED_SPLIT_TASK=` marker line. When `PHASE_MODE=false`, or the marker is present, skip every Step 1.7 file below and go straight to Step 2, with `PHASE_SPLIT_MODE=false`.
 Covers: `### Claim the Phase`, `### Report Stale Claim Releases`, `### Reconcile Roadmap/Tasks Divergence`, `### Overlap Guard`.
 Before claiming the phase, and before any STOP after the claim, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/release-claim-on-abort.md in full: it defines the Release the Claim on Abort procedure every abort in this step and the next invokes.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-7-claim-the-phase.md in full.
@@ -216,28 +225,28 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 ### Create or Reuse the Phase Container
 
-Applies when: `PHASE_MODE=true`. When `PHASE_MODE=false` skip this file (default `PHASE_SPLIT_MODE=false`). Its Unsupported Combination Guard runs first and stops a phase run in a multi-repo layout.
+Applies when: `PHASE_MODE=true` and the prompt carries no `SPAWNED_SPLIT_TASK=` marker line. When `PHASE_MODE=false` or the marker is present skip this file (default `PHASE_SPLIT_MODE=false`). Its Unsupported Combination Guard runs first and stops a phase run in a multi-repo layout.
 Covers: `#### Unsupported Combination Guard: Phase Mode + Multi-Repo`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-7-phase-container.md in full.
 
 
 ### Detect a Full-Stack Split Inside This Phase
 
-Applies when: `PHASE_MODE=true`. This file sets `PHASE_SPLIT_MODE`; when `PHASE_MODE=false` skip it and treat `PHASE_SPLIT_MODE` as `false`.
+Applies when: `PHASE_MODE=true` and the prompt carries no `SPAWNED_SPLIT_TASK=` marker line. This file sets `PHASE_SPLIT_MODE`; when `PHASE_MODE=false` or the marker is present skip it and treat `PHASE_SPLIT_MODE` as `false`.
 Covers: `` #### Pass 1 — Project-Split Detection (`metadata.splitGroup`) ``, `#### Pass 2 — Legacy Paired Split (fallback)`, `#### Active Split Files`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-7-detect-split.md in full.
 
 
 ### Create Phase Containers Per Project Group
 
-Applies when: `PHASE_MODE=true`, after the split detection above has set `PHASE_SPLIT_MODE`. When `PHASE_MODE=false` skip it.
+Applies when: `PHASE_MODE=true` and the prompt carries no `SPAWNED_SPLIT_TASK=` marker line, after the split detection above has set `PHASE_SPLIT_MODE`. When `PHASE_MODE=false` or the marker is present skip it.
 Covers: `#### Derive Participating Project Groups`, `#### Resolve and Create Each Group's Container`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-7-per-group-containers.md in full.
 
 
 ### Phase Container Dev Server Bootstrap
 
-Applies when: `PHASE_MODE=true`. The dev-server bootstrap in it skips itself when `PHASE_SPLIT_MODE` is true; its closing Path and State Notes describe every phase-mode run. When `PHASE_MODE=false` skip it.
+Applies when: `PHASE_MODE=true` and the prompt carries no `SPAWNED_SPLIT_TASK=` marker line. The dev-server bootstrap in it skips itself when `PHASE_SPLIT_MODE` is true; its closing Path and State Notes describe every top-level phase-mode run. When `PHASE_MODE=false` or the marker is present skip it.
 Covers: `### Path and State Notes`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-7-dev-server-and-notes.md in full.
 
@@ -323,7 +332,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 ### Finalize Step
 
-Applies when: every top-level run that reached Post-Loop Cleanup, immediately after it. Otherwise skip this file and treat `FINALIZE_STATUS=skipped` as the default: a Phase-Mode Paired Split sub-orchestrator, a run whose Step 3 reported its Re-verify block, and a run with no `metadata.finalize` all leave `FINALIZE_STATUS=skipped`.
+Applies when: every top-level run that reached Post-Loop Cleanup, immediately after it, and the prompt does not carry the `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` marker. Otherwise skip this file and treat `FINALIZE_STATUS=skipped` as the default: a Phase-Mode Paired Split sub-orchestrator, a run whose Step 3 reported its Re-verify block, and a run with no `metadata.finalize` all leave `FINALIZE_STATUS=skipped`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-4-finalize.md in full.
 
 
@@ -335,55 +344,55 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 
 ## Phase Completion
 
-Applies when: `PHASE_MODE=true` outside a spawned split task (the top-level orchestrator, where `$PHASE_ID` is set). Otherwise skip this entry and the five Phase Completion files below (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the top-level orchestrator: the prompt carries no `SPAWNED_SPLIT_TASK=` marker line). Otherwise skip this entry and the five Phase Completion files below (default `PHASE_MODE=false`).
 Covers: `### Multi-File Pending Count`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-pending-count.md in full.
 
 
 ### Creates Verification
 
-Applies when: `PHASE_MODE=true` outside a spawned split task, and the phase's pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the phase's pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
 Covers: `#### Inputs`, `#### Procedure`, `#### Which branch to take`, `#### Verification tooling failed`, `#### On any missing entry`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-creates-verification.md in full.
 
 
 ### Phase Visual Gate
 
-Applies when: `PHASE_MODE=true` outside a spawned split task, and the pending count was zero after Creates Verification. Otherwise skip this file (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero after Creates Verification. Otherwise skip this file (default `PHASE_MODE=false`).
 Covers: `#### Is a comparison owed`, `#### Environment checks and the live URLs`, `#### Run the comparison`, `#### On a diverges verdict`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-visual-gate.md in full.
 
 
 ### Write Handoff
 
-Applies when: `PHASE_MODE=true` outside a spawned split task, and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
 Covers: `### Mark Phase Completed`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-handoff-and-mark.md in full.
 
 
 ### Offer a Pull Request
 
-Applies when: `PHASE_MODE=true` outside a spawned split task, and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
 Covers: `#### Select the acting forge account per repository`, `#### Confirm before publishing this phase`, `#### Publish each participating repository`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-offer-pull-request.md in full.
 
 
 ### Next Phase
 
-Applies when: `PHASE_MODE=true` outside a spawned split task, and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
+Applies when: `PHASE_MODE=true` outside a spawned split task (the prompt carries no `SPAWNED_SPLIT_TASK=` marker line), and the pending count was zero. Otherwise skip this file (default `PHASE_MODE=false`).
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/phase-completion-next-phase.md in full.
 
 
 ## Step 5: Completion
 
-Applies when: `PHASE_SPLIT_MODE=false` (the default when Step 1.7 was skipped), on every run that finished its wave loop or Phase Completion without a deadlock. When `PHASE_SPLIT_MODE=true` skip it.
+Applies when: `PHASE_SPLIT_MODE=false` (the default when Step 1.7 was skipped), on every run that finished its wave loop or Phase Completion without a deadlock, and the prompt does not carry the `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` marker. When `PHASE_SPLIT_MODE=true` or that marker is present skip it.
 Covers: `### If all stories complete:`.
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-5-completion.md in full.
 
 
 ### If deadlock detected:
 
-Applies when: `PHASE_SPLIT_MODE=false` and the wave loop stopped with stories still pending that are not ready. Otherwise skip this file (default: no deadlock).
+Applies when: `PHASE_SPLIT_MODE=false`, the prompt does not carry the `SPAWNED_SPLIT_TASK=phase-split-sub-orchestrator` marker, and the wave loop stopped with stories still pending that are not ready. Otherwise skip this file (default: no deadlock).
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-5-deadlock.md in full.
 
 
