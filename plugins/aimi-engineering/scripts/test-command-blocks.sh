@@ -1159,13 +1159,15 @@ GATE_LITERALS
 #
 # WHY THE PICKER'S FILE MATTERS AS MUCH AS ITS CONTENT
 #
-# `commands/references/` is delivered to OpenCode by install.sh's verbatim
-# whole-tree copy, and both of its command-install loops skip that subdirectory
-# by name — so translate_command_body(), which is what rewrites the picker's
-# tool name for that host, never sees a reference file. A picker written there
-# reaches OpenCode naming a tool that host does not have. That is why story 05
-# moved this one question up into the command body, and why 11a asserts it is
-# in execute.md while check 14 asserts it is nowhere under references/.
+# install.sh runs the full command-body rewrite, which is what turns the
+# picker's tool name into OpenCode's equivalent, over a command body and over
+# the subtrees named in REFERENCE_ALLOWLIST_FULL (references/plan/ and
+# references/execute/). Every other reference file gets at most the
+# host-literal rewrite or none. A picker is therefore placed in a command body
+# or in one of those subtrees, never in another reference file. That is why
+# story 05 moved this one question up into the command body, and why 11a
+# asserts it is in execute.md while check 14 asserts it is nowhere else under
+# references/.
 #
 # 11b's other half is criterion 3: the reference's agent-mode branch must set
 # SKIP_PUSH unconditionally. "Unconditionally" is the whole claim — the branch
@@ -1197,7 +1199,7 @@ CONTAINER_LITERALS
 
   assert_no_findings "$(printf '%s' "$body")" \
     "Check 11a — the flat-container push question lives in execute.md's completion branch" \
-    "A picker written into commands/references/ is never translated by install.sh and reaches OpenCode naming a tool that host does not have."
+    "A picker belongs in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); elsewhere install.sh does not run the full rewrite and it can reach OpenCode naming a tool that host does not have."
 
   region="$(md_section "$ref" "$CONTAINER_PUSH_REF_SECTION")"
   if [ -z "$region" ]; then
@@ -1381,16 +1383,19 @@ check_references_carry_no_picker() {
     find "$COMMANDS_DIR/references" -name '*.md' | sort | while IFS= read -r f; do
       rel="${f##*/}"
       [ "$rel" = "$PICKER_LITERAL_EXEMPT" ] && continue
-      # references/plan/ is the one subtree install.sh DOES run through the
-      # full command-body translation (install_references' allowlist), so a
-      # picker there is rewritten for OpenCode like one in a command body.
-      case "$f" in "$COMMANDS_DIR"/references/plan/*) continue ;; esac
+      # references/plan/ and references/execute/ are the subtrees install.sh
+      # runs through the full command-body translation (REFERENCE_ALLOWLIST_FULL),
+      # so a picker there is rewritten for OpenCode like one in a command body.
+      # Placement policy: a picker lives in a command body or in one of those.
+      case "$f" in
+        "$COMMANDS_DIR"/references/plan/*|"$COMMANDS_DIR"/references/execute/*) continue ;;
+      esac
       grep -nF '**AskUserQuestion**' "$f" 2>/dev/null | cut -c1-160 | sed "s|^|references/$rel:|"
     done
   )"
   assert_no_findings "$findings" \
     "Check 14 — no reference file carries picker markup (interactivity.md defines the literal and is exempt)" \
-    "install.sh copies commands/references/ verbatim and never runs translate_command_body over it, so this picker reaches OpenCode naming a tool that host does not have. Move it into a command body."
+    "A picker may live in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); this file is in neither. Move it into a command body."
 }
 
 # ---------------------------------------------------------------------------

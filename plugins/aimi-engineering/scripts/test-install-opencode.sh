@@ -21,9 +21,12 @@ set -uo pipefail
 #       strings the rewrite targets, so it is excluded on purpose)
 #     - the installed aimi/plan.md body still starts with the OpenCode Agent
 #       Invocation preamble and carries no AskUserQuestion literal
-#   fixture plugin tree (plan/x.md carrying the literals)
-#     - the plan/*.md glob is translated, config-dir rewrite included, with no
-#       agent-invocation preamble and no general-purpose -> general swap
+#   fixture plugin tree (plan/x.md and execute/y.md carrying the literals)
+#     - the plan/*.md and execute/*.md globs are translated, config-dir rewrite
+#       included, with no agent-invocation preamble and no general-purpose ->
+#       general swap, and the install reports both files
+#   fixture plugin tree with no references/execute/ directory
+#     - installs with exit 0 and translates the plan files only
 #     - a reference outside the allowlist stays byte-identical
 #     - the dry run lists the translated files and creates nothing
 #     - uninstall removes the translated references
@@ -125,7 +128,7 @@ echo "== fixture plugin tree: glob mode, dry run, uninstall, repeat install"
 # ---------------------------------------------------------------------------
 FIX=$(new_tmp)
 FP="$FIX/repo/plugins/aimi-engineering"
-mkdir -p "$FP/.claude-plugin" "$FP/scripts" "$FP/commands/references/plan"
+mkdir -p "$FP/.claude-plugin" "$FP/scripts" "$FP/commands/references/plan" "$FP/commands/references/execute"
 cp "$INSTALL_SH" "$FIX/repo/install.sh"
 printf '{"name":"aimi-engineering","version":"0.0.1"}\n' > "$FP/.claude-plugin/plugin.json"
 printf '#!/usr/bin/env bash\nprintf "{}\\n"\n' > "$FP/scripts/aimi-cli.sh"
@@ -135,6 +138,7 @@ printf -- '---\ndescription: fixture\n---\nBody\n' > "$FP/commands/fixture.md"
 # Trailing newline count matters: the rewrite must keep it exactly.
 printf 'Ask with AskUserQuestion here.\nSpawn: Task subagent_type="aimi-engineering:research:x" with general-purpose.\nCLI dir: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/scripts\nRoot: ${CLAUDE_PLUGIN_ROOT}/scripts\n\n\n' \
   > "$FP/commands/references/plan/x.md"
+cp "$FP/commands/references/plan/x.md" "$FP/commands/references/execute/y.md"
 printf 'Outside the allowlist: AskUserQuestion and ${CLAUDE_CONFIG_DIR:-$HOME/.claude} stay.\n' \
   > "$FP/commands/references/not-allowlisted.md"
 
@@ -144,6 +148,10 @@ assert_eq "0" "$RC" "fixture: dry run exits 0"
 case "$OUT" in
   *"Would translate reference: plan/x.md"*) pass "fixture: dry run lists plan/x.md" ;;
   *) fail "fixture: dry run lists plan/x.md" "$OUT" ;;
+esac
+case "$OUT" in
+  *"Would translate reference: execute/y.md"*) pass "fixture: dry run lists execute/y.md" ;;
+  *) fail "fixture: dry run lists execute/y.md" "$OUT" ;;
 esac
 case "$OUT" in
   *"Would translate reference: not-allowlisted.md"*) fail "fixture: dry run must not list not-allowlisted.md" ;;
@@ -162,6 +170,10 @@ if [ -e "$DRY/xdg" ]; then fail "real tree: dry run creates nothing under the XD
 # install
 run_install "$FIX/repo/install.sh" "$FIX"
 assert_eq "0" "$RC" "fixture: install exits 0"
+case "$OUT" in
+  *"Translated 2 reference file(s)"*) pass "fixture: install reports Translated 2 reference file(s)" ;;
+  *) fail "fixture: install reports Translated 2 reference file(s)" "$OUT" ;;
+esac
 FREFS="$FIX/xdg/opencode/plugins/aimi-engineering/commands/references"
 X="$FREFS/plan/x.md"
 assert_file_lacks "$X" "AskUserQuestion" "fixture: plan/x.md has no AskUserQuestion literal"
@@ -174,6 +186,15 @@ assert_file_lacks "$X" "OpenCode Agent Invocation" "fixture: plan/x.md has no ag
 assert_file_has "$X" "general-purpose" "fixture: plan/x.md keeps general-purpose (no swap)"
 assert_eq "Ask with the question tool here." "$(sed -n 1p "$X")" "fixture: plan/x.md first line is the translated picker sentence"
 assert_eq "6" "$(wc -l < "$X" | tr -d ' ')" "fixture: plan/x.md keeps its trailing newlines"
+Y="$FREFS/execute/y.md"
+assert_file_lacks "$Y" "AskUserQuestion" "fixture: execute/y.md has no AskUserQuestion literal"
+assert_file_lacks "$Y" 'Task subagent_type="aimi-engineering:' "fixture: execute/y.md has no Task subagent_type literal"
+assert_file_has "$Y" 'aimi-task subagent_type="aimi-engineering:research:x"' "fixture: execute/y.md spawn rewritten to aimi-task"
+assert_file_has "$Y" '${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/scripts' "fixture: execute/y.md carries the config-dir rewrite"
+assert_file_lacks "$Y" 'CLAUDE_CONFIG_DIR' "fixture: execute/y.md has no CLAUDE_CONFIG_DIR token left"
+assert_file_has "$Y" '${AIMI_PLUGIN_DIR}/scripts' "fixture: execute/y.md plugin root rewritten"
+assert_file_lacks "$Y" "OpenCode Agent Invocation" "fixture: execute/y.md has no agent-invocation preamble"
+assert_file_has "$Y" "general-purpose" "fixture: execute/y.md keeps general-purpose (no swap)"
 assert_same_file "$FP/commands/references/not-allowlisted.md" "$FREFS/not-allowlisted.md" \
   "fixture: a reference outside the allowlist is byte-identical"
 
@@ -198,6 +219,25 @@ if [ -e "$X" ] || [ -d "$FIX/xdg/opencode/plugins/aimi-engineering" ]; then
 else
   pass "fixture: uninstall removes the translated references"
 fi
+
+# ---------------------------------------------------------------------------
+echo "== fixture plugin tree with no references/execute/ directory"
+# ---------------------------------------------------------------------------
+NX=$(new_tmp)
+NP="$NX/repo/plugins/aimi-engineering"
+mkdir -p "$NP/.claude-plugin" "$NP/scripts" "$NP/commands/references/plan"
+cp "$INSTALL_SH" "$NX/repo/install.sh"
+printf '{"name":"aimi-engineering","version":"0.0.1"}\n' > "$NP/.claude-plugin/plugin.json"
+printf '#!/usr/bin/env bash\nprintf "{}\\n"\n' > "$NP/scripts/aimi-cli.sh"
+chmod +x "$NP/scripts/aimi-cli.sh"
+printf -- '---\ndescription: fixture\n---\nBody\n' > "$NP/commands/fixture.md"
+cp "$FP/commands/references/plan/x.md" "$NP/commands/references/plan/x.md"
+run_install "$NX/repo/install.sh" "$NX"
+assert_eq "0" "$RC" "no-execute fixture: install exits 0"
+case "$OUT" in
+  *"Translated 1 reference file(s)"*) pass "no-execute fixture: install reports Translated 1 reference file(s)" ;;
+  *) fail "no-execute fixture: install reports Translated 1 reference file(s)" "$OUT" ;;
+esac
 
 echo
 echo "Results: ${GREEN}${TESTS_PASSED} passed${NC}, ${RED}${TESTS_FAILED} failed${NC}"

@@ -164,18 +164,13 @@ This contract is stated in **prose only**. There is no lettered-option block
 here, and the interactive-question tool is deliberately not named anywhere in
 this file. That is a mechanical constraint, not a stylistic preference.
 
-`install.sh` rewrites that tool into OpenCode's own equivalent using four
-exact-match string substitutions (`install.sh:273-276`), and those
-substitutions are applied **only to command bodies**. Reference files never
-reach that function: they are delivered to OpenCode by the verbatim whole-tree
-copy in `install.sh` (the explanatory comment at `:481-485` and the `cp -R` it
-describes at `:486`), and both command-install loops skip the `references`
-subdirectory by name (`install.sh:530` and `install.sh:580`). A picker written
-into a reference file would therefore reach OpenCode untranslated, naming a
-tool that host does not have — a consequence `install.sh:266-272` spells out
-in its own comment. `forge-contract.md` is the existing precedent: it carries
-its account-selection contract in prose for exactly this reason, and this file
-follows it.
+`install.sh` rewrites that tool into OpenCode's own equivalent where it runs the
+full command-body rewrite: a command body, and the subtrees named in
+`REFERENCE_ALLOWLIST_FULL` (`plan/*.md` and `execute/*.md`). This file is on
+neither side of that line, and `test-command-blocks.sh` Check 14 refuses picker
+markup in any reference outside those subtrees. `forge-contract.md` is the
+existing precedent: it carries its account-selection contract in prose for the
+same reason, and this file follows it.
 
 If a later editor feels this file is incomplete without the option block, the
 option block belongs in the **command body** that consumes this file — where
