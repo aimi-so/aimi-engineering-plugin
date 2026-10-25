@@ -37,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import capture_command_block_jq as CAP  # noqa: E402
+import execute_text as ET  # noqa: E402
 
 SCRIPTS = os.path.dirname(HERE)
 CAPTURE_SH = os.path.join(SCRIPTS, "capture-command-block-jq.sh")
@@ -179,13 +180,16 @@ def test_recorded_file_distribution_matches_the_live_extractor():
 
 
 def test_recorded_files_are_exactly_the_ones_the_story_names():
+    # The four non-execute files are literals; the execute side comes from the
+    # reader, so a split of execute.md into references/execute/ files is still
+    # a member while a stray recorded file is not.
+    execute_side = {k for k in ET.load_execute_corpus() if {s["file"] for s in SITES} & {k}} | {"execute.md"}
     named = {
-        "execute.md",
         "references/container-execution.md",
         "review.md",
         "references/plan/phase-3e-story-merge.md",
         "references/execution-mode.md",
-    }
+    } | execute_side
     assert {s["file"] for s in SITES} == named
 
 

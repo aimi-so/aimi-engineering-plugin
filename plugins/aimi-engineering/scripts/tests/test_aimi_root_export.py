@@ -21,7 +21,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
 PLUGIN = os.path.dirname(SCRIPTS)
 sys.path.insert(0, SCRIPTS)
+sys.path.insert(0, HERE)
 
+import execute_text as ET  # noqa: E402
 import tasks as T  # noqa: E402
 
 CLI = os.path.join(SCRIPTS, "aimi-cli.sh")
@@ -247,7 +249,7 @@ def test_the_skill_names_aimi_root_in_both_verify_exports_and_keeps_the_boundary
 
 
 def test_execute_spawn_fields_list_aimi_root_directly_after_tasks_file_path():
-    text = _read(EXECUTE)
+    text = ET.execute_text()
     start = text.index("- TASKS_FILE_PATH = WAVE_TASKS_FILE")
     scratch = text.index("- SCRATCH_PREFIX = PLAN_DISC", start)
     window = text[start:scratch]

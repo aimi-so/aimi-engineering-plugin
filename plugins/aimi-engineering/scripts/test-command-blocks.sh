@@ -109,6 +109,30 @@ EVENTS="$WORK_DIR/events.tsv"   # A|R \t var \t loopdepth \t blockline \t id
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
+# execute.md's text in DOCUMENT ORDER, router plus whatever references/execute/
+# files it reads, built once by the one reader every test of that text shares
+# (scripts/tests/execute_text.py). Checks that compare line numbers inside one
+# file, or count a literal across the whole command, read this file so they
+# survive the router split. Check 12b alone keeps the router's own frontmatter.
+EXEC_TEXT="$WORK_DIR/execute-text.md"
+
+build_execute_text() {
+  if ! AIMI_EXECUTE_WIRING_ROOT="$COMMANDS_DIR" python3 "$SCRIPT_DIR/tests/execute_text.py" "$COMMANDS_DIR" > "$EXEC_TEXT" \
+     || [ ! -s "$EXEC_TEXT" ]; then
+    echo "FATAL: could not build the document-order execute text with scripts/tests/execute_text.py" >&2
+    exit 1
+  fi
+}
+
+# Maps a commands/-relative name to the file a check should read: execute.md
+# becomes the document-order file, every other name stays in COMMANDS_DIR.
+command_text_path() {
+  case "$1" in
+    execute.md) printf '%s' "$EXEC_TEXT" ;;
+    *) printf '%s/%s' "$COMMANDS_DIR" "$1" ;;
+  esac
+}
+
 # Process-environment names. These are read by design and assigned by the host,
 # never by the prose, so check 4 would otherwise report every one of them in
 # every file that resolves the CLI path. Repo-owned variables are NOT listed
@@ -577,12 +601,12 @@ FIXTURES
   # file path or a --phase argument, the raw dot-bearing id was needed instead.
   local leaks
   leaks="$(
-    grep -n 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null \
+    grep -n 'PHASE_ID_SLUG' "$EXEC_TEXT" 2>/dev/null \
       | grep -E -- '-tasks\.json|--phase' \
       | sed 's/^/execute.md:/'
     # Outside the derivation block entirely (prose, or another block).
     in_block="$(grep -c 'PHASE_ID_SLUG' "$block" 2>/dev/null || echo 0)"
-    in_file="$(grep -c 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null || echo 0)"
+    in_file="$(grep -c 'PHASE_ID_SLUG' "$EXEC_TEXT" 2>/dev/null || echo 0)"
     [ "$in_block" = "$in_file" ] \
       || printf 'PHASE_ID_SLUG appears %s time(s) in execute.md but only %s inside the derivation block\n' \
            "$in_file" "$in_block"
@@ -625,7 +649,7 @@ FIXTURES
 # phase-mode run. Exactly one, below the gate, is the whole contract.
 # ---------------------------------------------------------------------------
 check_reverify_branch() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local id rel start heading body matches="" block findings=""
 
   # --- The capture: Step 1.7's on-success extraction block ------------------
@@ -634,7 +658,7 @@ check_reverify_branch() {
   # roadmap-get can recover the status the phase was claimed in.
   while IFS=$'\t' read -r id rel start heading; do
     [ -n "$id" ] || continue
-    [ "$rel" = "execute.md" ] || continue
+    case "$rel" in execute.md|references/execute/*) ;; *) continue ;; esac
     body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
     case "$body" in
       *'PHASE_ENTRY_STATUS='*) matches="$matches$id " ;;
@@ -853,7 +877,7 @@ check_forge_account_picker() {
 
   while IFS='|' read -r file heading; do
     [ -n "$heading" ] || continue
-    path="$COMMANDS_DIR/$file"
+    path="$(command_text_path "$file")"
     if [ ! -f "$path" ]; then
       missing="$missing$file is not readable"$'\n'
       continue
@@ -1052,7 +1076,7 @@ PHASE_PUBLISH_SECTION='### Offer a Pull Request'
 PHASE_PUBLISH_GATE='#### Confirm before publishing this phase'
 
 check_phase_publish_gate() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local region gate_line decline_line pushes p
   local missing="" ordering="" closed=""
   local literal why
@@ -1151,7 +1175,7 @@ CONTAINER_PUSH_SECTION='### If all stories complete:'
 CONTAINER_PUSH_REF_SECTION='## Container Mode: Push the Branch'
 
 check_container_push_confirmation() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local ref="$COMMANDS_DIR/references/container-execution.md"
   local region literal why body="" refs=""
 
@@ -1215,7 +1239,8 @@ CONTAINER_LITERALS
 PUSH_REFUSAL_SECTION='### Refuse --push'
 
 check_push_flag_removed() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
+  local router="$COMMANDS_DIR/execute.md"
   local region first last hint hits n stray="" loud="" flag=""
 
   # --- 12a: the flag's variable is gone from every command file -------------
@@ -1225,7 +1250,7 @@ check_push_flag_removed() {
     "The flag is removed, not deprecated. Nothing may read it, in a command body or a reference."
 
   # --- 12b: the frontmatter no longer advertises it ------------------------
-  hint="$(grep -n '^argument-hint:' "$md" | grep -F -- '--push' | sed 's|^|execute.md:|' | cut -c1-160)"
+  hint="$(grep -n '^argument-hint:' "$router" | grep -F -- '--push' | sed 's|^|execute.md:|' | cut -c1-160)"
   assert_no_findings "$hint" \
     "Check 12b — execute.md's argument-hint no longer advertises --push" \
     "Autocomplete would keep offering a flag whose only remaining behavior is to fail the run."
@@ -1292,7 +1317,7 @@ check_completion_names_open_pr() {
   # --- 13a: no raw forge command is recommended to the user ----------------
   raw="$(
     for f in $COMPLETION_REPORT_FILES; do
-      grep -n 'gh pr create' "$COMMANDS_DIR/$f" 2>/dev/null | cut -c1-160 | sed "s|^|$f:|"
+      grep -n 'gh pr create' "$(command_text_path "$f")" 2>/dev/null | cut -c1-160 | sed "s|^|$f:|"
     done
   )"
   assert_no_findings "$raw" \
@@ -1301,7 +1326,7 @@ check_completion_names_open_pr() {
 
   # --- 13b: every PR recommendation names the command instead --------------
   for f in $COMPLETION_REPORT_FILES; do
-    path="$COMMANDS_DIR/$f"
+    path="$(command_text_path "$f")"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       case "$line" in
@@ -1390,6 +1415,7 @@ main() {
   echo "Extracting bash-fenced blocks from commands/, skills/, and agents/..."
   extract_blocks
   scan_blocks
+  build_execute_text
   load_baseline
   : > "$MATCHED_BASELINE"
 
