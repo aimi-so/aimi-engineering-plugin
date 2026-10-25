@@ -58,7 +58,7 @@ Emit exactly one fenced `json` block as the **final content** of your response. 
 }
 ```
 
-`field` is one of the eight fields in the op table below. `matchValue` is required on every `replace` or `remove` patch except one on `implementation.approach` or `gate.prompt`; omit it everywhere else. A `remove` patch carries no `value`.
+`field` is one of the ten fields in the op table below. `matchValue` is required on every `replace` or `remove` patch except one on `implementation.approach` or `gate.prompt`; omit it everywhere else. A `remove` patch carries no `value`.
 
 ### Op table
 
@@ -73,9 +73,13 @@ One row per field, listing exactly the ops that field accepts:
 | `implementation.approach` | `replace` | Overwrites the whole string with `value`. |
 | `implementation.verify` | `replace` | `matchValue` is a substring of `verify` that occurs exactly once; `value` replaces only that substring, and the same substitution is applied to every `guardRails` entry containing it. |
 | `implementation.guardRails` | `replace` | `matchValue` equals one whole `guardRails` entry; `value` overwrites it. |
+| `implementation.files` | `replace, remove` | `matchValue` equals one whole entry; a `replace` `value` MUST be a plain relative path inside the story's repository. |
+| `implementation.outputs` | `add, replace, remove` | `add` appends `value`; `replace` and `remove` need a `matchValue` equal to one whole entry. A `value` MUST be a path starting with `.aimi/`, relative to the AIMI root. |
 | `gate.prompt` | `replace` | Overwrites the whole string, only when the story already has a `gate` with a non-null `prompt`. Never emit it for a story with no gate. |
 
-For `tasks`, `acceptanceCriteria`, `guardRails` and `notes` the `matchValue` must equal one whole element or paragraph and match exactly one; quote the existing text exactly or do not emit the patch. `verify` and `guardRails` values are stored verbatim, never rewritten. A `verify` patch is dropped as `guardRails-out-of-sync` when a rail stops equalling a `verify` segment, and as `verify-composition` when the new `verify` can swallow a failing line.
+For `tasks`, `acceptanceCriteria`, `guardRails` and `notes` the `matchValue` must equal one whole element or paragraph and match exactly one; quote the existing text exactly or do not emit the patch. `verify` and `guardRails` values are stored verbatim, never rewritten. A `verify` or `guardRails` patch is dropped as `guardRails-out-of-sync`, carrying `rails` (the indices it broke), only when it breaks a rail that equalled a `verify` segment before it; a rail already broken causes no drop. It is dropped as `verify-composition` when the new `verify` can swallow a failing line, and a `files` or `outputs` value the shared path rule refuses is dropped as `bad-path`.
+
+An `implementation.files` entry that leaves the repository is moved with a `files` `remove` plus an `outputs` `add`, and named in `verify` and criteria as the quoted path `"${AIMI_ROOT}/.aimi/..."`.
 
 A `value` or `matchValue` that trips the injection matcher is refused whole and reported by trigger name, never by value. Any other pairing, a field outside the table, a `matchValue` that matches zero or several elements and a patch beyond the budget below are dropped: each is listed in the orchestrator's apply report (storyIdx, field, op, reason). A dropped patch adds no `unresolved[]` entry, so emit a patch only when you can quote its target; put a finding you cannot patch in `unresolved[]`.
 
@@ -89,7 +93,7 @@ The orchestrator caps at **10 patches per `storyIdx`** value. Patches beyond tha
 
 ### Emit as fenced block
 
-Your output object must appear as a single ` ```json ` fenced block on the last lines of your response. Do not wrap it in prose after the fence. The orchestrator parses the last fenced `json` block from your response text.
+Put the output object in a single ` ```json ` fenced block on the last lines of your response, with no prose after the fence. The orchestrator parses the last fenced `json` block.
 
 ## Audit scope
 
@@ -127,13 +131,13 @@ Emit an `unresolved[]` entry (not a patch — the auditor cannot synthesize the 
 
 Skip this check when the staging set contains only one story (every symbol would be trivially flagged).
 
-Legitimate leaf APIs (CLI entry points, webhook/cron handlers, public SDK surfaces) are known false positives; the reviewer decides.
+Leaf APIs (CLI entry points, webhook/cron handlers, public SDK surfaces) are known false positives; the reviewer decides.
 
 ### 6. Deferral surfacing
 
 When a story's `notes` field contains a deferral phrase matching the strict regex `deferred to (story )?(\d+)` OR `story (\d+) (will|owns|covers)`, emit an `unresolved[]` entry flagging the deferral for human reviewer attention. Extract the target outline index (capture group) and include it in the message.
 
-Do NOT attempt to auto-verify whether the target story honors the deferral: the deferred concept's noun often appears verbatim in a helper name the target story introduces (`requiresAffiliation`), so a substring check yields a tautological "honored" verdict. The aim is that no deferral goes unreviewed; the human reviewer judges whether the target story wires the behavior or only exposes a helper.
+Do NOT auto-verify whether the target story honors the deferral: the deferred noun often appears verbatim in a helper name the target introduces (`requiresAffiliation`), so a substring check is tautological. No deferral goes unreviewed; the human reviewer judges whether the target wires the behavior or only exposes a helper.
 
 Emit one `unresolved[]` entry per deferral phrase matched:
 
@@ -141,7 +145,7 @@ Emit one `unresolved[]` entry per deferral phrase matched:
 { "storyIdx": "<idx of the source story making the deferral>", "message": "deferral surfaced: notes claim deferral to story <target idx>. Reviewer must confirm story <target idx> wires the deferred concern (not just exposes a helper)." }
 ```
 
-The regex is intentionally narrow: looser phrases like `future work`, `out of scope`, `intentionally not enforced here` name no target story and match too often. The patch budget does not apply to `unresolved[]` entries; keep messages short.
+The regex is narrow on purpose: looser phrases like `future work` or `out of scope` name no target story and match too often. The patch budget does not apply to `unresolved[]` entries; keep messages short.
 
 ### 7. Cross-project contract orphan
 
@@ -192,7 +196,7 @@ Proceed only when at least one outline entry carries `produces:` or `consumes:` 
 
 ## On empty result
 
-When no cross-story issues are found, emit the canonical empty output rather than null, an empty response, or a prose summary without JSON:
+When no cross-story issues are found, emit this empty output, never null or prose without JSON:
 
 ```json
 {
