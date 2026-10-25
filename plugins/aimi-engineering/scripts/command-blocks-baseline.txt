@@ -76,22 +76,6 @@ syntax	skills/agent-browser/SKILL.md	Navigation (block 1)	# usage listing: `agen
 # Both are gone. That is what this list is for: a NEW name means a new one.
 unassigned	brainstorm.md	renderBundlePending	# bundle-detection verdict the surrounding prose resolves; no block assigns it
 unassigned	brainstorm.md	CHOSEN_BUNDLE_PATH	# AskUserQuestion pick the surrounding prose resolves; no block assigns it
-unassigned	execute.md	ARTIFACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
-unassigned	execute.md	CONTRACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
-unassigned	execute.md	DECISIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
-unassigned	execute.md	DEFAULT_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	DEFERRED_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
-unassigned	execute.md	DEVIATIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
-unassigned	execute.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_DIR	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_SPLIT_FILES	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_SPLIT_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	execute.md	SERVE_URL	# adopted from `serve start`'s stdout per references/container-execution.md; assigned there, read here
-unassigned	execute.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	init.md	AIMI_CLI	# this file documents CLI resolution rather than performing it; legitimately caller-supplied
 unassigned	next.md	CONTAINER_ROOT	# supplied by the orchestrator that invokes this flow, never by next.md itself
 unassigned	next.md	PROJECT_PATH	# supplied by the orchestrator that invokes this flow, never by next.md itself
@@ -152,6 +136,46 @@ unassigned	references/execute/paired-split-branches-and-worktrees.md	PHASE_ID	# 
 unassigned	references/execute/paired-split-merge-and-continue.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/paired-split-merge-and-continue.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/paired-split-merge-and-continue.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_DIR	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_SPLIT_FILES	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_SPLIT_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-creates-verification.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	ARTIFACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	references/execute/phase-completion-handoff-and-mark.md	CONTRACTS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	references/execute/phase-completion-handoff-and-mark.md	DECISIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	references/execute/phase-completion-handoff-and-mark.md	DEFERRED_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	references/execute/phase-completion-handoff-and-mark.md	DEVIATIONS_JSON	# handoff payload array the agent composes in prose before roadmap-write-handoff runs
+unassigned	references/execute/phase-completion-handoff-and-mark.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_DIR	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_SPLIT_FILES	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_SPLIT_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-handoff-and-mark.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-next-phase.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	PHASE_DIR	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	PHASE_SPLIT_FILES	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	PHASE_SPLIT_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-offer-pull-request.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-pending-count.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-pending-count.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-pending-count.md	PHASE_DIR	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-pending-count.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-pending-count.md	PHASE_SPLIT_FILES	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	PHASE_SPLIT_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/phase-completion-visual-gate.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/release-claim-on-abort.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/release-claim-on-abort.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-0-7-visual-follow-prompt.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
@@ -185,6 +209,28 @@ unassigned	references/execute/step-2-flat-container.md	AIMI_ROOT	# assigned by a
 unassigned	references/execute/step-2-flat-container.md	DEFAULT_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-2-flat-container.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-2-main-repo-branch-setup.md	DEFAULT_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-1-3-2-worktree-and-concurrency.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-guidelines-and-dev-server.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-guidelines-and-dev-server.md	SERVE_URL	# adopted from `serve start`'s stdout per references/container-execution.md; assigned there, read here
+unassigned	references/execute/step-3-3-guidelines-and-dev-server.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-open-visual-follow.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-open-visual-follow.md	PHASE_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-open-visual-follow.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-open-visual-follow.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-3-open-visual-follow.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-check-pending.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-check-pending.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-check-pending.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-check-pending.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-3-check-pending.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-4-finalize.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-4-finalize.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	DEFAULT_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
+unassigned	references/execute/step-5-completion.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/visual-follow-lifecycle.md	VISUAL_URL	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/container-execution.md	AIMI_ROOT	# reference file describing the mechanics; the calling command assigns this
 unassigned	references/container-execution.md	CONTAINER_BASE	# reference file describing the mechanics; the calling command assigns this

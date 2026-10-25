@@ -49,7 +49,12 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	251843
+execute.md	26684
+references/execute/phase-completion-creates-verification.md	31348
+references/execute/phase-completion-handoff-and-mark.md	19525
+references/execute/phase-completion-offer-pull-request.md	25226
+references/execute/step-4-wave-execution-loop.md	59278
+references/execute/step-5-completion.md	30094
 references/execute/paired-split-merge-and-continue.md	21738
 references/execute/step-1-7-claim-the-phase.md	18178
 brainstorm.md	144635

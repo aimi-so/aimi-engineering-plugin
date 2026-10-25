@@ -992,8 +992,19 @@ EOF
 # fenced blocks — a fence-blind scan ends the section on the first one and the
 # check then fails for a reason that has nothing to do with publishing.
 md_section() {
+  # A router entry repeats the heading of the file it routes to, so the first
+  # match can be a stub (heading, then an `Applies when:` line). A stub is
+  # discarded and the scan goes on to the next occurrence, which is the body.
   awk -v H="$2" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function flush(   i, first) {
+      first = ""
+      for (i = 2; i <= nb; i++) { if (buf[i] ~ /^[0-9]+\t[ \t]*$/) continue; first = buf[i]; break }
+      if (first ~ /^[0-9]+\tApplies when:/) { nb = 0; inside = 0; return 0 }
+      for (i = 1; i <= nb; i++) print buf[i]
+      return 1
+    }
+    function emit(line) { nb = nb + 1; buf[nb] = line }
     {
       n = n + 1
       probe = $0; sub(/^[ \t]+/, "", probe)
@@ -1002,21 +1013,22 @@ md_section() {
         info = probe; sub(/^`+/, "", info); info = trim(info)
         if (infence == 0)                              { infence = 1; openind = ind }
         else if (info == "" && ind <= openind)         { infence = 0 }
-        if (inside) print n "\t" $0
+        if (inside) emit(n "\t" $0)
         next
       }
-      if (infence == 1) { if (inside) print n "\t" $0; next }
-      if (!inside && index($0, H) == 1) {
-        inside = 1; lvl = 0
-        while (substr(probe, lvl + 1, 1) == "#") lvl++
-        print n "\t" $0; next
-      }
+      if (infence == 1) { if (inside) emit(n "\t" $0); next }
       if (inside && probe ~ /^#{1,6}[ \t]/) {
         l = 0; while (substr(probe, l + 1, 1) == "#") l++
-        if (l <= lvl) exit
+        if (l <= lvl) { if (flush()) { done = 1; exit } }
       }
-      if (inside) print n "\t" $0
+      if (!inside && !done && index($0, H) == 1) {
+        inside = 1; lvl = 0; nb = 0
+        while (substr(probe, lvl + 1, 1) == "#") lvl++
+        emit(n "\t" $0); next
+      }
+      if (inside) emit(n "\t" $0)
     }
+    END { if (inside && !done) flush() }
   ' "$1"
 }
 
