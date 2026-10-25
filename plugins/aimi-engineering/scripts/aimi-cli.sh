@@ -1973,6 +1973,20 @@ cmd_get_story_context() {
     --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
 }
 
+# The directory holding .aimi/, handed to a probe as --aimi-root so every
+# probed segment sees it as AIMI_ROOT beside TASKS_FILE_PATH. It is AIMI_DIR
+# (find_aimi_root's own export, absolute) minus its trailing /.aimi -- NOT
+# PROJECT_ROOT, which is the git toplevel and differs from it in a multi-repo
+# layout. Fills the named array; leaves it empty when AIMI_DIR is not absolute.
+# Usage: _aimi_root_args <array-name>
+_aimi_root_args() {
+  local -n _out="$1"
+  _out=()
+  case "${AIMI_DIR:-}" in
+    /*/.aimi) _out=(--aimi-root "${AIMI_DIR%/.aimi}") ;;
+  esac
+}
+
 # Probe a story's implementation.verify ONE ASSERTION AT A TIME.
 #
 # The executor's pre-run answers "does this whole verify already pass before
@@ -2071,10 +2085,14 @@ cmd_verify_probe() {
     fi
   fi
 
+  local root_args=()
+  _aimi_root_args root_args
+
   check_python3
   python3 "$(_aimi_tasks_py)" verify-probe \
     --tasks-file "$tasks_file" --story-id "$story_id" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}"
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" "${previous_args[@]}" "${skip_args[@]}" \
+    ${root_args[@]+"${root_args[@]}"}
 }
 
 # Run every story's implementation.verify at the tasks file's own
@@ -2116,10 +2134,14 @@ cmd_probe_plan() {
     extra+=(--run-suites)
   fi
 
+  local root_args=()
+  _aimi_root_args root_args
+
   check_python3
   python3 "$(_aimi_tasks_py)" probe-plan \
     --tasks-file "$tasks_file" \
-    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" ${extra[@]+"${extra[@]}"}
+    --cwd "${AIMI_INVOCATION_DIR:-$PWD}" ${extra[@]+"${extra[@]}"} \
+    ${root_args[@]+"${root_args[@]}"}
 }
 
 # List every planning defect a previous executor recorded in .aimi/known-gaps/.
