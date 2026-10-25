@@ -148,6 +148,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
       'approach': '<actionable strategy referencing codebase patterns>',
       'verify': '<executable command or checkable assertion>',
       'guardRails': ['<optional - exact text of each verify segment that is SUPPOSED to pass before and after the work, as the probe segmenter splits it>'],
+      'outputs': ['<optional, .aimi/... paths outside the repository>'],
       'prototypeAnchor': '<optional, relative path to single prototype file>'
     },
     'verification': {
