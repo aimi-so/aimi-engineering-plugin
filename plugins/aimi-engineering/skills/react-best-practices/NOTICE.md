@@ -10,8 +10,8 @@ and Next.js performance guidelines, licensed under the MIT License (the
 
 Copyright (c) Vercel, Inc.
 
-The conventions in `SKILL.md` and the deep-reference material under
-`references/` are adaptations of Vercel Engineering's published performance
+The conventions in `SKILL.md` and the deep-reference material in
+`AGENTS.md` and under `rules/` are adaptations of Vercel Engineering's published performance
 optimization rules for React and Next.js — covering eliminating waterfalls,
 bundle size optimization, server-side performance, and client-side data
 fetching, prioritized by impact.

@@ -5,82 +5,42 @@ The section ID (in parentheses) is the filename prefix used to group rules.
 
 ---
 
-## 1. Core Rendering (rendering)
+## 1. Eliminating Waterfalls (async)
 
 **Impact:** CRITICAL  
-**Description:** Fundamental React Native rendering rules. Violations cause
-runtime crashes or broken UI.
+**Description:** Waterfalls are the #1 performance killer. Each sequential await adds full network latency. Eliminating them yields the largest gains.
 
-## 2. List Performance (list-performance)
+## 2. Bundle Size Optimization (bundle)
 
-**Impact:** HIGH  
-**Description:** Optimizing virtualized lists (FlatList, LegendList, FlashList)
-for smooth scrolling and fast updates.
+**Impact:** CRITICAL  
+**Description:** Reducing initial bundle size improves Time to Interactive and Largest Contentful Paint.
 
-## 3. Animation (animation)
+## 3. Server-Side Performance (server)
 
 **Impact:** HIGH  
-**Description:** GPU-accelerated animations, Reanimated patterns, and avoiding
-render thrashing during gestures.
+**Description:** Optimizing server-side rendering and data fetching eliminates server-side waterfalls and reduces response times.
 
-## 4. Scroll Performance (scroll)
+## 4. Client-Side Data Fetching (client)
 
-**Impact:** HIGH  
-**Description:** Tracking scroll position without causing render thrashing.
+**Impact:** MEDIUM-HIGH  
+**Description:** Automatic deduplication and efficient data fetching patterns reduce redundant network requests.
 
-## 5. Navigation (navigation)
-
-**Impact:** HIGH  
-**Description:** Using native navigators for stack and tab navigation instead of
-JS-based alternatives.
-
-## 6. React State (react-state)
+## 5. Re-render Optimization (rerender)
 
 **Impact:** MEDIUM  
-**Description:** Patterns for managing React state to avoid stale closures and
-unnecessary re-renders.
+**Description:** Reducing unnecessary re-renders minimizes wasted computation and improves UI responsiveness.
 
-## 7. State Architecture (state)
-
-**Impact:** MEDIUM  
-**Description:** Ground truth principles for state variables and derived values.
-
-## 8. React Compiler (react-compiler)
+## 6. Rendering Performance (rendering)
 
 **Impact:** MEDIUM  
-**Description:** Compatibility patterns for React Compiler with React Native and
-Reanimated.
+**Description:** Optimizing the rendering process reduces the work the browser needs to do.
 
-## 9. User Interface (ui)
+## 7. JavaScript Performance (js)
 
-**Impact:** MEDIUM  
-**Description:** Native UI patterns for images, menus, modals, styling, and
-platform-consistent interfaces.
+**Impact:** LOW-MEDIUM  
+**Description:** Micro-optimizations for hot paths can add up to meaningful improvements.
 
-## 10. Design System (design-system)
-
-**Impact:** MEDIUM  
-**Description:** Architecture patterns for building maintainable component
-libraries.
-
-## 11. Monorepo (monorepo)
+## 8. Advanced Patterns (advanced)
 
 **Impact:** LOW  
-**Description:** Dependency management and native module configuration in
-monorepos.
-
-## 12. Third-Party Dependencies (imports)
-
-**Impact:** LOW  
-**Description:** Wrapping and re-exporting third-party dependencies for
-maintainability.
-
-## 13. JavaScript (js)
-
-**Impact:** LOW  
-**Description:** Micro-optimizations like hoisting expensive object creation.
-
-## 14. Fonts (fonts)
-
-**Impact:** LOW  
-**Description:** Native font loading for improved performance.
+**Description:** Advanced patterns for specific cases that require careful implementation.
