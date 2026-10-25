@@ -766,7 +766,6 @@ install_commands() {
 # | workflow agent                       | translated as                          |
 # | ------------------------------------ | -------------------------------------- |
 # | aimi-bug-reproduction-validator      | aimi-bug-reproduction-validator        |
-# | aimi-learnings-triage                | aimi-learnings-triage                  |
 # | aimi-scope-negative-verifier         | aimi-scope-negative-verifier           |
 # | aimi-scope-positive-verifier         | aimi-scope-positive-verifier           |
 # | aimi-spec-flow-analyzer              | aimi-spec-flow-analyzer                |

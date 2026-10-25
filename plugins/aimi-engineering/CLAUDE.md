@@ -499,8 +499,7 @@ Hooks support per-guard bypass via environment variables. Set `<name>=off` (or u
 | `AIMI_DEFAULT_BRANCH_GUARD` | pre-bash-dispatcher (default-branch handler) | Allows commits on protected branches (main/master/develop) |
 | `AIMI_SHELL_TRUE_GUARD` | pre-bash-dispatcher (shell-true handler) | Allows commits with shell=True in staged Python files |
 | `AIMI_WORKTREE_BUDGET_GUARD` | pre-bash-dispatcher (worktree-budget handler) | Allows git worktree add beyond metadata.maxConcurrency |
-| `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, friction/telemetry logs, roadmap.json, phase-*/handoff.md, and staged story files (`.aimi/.tasks-staging/<run>/NN-*.json`) |
-| `AIMI_AGENT_MODE` | aimi-learnings skill | Forces JSON-only read-only path; never marks events |
+| `AIMI_RUNTIME_STATE_GUARD` | guard-runtime-state | Allows direct Write/Edit to .aimi/state/, .aimi/tasks during execution, roadmap.json, phase-*/handoff.md, and staged story files (`.aimi/.tasks-staging/<run>/NN-*.json`) |
 
 > `AIMI_RUNTIME_STATE_GUARD` (`guard-runtime-state.py`) intercepts the Write/Edit tool path and blocks direct writes to `roadmap.json` and `phase-*/handoff.md` (see Roadmap File Schema above) the same way it blocks `.aimi/tasks/*-tasks.json`, pointing the caller at the `roadmap-*` aimi-cli.sh verbs instead. This coverage is Write/Edit-tool-only — the hook is registered on `matcher: Write|Edit` (`hooks/hooks.json`) and reads `tool_input.file_path`. A Bash command that writes either file directly (e.g. `jq ... > roadmap.json`) is **not** intercepted.
 

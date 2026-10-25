@@ -11,33 +11,6 @@ from typing import Callable
 
 SCHEMA_VERSIONS: frozenset[str] = frozenset({"3.3"})  # acceptable tasks.json schema versions
 
-# ---------------------------------------------------------------------------
-# Secret-redaction helpers
-# ---------------------------------------------------------------------------
-
-_REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bsk-[A-Za-z0-9\-_]{20,}\b"), "sk-token"),
-    (re.compile(r"\bghp_[A-Za-z0-9]{36,}\b"), "github-pat"),
-    (re.compile(r"\bgho_[A-Za-z0-9]{36,}\b"), "github-oauth"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "slack-token"),
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b"), "jwt"),
-    (re.compile(r"\bAKIA[A-Z0-9]{16}\b"), "aws-access-key"),
-    (re.compile(r"\baws_secret_access_key\s*[:=]\s*\S+", re.IGNORECASE), "aws-secret-key"),
-    (re.compile(r"\b(password|passwd|api[_\-]?key|secret)\s*[:=]\s*\S+", re.IGNORECASE), "credential"),
-]
-
-
-def redact_secrets(text: str) -> str:
-    """Replace common secret token patterns with [REDACTED:<token_type>] placeholders.
-
-    Patterns covered: OpenAI/Anthropic sk- tokens, GitHub PATs/OAuth tokens,
-    Slack tokens, JWTs, AWS access keys, AWS secret keys, and generic
-    password/api_key/secret assignments.
-    """
-    for pattern, token_type in _REDACT_PATTERNS:
-        text = pattern.sub(f"[REDACTED:{token_type}]", text)
-    return text
-
 
 def safe_hook(fn: Callable[[dict], None]) -> Callable[[], None]:
     """Decorator that wraps a handler(tool_input: dict) -> None.
@@ -93,15 +66,6 @@ def load_aimi_config(start: Path | None = None) -> dict:
         if parent == current:
             return {}
         current = parent
-
-
-def is_quiet_mode() -> bool:
-    """Walk up from $CLAUDE_PLUGIN_ROOT (or cwd) looking for .aimi/config.json.
-
-    Returns config.get("quietMode", False) when found and parseable,
-    otherwise False.
-    """
-    return bool(load_aimi_config().get("quietMode", False))
 
 
 # Path token shared by both extractors below: a double-quoted path, a
@@ -164,23 +128,6 @@ def effective_cwd(command: str, tool_input: dict) -> str:
     return os.getcwd()
 
 
-def resolve_session_id(tool_input: dict) -> str:
-    """Resolve the current session identifier.
-
-    Priority:
-    1. tool_input.get("session_id")
-    2. os.environ.get("CLAUDE_SESSION_ID")
-    3. "default"
-    """
-    sid = tool_input.get("session_id")
-    if sid:
-        return str(sid)
-    sid = os.environ.get("CLAUDE_SESSION_ID")
-    if sid:
-        return str(sid)
-    return "default"
-
-
 def find_aimi_dir(start: Path | None = None) -> Path | None:
     """Walk up from start (default: cwd) looking for a .aimi directory.
 
@@ -199,25 +146,6 @@ def find_aimi_dir(start: Path | None = None) -> Path | None:
         if parent == current:
             return None
         current = parent
-
-
-def extract_skill_name(tool_input: dict) -> str | None:
-    """Extract the skill name from a Skill tool_input dict.
-
-    Priority:
-    1. tool_input["tool_input"]["skill"]  (Claude Code's actual shape)
-    2. tool_input["skill"]               (flat fallback)
-    3. None if neither is present
-    """
-    nested = tool_input.get("tool_input")
-    if isinstance(nested, dict):
-        name = nested.get("skill")
-        if name:
-            return str(name)
-    name = tool_input.get("skill")
-    if name:
-        return str(name)
-    return None
 
 
 def deny(user_message: str, event_name: str = "PreToolUse") -> str:

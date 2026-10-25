@@ -7,16 +7,14 @@ from pathlib import Path
 
 import pytest
 
-# Insert the hooks directory onto sys.path so we can import hook_utils and
-# friction_store directly (the parent dir name contains a hyphen, which is
+# Insert the hooks directory onto sys.path so we can import hook_utils
+# directly (the parent dir name contains a hyphen, which is
 # not a valid Python package identifier).
 _HOOKS_DIR = Path(__file__).parent.parent
 if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
-import friction_store  # noqa: E402
 import hook_utils  # noqa: E402
-import scope_classifier  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -56,24 +54,6 @@ def test_safe_json_input_returns_empty_on_invalid(monkeypatch):
     assert result == {}
 
 
-def test_is_quiet_mode_default_false(tmp_path, monkeypatch):
-    """When no .aimi/config.json exists the function returns False."""
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
-
-    assert hook_utils.is_quiet_mode() is False
-
-
-def test_is_quiet_mode_reads_flag(tmp_path, monkeypatch):
-    """When .aimi/config.json has quietMode=true the function returns True."""
-    config_dir = tmp_path / ".aimi"
-    config_dir.mkdir()
-    (config_dir / "config.json").write_text(json.dumps({"quietMode": True}))
-
-    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
-
-    assert hook_utils.is_quiet_mode() is True
-
-
 # ---------------------------------------------------------------------------
 # load_aimi_config tests
 # ---------------------------------------------------------------------------
@@ -89,7 +69,7 @@ def test_load_aimi_config_returns_parsed_dict(tmp_path, monkeypatch):
     """Returns the parsed dict when config is valid JSON."""
     config_dir = tmp_path / ".aimi"
     config_dir.mkdir()
-    data = {"quietMode": True, "telemetry": {"enabled": False}}
+    data = {"guards": {"protectedBranches": ["release"]}}
     (config_dir / "config.json").write_text(json.dumps(data))
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path))
     assert hook_utils.load_aimi_config() == data
@@ -108,7 +88,7 @@ def test_load_aimi_config_walks_up(tmp_path, monkeypatch):
     """Finds config.json by walking up from a nested directory."""
     config_dir = tmp_path / ".aimi"
     config_dir.mkdir()
-    data = {"quietMode": True}
+    data = {"guards": {}}
     (config_dir / "config.json").write_text(json.dumps(data))
     # start from a nested dir that doesn't have its own .aimi
     nested = tmp_path / "sub" / "deep"
@@ -229,38 +209,6 @@ def test_effective_cwd_cd_target_outranks_the_session_cwd(command):
 
 
 # ---------------------------------------------------------------------------
-# resolve_session_id tests
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_session_id_from_tool_input():
-    """Returns session_id from tool_input when present."""
-    result = hook_utils.resolve_session_id({"session_id": "abc123"})
-    assert result == "abc123"
-
-
-def test_resolve_session_id_from_env(monkeypatch):
-    """Returns CLAUDE_SESSION_ID from environment when tool_input lacks it."""
-    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-session")
-    result = hook_utils.resolve_session_id({})
-    assert result == "env-session"
-
-
-def test_resolve_session_id_default(monkeypatch):
-    """Returns 'default' when neither tool_input nor env has the value."""
-    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
-    result = hook_utils.resolve_session_id({})
-    assert result == "default"
-
-
-def test_resolve_session_id_tool_input_takes_precedence(monkeypatch):
-    """tool_input.session_id wins over CLAUDE_SESSION_ID."""
-    monkeypatch.setenv("CLAUDE_SESSION_ID", "env-session")
-    result = hook_utils.resolve_session_id({"session_id": "tool-session"})
-    assert result == "tool-session"
-
-
-# ---------------------------------------------------------------------------
 # find_aimi_dir tests
 # ---------------------------------------------------------------------------
 
@@ -319,36 +267,6 @@ def test_deny_includes_top_level_system_message():
 
 
 # ---------------------------------------------------------------------------
-# extract_skill_name tests
-# ---------------------------------------------------------------------------
-
-
-def test_extract_skill_name_nested_shape():
-    """Returns skill name from tool_input.tool_input.skill (Claude Code shape)."""
-    tool_input = {"tool_input": {"skill": "aimi:plan"}}
-    assert hook_utils.extract_skill_name(tool_input) == "aimi:plan"
-
-
-def test_extract_skill_name_flat_fallback():
-    """Returns skill name from tool_input.skill when nested key is absent."""
-    tool_input = {"skill": "aimi:review"}
-    assert hook_utils.extract_skill_name(tool_input) == "aimi:review"
-
-
-def test_extract_skill_name_nested_takes_precedence():
-    """Nested tool_input.tool_input.skill wins over top-level tool_input.skill."""
-    tool_input = {"tool_input": {"skill": "aimi:plan"}, "skill": "aimi:other"}
-    assert hook_utils.extract_skill_name(tool_input) == "aimi:plan"
-
-
-def test_extract_skill_name_returns_none_when_absent():
-    """Returns None when neither shape provides a skill name."""
-    assert hook_utils.extract_skill_name({}) is None
-    assert hook_utils.extract_skill_name({"tool_input": {}}) is None
-    assert hook_utils.extract_skill_name({"tool_input": {"other": "x"}}) is None
-
-
-# ---------------------------------------------------------------------------
 # SCHEMA_VERSIONS tests
 # ---------------------------------------------------------------------------
 
@@ -362,52 +280,3 @@ def test_schema_versions_rejects_unknown():
     """SCHEMA_VERSIONS must not include arbitrary version strings."""
     assert "1.0" not in hook_utils.SCHEMA_VERSIONS
     assert "99.0" not in hook_utils.SCHEMA_VERSIONS
-
-
-# ---------------------------------------------------------------------------
-# friction_store tests
-# ---------------------------------------------------------------------------
-
-
-def test_scope_return_type_annotation():
-    """classify_scope return annotation is Literal['project', 'plugin', 'inbox']."""
-    import typing
-    from typing import Literal, get_args, get_type_hints
-    # Use get_type_hints to resolve string annotations (from __future__ import annotations)
-    hints = get_type_hints(scope_classifier.classify_scope)
-    ann = hints.get("return")
-    assert ann is not None, "classify_scope must have a return annotation"
-    # The annotation should be Literal["project", "plugin", "inbox"]
-    assert hasattr(ann, "__args__"), "return annotation must be a Literal type"
-    assert set(get_args(ann)) == {"project", "plugin", "inbox"}
-
-
-def test_friction_store_round_trip(tmp_path, monkeypatch):
-    """append_event, pending_count, and read_pending work together correctly."""
-    # Redirect the store to a temp directory so tests don't pollute ~/.aimi.
-    fake_home = tmp_path / "home"
-    fake_home.mkdir()
-
-    # Patch the module-level _STORE_DIR which was evaluated at import time.
-    store_dir = fake_home / ".aimi" / "learnings"
-    monkeypatch.setattr(friction_store, "_STORE_DIR", store_dir)
-
-    events = [
-        {"type": "tool_use", "tool": "Bash"},
-        {"type": "tool_use", "tool": "Read"},
-        {"type": "session_end", "duration": 42},
-    ]
-
-    for ev in events:
-        friction_store.append_event(ev)
-
-    assert friction_store.pending_count() == 3
-
-    collected = list(friction_store.read_pending())
-    # append_event now adds event_id to every stored event; strip it for comparison.
-    collected_stripped = [{k: v for k, v in e.items() if k != "event_id"} for e in collected]
-    assert collected_stripped == events
-    # Verify event_id was actually added to each stored event
-    for e in collected:
-        assert "event_id" in e
-        assert len(e["event_id"]) == 16

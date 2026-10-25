@@ -105,27 +105,8 @@ def main(tool_input: dict) -> None:
 
     target = Path(file_path_raw).resolve()
 
-    home = Path("~").expanduser().resolve(strict=False)
-    learnings_dir = (home / ".aimi" / "learnings").resolve(strict=False)
-    telemetry_dir = (home / ".aimi" / "telemetry").resolve(strict=False)
-
-    # Always-blocked: ~/.aimi/learnings/ (recursive)
-    try:
-        target.relative_to(learnings_dir)
-        _deny_path(str(target), "Friction log is append-only")
-    except ValueError:
-        pass
-
-    # Always-blocked: ~/.aimi/telemetry/ (recursive)
-    try:
-        target.relative_to(telemetry_dir)
-        _deny_path(str(target), "Telemetry log is append-only")
-    except ValueError:
-        pass
-
-    # Always-blocked: the jq -> Python golden corpus.  It sits with the two
-    # $HOME checks above rather than in the .aimi/ section below because it
-    # blocks unconditionally: the corpus is a repository file, so it must be
+    # Always-blocked: the jq -> Python golden corpus.  It sits ahead of the
+    # .aimi/ section below because it blocks unconditionally: the corpus is a repository file, so it must be
     # refused before the .aimi/ walk-up that the rest of main() depends on.
     if target.parts[-3:] == _GOLDEN_CORPUS_PARTS:
         _deny_path(

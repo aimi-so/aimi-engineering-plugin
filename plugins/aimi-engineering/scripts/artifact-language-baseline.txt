@@ -60,6 +60,5 @@ exempt	design/shape.md	# reads .aimi/brainstorms/ as context for a design shapin
 exempt	design/polish.md	# declares Write/Edit to polish the target project's own source; never a plugin-owned .aimi/ artifact
 exempt	review.md	# reads .aimi/brainstorms/ as context for a code review; authors no artifact under .aimi/
 exempt	status.md	# every .aimi/tasks/ match is prose forbidding a glob of that path, never a write to it
-exempt	learnings.md	# thin wrapper; the actual writer of the friction/learnings state under ~/.aimi/learnings/ is skills/aimi-learnings/SKILL.md
 exempt	next.md	# declares Write/Edit to advance the target project's own source; never a plugin-owned .aimi/ artifact
 exempt	skills/brainstorm/SKILL.md	# deprecated per its own header ("no longer loaded by brainstorm.md... retained for reference only"); never executed

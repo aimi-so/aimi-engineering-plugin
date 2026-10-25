@@ -50,13 +50,13 @@
 # backs.
 
 execute.md	433455
-brainstorm.md	144724
+brainstorm.md	144635
 open-pr.md	84576
 references/forge-contract.md	45757
 references/container-execution.md	34176
 references/visual-variants.md	27154
 next.md	22176
-references/cli-path-resolution.md	37540
+references/cli-path-resolution.md	37503
 review.md	22577
 references/scope-contexts.md	20743
 deepen.md	18696
