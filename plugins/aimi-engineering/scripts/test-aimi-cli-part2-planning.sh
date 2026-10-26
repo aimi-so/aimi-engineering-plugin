@@ -1553,6 +1553,65 @@ RESEOF
   assert_contains "escapes project root" "$stderr_out" "extract-sections: symlink escape error on stderr"
   rm -f "$symlink_target" "$symlink_path"
 
+  # --- Test 13: any heading level >= 2 is addressable (#### / #####), closed at the
+  # next heading of the same-or-higher level, fence-aware ---
+  local deep_file="$es_dir/.aimi/deep.md"
+  cat > "$deep_file" << 'RESEOF'
+# Deep Research
+
+## Top
+### Mid
+#### Deep A
+body a
+##### Deeper
+body deeper
+#### Deep B
+body b
+
+```bash
+#### Fake Deep
+```
+## Next
+next body
+RESEOF
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deep A" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "extract-sections: #### anchor exits 0"
+  assert_contains "#### Deep A" "$stdout" "extract-sections: #### anchor includes its own heading"
+  assert_contains "body deeper" "$stdout" "extract-sections: #### anchor includes its nested ##### lines"
+  local deep_bleed="no"
+  case "$stdout" in *"body b"*|*"Deep B"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: #### section stops at the next #### heading"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deeper" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "extract-sections: ##### anchor exits 0"
+  assert_contains "##### Deeper" "$stdout" "extract-sections: ##### anchor includes its own heading"
+  deep_bleed="no"
+  case "$stdout" in *"body b"*|*"body a"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: ##### section stops at the next #### heading"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Top" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "#### Deep B" "$stdout" "extract-sections: h2 anchor includes nested #### lines"
+  deep_bleed="no"
+  case "$stdout" in *"next body"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: h2 anchor still stops at the next h2"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Fake Deep" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections: a #### line inside a code fence is not matched"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deep Research" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections: h1 stays unmatchable"
+
   rm -rf "$es_dir"
 }
 
