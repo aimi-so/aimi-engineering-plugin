@@ -14340,11 +14340,13 @@ cmd_research_lookup() {
 }
 
 # Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
-# Print only the requested '## '/'### ' sections of a research .md file, concatenated
-# verbatim in the order the anchors were requested.
+# Print only the requested sections of a research .md file (any heading level 2 or
+# deeper: '## ', '### ', '#### ', ...), concatenated verbatim in the order the anchors
+# were requested. An h1 is never matchable.
 # Each section spans from its matching heading line up to (but not including) the next
-# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested h3s
-# and stops at the next h2 (or h1); an h3 anchor stops at the next h3/h2 (or h1).
+# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested
+# h3/h4 lines and stops at the next h2 (or h1); an h4 anchor stops at the next
+# h4/h3/h2 (or h1).
 # Anchor text is matched case-insensitively against the heading text (leading #s and
 # surrounding whitespace stripped). An anchor with no matching heading is skipped (not
 # a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
@@ -14437,8 +14439,8 @@ cmd_extract_sections() {
           in_section = 0
         }
 
-        # Only ## / ### headings are matchable anchors; first match wins.
-        if (!in_section && !matched_done && (level == 2 || level == 3)) {
+        # Any heading of level 2 or deeper is a matchable anchor (h1 is not); first match wins.
+        if (!in_section && !matched_done && level >= 2) {
           heading_text = substr($0, level + 1)
           gsub(/^[[:space:]]+/, "", heading_text)
           gsub(/[[:space:]]+$/, "", heading_text)
@@ -18166,12 +18168,13 @@ COMMANDS:
                               on the ARGUMENT, before the file is opened); missing file or
                               missing <path> arg -> error/usage on stderr, exit 1.
     extract-sections <file> --anchors "<titles>"
-                              Print only the requested '## '/'### ' sections of a
-                              research .md file, concatenated verbatim in request order.
+                              Print only the requested sections (any heading level 2 or
+                              deeper; h1 is not matchable) of a research .md file,
+                              concatenated verbatim in request order.
                               Each section spans its matching heading up to the next
                               heading of the same-or-higher level (or EOF) -- an h2
-                              anchor includes nested h3s and stops at the next h2/h1;
-                              an h3 anchor stops at the next h3/h2/h1.
+                              anchor includes nested h3/h4 lines and stops at the next
+                              h2/h1; an h4 anchor stops at the next h4/h3/h2/h1.
                               --anchors accepts comma- or newline-separated heading
                               titles; matching is case-insensitive on heading text.
                               An anchor with no matching heading is skipped (not an
