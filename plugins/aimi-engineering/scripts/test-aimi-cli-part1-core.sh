@@ -1652,6 +1652,35 @@ test_get_story_context() {
   assert_stderr_contains "not found" "$stderr_output" "get-story-context US-999 shows not found error"
 }
 
+test_triage_verify() {
+  echo ""
+  echo "=== Testing triage-verify command ==="
+
+  local f="$TASKS_DIR/9999-99-97-triage-tasks.json"
+  printf '%s' '{"project":"x","userStories":[{"id":"US-001","title":"t","status":"failed","implementation":{"verify":"set -o pipefail; git diff | grep -q x"}}]}' > "$f"
+  local before after output exit_code
+  before=$(cksum < "$f")
+  output=$("$CLI" triage-verify US-001 --tasks-file "$f" 2>/dev/null)
+  exit_code=$?
+  after=$(cksum < "$f")
+  assert_exit_code "0" "$exit_code" "triage-verify US-001 exits 0"
+  assert_eq "US-001" "$(echo "$output" | jq -r '.id')" "triage-verify echoes the story id"
+  assert_eq "git-diff-unstaged" "$(echo "$output" | jq -r '.shipped | index("git-diff-unstaged") | if . == null then "absent" else "git-diff-unstaged" end')" "triage-verify names the shipped detectors"
+  assert_eq "pipefail-grep-q" "$(echo "$output" | jq -r '.findings[0].detector')" "triage-verify reports the pipefail grep -q finding"
+  assert_eq "$before" "$after" "triage-verify leaves the tasks file byte-identical"
+
+  # A story with no verify answers empty findings, not a refusal
+  output=$("$CLI" triage-verify US-001 2>/dev/null)
+  assert_eq "0" "$(echo "$output" | jq '.findings | length')" "triage-verify on a story with no verify has empty findings"
+
+  local stderr_output
+  stderr_output=$("$CLI" triage-verify 2>&1) || true
+  assert_stderr_contains "Usage: aimi-cli.sh triage-verify" "$stderr_output" "triage-verify without an id prints the usage line"
+  stderr_output=$("$CLI" triage-verify 'US-001;x' --tasks-file "$f" 2>&1) || true
+  assert_stderr_contains "Invalid story ID format" "$stderr_output" "triage-verify refuses a malformed id"
+  rm -f "$f"
+}
+
 test_get_story_context_skills_present() {
   echo ""
   echo "=== Testing get-story-context emits skills[] when story declares skills ==="
@@ -11749,6 +11778,7 @@ main() {
   test_status_uses_user_stories_key
   test_story_id_not_found
   test_get_story_context
+  test_triage_verify
   test_get_story_context_skills_present
   test_get_story_context_skills_opencode_prefix
   test_get_story_context_skills_absent

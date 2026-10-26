@@ -1973,6 +1973,34 @@ cmd_get_story_context() {
     --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
 }
 
+# Static triage of a failed story's implementation.verify: prints
+# {id, findings[], shipped[]}. Read-only, takes no lock, one crossing.
+# Usage: triage-verify <story-id> [--tasks-file <path>]
+cmd_triage_verify() {
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh triage-verify <story-id> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" triage-verify \
+    --tasks-file "$tasks_file" --story-id "$story_id"
+}
+
 # The directory holding .aimi/, handed to a probe as --aimi-root so every
 # probed segment sees it as AIMI_ROOT beside TASKS_FILE_PATH. It is AIMI_DIR
 # (find_aimi_root's own export, absolute) minus its trailing /.aimi -- NOT
@@ -17721,6 +17749,9 @@ COMMANDS:
                               nothing, and reports why, for a story whose verification.
                               status is not pending, whose strategy is visual, or that
                               carries no verification object at all.
+    triage-verify <id> [--tasks-file <path>]
+                              Static verify-detector findings for a failed story (returns
+                              {id, findings, shipped} JSON). Read-only, no lock.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
@@ -19168,6 +19199,7 @@ main() {
     acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
     acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
+    triage-verify) shift; cmd_triage_verify "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;

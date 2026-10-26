@@ -538,9 +538,14 @@ while true:
         # Prefer the structured failureCause over generic message when available
         payload = result_payload_by_id.get(full_story.id)
         cause = (payload.get("failureCause") if payload else None) or "Failed during parallel wave [wave]"
-        $AIMI_CLI mark-failed [full_story.id] "[cause]" --tasks-file [WAVE_TASKS_FILE]
+        # Static triage of the verify text, read-only; the dynamic verify-probe
+        # unsatisfiable result stays authoritative, so report both and prefer
+        # the dynamic one. A triage error never blocks mark-failed.
+        triage = $AIMI_CLI triage-verify [full_story.id] --tasks-file [WAVE_TASKS_FILE]   # on error: triage = {findings: []}
+        notes = cause + ("; static triage: [finding.detector] [finding.message]" for each triage.findings)
+        $AIMI_CLI mark-failed [full_story.id] "[notes]" --tasks-file [WAVE_TASKS_FILE]
         $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
-        Report: "[full_story.id] failed: [cause]. Dependent stories cascade-skipped."
+        Report: "[full_story.id] failed: [notes]. Dependent stories cascade-skipped."
 
     # ========================================
     # MERGE PER PROJECT GROUP (not across repos)
