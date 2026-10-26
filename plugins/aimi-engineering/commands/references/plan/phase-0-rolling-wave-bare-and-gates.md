@@ -130,11 +130,21 @@ For each `id / name / dir` line (ascending phase-id order, matching `roadmap-get
 #### Phase-Scoped Topic Slug
 
 ```bash
-PHASE_TOPIC_SLUG="${featureSlug}-phase-${SELECTED_PHASE_ID}${PHASE_SLUG:+-$PHASE_SLUG}"
+PHASE_SUFFIX="-phase-${SELECTED_PHASE_ID}"
+PHASE_TOPIC_SLUG="${featureSlug}${PHASE_SUFFIX}${PHASE_SLUG:+-$PHASE_SLUG}"
 # Apply the same five-step normalization as commands/references/topic-slug.md
 # (lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) —
 # featureSlug and PHASE_SLUG are already lowercase-hyphenated, so this mainly
 # applies the 50-char truncation.
+if [ "${#PHASE_TOPIC_SLUG}" -gt 50 ]; then
+  # A plain truncation of a long featureSlug cuts the phase id off, and every
+  # phase of the feature then shares one slug (and one research file glob).
+  # Keep the phase id and shorten the feature part instead.
+  PHASE_BASE=$(printf '%s' "$featureSlug" | cut -c1-$((50 - ${#PHASE_SUFFIX})) | sed 's/-*$//')
+  PHASE_TOPIC_SLUG="${PHASE_BASE}${PHASE_SUFFIX}"
+fi
 ```
+
+The slug stays unique per phase even when `featureSlug` alone is 50 characters; the descriptive `PHASE_SLUG` words are the part dropped to make room.
 
 Phase 1's **Derive Topic Slug** step below substitutes `PHASE_TOPIC_SLUG` for a fresh derivation whenever `ROADMAP_MODE=true`. This is what keeps research filenames, `RUN_DIR`, and every other `topicSlug`-keyed artifact phase-scoped automatically, with no further changes needed anywhere else in the pipeline that already references `topicSlug` generically.

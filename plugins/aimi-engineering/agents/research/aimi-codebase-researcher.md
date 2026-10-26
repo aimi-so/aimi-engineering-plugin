@@ -242,7 +242,9 @@ $ grep -c '^## ' commands/plan.md
    `commands/references/sanitization.md` § *Measure-Block Execution Allowlist*:
    one command whose every pipeline segment leads with `grep`, `wc`, `find`,
    `ls`, `awk`, `jq`, `stat`, or `git ls-files|log|show`, and no `;`, `&&`,
-   backtick, or `$(…)`. `/aimi:plan` Phase 1.6 **re-runs** every block and
+   backtick, or `$(…)`. The allowlist splits on every `|`, even one inside a
+   quoted pattern, so write alternation as repeated `-e` flags
+   (`grep -c -e a -e b file`), never as `a\|b` or `-E 'a|b'`. `/aimi:plan` Phase 1.6 **re-runs** every block and
    escalates a mismatch to the user; a block it has to refuse costs its figure
    the check, and that figure becomes `UNVERIFIED` too.
 

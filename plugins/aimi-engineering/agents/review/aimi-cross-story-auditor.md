@@ -113,6 +113,8 @@ Only declare a dependency when there is clear textual evidence in the consumer s
 
 When two stories share at least one path in `implementation.files` and neither story's `tasks[]` contains a cross-story wiring step that references the other story by title or outline token, the integration seam is undocumented. Emit an `add` patch appending a cross-story wiring task (e.g., `"Wire <handler from outline:NN> into <shared file path>"`) to `tasks` on the story whose `tasks[]` is more appropriate for the integration step. If both stories are equally responsible, patch the consumer.
 
+The same shared path has a second consequence. Two stories of the same `project` that list one literal path in `implementation.files` and are not ordered by `dependsOn` (directly or through other stories) land in the same wave, and `validate-wave-contention` later refuses that wave. When the stories are unordered, also emit a `dependsOn` `add` patch on the story with the higher outline index, naming the other story's `outline:NN`. When that edge would create a cycle, or the two stories legitimately need to run in the same wave, add an `unresolved[]` entry naming both stories and the path instead. Stories of different projects never collide, so skip pairs whose `project` differs.
+
 Skip this check for stories in the failed expansion idx list.
 
 ### 4. Approach duplication
