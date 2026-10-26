@@ -103,6 +103,8 @@ Evaluate every pair (and individual story) against these nine concerns:
 
 When two sibling stories describe the same API endpoint or shared data model but use different names for the endpoint path, field names, or return type shape, flag the discrepancy. Compare against canonical names in the research summary when available. When you can point to the exact contradicted text — a specific `acceptanceCriteria` entry, `implementation.approach`, or `gate.prompt` naming the wrong endpoint/field/shape — prefer an `op: replace` patch correcting that field directly. Fall back to an `add` patch appending a correction note to `notes`, or a clarifying task to `tasks`, when the wrong text cannot be isolated to one field. If it still cannot be safely patched (both stories may be right and the correct name is ambiguous), add an `unresolved[]` entry.
 
+This concern also covers cross-story identifier drift: a flag, key, verb or file name that two sibling stories spell differently (for example `--verify-evidence` in one story and `--evidence` in another). Compare only stories that name the same identifier; never compare every pair of criteria. Never invent the winner: emit an `unresolved[]` entry naming both stories and both spellings, unless one spelling can be quoted exactly from another story or the research summary, and only then an `op: replace` patch on the losing side.
+
 ### 2. Missing `dependsOn` declarations
 
 When a consumer story's `approach`, `acceptanceCriteria`, or `tasks[]` text references a named output, interface, or artifact produced by another (producer) outline entry — but the consumer story's `dependsOn` array does not include `outline:NN` for that producer — emit an `add` patch appending the missing `outline:NN` token to `dependsOn`.
@@ -170,6 +172,8 @@ Fix the criteria or approach side with `op: replace`, in line with the most rece
 ```
 { "storyIdx": "<idx of the story>", "message": "intra-story contradiction: notes and <acceptanceCriteria|implementation.approach> of story <idx> state conflicting facts: <one clause>. Reviewer must correct notes." }
 ```
+
+This concern also extends across sibling stories to exact numbers: different exact counts, sizes or limits stated for the same noun conflict. Compare only stories that name the same noun. Never invent the winner: emit an `unresolved[]` entry naming both stories and both numbers, unless one side can be quoted exactly from another story or the research summary.
 
 Also treat one fact stated in two fields of one story as intra-story duplication: a count, a path or a rule repeated between `acceptanceCriteria` and `tasks`, or `tasks` restating `implementation.approach`. Leave the fact in one field: emit a `tasks` `remove` patch (`matchValue` the whole redundant task; never a `Wire <X> into <Y>` task) or an `acceptanceCriteria` `replace` patch (`matchValue` the whole criterion, `value` the criterion without the repeated fact). When the element cannot be quoted exactly, fall back to `unresolved[]`:
 
