@@ -18589,9 +18589,13 @@ COMMANDS:
                               one definition for every count reported, so an
                               in_progress story is pending everywhere.
                               Output. One JSON object: {mode: "project-split"|
-                              "paired-split"|"single"|"none", anchor, members:
-                              [{path,project,branchName,storyCount,pendingCount,
-                              active}], activeCount, total, degradedReason}.
+                              "paired-split"|"single"|"none"|"ambiguous", anchor,
+                              members: [{path,project,branchName,storyCount,
+                              pendingCount,active}], activeCount, total,
+                              degradedReason}. "ambiguous" (flat scope only) means
+                              the flat plan has no pending story but a failed one,
+                              while a roadmap phase is waiting to be claimed; it
+                              adds failedCount and claimablePhases.
                               degradedReason explains any fall-back so the caller
                               can report it without re-deriving why.
     verify-creates --feature <slug> --phase <id> [--dir <container-path>]

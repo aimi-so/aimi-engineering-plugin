@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.154.0] - 2026-10-26
+
+Four plan and execute defects fixed, and static plan checks added and backtested against the known-gap corpus (#172, #173).
+
+### Fixed
+- `apply-audit-patches --annotate-deferred` kept only the first 200 characters of an auditor finding and dropped the human `--reason` from the notes of the stories it annotated. The note now holds the finding uncut (a 2000-character sanity cap; 200 stays only on `oqDecisions`) and the batch reason (1000-character cap), and a story whose deferral carries a human reason gets the marker `[audit-deferred: resolved at plan review]` instead of the unresolved one (#173).
+- `extract-sections` matched only `##` headings, so an anchor naming a `###` or deeper heading was silently skipped. It matches any heading level of two or more, and a section ends at the next heading of the same or a higher level. The researcher templates use `###` and forbid `$`, a backtick, a quote and a backslash in headings, and `phase-3d-prep-blocks.md` reports the anchors that were dropped (#173).
+- `split-detect` handed a stale flat plan (no pending story, at least one failed) to `/aimi:execute` while a roadmap phase was waiting to be claimed. It now answers a new mode, `ambiguous`, with `failedCount` and `claimablePhases`, so the caller asks instead of guessing (#173).
+- Phase Completion could not list a phase's members once every story was completed, because `split-detect` dropped a finished group. `split-detect --dir <d> --include-completed` keeps it, the four Phase Completion steps use it, and on a non-git `AIMI_ROOT` an empty membership is refused instead of falling back to `.` (#173).
+
+### Added
+- `scripts/plan_checks.py`: pure static checks over plan text. Four verify detectors (`pipefail-grep-q`, `runner-summary-colour`, `git-diff-unstaged`, `negated-grep-no-twin`) in a `DETECTORS` tuple, plus `citation_drift` and `reverse_references`. Nothing in it runs a verify. Tests are in `scripts/tests/test_plan_checks.py` (#172).
+- `scripts/tests/backtest_known_gaps.py [--check]` scores each check against the known-gap corpus and prints a SHIP or NOT-SHIP verdict per check. Its recorded run (as of 2026-10-26, 29 of 157 gaps linked to a story) shipped `pipefail-grep-q` and `git-diff-unstaged`, and withheld `runner-summary-colour`, `negated-grep-no-twin`, `citation_drift` (no hit on a linked gap story) and `reverse_references` (it flagged 396 of 408 stories that had no gap). The `git-diff-unstaged` verdict rests on a single linked hit (#172).
+- `triage-verify <id> [--tasks-file <path>]` reports the static findings of a failed story's verify, limited to `SHIPPED_TRIAGE_DETECTORS` (`pipefail-grep-q`, `git-diff-unstaged`). The wave loop's failure branch calls it and records the finding in the failure notes. Read-only, no lock (#172).
+- `--include-completed` for `split-detect`, the `ambiguous` mode, and `--agent-deferral` for `apply-audit-patches --annotate-deferred` (refused without it; keeps the unresolved marker and adds no reason text) (#173).
+- The cross-story auditor's concerns on identifiers and on exact numbers that sibling stories state differently are extended; it still has nine concerns (#172).
+- Not shipped: a `check-citations` verb and validation rule R25. The backtest withheld the checks they would have run (`citation_drift` and `reverse_references`), so `plan_checks.py` carries those two as functions that no verb calls.
+
 ## [1.153.0] - 2026-10-25
 
 `/aimi:execute` is a router: a run reads the step files its own state selects instead of the whole command.
