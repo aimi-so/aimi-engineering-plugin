@@ -239,6 +239,110 @@ case "$OUT" in
   *) fail "no-execute fixture: install reports Translated 1 reference file(s)" "$OUT" ;;
 esac
 
+# ---------------------------------------------------------------------------
+echo "== agent permission blocks"
+# ---------------------------------------------------------------------------
+AGENTS_DIR="$REAL/xdg/opencode/agents"
+OC_NAMES="read grep glob bash edit webfetch websearch task todowrite skill"
+
+# perm_get <agent file> <key> -- the allow/deny value of a permission key
+perm_get() {
+  awk -v k="$2" '
+    /^---$/ { fm++; next }
+    fm == 1 && /^permission:/ { inperm = 1; next }
+    fm == 1 && inperm && /^  [a-z]+: / { gsub(/^  /, ""); split($0, a, ": "); if (a[1] == k) { print a[2]; exit } next }
+    fm == 1 && inperm { inperm = 0 }
+  ' "$1"
+}
+
+# Every source agent that declares a tools line: its installed twin carries an
+# explicit allow or deny for all ten names.
+WITH_TOOLS=0
+for src in "$SRC_PLUGIN"/agents/*/*.md; do
+  grep -q '^tools:' "$src" || continue
+  WITH_TOOLS=$((WITH_TOOLS + 1))
+  base=$(basename "$src")
+  inst="$AGENTS_DIR/$base"
+  ok=yes
+  for n in $OC_NAMES; do
+    v=$(perm_get "$inst" "$n")
+    case "$v" in allow|deny) ;; *) ok=no ;; esac
+  done
+  assert_eq "yes" "$ok" "real tree: $base carries an explicit permission for all ten names"
+done
+assert_eq "10" "$WITH_TOOLS" "real tree: ten agent sources declare a tools line"
+
+AUD="$AGENTS_DIR/aimi-cross-story-auditor.md"
+assert_eq "allow" "$(perm_get "$AUD" read)" "real tree: auditor read is allow"
+assert_eq "deny" "$(perm_get "$AUD" edit)" "real tree: auditor edit is deny"
+assert_eq "deny" "$(perm_get "$AUD" bash)" "real tree: auditor bash is deny"
+VER="$AGENTS_DIR/aimi-scope-negative-verifier.md"
+assert_eq "deny" "$(perm_get "$VER" edit)" "real tree: scope verifier edit is deny"
+for n in read grep bash; do
+  assert_eq "allow" "$(perm_get "$VER" "$n")" "real tree: scope verifier $n is allow"
+done
+RES="$AGENTS_DIR/aimi-codebase-researcher.md"
+assert_eq "allow" "$(perm_get "$RES" edit)" "real tree: codebase researcher edit is allow"
+assert_eq "allow" "$(perm_get "$RES" bash)" "real tree: codebase researcher bash is allow"
+
+# No installed agent carries a tools or allowed-tools key.
+LEAK=0
+for f in "$AGENTS_DIR"/*.md; do
+  if awk '/^---$/ { fm++; next } fm == 1 && /^(tools|allowed-tools):/ { found = 1 } END { exit !found }' "$f"; then
+    LEAK=$((LEAK + 1))
+  fi
+done
+assert_eq "0" "$LEAK" "real tree: no installed agent carries a tools or allowed-tools key"
+
+# An agent with no tools line has no permission block.
+NOTOOLS=""
+for src in "$SRC_PLUGIN"/agents/*/*.md; do
+  grep -q '^tools:' "$src" || { NOTOOLS="$AGENTS_DIR/$(basename "$src")"; break; }
+done
+assert_eq "yes" "$([ -f "$NOTOOLS" ] && echo yes || echo no)" "real tree: found an agent source without a tools line"
+assert_file_lacks "$NOTOOLS" "permission:" "real tree: an agent without a tools line has no permission block"
+
+# Fixture: unmapped tool fails the install and writes nothing for that agent;
+# an mcp__ pattern is skipped with a warning; a YAML list is accepted.
+AX=$(new_tmp)
+AP="$AX/repo/plugins/aimi-engineering"
+mkdir -p "$AP/.claude-plugin" "$AP/scripts" "$AP/commands" "$AP/agents/review"
+cp "$INSTALL_SH" "$AX/repo/install.sh"
+printf '{"name":"aimi-engineering","version":"0.0.1"}\n' > "$AP/.claude-plugin/plugin.json"
+printf '#!/usr/bin/env bash\nprintf "{}\\n"\n' > "$AP/scripts/aimi-cli.sh"
+chmod +x "$AP/scripts/aimi-cli.sh"
+printf -- '---\ndescription: fixture\n---\nBody\n' > "$AP/commands/fixture.md"
+printf -- '---\nname: fx\ndescription: listed\ntools:\n  - Read\n  - mcp__x__*\n---\nBody\n' > "$AP/agents/review/aimi-fx-list.md"
+run_install "$AX/repo/install.sh" "$AX"
+assert_eq "0" "$RC" "agent fixture: YAML list and mcp__ pattern install exits 0"
+case "$OUT" in
+  *"mcp__x__*"*) pass "agent fixture: mcp__ pattern warns" ;;
+  *) fail "agent fixture: mcp__ pattern warns" "$OUT" ;;
+esac
+FXL="$AX/xdg/opencode/agents/aimi-fx-list.md"
+assert_eq "allow" "$(perm_get "$FXL" read)" "agent fixture: YAML list read is allow"
+assert_eq "deny" "$(perm_get "$FXL" edit)" "agent fixture: YAML list edit is deny"
+
+BAD=$(new_tmp)
+BP="$BAD/repo/plugins/aimi-engineering"
+mkdir -p "$BP/.claude-plugin" "$BP/scripts" "$BP/commands" "$BP/agents/review"
+cp "$INSTALL_SH" "$BAD/repo/install.sh"
+cp "$AP/.claude-plugin/plugin.json" "$BP/.claude-plugin/plugin.json"
+cp "$AP/scripts/aimi-cli.sh" "$BP/scripts/aimi-cli.sh"
+cp "$AP/commands/fixture.md" "$BP/commands/fixture.md"
+printf -- '---\nname: bad\ndescription: bad\ntools: Read, Frobnicate\n---\nBody\n' > "$BP/agents/review/aimi-bad.md"
+run_install "$BAD/repo/install.sh" "$BAD"
+if [ "$RC" -ne 0 ]; then pass "agent fixture: unmapped tool fails the install"; else fail "agent fixture: unmapped tool fails the install" "$OUT"; fi
+case "$OUT" in
+  *"aimi-bad.md"*"Frobnicate"*) pass "agent fixture: failure names the agent file and the tool" ;;
+  *) fail "agent fixture: failure names the agent file and the tool" "$OUT" ;;
+esac
+if [ -e "$BAD/xdg/opencode/agents/aimi-bad.md" ]; then
+  fail "agent fixture: no destination file written for the failing agent"
+else
+  pass "agent fixture: no destination file written for the failing agent"
+fi
+
 echo
 echo "Results: ${GREEN}${TESTS_PASSED} passed${NC}, ${RED}${TESTS_FAILED} failed${NC}"
 [ "$TESTS_FAILED" -eq 0 ]
