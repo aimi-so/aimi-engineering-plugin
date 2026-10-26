@@ -15721,6 +15721,7 @@ _split_detect_phase_main_file() {
 cmd_split_detect() {
   local scope_dir=""
   local dir_mode=false
+  local include_completed=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -15733,12 +15734,21 @@ cmd_split_detect() {
         dir_mode=true
         shift 2
         ;;
+      --include-completed)
+        include_completed=true
+        shift
+        ;;
       *)
         echo "Error: split-detect: unknown argument: $1" >&2
         exit 1
         ;;
     esac
   done
+
+  if [ "$include_completed" = true ] && [ "$dir_mode" != true ]; then
+    echo "Error: split-detect: --include-completed requires --dir (it lists a phase directory's members after all are completed)" >&2
+    exit 1
+  fi
 
   # ------------------------------------------------------------------
   # 1. Build the candidate pool, newest mtime first
@@ -15956,9 +15966,11 @@ cmd_split_detect() {
     # A group with nothing left to do is not this run's work. Drop ALL of its
     # members from the pool and look again, rather than letting a completed
     # stale split route today's real work to a single-file fallback.
+    # --include-completed (--dir scope only) keeps the group: Phase Completion
+    # needs the members of a phase whose stories are all done.
     local group_active=0
     group_active=$(printf '%s' "$group" | jq '[.[] | select(.active)] | length')
-    if [ "$group_active" -eq 0 ]; then
+    if [ "$group_active" -eq 0 ] && [ "$include_completed" != true ]; then
       pool=$(printf '%s\n%s' "$pool" "$group" | jq -sc '
         .[1] as $g | [.[0][] | select(.path as $p | ($g | map(.path) | index($p)) == null)]')
       continue
@@ -16008,6 +16020,14 @@ cmd_split_detect() {
         fi
       fi
     fi
+  fi
+
+  # An empty membership under --include-completed would let a caller fall
+  # back to "." as the git target; on a non-git root that is not a repository.
+  if [ "$include_completed" = true ] && [ "$aimi_root_is_git" != true ] \
+     && [ "$(printf '%s' "$members" | jq 'length')" -eq 0 ]; then
+    echo "Error: split-detect: --include-completed found no members in phase directory $scope_dir, and AIMI_ROOT ($PWD) is not a git repository, so the root cannot fall back to \".\"" >&2
+    exit 1
   fi
 
   # ------------------------------------------------------------------
@@ -18490,14 +18510,18 @@ COMMANDS:
                               keys stay absent, byte-unchanged.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
-    split-detect [--dir <phase-dir>]
+    split-detect [--dir <phase-dir> [--include-completed]]
                               Read side of metadata.splitGroup: decide whether
                               the tasks files in scope form ONE split group that
                               must execute together, and report which members
                               still have pending work. A query, never a gate —
                               every outcome, including "single" and "none",
                               exits 0; non-zero is a real error (bad argument,
-                              unreadable --dir).
+                              unreadable --dir). --include-completed (needs
+                              --dir) keeps a group whose stories are all
+                              completed so Phase Completion can list its
+                              members; on a non-git AIMI_ROOT an empty
+                              membership is refused (exit 1).
                               Scope. Without --dir: FLAT — *-tasks.json whose
                               parent directory is .aimi/tasks itself, depth 1
                               only. The depth restriction is load-bearing:

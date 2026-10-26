@@ -32,7 +32,7 @@ set -uo pipefail
 #   - story-merge Tests
 #   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
-#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57)
+#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -8126,7 +8126,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46, TC50-TC54, TC57)
+# split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -8881,6 +8881,68 @@ test_split_detect_stale_flat_plan_versus_planned_phase() {
   rm -rf "$d"
 }
 
+# TC58: --include-completed (--dir scope only) keeps a group whose every story
+# is completed, so Phase Completion can still list the repositories that took
+# part. Without the flag the same directory answers exactly as before, and an
+# empty membership on a non-git AIMI_ROOT is refused rather than left for a
+# caller to fall back to ".".
+test_split_detect_include_completed() {
+  echo ""
+  echo "=== TC58: split-detect --dir --include-completed — completed groups, flag scope, non-git refusal ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories completed)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories completed completed)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p" --include-completed) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC58: --include-completed on an all-completed group exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC58: mode reports the group's kind"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: every member of the group is listed"
+  assert_eq "apps/web,services/api" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | sort | join(",")')" \
+    "TC58: each member carries its project"
+  assert_eq "0,0" "$(printf '%s' "$out" | jq -r '[.members[].pendingCount] | map(tostring) | join(",")')" \
+    "TC58: each member carries a pendingCount of 0"
+
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC58: the same call without the flag still reports none"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: the same call without the flag still lists no members"
+  assert_contains "fully completed" "$(printf '%s' "$out" | jq -r '.degradedReason')" \
+    "TC58: without the flag the exhausted-pool reason is unchanged"
+
+  local err
+  err=$( cd "$d" && "$CLI" split-detect --include-completed 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC58: --include-completed without --dir exits 1"
+  assert_contains "--include-completed" "$err" "TC58: the refusal names --include-completed"
+  assert_contains "--dir" "$err" "TC58: the refusal names --dir"
+
+  # Empty membership: a non-git AIMI_ROOT is refused, a git one is not.
+  local e="$d/.aimi/tasks/myfeat/phase-3-empty"; mkdir -p "$e"
+  err=$( cd "$d" && "$CLI" split-detect --dir "$e" --include-completed 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC58: empty membership on a non-git root exits 1"
+  assert_contains "phase-3-empty" "$err" "TC58: the refusal names the phase directory"
+  assert_contains 'cannot fall back to "."' "$err" "TC58: the refusal states the root cannot fall back to \".\""
+
+  git init -q "$d" >/dev/null 2>&1
+  out=$(_sd_run "$d" --dir "$e" --include-completed) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC58: empty membership on a git root still exits 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: empty membership on a git root lists no members"
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9101,7 +9163,7 @@ main() {
   # project dir. TC47-TC49 are used by the story-merge project-axis tests
   # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46, TC50-TC54, TC57) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -9119,6 +9181,7 @@ main() {
   test_split_detect_dir_scope_refusal_matches_flat_scope
   test_split_detect_empty_dir_with_decoy
   test_split_detect_stale_flat_plan_versus_planned_phase
+  test_split_detect_include_completed
 
   cleanup
 

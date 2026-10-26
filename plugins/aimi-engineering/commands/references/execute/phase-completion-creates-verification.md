@@ -37,7 +37,12 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 if [ "$PHASE_SPLIT_MODE" = true ]; then
   PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
   # Hoisted once, above the loop -- never re-called per split_file.
-  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
+  PHASE_SPLIT_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" --include-completed) || {
+    echo "split-detect --include-completed failed for $PHASE_DIR_PATH" >&2
+    $AIMI_CLI roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    exit 1
+  }
+  PHASE_MEMBERS_JSON=$(printf '%s' "$PHASE_SPLIT_JSON" | jq -c '.members[]')
   CV_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
