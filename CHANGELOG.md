@@ -15,6 +15,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - `plan.md` read `$ARGUMENTS` in three bash blocks that had been moved into `references/plan/`, where the host does not substitute it, so the flags a user typed were lost. The blocks are back in the command body.
+- The phase-scoped topic slug keeps the phase id when `featureSlug` is long. A plain 50-character truncation cut the id off, so every phase of the feature shared one slug and one research file glob; the feature part is shortened instead.
+- The Phase 2.4 symbol check assigned `SYMBOL` as a prefix on the `grep` line, where the shell expands `"$SYMBOL"` before the assignment exists. The pattern was empty and every symbol matched the first file read. `SYMBOL` is now assigned on its own line and passed with `-e`.
+- `sanitization.md` and the codebase researcher state that the measure-block allowlist splits on every `|`, quoted or not, and that alternation is written with repeated `-e` flags.
+- The cross-story auditor emits a `dependsOn` patch for unordered stories of one `project` that list the same path (the pair `validate-wave-contention` would refuse), or an `unresolved[]` entry when that edge would form a cycle.
 
 ## [1.152.0] - 2026-10-25
 
