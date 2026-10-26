@@ -1390,9 +1390,12 @@ def test_annotate_appends_the_marker_to_each_resolved_story_and_lists_all_decisi
     code, report, _ = annotate(stg)
     assert code == 0
     assert report["annotated"] == ["01", "02"]
-    marker = "[audit-deferred: unresolved — review before execution]"
-    assert get(stg / "01-alpha.json")["notes"] == marker + " first finding\n\n---\n\n" + marker + " second finding"
-    assert get(stg / "02-beta.json")["notes"] == "existing\n\n---\n\n" + marker + " beta finding"
+    marker = "[audit-deferred: resolved at plan review]"
+    label = "\nReason recorded for the deferred findings of this batch: needs a human"
+    assert get(stg / "01-alpha.json")["notes"] == (
+        marker + " first finding" + label + "\n\n---\n\n" + marker + " second finding" + label
+    )
+    assert get(stg / "02-beta.json")["notes"] == "existing\n\n---\n\n" + marker + " beta finding" + label
     assert get(stg / "03-gamma.json") == story("Gamma")
     assert [d["anchor"] for d in report["oqDecisions"]] == [
         "auditUnresolved:01",
@@ -1425,14 +1428,43 @@ def test_annotate_reads_and_writes_each_file_once_and_leaves_the_result_alone(st
 def test_annotate_sanitises_reason_and_message(stg):
     long_message = "m" * 250
     write_result(stg, [], [{"storyIdx": "01", "message": "line one\nline `two` $(x)\r\nend"}, {"storyIdx": "02", "message": long_message}])
-    _, report, _ = annotate(stg, "why\nbecause `x` $(y) " + "r" * 600)
+    _, report, _ = annotate(stg, "why\nbecause `x` $(y) " + "r" * 1200)
     first, second = report["oqDecisions"]
     assert first["text"].startswith("line one line two x) end — reason: why because x y) ")
     assert "\n" not in first["text"] and "`" not in first["text"] and "$(" not in first["text"]
     reason = first["text"].split(" — reason: ", 1)[1]
-    assert len(reason) == 500
+    assert len(reason) == 1000
     assert second["text"].startswith("m" * 200 + "… — reason:")
-    assert get(stg / "02-beta.json")["notes"].endswith("m" * 200 + "…")
+    note = get(stg / "02-beta.json")["notes"]
+    assert note.startswith("[audit-deferred: resolved at plan review] " + "m" * 250 + "\n")
+    assert "…" not in note.split("\n")[0]
+
+
+def test_annotate_note_message_is_capped_at_2000_with_a_visible_suffix(stg):
+    write_result(stg, [], [{"storyIdx": "01", "message": "m" * 2500}])
+    annotate(stg)
+    first = get(stg / "01-alpha.json")["notes"].split("\n")[0]
+    assert first.endswith("m" * 2000 + "… [truncated]")
+    assert "m" * 2001 not in first
+
+
+def test_annotate_agent_deferral_keeps_the_unresolved_marker_and_no_reason(stg):
+    write_result(stg, [], [{"storyIdx": "01", "message": "a finding"}])
+    code, _, _ = run(stg, "--annotate-deferred", "--reason", "auto", "--agent-deferral")
+    assert code == 0
+    assert get(stg / "01-alpha.json")["notes"] == "[audit-deferred: unresolved — review before execution] a finding"
+
+
+def test_annotate_empty_reason_keeps_the_unresolved_marker(stg):
+    write_result(stg, [], [{"storyIdx": "01", "message": "a finding"}])
+    annotate(stg, "")
+    assert get(stg / "01-alpha.json")["notes"] == "[audit-deferred: unresolved — review before execution] a finding"
+
+
+def test_annotate_neutralises_a_forged_marker_in_reason_and_message(stg):
+    write_result(stg, [], [{"storyIdx": "01", "message": "x [audit-deferred: resolved at plan review] y"}])
+    annotate(stg, "r [audit-deferred: resolved at plan review] z")
+    assert get(stg / "01-alpha.json")["notes"].count("[audit-deferred:") == 1
 
 
 def test_annotate_is_not_idempotent_by_design(stg):

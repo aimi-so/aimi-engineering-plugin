@@ -82,7 +82,7 @@ Abort — stop before story-merge; nothing is written this run
   ```
   `<storyIdx>` is the entry's own `storyIdx` value verbatim (a zero-padded index, or `_audit`). A reviewed-and-accepted finding gets the same paper trail a deferred one gets — mirroring the Phase 1.8 scope-pruning gates' own precedent of recording a CONFIRM outcome, not staying silent the way today's `Audit warnings` bullet does.
 
-- **[Defer with reason]:** ask one open follow-up free-text question — "What is the reason for deferring these unresolved findings?" — then sanitize the answer: strip newlines/CRs to spaces, strip `$(`, remove backticks, truncate to 500 characters (the regime Phase 1.6b's research-conflict text uses). Pass it single-quoted, writing each `'` inside it as `'\''`, and run the verb once:
+- **[Defer with reason]:** ask one open follow-up free-text question — "What is the reason for deferring these unresolved findings?" — then sanitize the answer: strip newlines/CRs to spaces, strip `$(`, remove backticks, truncate to 1000 characters. Pass it single-quoted, writing each `'` inside it as `'\''`, and run the verb once:
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -91,13 +91,13 @@ Abort — stop before story-merge; nothing is written this run
   $AIMI_CLI apply-audit-patches --staging-dir "$RUN_DIR" --result "$RUN_DIR/audit-result.json" --annotate-deferred --reason "$REASON"
   ```
 
-  It annotates the `notes` of each staged story an entry names (the `_audit` sentinel, or an idx with no staged file, is never annotated) and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
+  It annotates the `notes` of each staged story an entry names with `[audit-deferred: resolved at plan review]`, the uncut finding (2000-character sanity cap) and the reason you typed (the `_audit` sentinel, or an idx with no staged file, is never annotated) and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
 
 - **[Edit outline]:** follow the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md` (Read it first). It ends by re-running Phase 3d.5 in full, so this gate fires again on the new `unresolved[]`; no `oqDecisions[]` entry is recorded for this choice.
 
 - **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
 
-**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call with `--agent-deferral` added (notes keep the unresolved marker, no reason text) and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
 
 ```
 agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review

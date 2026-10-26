@@ -15344,7 +15344,7 @@ cmd_story_merge() {
 # ============================================================================
 # apply-audit-patches: validate and apply the cross-story auditor's patches
 # Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
-#           [--annotate-deferred --reason <text>]
+#           [--annotate-deferred --reason <text> [--agent-deferral]]
 # ============================================================================
 #
 # Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
@@ -15355,8 +15355,8 @@ cmd_story_merge() {
 # (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
 # one crossing.
 cmd_apply_audit_patches() {
-  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]"
-  local staging_dir="" result_path="" annotate=false reason="" reason_given=false
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -15374,6 +15374,10 @@ cmd_apply_audit_patches() {
         ;;
       --annotate-deferred)
         annotate=true
+        shift
+        ;;
+      --agent-deferral)
+        agent_deferral=true
         shift
         ;;
       *)
@@ -15396,6 +15400,11 @@ cmd_apply_audit_patches() {
     exit 1
   fi
 
+  if [ "$annotate" != true ] && [ "$agent_deferral" = true ]; then
+    echo "Error: apply-audit-patches: --agent-deferral is only valid with --annotate-deferred ($usage)" >&2
+    exit 1
+  fi
+
   validate_path_in_project "$staging_dir"
   if [ -n "$result_path" ]; then
     validate_path_in_project "$result_path"
@@ -15413,6 +15422,9 @@ cmd_apply_audit_patches() {
   fi
   if [ "$annotate" = true ]; then
     aa_args+=(--annotate-deferred --reason "$reason")
+    if [ "$agent_deferral" = true ]; then
+      aa_args+=(--agent-deferral)
+    fi
   fi
   python3 "$(_aimi_script_py audit_patches.py)" "${aa_args[@]}"
 }
@@ -17546,7 +17558,7 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
-    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]
                               Validate and apply the cross-story auditor's patches to the
                               staged NN-*.json story files in one crossing: one read and one
                               atomic write per affected file, every refusal decided before
@@ -17556,8 +17568,11 @@ COMMANDS:
                               dropped; exit 1 on an unreadable result, a duplicate idx, an
                               escaping symlink or an array-valued staging file.
                               --annotate-deferred --reason <text> instead appends the
-                              audit-deferred marker to the notes of every story an unresolved
-                              entry names and prints {annotated, oqDecisions}.
+                              audit-deferred marker, the uncut finding and the reason to the
+                              notes of every story an unresolved entry names and prints
+                              {annotated, oqDecisions}. --agent-deferral (only with
+                              --annotate-deferred) keeps the unresolved marker and adds no
+                              reason text.
     validate-outline --outline <path>
                               Check an outline.json array's produces/consumes contract
                               ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in

@@ -5000,6 +5000,15 @@ test_apply_audit_patches() {
 
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
   assert_eq "02|cross-checked" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=json.load(open(sys.argv[2]))["notes"]; print(",".join(d["annotated"]) + "|" + n)' "$output" "$stg/01-story.json")" "apply-audit-patches: --annotate-deferred touches only the story an unresolved entry names"
+  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("[audit-deferred: resolved at plan review] endpoint name drift" in n and "after review" in n))' "$stg/02-story.json")" "apply-audit-patches: the human --reason and the finding land in the annotated story's notes"
+
+  printf '%s\n' '{"title":"S03","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","verification":{"strategy":"test","status":"pending"}}' > "$stg/03-story.json"
+  printf '%s\n' '{"patches":[],"unresolved":[{"storyIdx":"03","message":"agent finding"}]}' > "$stg/audit-result.json"
+  "$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "auto" --agent-deferral >/dev/null 2>&1 || true
+  assert_eq "[audit-deferred: unresolved — review before execution] agent finding" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notes"])' "$stg/03-story.json")" "apply-audit-patches: --agent-deferral keeps the unresolved marker and no reason text"
+
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" --agent-deferral 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "apply-audit-patches: --agent-deferral without --annotate-deferred is refused"
 
   output=$("$CLI" apply-audit-patches --staging-dir "/tmp" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "apply-audit-patches: an escaping --staging-dir exits 1"
