@@ -175,6 +175,10 @@ DECISION_MESSAGE_LIMIT = 200
 TRUNCATION_SUFFIX = "… [truncated]"
 REASON_LABEL = "Reason recorded for the deferred findings of this batch:"
 AUDIT_SENTINEL = "_audit"
+AUDIT_FAILED_STATUS = "audit-failed"
+AUDIT_DID_NOT_RUN_MESSAGE = (
+    "The cross-story audit did not run, so no cross-story check covered this story."
+)
 
 _STAGED_NAME = re.compile(r"[0-9]{2}-.*\.json", re.S)
 _IDX = re.compile(r"[0-9]{2}")
@@ -807,6 +811,7 @@ def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
     reason_text = sanitize_reason(reason)
     resolved = bool(reason_text) and not agent_deferral
 
+    stub = result.get("status") == AUDIT_FAILED_STATUS
     entries = [_normalise_unresolved(e) for e in result.get("unresolved", [])]
     additions = {}
     decisions = []
@@ -821,7 +826,24 @@ def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
                 "resolution": "deferred",
             }
         )
-        if idx != AUDIT_SENTINEL and idx in idx_map:
+        if stub and idx == AUDIT_SENTINEL:
+            # The Failure Fallback stub: no story was audited, so every staged
+            # story carries the notice. The decision above stays a single entry.
+            for staged in idx_map:
+                if resolved:
+                    addition = (
+                        DEFER_MARKER_RESOLVED
+                        + " "
+                        + AUDIT_DID_NOT_RUN_MESSAGE
+                        + "\n"
+                        + REASON_LABEL
+                        + " "
+                        + reason_text
+                    )
+                else:
+                    addition = DEFER_MARKER + " " + AUDIT_DID_NOT_RUN_MESSAGE
+                additions.setdefault(staged, []).append(addition)
+        elif idx != AUDIT_SENTINEL and idx in idx_map:
             if resolved:
                 addition = (
                     DEFER_MARKER_RESOLVED
