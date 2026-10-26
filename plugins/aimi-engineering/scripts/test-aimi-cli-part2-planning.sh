@@ -32,7 +32,7 @@ set -uo pipefail
 #   - story-merge Tests
 #   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
-#   - split-detect Tests (TC36-TC46, TC50-TC53)
+#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -8126,7 +8126,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46, TC50-TC53)
+# split-detect Tests (TC36-TC46, TC50-TC54, TC57)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -8820,6 +8820,67 @@ test_split_detect_empty_dir_with_decoy() {
   rm -rf "$d"
 }
 
+# TC57: a stale flat plan (no pending/in_progress story, at least one failed)
+# beside a claimable planned roadmap phase is ambiguous, not silently re-run.
+# Every neighbouring shape keeps its old answer.
+_sd_roadmap() {
+  local dir="$1" phases="$2"
+  mkdir -p "$dir/.aimi/tasks/myfeat"
+  printf '{"phases": %s}' "$phases" > "$dir/.aimi/tasks/myfeat/roadmap.json"
+}
+
+test_split_detect_stale_flat_plan_versus_planned_phase() {
+  echo ""
+  echo "=== TC57: split-detect — stale flat plan beside a claimable planned phase ==="
+
+  local planned='[{"id": 2, "name": "Auth", "status": "planned"}]'
+  local d out exit_code
+
+  # (a) failed-only flat file + claimable phase -> ambiguous
+  d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed completed)"
+  _sd_roadmap "$d" "$planned"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC57: ambiguous still exits 0"
+  assert_eq "ambiguous" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: stale flat plan plus planned phase is ambiguous"
+  assert_eq "2026-07-27-old-tasks.json" "$(_sd_member_names "$out")" "TC57: the flat anchor is still carried as a member"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.failedCount')" "TC57: the failed count is reported"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.claimablePhases | length')" "TC57: one claimable phase listed"
+  assert_eq "myfeat" "$(printf '%s' "$out" | jq -r '.claimablePhases[0].feature')" "TC57: phase feature reported"
+  assert_eq "2 Auth" "$(printf '%s' "$out" | jq -r '.claimablePhases[0] | "\(.id) \(.name)"')" "TC57: phase id and name reported"
+
+  # (b) a flat file that still has a pending story keeps winning
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed pending)"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: flat file with a pending story keeps mode single"
+  assert_eq "false" "$(printf '%s' "$out" | jq 'has("claimablePhases")')" "TC57: no claimablePhases key outside ambiguous"
+
+  # (c) a phase claimed by a session is not claimable
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed)"
+  _sd_roadmap "$d" '[{"id": 2, "name": "Auth", "status": "planned", "claim": {"claimedPid": 1}}]'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a claimed phase does not trigger ambiguous"
+
+  # (d) a phase whose dependency is not completed is not claimable
+  _sd_roadmap "$d" '[{"id": 1, "name": "Base", "status": "in_progress"}, {"id": 2, "name": "Auth", "status": "planned", "dependsOn": [1]}]'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a dependency-blocked phase does not trigger ambiguous"
+
+  # (e) a corrupt roadmap degrades to the old answer
+  printf '{not json' > "$d/.aimi/tasks/myfeat/roadmap.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC57: a corrupt roadmap does not fail split-detect"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a corrupt roadmap degrades to mode single"
+
+  # (f) --dir scope never reports ambiguous
+  _sd_roadmap "$d" "$planned"
+  out=$(_sd_run "$d" --dir "$d/.aimi/tasks") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: --dir scope is unaffected by a planned phase"
+  assert_eq "false" "$(printf '%s' "$out" | jq 'has("claimablePhases")')" "TC57: --dir scope output carries no claimablePhases"
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9040,7 +9101,7 @@ main() {
   # project dir. TC47-TC49 are used by the story-merge project-axis tests
   # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46, TC50-TC53) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC54, TC57) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -9057,6 +9118,7 @@ main() {
   test_split_detect_marked_group_unaffected_by_non_git_aimi_root
   test_split_detect_dir_scope_refusal_matches_flat_scope
   test_split_detect_empty_dir_with_decoy
+  test_split_detect_stale_flat_plan_versus_planned_phase
 
   cleanup
 

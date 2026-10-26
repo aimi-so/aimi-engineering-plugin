@@ -15972,6 +15972,45 @@ cmd_split_detect() {
   done
 
   # ------------------------------------------------------------------
+  # 2b. Stale flat plan versus a claimable planned phase
+  # ------------------------------------------------------------------
+  # A flat file with no pending/in_progress story and at least one failed one
+  # still reads as active (the describe predicate counts failed as unfinished),
+  # so it wins over a roadmap phase waiting to be claimed. Only that winner,
+  # only in flat scope, is checked; the roadmap crossing happens at most once.
+  # python3 absent degrades to the old answer with one hint -- never a refusal.
+  local claimable="[]" failed_count=0
+  if [ "$dir_mode" != true ] && [ "$mode" = "single" ] && [ -z "$degraded_reason" ] && [ "$anchor" != "null" ]; then
+    local anchor_file counts live_count
+    anchor_file=$(printf '%s' "$anchor" | jq -r '.')
+    counts=$(jq -r '[(.userStories // [])[]? | (.status? // "pending")] |
+      "\([.[] | select(. == "pending" or . == "in_progress")] | length) \([.[] | select(. == "failed")] | length)"' \
+      "$anchor_file" 2>/dev/null) || counts=""
+    live_count=${counts%% *}
+    failed_count=${counts##* }
+    case "$live_count$failed_count" in
+      ''|*[!0-9]*) live_count=1; failed_count=0 ;;
+    esac
+    if [ "$live_count" -eq 0 ] && [ "$failed_count" -gt 0 ]; then
+      local roadmaps=() rm_file
+      for rm_file in "$TASKS_DIR"/*/roadmap.json; do
+        [ -f "$rm_file" ] && roadmaps+=("$rm_file")
+      done
+      if [ ${#roadmaps[@]} -gt 0 ]; then
+        if command -v python3 >/dev/null 2>&1; then
+          claimable=$(python3 "$(_aimi_roadmap_py)" planned-phases "${roadmaps[@]}" | jq -c '.') || claimable="[]"
+          [ -n "$claimable" ] || claimable="[]"
+          if [ "$(printf '%s' "$claimable" | jq 'length')" -gt 0 ]; then
+            mode="ambiguous"
+          fi
+        else
+          echo "split-detect: python3 not found; skipping the roadmap check for a stale flat plan" >&2
+        fi
+      fi
+    fi
+  fi
+
+  # ------------------------------------------------------------------
   # 3. Emit
   # ------------------------------------------------------------------
   printf '%s' "$members" | jq \
@@ -15979,6 +16018,8 @@ cmd_split_detect() {
     --argjson anchor "$anchor" \
     --argjson total "$declared_total" \
     --arg reason "$degraded_reason" \
+    --argjson claimable "$claimable" \
+    --argjson failed "$failed_count" \
     '{
       mode: $mode,
       anchor: $anchor,
@@ -15986,7 +16027,7 @@ cmd_split_detect() {
       activeCount: ([.[] | select(.active)] | length),
       total: $total,
       degradedReason: (if ($reason | length) > 0 then $reason else null end)
-    }'
+    } + (if $mode == "ambiguous" then {failedCount: $failed, claimablePhases: $claimable} else {} end)'
 }
 
 # ============================================================================

@@ -3997,6 +3997,37 @@ def op_roadmap_eligible(argv):
     return 0
 
 
+def op_roadmap_planned_phases(argv):
+    """The claimable planned phases across several roadmap.json files.
+
+    split-detect's question: is a planned phase waiting to be claimed? The
+    verdict is op_roadmap_eligible's own -- `candidates` with id_only_key over
+    the planned status -- so the claim and dependency rules are never restated
+    here. Every argument is a roadmap path; the feature is its folder name.
+
+    Tolerant where roadmap-eligible is strict: one corrupt or unreadable
+    roadmap costs one stderr line and is skipped, because a stale file
+    elsewhere must not take split-detect down.
+    """
+    out = []
+    for path in argv:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                doc = json.load(handle)
+        except (OSError, ValueError):
+            sys.stderr.write("split-detect: skipping unreadable roadmap " + path + "\n")
+            continue
+        stored = doc.get("phases") if isinstance(doc, dict) else None
+        if not isinstance(stored, list):
+            continue
+        phases = [p for p in stored if isinstance(p, dict)]
+        feature = os.path.basename(os.path.dirname(os.path.abspath(path)))
+        for phase in candidates(phases, ["planned"], {}, id_only_key):
+            out.append({"feature": feature, "id": phase.get("id"), "name": phase.get("name")})
+    _emit(out)
+    return 0
+
+
 def _index(value, key, path):
     """jq's `.<key>`: legal on an object and on null, an error on anything else."""
     if value is None:
@@ -5038,6 +5069,7 @@ _OPS = {
     "judge-phases": op_judge_phases,
     "roadmap-get": op_roadmap_get,
     "roadmap-eligible": op_roadmap_eligible,
+    "planned-phases": op_roadmap_planned_phases,
     "list-archivable-phases": op_list_archivable_phases,
     "set-status": op_set_status,
     "claim": op_claim,
@@ -5065,6 +5097,7 @@ _VERB_FOR_OP = {
     # The one entry whose verb is outside the roadmap-* family: list-archivable
     # is a tasks.json verb that reads one roadmap.json per feature folder.
     "list-archivable-phases": "list-archivable",
+    "planned-phases": "split-detect",
     "sweep": "roadmap-sweep",
     "set-status": "roadmap-set-status",
     "claim": "roadmap-claim",
