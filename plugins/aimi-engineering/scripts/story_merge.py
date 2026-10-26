@@ -2896,6 +2896,25 @@ def verify_refusal_findings(story):
     ]
 
 
+def rail_and_path_findings(story):
+    """Sanitized guard-rail and path findings for one story; [] for a clean one.
+
+    Rails first, then paths, the order the report keeps. The two rules live in
+    tasks.py (guard_rail_findings, implementation_path_findings) and are
+    imported INSIDE this body for the reason verify_refusal_findings gives; this
+    function restates neither. Both callers -- validate-staging and the
+    story-merge refusal -- read it, so they cannot disagree about a story.
+    """
+    if not isinstance(story, dict):
+        return []
+    from tasks import guard_rail_findings, implementation_path_findings
+
+    return [
+        rm_sanitize(finding, _FINDING_MAXLEN)
+        for finding in guard_rail_findings(story) + implementation_path_findings(story)
+    ]
+
+
 def _depends_on_tokens(entries):
     tokens = set()
     for entry in entries:
@@ -2931,6 +2950,7 @@ def validate_staging(staging_dir, outline=None):
         findings = []
         for entry in entries:
             findings.extend(verify_refusal_findings(entry))
+            findings.extend(rail_and_path_findings(entry))
         if entries:
             tokens = _depends_on_tokens(entries)
             for edge in edges:
@@ -2959,6 +2979,26 @@ def verify_refusal_lines(stories):
                 + " (staged "
                 + str(story.get("_stagedIdx", ""))
                 + "): implementation.verify "
+                + finding
+            )
+    return lines
+
+
+def rail_and_path_refusal_lines(stories):
+    """One refusal line per guard-rail or path finding, naming story and staged idx.
+
+    A builder of its own: verify_refusal_lines hard-codes the implementation.verify
+    prefix, and these findings already name their field and index.
+    """
+    lines = []
+    for story in stories:
+        for finding in rail_and_path_findings(story):
+            lines.append(
+                "  Story "
+                + story["id"]
+                + " (staged "
+                + str(story.get("_stagedIdx", ""))
+                + "): "
                 + finding
             )
     return lines
@@ -3044,6 +3084,22 @@ def main(argv):
             "Error: story-merge: implementation.verify would swallow a failing line"
             " (start it with set -e or chain its lines with &&):",
             swallowing,
+        )
+    # The third gate in the same spot, for the same reason: an audit patch can
+    # introduce a guard rail that is not a whole verify segment, or an
+    # implementation.files entry outside the repository, after validate-staging
+    # ran. No agent_mode branch, no flag, no environment escape. It reads only
+    # the staged stories in hand, so a tasks file already on disk is never
+    # revalidated or changed.
+    rails_and_paths = rail_and_path_refusal_lines(stories)
+    if rails_and_paths:
+        die_list(
+            "Error: story-merge: an implementation.guardRails entry must be a whole"
+            " top-level segment of implementation.verify, an implementation.files entry"
+            " must stay inside the story's repository (a file outside it belongs in"
+            " implementation.outputs as a .aimi/ path), and implementation.outputs must"
+            " hold .aimi/ paths; no files were written:",
+            rails_and_paths,
         )
     # Computed ONCE, while every story still carries its _stagedIdx, and reused by
     # --foundation below so the two can never resolve an idx differently.

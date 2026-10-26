@@ -55,15 +55,18 @@ Symbols that fail validation are silently dropped from that anchor's candidate l
 - **Single-repo** (`AIMI_ROOT_IS_GIT_REPO=true`): the only root is `$AIMI_ROOT`.
 - **Multi-repo** (`AIMI_ROOT_IS_GIT_REPO=false`): iterate the child-repo list discovered by the Phase 0 auto-scan (see Phase 0 "Auto-Scan for Git Repos"). Each discovered `<name>/` becomes a root at `$AIMI_ROOT/<name>`.
 
-Run grep via env-var indirection so the symbol is never expanded by the shell:
+Run grep via env-var indirection so the symbol is never expanded by the shell. Assign `SYMBOL` on its own line and run `grep` on the next. Written as a prefix on the grep line (`SYMBOL=… grep … "$SYMBOL"`), the shell expands `"$SYMBOL"` before the assignment exists, so the pattern is empty, matches every line, and every symbol "verifies" against the first file grep reads:
 
 ```bash
-SYMBOL="<sanitized symbol>" grep -F -rn \
+SYMBOL="<sanitized symbol>"
+grep -F -rn \
   --exclude-dir={.git,.worktrees,node_modules,.aimi,vendor,dist,build,.next,coverage,.cache} \
-  -- "$SYMBOL" "$ROOT"
+  -e "$SYMBOL" "$ROOT"
 ```
 
-The `-F` (fixed-string) flag makes `.` and `:` and `-` literal — combined with the orchestrator regex, this rules out shell metacharacter injection. The exclusion set blocks self-resolution loops via `.aimi/` and ignores vendored/build output.
+If every symbol in a run reports a hit in the same file (typically `.gitignore:1`), the pattern was empty: discard the run and fix the invocation rather than recording the hits as evidence.
+
+The `-F` (fixed-string) flag makes `.` and `:` and `-` literal, and `-e` keeps a symbol that starts with `-` from being read as a flag — combined with the orchestrator regex, this rules out shell metacharacter injection. The exclusion set blocks self-resolution loops via `.aimi/` and ignores vendored/build output.
 
 **Classify each hit by path category** to build the evidence field:
 

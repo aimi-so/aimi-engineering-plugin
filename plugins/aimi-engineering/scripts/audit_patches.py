@@ -31,7 +31,12 @@ private copy of its patterns here -- and its `clean` result is stored as
 returned. The two fields that hold shell (`implementation.verify` and
 `implementation.guardRails`) go through `judge_patch_value` instead, which
 judges and never rewrites: a script the expander wrote unsanitized would only be
-corrupted by a rewrite.
+corrupted by a rewrite. The two path fields (`implementation.files`,
+`implementation.outputs`) take the plain sanitizer path and then one more
+judgment, the shared path rule, on every add or replace value; a `matchValue`
+is only sanitized, never path-judged, so an entry that already holds `..` can
+still be named in order to be removed. Moving a wrong entry from one field to
+the other is two patches, each judged on its own.
 
 Every refusal is computed before the first write. Writes are staged to temp
 files beside their targets first and renamed second, the audit result LAST, so
@@ -53,9 +58,14 @@ when the matcher fired. It NEVER echoes a patch value or matchValue.
               does not exist.
   refused     well-formed, refused on its content: a sanitizer trigger, tasks[]
               over its cap, a matchValue that matched zero or several entries,
-              guard rails that would no longer be segments of the verify, a
-              verify that can swallow a failing line, a post-patch validation
-              failure.
+              an implementation.files / implementation.outputs value that the
+              shared path rule refuses (`bad-path`; the value is judged by
+              tasks.implementation_path_problem and never echoed),
+              a patch that leaves a guard rail broken that was in sync before it
+              (a rail that stops being exactly one top-level segment of the
+              verify), a verify that can swallow a failing line, a post-patch
+              validation failure. A rail that was already broken before the
+              patch never causes a drop on its own: the check is differential.
 
 The one `unresolved` entry this module still appends of its own is the cap
 notice (`audit cap reached: N additional patches dropped`): capped patches are
@@ -68,8 +78,11 @@ REPORT
 Apply mode prints one JSON object:
 
   applied     int   patches that landed in a story file
-  dropped     list  [{storyIdx, field, op, reason[, trigger]}], one per dropped
-              patch; every string is cut to 64 characters
+  dropped     list  [{storyIdx, field, op, reason[, trigger][, rails]}], one per
+              dropped patch; every string is cut to 64 characters. `rails` is
+              present on a `guardRails-out-of-sync` entry only: the ascending
+              list of integer rail indices the patch newly broke, never an
+              index that was already broken and never any rail text
   unresolved  int   length of the merged `unresolved` array now on disk
   capped      int   patches beyond the 10-per-storyIdx cap
   auditedIdx  list  the staged idx set, sorted
@@ -113,8 +126,12 @@ ALLOWED_FIELDS = (
     "implementation.approach",
     "implementation.verify",
     "implementation.guardRails",
+    "implementation.files",
+    "implementation.outputs",
     "gate.prompt",
 )
+# The fields whose values are repository paths, judged by the shared path rule.
+PATH_FIELDS = ("implementation.files", "implementation.outputs")
 OPS_FOR_FIELD = {
     "dependsOn": frozenset({"add"}),
     "tasks": frozenset({"add", "replace", "remove"}),
@@ -123,6 +140,8 @@ OPS_FOR_FIELD = {
     "implementation.approach": frozenset({"replace"}),
     "implementation.verify": frozenset({"replace"}),
     "implementation.guardRails": frozenset({"replace"}),
+    "implementation.files": frozenset({"replace", "remove"}),
+    "implementation.outputs": frozenset({"add", "replace", "remove"}),
     "gate.prompt": frozenset({"replace"}),
 }
 # (field, op) pairs that locate the text they change by an exact `matchValue`.
@@ -134,6 +153,10 @@ NEEDS_MATCH_VALUE = frozenset(
         ("acceptanceCriteria", "replace"),
         ("implementation.verify", "replace"),
         ("implementation.guardRails", "replace"),
+        ("implementation.files", "replace"),
+        ("implementation.files", "remove"),
+        ("implementation.outputs", "replace"),
+        ("implementation.outputs", "remove"),
     }
 )
 MAX_PATCHES_PER_STORY = 10
@@ -279,12 +302,18 @@ class _Plan:
         self.unresolved = []
         self.capped = 0
 
-    def drop(self, idx, field, op, reason, trigger=None):
+    def drop(self, idx, field, op, reason, trigger=None, rails=None):
         """Record a dropped patch. Strings are cut to 64 characters; the entry
-        is built from validated names and a fixed reason, never from a value."""
+        is built from validated names and a fixed reason, never from a value.
+        `rails` (guardRails-out-of-sync only) is written as a sorted list of
+        real ints, so no rail text can reach the report through it."""
         entry = {"storyIdx": _echo(idx), "field": _echo(field), "op": _echo(op), "reason": reason}
         if trigger is not None:
             entry["trigger"] = _trigger_name(trigger)
+        if rails is not None:
+            entry["rails"] = sorted(
+                {r for r in rails if isinstance(r, int) and not isinstance(r, bool)}
+            )
         self.dropped.append(entry)
 
     def drop_raw(self, patch, reason):
@@ -364,6 +393,14 @@ def plan_patches(patches, idx_map, docs):
                 if trigger is not None:
                     plan.drop(idx, field, op, "matchValue-sanitizer:" + _trigger_name(trigger), trigger)
                     continue
+            if field in PATH_FIELDS and op != "remove":
+                # Lazy for the reason _broken_rails gives: importing this module
+                # must not load tasks. The matchValue is deliberately not judged.
+                from tasks import implementation_path_problem
+
+                if implementation_path_problem(field, clean) is not None:
+                    plan.drop(idx, field, op, "bad-path")
+                    continue
 
         candidates.setdefault(idx, []).append(
             {"field": field, "op": op, "value": clean, "matchValue": match_value}
@@ -390,9 +427,10 @@ def plan_patches(patches, idx_map, docs):
 class _Drop(Exception):
     """Raised inside _apply_one to refuse the patch it was applying."""
 
-    def __init__(self, reason):
+    def __init__(self, reason, rails=None):
         super().__init__(reason)
         self.reason = reason
+        self.rails = rails
 
 
 def _paragraph_append(existing, addition):
@@ -409,18 +447,34 @@ def _single_hit(entries, match_value):
     return hits[0]
 
 
-def _rails_in_sync(doc):
-    """Every guard rail is exactly one segment of the story's verify.
+def _broken_rails(doc):
+    """The set of guardRails indices that are not exactly one top-level segment
+    of the story's verify.
 
-    The rule lives in tasks.py (`_guard_rail_errors`, which cuts the verify with
+    The rule lives in tasks.py (`broken_rail_indices`, which cuts the verify with
     `verify_segments`); this calls it rather than restating it. Imported here
     and not at the top because tasks imports story_merge, which imports this
     module, so a top-level import would be a cycle -- and importing it lazily
     also keeps `import audit_patches` from loading the tasks module at all.
     """
-    from tasks import _guard_rail_errors
+    from tasks import broken_rail_indices
 
-    return not _guard_rail_errors("story", doc)
+    return set(broken_rail_indices(doc))
+
+
+def _require_no_new_broken_rails(doc, before):
+    """Drop the patch when it broke a rail that was in sync before it.
+
+    Differential, not whole-list: one rail that was already broken must not
+    discard every patch of its story. `before` is `_broken_rails(doc)` taken
+    before the branch mutated the candidate. The two sets are compared by
+    position, which is sound because a guardRails replace assigns in place
+    (`_single_hit`, same index) and a verify replace rebuilds the rail list one
+    to one (same length), so an index names the same rail on both sides.
+    """
+    newly = _broken_rails(doc) - before
+    if newly:
+        raise _Drop("guardRails-out-of-sync", sorted(newly))
 
 
 def _apply_one(doc, patch):
@@ -474,6 +528,7 @@ def _apply_one(doc, patch):
         match_value = patch["matchValue"]
         if verify.count(match_value) != 1:
             raise _Drop("matchValue-match-count")
+        before = _broken_rails(doc)
         # The same substitution lands in every rail that contains the matched
         # text, so a rewritten assertion and its label move together.
         rails = impl.get("guardRails")
@@ -483,13 +538,33 @@ def _apply_one(doc, patch):
                 for entry in rails
             ]
         impl["verify"] = verify.replace(match_value, value)
-        if not _rails_in_sync(doc):
-            raise _Drop("guardRails-out-of-sync")
-        # Lazy for the reason _rails_in_sync gives.
+        _require_no_new_broken_rails(doc, before)
+        # Lazy for the reason _broken_rails gives.
         from tasks import verify_composition_findings
 
         if verify_composition_findings(impl["verify"]):
             raise _Drop("verify-composition")
+    elif field in PATH_FIELDS:
+        key = field.split(".", 1)[1]
+        # Only an outputs add may create what is absent; every other op names
+        # an existing entry.
+        creates = field == "implementation.outputs" and op == "add"
+        impl = doc.setdefault("implementation", {}) if creates else doc.get("implementation")
+        if not isinstance(impl, dict):
+            raise _Drop("post-validation")
+        entries = impl.setdefault(key, []) if creates and key not in impl else impl.get(key)
+        if not isinstance(entries, list):
+            raise _Drop("post-validation")
+        if op == "add":
+            if value in entries:
+                raise _Drop("post-validation")
+            entries.append(value)
+        else:
+            hit = _single_hit(entries, patch["matchValue"])
+            if op == "replace":
+                entries[hit] = value
+            else:
+                del entries[hit]
     elif field == "implementation.guardRails":
         impl = doc.get("implementation")
         if not isinstance(impl, dict):
@@ -499,10 +574,11 @@ def _apply_one(doc, patch):
             rails = []
         if not isinstance(rails, list):
             raise _Drop("post-validation")
-        rails[_single_hit(rails, patch["matchValue"])] = value
+        hit = _single_hit(rails, patch["matchValue"])
+        before = _broken_rails(doc)
+        rails[hit] = value
         impl["guardRails"] = rails
-        if not _rails_in_sync(doc):
-            raise _Drop("guardRails-out-of-sync")
+        _require_no_new_broken_rails(doc, before)
     else:  # gate.prompt
         gate = doc.get("gate")
         if not isinstance(gate, dict) or gate.get("prompt") is None:
@@ -549,6 +625,10 @@ def _valid_story(doc, field, op, value):
         impl = doc.get("implementation")
         rails = impl.get("guardRails") if isinstance(impl, dict) else None
         return isinstance(rails, list) and all(_nonempty_str(e) for e in rails)
+    if field in PATH_FIELDS:
+        impl = doc.get("implementation")
+        entries = impl.get(field.split(".", 1)[1]) if isinstance(impl, dict) else None
+        return isinstance(entries, list) and all(isinstance(e, str) for e in entries)
     if field == "gate.prompt":
         gate = doc.get("gate")
         return isinstance(gate, dict) and _nonempty_str(gate.get("prompt"))
@@ -573,7 +653,7 @@ def apply_plan(plan, docs):
                 if not _valid_story(candidate, field, op, patch["value"]):
                     raise _Drop("post-validation")
             except _Drop as drop:
-                plan.drop(idx, field, op, drop.reason)
+                plan.drop(idx, field, op, drop.reason, rails=drop.rails)
                 continue
             doc = candidate
             changed = True

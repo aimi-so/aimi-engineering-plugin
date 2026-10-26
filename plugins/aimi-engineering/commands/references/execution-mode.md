@@ -27,8 +27,8 @@ absence still resolves to inline.
 `metadata.execution` applies to flat, non-phase tasks.json files only —
 `ROADMAP_MODE=false`, no `metadata.phase` key. A phase-scoped file
 (`metadata.phase` present) never carries `metadata.execution`: a claimed
-phase already runs inside its own phase container (see execute.md's Create
-or Reuse the Phase Container), so the flat-mode discriminator would be dead
+phase already runs inside its own phase container (see the Create
+or Reuse the Phase Container entry of execute.md, `references/execute/step-1-7-phase-container.md`), so the flat-mode discriminator would be dead
 data there — `CONTAINER_MODE` in execute.md is hardcoded to `false` whenever
 `PHASE_MODE=true`, regardless of what `metadata.execution` might say. `/aimi:plan`
 never writes the key on a phase-scoped file, and `aimi-cli.sh validate-tasks`
@@ -39,7 +39,7 @@ logic and cannot resolve a phase's own container base.
 
 ## Read Rule
 
-Read the field through the `metadata` verb, with a jq default that folds absence into `"inline"` — the same guarded call `commands/execute.md`'s own Execution Mode Detection uses, rather than a raw `jq` read of the tasks file. This snippet is a documented example of that call shape, not independent code, so it is kept in step with it deliberately: a caller copying this section is meant to land on the exact same shape execute.md already runs, not a shape that quietly re-derives what `metadata` already answers.
+Read the field through the `metadata` verb, with a jq default that folds absence into `"inline"` — the same guarded call Execution Mode Detection (`references/execute/step-1-execution-mode.md`) uses, rather than a raw `jq` read of the tasks file. This snippet is a documented example of that call shape, not independent code, so it is kept in step with it deliberately: a caller copying this section is meant to land on the exact same shape execute.md already runs, not a shape that quietly re-derives what `metadata` already answers.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)

@@ -214,10 +214,42 @@ def test_matching_rules_are_stated():
     assert "reported by trigger name, never by value" in AGENT_TEXT
 
 
+def test_op_table_has_the_path_rows_and_counts_ten_fields():
+    table = _op_table()
+    assert table["implementation.files"] == {"replace", "remove"}
+    assert table["implementation.outputs"] == {"add", "replace", "remove"}
+    assert len(table) == 10
+    assert "one of the ten fields" in AGENT_TEXT
+    assert "| `implementation.files` | `replace, remove` |" in AGENT_TEXT
+    assert "| `implementation.outputs` | `add, replace, remove` |" in AGENT_TEXT
+    assert "a path starting with `.aimi/`, relative to the AIMI root" in AGENT_TEXT
+    assert "plain relative path inside the story's repository" in AGENT_TEXT
+    # Rows added to the table must leave the two existing rows' text alone.
+    assert "| `tasks` | `add, replace, remove` | `add` appends `value`; `tasks[]` holds at most 50 entries." in AGENT_TEXT
+    assert "| `gate.prompt` | `replace` | Overwrites the whole string, only when" in AGENT_TEXT
+
+
+def test_drop_wording_names_bad_path_and_the_rails_semantics():
+    assert "`bad-path`" in AGENT_TEXT
+    assert "the shared path rule" in AGENT_TEXT
+    assert "carrying `rails` (the indices it broke)" in AGENT_TEXT
+    assert "only when it breaks a rail that equalled a `verify` segment before it" in AGENT_TEXT
+    assert "a rail already broken causes no drop" in AGENT_TEXT
+
+
+def test_out_of_repository_files_remedy_is_stated_once():
+    remedy = "is moved with a `files` `remove` plus an `outputs` `add`"
+    assert AGENT_TEXT.count(remedy) == 1
+    assert "${AIMI_ROOT}/.aimi/" in AGENT_TEXT
+    # Writing a `.aimi/<subdir>/` literal would make the auditor an artifact-language candidate.
+    assert not re.search(r"\.aimi/[a-z-]+/", AGENT_TEXT)
+
+
 def test_no_stale_vocabulary_wording():
     assert "accepts only `add`" not in AGENT_TEXT
     assert "dropped silently" not in AGENT_TEXT
     assert "six" not in AGENT_TEXT
+    assert "eight fields" not in AGENT_TEXT
     assert "listed in the orchestrator's apply report" in AGENT_TEXT
     assert "adds no `unresolved[]` entry" in AGENT_TEXT
 

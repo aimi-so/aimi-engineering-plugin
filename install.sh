@@ -451,6 +451,9 @@ REFERENCE_ALLOWLIST_FULL=(
   # plan/*.md is a glob so split files added later need no edit here; they
   # carry inline CLI resolution moved out of plan.md.
   "plan/*.md"
+  # execute/*.md carries the execute flow moved out of execute.md, pickers and
+  # inline CLI resolution included; the glob needs no edit for later splits.
+  "execute/*.md"
 )
 # literals mode: host literals only. The config-dir token is left alone so
 # the file can keep documenting the Claude Code cache path verbatim.
@@ -766,7 +769,6 @@ install_commands() {
 # | workflow agent                       | translated as                          |
 # | ------------------------------------ | -------------------------------------- |
 # | aimi-bug-reproduction-validator      | aimi-bug-reproduction-validator        |
-# | aimi-learnings-triage                | aimi-learnings-triage                  |
 # | aimi-scope-negative-verifier         | aimi-scope-negative-verifier           |
 # | aimi-scope-positive-verifier         | aimi-scope-positive-verifier           |
 # | aimi-spec-flow-analyzer              | aimi-spec-flow-analyzer                |

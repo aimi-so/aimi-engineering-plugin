@@ -118,6 +118,13 @@ A `git` segment must be followed immediately by one of exactly `ls-files`,
 refused by the same rule, with no denylist to keep current. A segment whose
 leading word is not on the list refuses the whole block.
 
+The split is on every `|` character, **including one inside a quoted pattern**.
+`grep 'a\|b' file` therefore splits into `grep 'a\` and `b' file`, and the second
+segment leads with `b'`, so the block is refused. This is deliberate: honouring
+quotes would mean parsing shell syntax in the one place that runs agent-written
+text. A block that needs alternation writes it with repeated `-e` flags
+(`grep -c -e a -e b file`) and never puts `|` or `\|` in a pattern.
+
 **Never invert this into a list of forbidden commands.** A denylist answers
 "is this one of the bad ones?", which is the wrong question for text an agent
 wrote: anything its author thought of that the list's author did not, runs.

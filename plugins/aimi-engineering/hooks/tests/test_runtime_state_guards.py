@@ -160,44 +160,6 @@ def test_runtime_guard_blocks_state_dir(tmp_path, monkeypatch):
     assert "State files reflect live runtime" in result["hookSpecificOutput"]["userMessage"]
 
 
-def test_runtime_guard_blocks_learnings(tmp_path, monkeypatch):
-    """A path under $HOME/.aimi/learnings/ should always be denied."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    learnings_dir = tmp_path / ".aimi" / "learnings"
-    learnings_dir.mkdir(parents=True)
-    target = learnings_dir / "friction.jsonl"
-    target.touch()
-
-    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
-
-    assert exit_code == 0
-    result = _parse_deny_output(output)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "Friction log is append-only" in result["hookSpecificOutput"]["userMessage"]
-
-
-def test_runtime_guard_blocks_telemetry(tmp_path, monkeypatch):
-    """A path under $HOME/.aimi/telemetry/ should always be denied."""
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("AIMI_RUNTIME_STATE_GUARD", raising=False)
-    monkeypatch.chdir(tmp_path)
-
-    telemetry_dir = tmp_path / ".aimi" / "telemetry"
-    telemetry_dir.mkdir(parents=True)
-    target = telemetry_dir / "events.jsonl"
-    target.touch()
-
-    output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
-
-    assert exit_code == 0
-    result = _parse_deny_output(output)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "Telemetry log is append-only" in result["hookSpecificOutput"]["userMessage"]
-
-
 def test_runtime_guard_blocks_tasks_when_lock_alive(tmp_path, monkeypatch):
     """Tasks file should be denied when .execute.lock exists with a live PID."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

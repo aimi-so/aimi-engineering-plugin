@@ -109,6 +109,30 @@ EVENTS="$WORK_DIR/events.tsv"   # A|R \t var \t loopdepth \t blockline \t id
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
+# execute.md's text in DOCUMENT ORDER, router plus whatever references/execute/
+# files it reads, built once by the one reader every test of that text shares
+# (scripts/tests/execute_text.py). Checks that compare line numbers inside one
+# file, or count a literal across the whole command, read this file so they
+# survive the router split. Check 12b alone keeps the router's own frontmatter.
+EXEC_TEXT="$WORK_DIR/execute-text.md"
+
+build_execute_text() {
+  if ! AIMI_EXECUTE_WIRING_ROOT="$COMMANDS_DIR" python3 "$SCRIPT_DIR/tests/execute_text.py" "$COMMANDS_DIR" > "$EXEC_TEXT" \
+     || [ ! -s "$EXEC_TEXT" ]; then
+    echo "FATAL: could not build the document-order execute text with scripts/tests/execute_text.py" >&2
+    exit 1
+  fi
+}
+
+# Maps a commands/-relative name to the file a check should read: execute.md
+# becomes the document-order file, every other name stays in COMMANDS_DIR.
+command_text_path() {
+  case "$1" in
+    execute.md) printf '%s' "$EXEC_TEXT" ;;
+    *) printf '%s/%s' "$COMMANDS_DIR" "$1" ;;
+  esac
+}
+
 # Process-environment names. These are read by design and assigned by the host,
 # never by the prose, so check 4 would otherwise report every one of them in
 # every file that resolves the CLI path. Repo-owned variables are NOT listed
@@ -577,12 +601,12 @@ FIXTURES
   # file path or a --phase argument, the raw dot-bearing id was needed instead.
   local leaks
   leaks="$(
-    grep -n 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null \
+    grep -n 'PHASE_ID_SLUG' "$EXEC_TEXT" 2>/dev/null \
       | grep -E -- '-tasks\.json|--phase' \
       | sed 's/^/execute.md:/'
     # Outside the derivation block entirely (prose, or another block).
     in_block="$(grep -c 'PHASE_ID_SLUG' "$block" 2>/dev/null || echo 0)"
-    in_file="$(grep -c 'PHASE_ID_SLUG' "$COMMANDS_DIR/execute.md" 2>/dev/null || echo 0)"
+    in_file="$(grep -c 'PHASE_ID_SLUG' "$EXEC_TEXT" 2>/dev/null || echo 0)"
     [ "$in_block" = "$in_file" ] \
       || printf 'PHASE_ID_SLUG appears %s time(s) in execute.md but only %s inside the derivation block\n' \
            "$in_file" "$in_block"
@@ -625,7 +649,7 @@ FIXTURES
 # phase-mode run. Exactly one, below the gate, is the whole contract.
 # ---------------------------------------------------------------------------
 check_reverify_branch() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local id rel start heading body matches="" block findings=""
 
   # --- The capture: Step 1.7's on-success extraction block ------------------
@@ -634,7 +658,7 @@ check_reverify_branch() {
   # roadmap-get can recover the status the phase was claimed in.
   while IFS=$'\t' read -r id rel start heading; do
     [ -n "$id" ] || continue
-    [ "$rel" = "execute.md" ] || continue
+    case "$rel" in execute.md|references/execute/*) ;; *) continue ;; esac
     body="$(cat "$BLOCKS_DIR/$id.sh" 2>/dev/null)"
     case "$body" in
       *'PHASE_ENTRY_STATUS='*) matches="$matches$id " ;;
@@ -853,7 +877,7 @@ check_forge_account_picker() {
 
   while IFS='|' read -r file heading; do
     [ -n "$heading" ] || continue
-    path="$COMMANDS_DIR/$file"
+    path="$(command_text_path "$file")"
     if [ ! -f "$path" ]; then
       missing="$missing$file is not readable"$'\n'
       continue
@@ -968,8 +992,19 @@ EOF
 # fenced blocks — a fence-blind scan ends the section on the first one and the
 # check then fails for a reason that has nothing to do with publishing.
 md_section() {
+  # A router entry repeats the heading of the file it routes to, so the first
+  # match can be a stub (heading, then an `Applies when:` line). A stub is
+  # discarded and the scan goes on to the next occurrence, which is the body.
   awk -v H="$2" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function flush(   i, first) {
+      first = ""
+      for (i = 2; i <= nb; i++) { if (buf[i] ~ /^[0-9]+\t[ \t]*$/) continue; first = buf[i]; break }
+      if (first ~ /^[0-9]+\tApplies when:/) { nb = 0; inside = 0; return 0 }
+      for (i = 1; i <= nb; i++) print buf[i]
+      return 1
+    }
+    function emit(line) { nb = nb + 1; buf[nb] = line }
     {
       n = n + 1
       probe = $0; sub(/^[ \t]+/, "", probe)
@@ -978,21 +1013,22 @@ md_section() {
         info = probe; sub(/^`+/, "", info); info = trim(info)
         if (infence == 0)                              { infence = 1; openind = ind }
         else if (info == "" && ind <= openind)         { infence = 0 }
-        if (inside) print n "\t" $0
+        if (inside) emit(n "\t" $0)
         next
       }
-      if (infence == 1) { if (inside) print n "\t" $0; next }
-      if (!inside && index($0, H) == 1) {
-        inside = 1; lvl = 0
-        while (substr(probe, lvl + 1, 1) == "#") lvl++
-        print n "\t" $0; next
-      }
+      if (infence == 1) { if (inside) emit(n "\t" $0); next }
       if (inside && probe ~ /^#{1,6}[ \t]/) {
         l = 0; while (substr(probe, l + 1, 1) == "#") l++
-        if (l <= lvl) exit
+        if (l <= lvl) { if (flush()) { done = 1; exit } }
       }
-      if (inside) print n "\t" $0
+      if (!inside && !done && index($0, H) == 1) {
+        inside = 1; lvl = 0; nb = 0
+        while (substr(probe, lvl + 1, 1) == "#") lvl++
+        emit(n "\t" $0); next
+      }
+      if (inside) emit(n "\t" $0)
     }
+    END { if (inside && !done) flush() }
   ' "$1"
 }
 
@@ -1052,7 +1088,7 @@ PHASE_PUBLISH_SECTION='### Offer a Pull Request'
 PHASE_PUBLISH_GATE='#### Confirm before publishing this phase'
 
 check_phase_publish_gate() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local region gate_line decline_line pushes p
   local missing="" ordering="" closed=""
   local literal why
@@ -1135,13 +1171,15 @@ GATE_LITERALS
 #
 # WHY THE PICKER'S FILE MATTERS AS MUCH AS ITS CONTENT
 #
-# `commands/references/` is delivered to OpenCode by install.sh's verbatim
-# whole-tree copy, and both of its command-install loops skip that subdirectory
-# by name — so translate_command_body(), which is what rewrites the picker's
-# tool name for that host, never sees a reference file. A picker written there
-# reaches OpenCode naming a tool that host does not have. That is why story 05
-# moved this one question up into the command body, and why 11a asserts it is
-# in execute.md while check 14 asserts it is nowhere under references/.
+# install.sh runs the full command-body rewrite, which is what turns the
+# picker's tool name into OpenCode's equivalent, over a command body and over
+# the subtrees named in REFERENCE_ALLOWLIST_FULL (references/plan/ and
+# references/execute/). Every other reference file gets at most the
+# host-literal rewrite or none. A picker is therefore placed in a command body
+# or in one of those subtrees, never in another reference file. That is why
+# story 05 moved this one question up into the command body, and why 11a
+# asserts it is in execute.md while check 14 asserts it is nowhere else under
+# references/.
 #
 # 11b's other half is criterion 3: the reference's agent-mode branch must set
 # SKIP_PUSH unconditionally. "Unconditionally" is the whole claim — the branch
@@ -1151,7 +1189,7 @@ CONTAINER_PUSH_SECTION='### If all stories complete:'
 CONTAINER_PUSH_REF_SECTION='## Container Mode: Push the Branch'
 
 check_container_push_confirmation() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
   local ref="$COMMANDS_DIR/references/container-execution.md"
   local region literal why body="" refs=""
 
@@ -1173,7 +1211,7 @@ CONTAINER_LITERALS
 
   assert_no_findings "$(printf '%s' "$body")" \
     "Check 11a — the flat-container push question lives in execute.md's completion branch" \
-    "A picker written into commands/references/ is never translated by install.sh and reaches OpenCode naming a tool that host does not have."
+    "A picker belongs in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); elsewhere install.sh does not run the full rewrite and it can reach OpenCode naming a tool that host does not have."
 
   region="$(md_section "$ref" "$CONTAINER_PUSH_REF_SECTION")"
   if [ -z "$region" ]; then
@@ -1215,7 +1253,8 @@ CONTAINER_LITERALS
 PUSH_REFUSAL_SECTION='### Refuse --push'
 
 check_push_flag_removed() {
-  local md="$COMMANDS_DIR/execute.md"
+  local md="$EXEC_TEXT"
+  local router="$COMMANDS_DIR/execute.md"
   local region first last hint hits n stray="" loud="" flag=""
 
   # --- 12a: the flag's variable is gone from every command file -------------
@@ -1225,7 +1264,7 @@ check_push_flag_removed() {
     "The flag is removed, not deprecated. Nothing may read it, in a command body or a reference."
 
   # --- 12b: the frontmatter no longer advertises it ------------------------
-  hint="$(grep -n '^argument-hint:' "$md" | grep -F -- '--push' | sed 's|^|execute.md:|' | cut -c1-160)"
+  hint="$(grep -n '^argument-hint:' "$router" | grep -F -- '--push' | sed 's|^|execute.md:|' | cut -c1-160)"
   assert_no_findings "$hint" \
     "Check 12b — execute.md's argument-hint no longer advertises --push" \
     "Autocomplete would keep offering a flag whose only remaining behavior is to fail the run."
@@ -1292,7 +1331,7 @@ check_completion_names_open_pr() {
   # --- 13a: no raw forge command is recommended to the user ----------------
   raw="$(
     for f in $COMPLETION_REPORT_FILES; do
-      grep -n 'gh pr create' "$COMMANDS_DIR/$f" 2>/dev/null | cut -c1-160 | sed "s|^|$f:|"
+      grep -n 'gh pr create' "$(command_text_path "$f")" 2>/dev/null | cut -c1-160 | sed "s|^|$f:|"
     done
   )"
   assert_no_findings "$raw" \
@@ -1301,7 +1340,7 @@ check_completion_names_open_pr() {
 
   # --- 13b: every PR recommendation names the command instead --------------
   for f in $COMPLETION_REPORT_FILES; do
-    path="$COMMANDS_DIR/$f"
+    path="$(command_text_path "$f")"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       case "$line" in
@@ -1356,16 +1395,19 @@ check_references_carry_no_picker() {
     find "$COMMANDS_DIR/references" -name '*.md' | sort | while IFS= read -r f; do
       rel="${f##*/}"
       [ "$rel" = "$PICKER_LITERAL_EXEMPT" ] && continue
-      # references/plan/ is the one subtree install.sh DOES run through the
-      # full command-body translation (install_references' allowlist), so a
-      # picker there is rewritten for OpenCode like one in a command body.
-      case "$f" in "$COMMANDS_DIR"/references/plan/*) continue ;; esac
+      # references/plan/ and references/execute/ are the subtrees install.sh
+      # runs through the full command-body translation (REFERENCE_ALLOWLIST_FULL),
+      # so a picker there is rewritten for OpenCode like one in a command body.
+      # Placement policy: a picker lives in a command body or in one of those.
+      case "$f" in
+        "$COMMANDS_DIR"/references/plan/*|"$COMMANDS_DIR"/references/execute/*) continue ;;
+      esac
       grep -nF '**AskUserQuestion**' "$f" 2>/dev/null | cut -c1-160 | sed "s|^|references/$rel:|"
     done
   )"
   assert_no_findings "$findings" \
     "Check 14 — no reference file carries picker markup (interactivity.md defines the literal and is exempt)" \
-    "install.sh copies commands/references/ verbatim and never runs translate_command_body over it, so this picker reaches OpenCode naming a tool that host does not have. Move it into a command body."
+    "A picker may live in a command body or in a REFERENCE_ALLOWLIST_FULL subtree (references/plan/, references/execute/); this file is in neither. Move it into a command body."
 }
 
 # ---------------------------------------------------------------------------
@@ -1390,6 +1432,7 @@ main() {
   echo "Extracting bash-fenced blocks from commands/, skills/, and agents/..."
   extract_blocks
   scan_blocks
+  build_execute_text
   load_baseline
   : > "$MATCHED_BASELINE"
 

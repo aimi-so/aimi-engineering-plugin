@@ -199,13 +199,3 @@ Shows the current values for the active host, then asks five questions — resea
 ```
 
 Use it to change assignments after first run, or to rebuild the config if the file was deleted.
-
----
-
-## `/aimi:learnings`
-
-Triages the friction queue that the plugin's hooks collect while you work — repeated failures, workarounds, surprises — and drafts proposals for turning them into durable project conventions.
-
-```bash
-/aimi:learnings
-```

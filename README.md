@@ -244,7 +244,6 @@ More on the layout, and why the split falls exactly there: [docs/roadmaps.md](do
 | `/aimi:validate-bug` | Reproduce and confirm a bug report |
 | `/aimi:init` | Prime the CLI path cache |
 | `/aimi:setup-models` | Choose which model runs which agent category |
-| `/aimi:learnings` | Triage friction the hooks recorded while you worked |
 
 Each one in detail: [docs/commands.md](docs/commands.md).
 
@@ -265,9 +264,9 @@ There is no flag for publishing. Finishing the work and publishing it are two se
 
 | | Count | |
 |---|---|---|
-| Commands | 12 | Slash commands for each stage |
+| Commands | 11 | Slash commands for each stage |
 | Skills | 24 | Packaged conventions and workflows |
-| Agents | 33 | 16 review, 7 workflow, 7 research, 2 design, 1 shared reference |
+| Agents | 33 | 16 review, 8 research, 6 workflow, 2 design, 1 shared reference |
 
 The full catalogue, with what each one is for: [docs/agents-and-skills.md](docs/agents-and-skills.md).
 

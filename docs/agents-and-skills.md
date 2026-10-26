@@ -19,7 +19,6 @@ These are invoked by commands, not by you.
 | `brainstorm` | The brainstorming process — batched questions, adaptive exit, design capture |
 | `task-planner` | The pipeline that produces a tasks file: research, spec analysis, story decomposition |
 | `story-executor` | The canonical prompt every story-executing agent receives |
-| `aimi-learnings` | Triage of friction events captured by hooks; drafts promotion proposals for review |
 
 ### Development and code style
 
@@ -100,12 +99,11 @@ These are invoked by commands, not by you.
 | `aimi-design-implementation-reviewer` | Compares the live UI against Figma or a prototype |
 | `aimi-design-iterator` | Refines a UI through screenshot, analyze, improve cycles |
 
-### Workflow (7)
+### Workflow (6)
 
 | Agent | What it does |
 |-------|--------------|
 | `aimi-bug-reproduction-validator` | Reproduces and validates bug reports, any language or framework |
-| `aimi-learnings-triage` | Read-only triage of friction events; returns a grouped report without marking anything |
 | `aimi-scope-negative-verifier` | Re-checks a claim that something is absent, using data-flow analysis rather than a name search |
 | `aimi-scope-positive-verifier` | Re-checks a claim that something already exists, the same way |
 | `aimi-spec-flow-analyzer` | Analyzes a spec for flow gaps and missing cases |

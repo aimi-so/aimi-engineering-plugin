@@ -112,10 +112,11 @@ Write exactly one JSON object to `outputPath`. Fields:
   "notes": "<optional>",
   "project": "<optional, relative repo path for multi-repo>",
   "implementation": {
-    "files": ["<concrete file paths from research>"],
+    "files": ["<concrete in-repository paths, plain relative, from research>"],
     "approach": "<actionable strategy, referencing codebase patterns by file:line where possible>",
     "verify": "<executable command or checkable assertion>",
     "guardRails": ["<optional: verbatim verify segments that pass by design>"],
+    "outputs": ["<optional, files written outside the repository: .aimi/... paths relative to the AIMI root>"],
     "prototypeAnchor": "<optional, relative path to the single prototype most relevant>"
   },
   "verification": {
@@ -184,9 +185,11 @@ Every prose field you write — `title`, `description`, every `acceptanceCriteri
 
 Write `implementation.verify` as if it already runs from the right directory, because it does — the executor cds into the story's own project before running anything (`skills/story-executor/SKILL.md` step 0), whether that project is its own repository or a subdirectory of a monorepo. Do **not** prefix the command with `cd <project> &&`: the executor is already there, so the prefix resolves to `<project>/<project>` and fails.
 
+`implementation.files` lists only files inside the story's own repository, as plain relative paths (no `..` segment, no leading `/` or `~`, no `./`, no whitespace). A file written OUTSIDE it, such as a report under the AIMI root's gitignored `.aimi/`, goes in the optional `implementation.outputs`, as a path relative to the AIMI root starting with `.aimi/`. A verify or criterion reaches that file through `"$AIMI_ROOT/.aimi/..."`, exported by the executor and by the plan-time probes, never through `../.aimi` and never through a path re-derived from the worktree.
+
 ## Verify measures the tree under test, never an installed copy
 
-A story that creates or changes an executable this repository *ships* must run **that tree's** copy of it. Resolve the tool the way an ordinary session does — from a global cache, from `PATH`, from a path an installer wrote into a shell profile — and the verify measures the copy already installed on the machine, which is a different checkout from the worktree the executor works in. The check then passes or fails for reasons that have nothing to do with the story, and a story that adds behaviour can never observe it.
+A story that creates or changes an executable this repository *ships* must run **that tree's** copy of it. Resolve the tool the way an ordinary session does (a global cache, `PATH`, a path an installer wrote into a shell profile) and the verify measures the copy installed on the machine, a different checkout from the executor's worktree. The check then passes or fails for reasons unrelated to the story, and a story that adds behaviour can never observe it.
 
 In this repository the shipped executable is `aimi-cli.sh` (the plugin-self-build case detected under "skills[] inference" below). So a story whose `implementation.files` touches `plugins/aimi-engineering/scripts/aimi-cli.sh` — or a module it dispatches into, such as `tasks.py` or `roadmap.py` — must bind the CLI in `implementation.verify` as
 
@@ -197,10 +200,10 @@ AIMI_CLI="$PWD/plugins/aimi-engineering/scripts/aimi-cli.sh"
 and never as `AIMI_CLI=$(cat ~/.config/aimi/cli-path)`. Three mechanical reasons, each independent of the other two:
 
 - The global cache names the **installed** plugin. A verify reading it never opens the file the story just edited.
-- Waiting for the cache to catch up is waiting for something the CLI is written to prevent: `write_global_cli_cache` refuses **on purpose** to persist any path carrying a `.worktrees/` segment (a throwaway checkout would leave later sessions pointing at a file that has since been removed), so the executor's own copy is never cached, by design.
+- The cache never catches up: `write_global_cli_cache` refuses **on purpose** to persist any path carrying a `.worktrees/` segment (a throwaway checkout would leave later sessions pointing at a removed file), so the executor's own copy is never cached.
 - The path must be **absolute**, which is why `$PWD/` is in front of it. Invoked by a relative path, `aimi-cli.sh` resolves its sibling Python modules against the working directory it holds after `find_aimi_root`, and can load another checkout's modules while appearing to run the worktree's.
 
-Recorded from the failing side in `.aimi/known-gaps/2026-09-03-US-002.md`: two stories in that phase had their verify repaired mid-flight for exactly this, and the gap closes by noting the rule did not yet exist here — which is why it does now.
+Recorded in `.aimi/known-gaps/2026-09-03-US-002.md`: two stories had their verify repaired mid-flight for exactly this.
 
 ## Verify fixtures live inside the project
 
@@ -210,11 +213,11 @@ A `verify` that needs a throwaway tasks file cannot build it with `mktemp -d`. E
 Error: Path escapes project root — access denied
 ```
 
-That is the confinement working rather than a defect, and it belongs to no particular verb: `count-pending`, which predates all of this, refuses the same path and accepts the same fixture the moment it is moved inside the repository. So build the fixture under the project — `.aimi/` is the obvious home — or point `TMPDIR` at a directory inside it before the fixture is created.
+That is the confinement working, not a defect, and it belongs to no particular verb: `count-pending` refuses the same path and accepts the same fixture once it is inside the repository. So build the fixture under the project — `.aimi/` is the obvious home — or point `TMPDIR` at a directory inside it before the fixture is created.
 
-`PROJECT_ROOT` is wider than the worktree the executor stands in, which is why the fixture has anywhere to go at all. `find_aimi_root` walks up from the working directory to the **first** `.aimi/` and takes that directory's git toplevel. `.aimi/` is gitignored, so it exists in no worktree; the walk from a story worktree nested under `.worktrees/` therefore climbs past every one of them to the main checkout. Everything under that checkout — the nested worktrees included — is inside `PROJECT_ROOT`. `/tmp` is not.
+`PROJECT_ROOT` is wider than the executor's worktree, which is why the fixture has anywhere to go. `find_aimi_root` walks up from the working directory to the **first** `.aimi/` and takes that directory's git toplevel. `.aimi/` is gitignored, so it exists in no worktree; the walk from a story worktree under `.worktrees/` climbs past every one of them to the main checkout. Everything under that checkout, the nested worktrees included, is inside `PROJECT_ROOT`. `/tmp` is not.
 
-Recorded from the failing side in `.aimi/known-gaps/2026-09-07-US-002-verify-fixture-em-tmp-recusado.md`: an executor wrote its verify fixture with `mktemp -d`, spent its diagnosis establishing that the refusal was structural rather than its own story's, and worked around it by repointing `TMPDIR`. The rule did not exist here — which is why it does now.
+Recorded in `.aimi/known-gaps/2026-09-07-US-002-verify-fixture-em-tmp-recusado.md`: an executor wrote its fixture with `mktemp -d`, spent its diagnosis establishing the refusal was structural, and repointed `TMPDIR`.
 
 ## Verify never names `verify-probe`
 
@@ -235,7 +238,7 @@ Four companion rules keep a guarded verify honest, each with its own reason:
 
 ## Guard-rail segments
 
-List in `implementation.guardRails` every `verify` segment that passes by design, such as a full suite or a regression check. Each entry is the segment's text verbatim, exactly as `verify_segments` cuts it: split on `;`, `&&`, `||` and newlines, with a heredoc counted as one segment. Leave every segment that discriminates the before-state from the after-state out of the list; an unlabelled segment that already passes is then visible as a real finding. Omit the key when nothing passes by design.
+List in `implementation.guardRails` every `verify` segment that passes by design, such as a full suite or a regression check. Each entry is the segment's text verbatim, exactly as `verify_segments` cuts it: split on `;`, `&&`, `||` and newlines. A function definition, a `for`/`while`/`until` loop, an `if`/`case` block, a `{ }` group, a `( )` subshell and a heredoc are each ONE segment: list the whole compound segment or its top-level call line, never a line inside it; `validate-staging` refuses that shape. Leave every segment that discriminates the before-state from the after-state out of the list; an unlabelled segment that already passes is then visible as a real finding. Omit the key when nothing passes by design.
 
 ## Verify coverage
 

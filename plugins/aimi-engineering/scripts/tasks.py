@@ -1301,6 +1301,35 @@ def _story_errors(story):
     return errors
 
 
+def _broken_guard_rails(implementation, rails):
+    """The one place a guard rail is tested for being a top-level segment.
+
+    Returns `(broken, texts)`: `broken` is `[(index, entry, kind)]` in index
+    order for every rail that is not exactly one segment of the story's own
+    implementation.verify, and `texts` the ordered segment texts the test was
+    made against (empty when verify is not a string). `kind` is `not-string`
+    for a non-string or empty entry, `no-verify` when verify is not a string
+    at all, and `not-segment` for a string that equals no segment. The
+    membership test is `verify_segments` reused rather than re-implemented,
+    and `_guard_rail_errors`, `broken_rail_indices` and `guard_rail_findings`
+    all read this list, so the three cannot disagree about which rails are
+    broken.
+    """
+    verify = implementation.get("verify") if isinstance(implementation, dict) else None
+    verified = isinstance(verify, str)
+    texts = [segment for _, segment in verify_segments(verify)] if verified else []
+    known = set(texts)
+    broken = []
+    for index, entry in enumerate(rails):
+        if not isinstance(entry, str) or entry == "":
+            broken.append((index, entry, "not-string"))
+        elif not verified:
+            broken.append((index, entry, "no-verify"))
+        elif entry not in known:
+            broken.append((index, entry, "not-segment"))
+    return broken, texts
+
+
 def _guard_rail_errors(story_id, story):
     """The implementation.guardRails rule, run last so no earlier error moves.
 
@@ -1310,6 +1339,8 @@ def _guard_rail_errors(story_id, story):
     first for the reason the note above gives: a bare jq_index on a scalar
     implementation would abort the whole run. An absent guardRails is no rule
     at all, so a document without the key validates byte for byte as before.
+    The segment test itself is `_broken_guard_rails`, shared with the two
+    readers below; this function only words its three messages.
     """
     implementation = jq_index(story, "implementation", STORY)
     if jq_type(implementation) != "object":
@@ -1319,16 +1350,139 @@ def _guard_rail_errors(story_id, story):
         return []
     if jq_type(rails) != "array":
         return [story_id + ": implementation.guardRails must be an array"]
-    verify = jq_index(implementation, "verify", STORY + ".implementation")
-    known = {segment for _, segment in verify_segments(verify)} if isinstance(verify, str) else set()
     errors = []
-    for index, entry in enumerate(rails):
+    for index, _entry, kind in _broken_guard_rails(implementation, rails)[0]:
         label = story_id + ": implementation.guardRails[" + str(index) + "]"
-        if not isinstance(entry, str) or entry == "":
+        if kind == "not-string":
             errors.append(label + " must be a non-empty string")
-        elif entry not in known:
+        else:
             errors.append(label + " matches no segment of implementation.verify")
     return errors
+
+
+def _guard_rail_subject(story):
+    """`(implementation, rails)` when a story carries a guardRails LIST, else None.
+
+    The public readers below take a plain dict and never raise, so each shape
+    check is an isinstance rather than the jq_index the validator uses. A
+    guardRails that is not a list is `_guard_rail_errors`' message to give and
+    these two report nothing for it.
+    """
+    if not isinstance(story, dict):
+        return None
+    implementation = story.get("implementation")
+    if not isinstance(implementation, dict):
+        return None
+    rails = implementation.get("guardRails")
+    if not isinstance(rails, list):
+        return None
+    return implementation, rails
+
+
+def broken_rail_indices(story):
+    """Ascending indices of the guardRails entries that are not exactly one
+    top-level segment of implementation.verify.
+
+    `[]` when implementation or guardRails is absent, or guardRails is not a
+    list. Duplicated rails are allowed: the test is membership.
+    """
+    subject = _guard_rail_subject(story)
+    if subject is None:
+        return []
+    return [index for index, _entry, _kind in _broken_guard_rails(*subject)[0]]
+
+
+_GUARD_RAIL_HEAD_CHARS = 40
+_GUARD_RAIL_FUNCTION = re.compile(r"(?:function\s+[\w.:-]+|[A-Za-z_][\w.:-]*\s*\(\s*\))")
+_GUARD_RAIL_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*['\"\\]?[A-Za-z_]")
+_GUARD_RAIL_REMEDY = (
+    "List the whole %s as the rail, or its top-level call line, never a line inside it."
+)
+
+
+def _guard_rail_head(entry):
+    """A short, single-line, retry-safe quote of a rail: no backtick, no
+    dollar followed by an open paren, whitespace collapsed, cut to a head."""
+    text = " ".join(entry.replace("`", "").split())
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    if len(text) > _GUARD_RAIL_HEAD_CHARS:
+        text = text[:_GUARD_RAIL_HEAD_CHARS].rstrip() + "..."
+    return text
+
+
+def _guard_rail_container_kind(segment):
+    """What kind of larger segment `segment` is, by its leading token or, for
+    a command that opens a heredoc, by the operator; None when it is neither."""
+    if _GUARD_RAIL_FUNCTION.match(segment):
+        return "function definition"
+    word = re.match(r"[A-Za-z]+", segment)
+    word = word.group(0) if word else ""
+    if word in ("for", "while", "until"):
+        return "for/while/until loop"
+    if word in ("if", "case"):
+        return "if/case block"
+    if segment.startswith("{"):
+        return "{ } group"
+    if segment.startswith("("):
+        return "( ) subshell"
+    if _GUARD_RAIL_HEREDOC.search(segment):
+        return "heredoc"
+    return None
+
+
+def guard_rail_findings(story):
+    """One plain sentence per broken guard rail, in index order.
+
+    Each names `implementation.guardRails[<i>]`. A rail found inside a larger
+    segment says what that segment is and gives the remedy; one that matches
+    nothing asks for the exact segment text; a non-string or empty entry and a
+    missing verify each have a sentence of their own. The text is built by
+    concatenation and the quoted head is cut short and stripped of backticks
+    and the dollar-open-paren pair, because the retry sanitizer drops both.
+    """
+    subject = _guard_rail_subject(story)
+    if subject is None:
+        return []
+    broken, texts = _broken_guard_rails(*subject)
+    findings = []
+    for index, entry, kind in broken:
+        label = "implementation.guardRails[" + str(index) + "]"
+        if kind == "not-string":
+            findings.append(
+                label + " is not a non-empty string. List the exact text of one"
+                " top-level segment of implementation.verify."
+            )
+            continue
+        if kind == "no-verify":
+            findings.append(
+                label + " cannot be checked because the story has no"
+                " implementation.verify string. Add the verify or remove the guard rail."
+            )
+            continue
+        head = _guard_rail_head(entry)
+        container = next((text for text in texts if entry in text and text != entry), None)
+        if container is None:
+            findings.append(
+                label + " (starts: " + head + ") matches no segment of"
+                " implementation.verify and sits inside none. Give the exact text"
+                " of one top-level segment."
+            )
+            continue
+        what = _guard_rail_container_kind(container)
+        if what is None:
+            findings.append(
+                label + " (starts: " + head + ") sits inside a larger segment of"
+                " implementation.verify rather than being a top-level segment. "
+                + _GUARD_RAIL_REMEDY % "segment"
+            )
+        else:
+            findings.append(
+                label + " (starts: " + head + ") sits inside a " + what
+                + " rather than being a top-level segment of implementation.verify. "
+                + _GUARD_RAIL_REMEDY % what
+            )
+    return findings
 
 
 def validate_stories(doc):
@@ -2286,6 +2440,190 @@ def _story_project_base(story, project_root):
     return project_path if project_inside else None
 
 
+# The lexical path rule for `implementation.files` and `implementation.outputs`.
+# It lives here, once: R17, R24 and every later caller (validate-staging, the
+# story-merge refusal, the audit patch check) call these functions and restate
+# nothing. It is LEXICAL on purpose -- string operations only, no filesystem
+# access and no os.path helper -- so the same verdict comes back whether the
+# entry names a file that exists, a directory that does not, or a repository
+# that is not checked out where the plan was written. The shared constants
+# below keep each reason and each remedy sentence spelled in one place.
+IMPLEMENTATION_FILES_FIELD = "implementation.files"
+IMPLEMENTATION_OUTPUTS_FIELD = "implementation.outputs"
+IMPLEMENTATION_PATH_FIELDS = (IMPLEMENTATION_FILES_FIELD, IMPLEMENTATION_OUTPUTS_FIELD)
+OUTPUTS_ROOT_PREFIX = ".aimi/"
+
+PATH_REASON_NOT_STRING = "is not a string"
+PATH_REASON_EMPTY = "is empty"
+PATH_REASON_ABSOLUTE = "is an absolute path"
+PATH_REASON_HOME = "starts with ~"
+PATH_REASON_DOTDOT = "has a .. segment"
+PATH_REASON_WHITESPACE = "contains whitespace"
+PATH_REASON_BACKSLASH = "contains a backslash"
+PATH_REASON_DOT = "has a . segment"
+PATH_REASON_NOT_AIMI = "does not start with .aimi/ followed by a path"
+
+FILES_ESCAPE_REMEDY = (
+    "a file outside the story's repository belongs in implementation.outputs "
+    "as a path starting with .aimi/ relative to the AIMI root"
+)
+FILES_PATH_REMEDY = (
+    "write a path relative to the story's repository, with no whitespace, "
+    "backslash, . or .. segment"
+)
+OUTPUTS_PATH_REMEDY = (
+    "write a path starting with .aimi/ relative to the AIMI root, with no "
+    "whitespace, backslash, ~, . or .. segment"
+)
+OUTPUTS_SHAPE_REMEDY = "write a list of strings, each a path starting with .aimi/"
+PATH_ECHO_MAXLEN = 60
+
+
+def _path_escape_reason(value):
+    """The reason a string leaves its repository, or `None` when it does not.
+
+    Absolute, `~`-led and `..`-bearing are the three ways a relative path stops
+    being relative to where it was written. Checked on the raw string, split on
+    "/" only: a backslash is its own refusal further down and is never read as
+    a separator here.
+    """
+    if value.startswith("/"):
+        return PATH_REASON_ABSOLUTE
+    if value.startswith("~"):
+        return PATH_REASON_HOME
+    if ".." in value.split("/"):
+        return PATH_REASON_DOTDOT
+    return None
+
+
+def implementation_path_escapes(value):
+    """True when a string names a place outside its repository (see above)."""
+    return isinstance(value, str) and _path_escape_reason(value) is not None
+
+
+def implementation_path_problem(field, value):
+    """A short reason `value` is not a valid entry of `field`, or `None`.
+
+    `field` is `implementation.files` or `implementation.outputs`; anything
+    else is the caller's bug and raises. The checks run in a fixed order so the
+    same bad value always gets the same reason: not a string, empty or
+    whitespace-only, an escape, whitespace anywhere, a backslash, a `.` segment
+    and -- for outputs alone -- a missing `.aimi/` prefix. A trailing slash is
+    allowed (a directory entry). Lexical only: the filesystem is never read.
+    """
+    if field not in IMPLEMENTATION_PATH_FIELDS:
+        raise ValueError("unknown implementation path field: " + repr(field))
+    if not isinstance(value, str):
+        return PATH_REASON_NOT_STRING
+    if value.strip() == "":
+        return PATH_REASON_EMPTY
+    escape = _path_escape_reason(value)
+    if escape is not None:
+        return escape
+    if any(char.isspace() for char in value):
+        return PATH_REASON_WHITESPACE
+    if "\\" in value:
+        return PATH_REASON_BACKSLASH
+    if "." in value.split("/"):
+        return PATH_REASON_DOT
+    if field == IMPLEMENTATION_OUTPUTS_FIELD:
+        if not value.startswith(OUTPUTS_ROOT_PREFIX) or not value[len(OUTPUTS_ROOT_PREFIX):].strip("/"):
+            return PATH_REASON_NOT_AIMI
+    return None
+
+
+def _path_echo(value):
+    """A model-written value, made safe to quote inside a finding.
+
+    Findings are read by people and by model prompts, so the echoed value loses
+    every backtick and `$(` (looped, so `$$((` cannot rebuild one), has each
+    whitespace character shown as a plain space, and is cut short.
+    """
+    text = value if isinstance(value, str) else repr(value)
+    text = text.replace("`", "'")
+    while "$(" in text:
+        text = text.replace("$(", "(")
+    text = re.sub(r"\s", " ", text)
+    if len(text) > PATH_ECHO_MAXLEN:
+        text = text[:PATH_ECHO_MAXLEN] + "..."
+    return text
+
+
+def _path_finding(field, index, value, reason, remedy):
+    return (
+        field + "[" + str(index) + "] " + reason
+        + " (value: " + _path_echo(value) + "); " + remedy + "."
+    )
+
+
+def _story_implementation(story):
+    if not isinstance(story, dict):
+        return None
+    implementation = story.get("implementation")
+    return implementation if isinstance(implementation, dict) else None
+
+
+def implementation_outputs_findings(story):
+    """One sentence per bad `implementation.outputs` entry of a story.
+
+    Absent, null and empty are valid. A value that is not a list of strings is
+    exactly one finding about the field as a whole, with no per-entry findings
+    layered on top of it.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    outputs = implementation.get("outputs")
+    if outputs is None:
+        return []
+    if not isinstance(outputs, list) or not all(isinstance(e, str) for e in outputs):
+        return [
+            IMPLEMENTATION_OUTPUTS_FIELD
+            + " is not a list of strings; " + OUTPUTS_SHAPE_REMEDY + "."
+        ]
+    findings = []
+    for index, entry in enumerate(outputs):
+        reason = implementation_path_problem(IMPLEMENTATION_OUTPUTS_FIELD, entry)
+        if reason is not None:
+            findings.append(
+                _path_finding(
+                    IMPLEMENTATION_OUTPUTS_FIELD, index, entry, reason,
+                    OUTPUTS_PATH_REMEDY,
+                )
+            )
+    return findings
+
+
+def implementation_path_findings(story):
+    """Every path-rule finding of a story: `files` first, then `outputs`.
+
+    A non-string `files` entry is skipped, as R17 skips it -- shape is the
+    schema check's business. A `files` escape carries the remedy that points at
+    `implementation.outputs`; every other `files` problem carries the plain
+    path remedy.
+    """
+    implementation = _story_implementation(story)
+    if implementation is None:
+        return []
+    findings = []
+    files = implementation.get("files")
+    if isinstance(files, list):
+        for index, entry in enumerate(files):
+            if not isinstance(entry, str):
+                continue
+            reason = implementation_path_problem(IMPLEMENTATION_FILES_FIELD, entry)
+            if reason is None:
+                continue
+            escapes = implementation_path_escapes(entry)
+            findings.append(
+                _path_finding(
+                    IMPLEMENTATION_FILES_FIELD, index, entry, reason,
+                    FILES_ESCAPE_REMEDY if escapes else FILES_PATH_REMEDY,
+                )
+            )
+    return findings + implementation_outputs_findings(story)
+
+
 def validate_tasks(docs, tasks_file, project_root, fields, warn):
     """R2 through R15, in the order bash ran them, over the parsed stream.
 
@@ -2460,9 +2798,20 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
             if not isinstance(files, list):
                 continue
             base = _story_project_base(story, project_root)
+            escapes = []
             unopenable = []
             for entry in files:
                 if not isinstance(entry, str):
+                    continue
+                # An escape is judged by the lexical rule alone and is NEVER
+                # reported as a missing directory: the entry does not name a
+                # directory under the story's repository at all, so "the
+                # directory it lands in may not exist" would point the author
+                # at the wrong fix. It needs neither the project base nor the
+                # filesystem, which is why it comes before both.
+                if implementation_path_escapes(entry):
+                    if entry not in escapes:
+                        escapes.append(entry)
                     continue
                 if base is None:
                     inside = False
@@ -2473,6 +2822,14 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     continue
                 if entry not in unopenable:
                     unopenable.append(entry)
+            if escapes:
+                warn(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": implementation.files leaves the story's repository: "
+                    + ", ".join(_path_echo(entry) for entry in escapes)
+                    + " — move a file outside the repository to implementation.outputs"
+                )
             if unopenable:
                 warn(
                     tasks_file + ": "
@@ -2716,6 +3073,25 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     tasks_file + ": "
                     + jq_tostring(jq_index(story, "id", ".userStories[]"))
                     + ": implementation.verify " + finding
+                )
+
+    # R24 -- implementation.outputs, when present and not null, must be a list
+    # of strings each starting with .aimi/ and passing the shared path rule.
+    # Appended AFTER R23 for R17's reason: a rule below the last one can only
+    # add lines after everything already recorded, so a tasks file without the
+    # key validates byte for byte as before. An ERROR where R17 warns, and the
+    # difference is which way the document is wrong: an `outputs` entry is a
+    # declaration the plugin's own later checks read as a place to look, so a
+    # malformed one is a record its reader cannot use, not a question to the
+    # author. Absent and null do nothing, as R21 and R22 treat their keys. The
+    # finding text is implementation_outputs_findings', stated nowhere else.
+    for doc in docs:
+        for story in _stories(doc):
+            for finding in implementation_outputs_findings(story):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + finding
                 )
 
     return errors
@@ -6322,6 +6698,11 @@ _VERIFY_TIMEOUT = 600
 # because both are the same fact.
 VERIFY_PROBE_ACTIVE_ENV = "AIMI_VERIFY_PROBE_ACTIVE"
 
+# The directory holding `.aimi/`, exported to every probed segment beside
+# TASKS_FILE_PATH so a verify reads "$AIMI_ROOT/.aimi/..." without a relative
+# hop that breaks inside a worktree (which has no `.aimi/` of its own).
+AIMI_ROOT_ENV = "AIMI_ROOT"
+
 # What the refusal says. A message that reported only "failed" would send the
 # reader looking for a broken assertion, when what happened is that the verify
 # being probed names the probe -- so it names the recursion, and it names the
@@ -7517,7 +7898,7 @@ def _probe_segment_script(segment, snapshot, restore, aborted):
     return "\n".join(lines)
 
 
-def probe_verify(text, cwd, skip_matching=None, timeout=None):
+def probe_verify(text, cwd, skip_matching=None, timeout=None, aimi_root=None):
     """Every assertion in `text`, run on its own in `cwd`, with its exit status.
 
     EVERY SEGMENT RUNS ONCE, IN ORDER, AND THE SHELL IT LEAVES BEHIND IS
@@ -7715,8 +8096,18 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
     # see it. Restored on the way out so a second call in the same process (the
     # tests, and any caller driving this function directly) is not itself read
     # as a nested one.
+    #
+    # `aimi_root` IS WRITTEN THROUGH THE SAME CHANNEL AND RESTORED THE SAME WAY.
+    # When given it overwrites whatever AIMI_ROOT the caller's environment
+    # already held (a stale value must not decide what a verify reads), and it
+    # lands before `assigned` is seeded so a segment reading `$AIMI_ROOT` is
+    # resolved rather than reported missing. With none given the environment
+    # is left exactly as it was.
     previous_marker = os.environ.get(VERIFY_PROBE_ACTIVE_ENV)
+    previous_root = os.environ.get(AIMI_ROOT_ENV)
     os.environ[VERIFY_PROBE_ACTIVE_ENV] = "1"
+    if aimi_root is not None:
+        os.environ[AIMI_ROOT_ENV] = aimi_root
     try:
         return _probe_verify_segments(text, cwd, skip_matching, timeout)
     finally:
@@ -7724,6 +8115,11 @@ def probe_verify(text, cwd, skip_matching=None, timeout=None):
             os.environ.pop(VERIFY_PROBE_ACTIVE_ENV, None)
         else:
             os.environ[VERIFY_PROBE_ACTIVE_ENV] = previous_marker
+        if aimi_root is not None:
+            if previous_root is None:
+                os.environ.pop(AIMI_ROOT_ENV, None)
+            else:
+                os.environ[AIMI_ROOT_ENV] = previous_root
 
 
 def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
@@ -7762,7 +8158,8 @@ def _probe_verify_segments(text, cwd, skip_matching=None, timeout=None):
     # The state a segment can be PROVEN to have: what a carried assignment
     # binds, seeded with the environment this process already holds --
     # `subprocess.run` hands that same environment to every segment, so `$HOME`
-    # and an exported `$TASKS_FILE_PATH` are resolved, not missing. It is not
+    # and an exported `$TASKS_FILE_PATH` or `$AIMI_ROOT` are resolved, not
+    # missing. It is not
     # read back out of the snapshot; probe_verify's docstring says why.
     assigned = set(os.environ)
     # THE ONE PATH THIS MODULE NAMES RATHER THAN RECEIVES, and it is written
@@ -8014,6 +8411,20 @@ def guard_rails_for_story(path, story_id):
     return []
 
 
+def _aimi_root_flag(argv, verb):
+    """`--aimi-root`'s value, or None when the flag is absent. A value that is
+    not an absolute path is refused: a relative root would resolve against each
+    segment's own working directory and name a different place per segment.
+    The test is a leading slash, not an os.path call -- the structural count of
+    those in this module is pinned."""
+    value = _flag(argv, "--aimi-root")
+    if value is None:
+        return None
+    if not value.startswith("/"):
+        die("Error: %s: --aimi-root must be an absolute path, got: %s" % (verb, value))
+    return value
+
+
 def op_verify_probe(argv):
     """The story bash already proved exists -- validate_story_id and
     validate_story_exists both ran before this process started.
@@ -8103,10 +8514,12 @@ def op_verify_probe(argv):
     cwd = _flag(argv, "--cwd")
     previous_file = _flag(argv, "--previous-file")
     skip_matching = _flag(argv, "--skip-matching")
+    aimi_root = _aimi_root_flag(argv, "verify-probe")
     if not path or story_id is None:
         die(
             "Usage: tasks.py verify-probe --tasks-file <path> --story-id <id> "
-            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>]"
+            "[--cwd <dir>] [--previous-file <path>] [--skip-matching <regex>] "
+            "[--aimi-root <absolute dir>]"
         )
     # The regex is validated HERE rather than left to `re.compile` inside the
     # probe, because this is the argument-handling half of the verb: a caller
@@ -8122,7 +8535,9 @@ def op_verify_probe(argv):
                 "expression: %s" % err
             )
     text = verify_text_for_story(path, story_id)
-    results = probe_verify(text, cwd or os.getcwd(), skip_matching=skip_matching)
+    results = probe_verify(
+        text, cwd or os.getcwd(), skip_matching=skip_matching, aimi_root=aimi_root
+    )
     _match_previous(_read_previous_probe(previous_file), results)
     # `guardRail` is added HERE and not in probe_verify: the label is the
     # story's own declaration, read from the document, while probe_verify
@@ -8203,7 +8618,7 @@ def _probe_plan_why(entry):
     return "no verdict could be reached"
 
 
-def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
+def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching, aimi_root=None):
     """The per-story loop. Returns (stories, unlabelled, unmeasured)."""
     stories_out, unlabelled, unmeasured = [], [], []
     for doc in docs:
@@ -8245,8 +8660,13 @@ def _probe_plan_stories(docs, path, git_tree, sha, prefix, skip_matching):
                         "why": "project directory %s does not exist at the base commit" % probe_dir,
                     })
                     continue
+            # The keyword is passed only when there is a root to hand over, so
+            # a caller (or a test double) that predates it sees the call it
+            # always saw.
+            root_kwargs = {} if aimi_root is None else {"aimi_root": aimi_root}
             results = probe_verify(
-                verify, git_tree + "/" + rel, skip_matching=skip_matching
+                verify, git_tree + "/" + rel, skip_matching=skip_matching,
+                **root_kwargs
             )
             rails = set(guard_rails_for_story(path, sid)) if isinstance(sid, str) else set()
             for entry in results:
@@ -8290,10 +8710,11 @@ def op_probe_plan(argv):
     cwd = _flag(argv, "--cwd") or os.getcwd()
     ref = _flag(argv, "--ref")
     run_suites = "--run-suites" in argv
+    aimi_root = _aimi_root_flag(argv, "probe-plan")
     if not path:
         die(
             "Usage: tasks.py probe-plan --tasks-file <path> [--cwd <dir>] "
-            "[--ref <sha>] [--run-suites]"
+            "[--ref <sha>] [--run-suites] [--aimi-root <absolute dir>]"
         )
     docs = read_docs(path, "probe-plan")
     if not ref:
@@ -8316,7 +8737,8 @@ def op_probe_plan(argv):
         return 0
     if top[0] != 0:
         grouped = _probe_plan_project_groups(
-            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+            docs, path, ref, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+            aimi_root=aimi_root,
         )
         if grouped is None:
             _emit(_probe_plan_not_probed(ref, "the invocation directory is not inside a git repository"))
@@ -8325,7 +8747,8 @@ def op_probe_plan(argv):
         return 0
     toplevel = top[1].strip()
     outcome = _probe_plan_in_repo(
-        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN
+        docs, path, ref, toplevel, cwd, None if run_suites else _PROBE_PLAN_SUITE_PATTERN,
+        aimi_root=aimi_root,
     )
     if outcome[0] == "not-probed":
         _emit(_probe_plan_not_probed(ref, outcome[1]))
@@ -8345,7 +8768,7 @@ def _probe_plan_payload(ref, stories_out, unlabelled, unmeasured):
     }
 
 
-def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
+def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching, aimi_root=None):
     """The resolve-ref / worktree-add / per-story sequence against ONE
     repository. `toplevel` is its root and `cwd` a directory inside it whose
     prefix the stories' own relative paths hang from. Returns
@@ -8370,7 +8793,7 @@ def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
             return ("not-probed", "git worktree add failed: " + detail)
         try:
             stories_out, unlabelled, unmeasured = _probe_plan_stories(
-                docs, path, git_tree, sha, prefix, skip_matching,
+                docs, path, git_tree, sha, prefix, skip_matching, aimi_root=aimi_root,
             )
         finally:
             removed = _probe_plan_git(["worktree", "remove", "--force", git_tree], toplevel)
@@ -8380,7 +8803,7 @@ def _probe_plan_in_repo(docs, path, ref, toplevel, cwd, skip_matching):
     return ("ok", stories_out, unlabelled, unmeasured)
 
 
-def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
+def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching, aimi_root=None):
     """The invocation directory is not inside a git repository, which is the
     multi-repo layout: AIMI_ROOT is a plain parent holding one repository per
     project. Each story's own `project` names the repository it is probed in,
@@ -8450,7 +8873,8 @@ def _probe_plan_project_groups(docs, path, ref, cwd, skip_matching):
                 for i in members
             ]
             outcome = _probe_plan_in_repo(
-                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching
+                [{"userStories": stripped}], path, ref, toplevel, group_dir, skip_matching,
+                aimi_root=aimi_root,
             )
             if outcome[0] == "not-probed":
                 reason = "project %s could not be probed: %s" % (project, outcome[1])

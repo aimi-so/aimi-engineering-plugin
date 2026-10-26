@@ -2,6 +2,54 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.153.0] - 2026-10-25
+
+`/aimi:execute` is a router: a run reads the step files its own state selects instead of the whole command.
+
+### Changed
+- `commands/execute.md` is a router over `commands/references/execute/` (40 step files). Each entry keeps a heading, an `Applies when:` condition with the default for the skipped case beside it, and a `Read` line; the step bodies moved verbatim. Spawned split tasks get a `Spawned Tasks` table and a `SPAWNED_SPLIT_TASK=<kind>` marker naming which entries they evaluate and which they skip, and the router carries the re-read-after-compaction rule, the Step 4 in-loop state rule and the STOP on a failed `Read`.
+- What a run loads, measured at this release from the merged tree with `scripts/tests/measure_execute_reads.py`: before, every invocation loaded `execute.md` whole, 433455 bytes. The router is now 32198 bytes. A flat inline run reads 201948 bytes, a flat container run 207142, a phase run 357831 and a phase run with a full-stack split 366990 (counting the wave-loop files its spawned sub-orchestrators read). The 40 step files total 436074 bytes, so router plus every file is 468272, larger than before: steps every run reads gain nothing, and the saving is the steps a given run skips. Re-measure with `wc -c` rather than quoting these. The transcript baseline (about 178k tokens median per `/aimi:execute` invocation, about 29% of a run's input tokens; `/aimi:plan`'s router cut its injection from about 148k to about 16k tokens) was measured outside the repo.
+- `install.sh` translates `commands/references/execute/*.md` like a command body (`REFERENCE_ALLOWLIST_FULL` gains `execute/*.md`), and `test-command-blocks.sh` Check 14 exempts `references/execute/` as it does `references/plan/`. `./install.sh --to opencode --dry-run` lists 87 references (44 plan, 40 execute, 3 literals).
+- Structural tests `test_execute_wiring.py` (with its reader `execute_text.py` and the `AIMI_EXECUTE_WIRING_ROOT` override) and `test_arguments_stay_in_command_bodies.py` pin the router, its step files and the rule that `$ARGUMENTS` is read only in a command body.
+- Citations of a moved `execute.md` section in `commands/` and both `CLAUDE.md` files name the step file holding it; the two line-number citations in `user-communication.md` and `container-execution.md` name a file and a section. `plugins/aimi-engineering/CLAUDE.md` gains `## Execute Router Layout` and a re-measured `commands/` jq census; the size budgets of the edited reference files are re-set.
+
+### Fixed
+- `plan.md` read `$ARGUMENTS` in three bash blocks that had been moved into `references/plan/`, where the host does not substitute it, so the flags a user typed were lost. The blocks are back in the command body.
+- The phase-scoped topic slug keeps the phase id when `featureSlug` is long. A plain 50-character truncation cut the id off, so every phase of the feature shared one slug and one research file glob; the feature part is shortened instead.
+- The Phase 2.4 symbol check assigned `SYMBOL` as a prefix on the `grep` line, where the shell expands `"$SYMBOL"` before the assignment exists. The pattern was empty and every symbol matched the first file read. `SYMBOL` is now assigned on its own line and passed with `-e`.
+- `sanitization.md` and the codebase researcher state that the measure-block allowlist splits on every `|`, quoted or not, and that alternation is written with repeated `-e` flags.
+- The cross-story auditor emits a `dependsOn` patch for unordered stories of one `project` that list the same path (the pair `validate-wave-contention` would refuse), or an `unresolved[]` entry when that edge would form a cycle.
+
+## [1.152.0] - 2026-10-25
+
+Plan stories that keep out-of-repository files out of `implementation.files`, and guard rails that name a whole verify segment (#168, #169).
+
+### Added
+- `implementation.outputs` (optional on a story): paths relative to the AIMI root, each starting with `.aimi/`, for files a story writes outside its repository. The story executor creates each one itself, never stages or commits it, and never treats it as a commit-verification target. The story expander and the task format reference describe it, and `implementation.files` is now documented as in-repository paths only.
+- `validate-tasks` rule R24: a present `implementation.outputs` that is not a list of strings, or holds an entry the shared path rule refuses, is an error. A tasks file without the key validates exactly as before.
+- One lexical path rule (`implementation_path_problem`, `scripts/tasks.py`) shared by `validate-tasks`, `validate-staging`, the `story-merge` refusal and `apply-audit-patches`: no absolute or `~`-led path, no `..` or `.` segment, no whitespace or backslash, and for `outputs` the `.aimi/` prefix.
+- `apply-audit-patches` accepts `implementation.files` (`replace`, `remove`) and `implementation.outputs` (`add`, `replace`, `remove`), with `matchValue` locating the entry for a replace or remove. A value the path rule refuses is dropped as `bad-path` and never echoed. The cross-story auditor emits these ops, for example moving an out-of-repository file with a `files` remove plus an `outputs` add.
+- A `guardRails-out-of-sync` entry in `dropped[]` carries `rails`: the ascending integer indices of the guard rails that patch newly broke. The Phase 3d.5 report relays them as `(rails i,j)`.
+- `validate-staging` reports a guard rail that is not a whole top-level segment of the story's `verify`, naming `implementation.guardRails[<i>]`, what larger construct it sits in and the remedy, and reports an `implementation.files` or `implementation.outputs` entry the path rule refuses.
+- `verify-probe` and `probe-plan` export `AIMI_ROOT` (the directory holding `.aimi/`) to every segment they run, and the story executor exports it beside `TASKS_FILE_PATH` for both runs of a story's `implementation.verify`; `/aimi:execute` passes it in the task pointer.
+
+### Changed
+- `story-merge` refuses, with no `--agent-mode` exemption, a staged story with a guard rail that is not a whole verify segment, an `implementation.files` entry outside its repository or a malformed `implementation.outputs`, one line per finding naming the story and its staged idx. The check sits beside the verify refusal and writes nothing when it fires.
+- `apply-audit-patches` drops a `verify` or `guardRails` patch for `guardRails-out-of-sync` only when it newly breaks a rail. A rail that was already broken before the patch no longer discards every patch of its story.
+- `validate-tasks` rule R17 (a warning) now reports a `files` entry that leaves the repository as its own warning pointing at `implementation.outputs`, instead of reporting it as a directory that does not exist.
+- The story expander's retry loop is fed the rail and path findings, and the expander and the task-planner format reference say where an out-of-repository file goes and what a guard rail may name.
+- Both `CLAUDE.md` files describe the above: the widened `apply-audit-patches` rules and drop vocabulary, the two new `validate-staging` rules, the `story-merge` rail and path refusal, `implementation.outputs`, R24, the R17 wording and the verify environment.
+
+### Fixed
+- A story could list a file outside its repository (a path under `.aimi/`, an absolute path, a `..` path) in `implementation.files` and nothing flagged it before execution (#168). The expansion check, the audit patch check, `validate-tasks` and the merge now judge it, and the file is declared in `implementation.outputs` instead.
+- A guard rail that named a line inside a function, loop, block or heredoc, rather than the whole top-level segment, matched no segment of `verify` and surfaced late as a validation or probe failure (#169). It is now reported during expansion with its index and a remedy, refused at the merge, and no longer lets one stale rail discard every unrelated audit patch of its story.
+- A story `verify` that read `"$AIMI_ROOT/.aimi/..."` had no `AIMI_ROOT` in its environment, and inside a worktree, which has no `.aimi/` of its own, there was nothing relative to fall back on. It is now exported to the executor's verify runs and to `verify-probe` and `probe-plan`.
+- `skills/react-best-practices/rules/` held the 38 React Native rules from `skills/react-native-skills/rules/`, byte for byte, since the skill was added. `SKILL.md` points the reader at `rules/async-parallel.md` and `rules/bundle-barrel-imports.md`, which did not exist, so an executor that opened a rule file for web React code read mobile guidance (`Pressable`, `expo-image`, Reanimated) instead. The directory now holds the 58 web rules `SKILL.md` lists, one file per rule id, split from the skill's own `AGENTS.md` with no text changed, plus a `_sections.md` for the eight categories. `NOTICE.md` names `AGENTS.md` and `rules/` instead of a `references/` directory the skill never had.
+
+### Removed
+- The hook telemetry and friction pipeline: `push-skill-frame`, `pop-skill-frame`, `log-read-trace`, `log-skill-invocation`, `stash-prompt`, `capture-correction`, `gate-friction-threshold` and their modules (`frame_helpers`, `telemetry_writer`, `friction_store`, `scope_classifier`), together with `/aimi:learnings`, the `aimi-learnings` skill and the `aimi-learnings-triage` agent. The skill frame was pushed before the Skill tool ran and popped as soon as it returned, which is before any of the skill's work happens, so it was empty for every event after it: one of 49,185 recorded reads carried a frame. Correction capture required a frame, so the friction queue `/aimi:learnings` reads never received an event. What did run cost one `python3` process per Read, five per Skill call and two per prompt, kept the full text of every prompt under `~/.aimi/session/`, and grew `~/.aimi/telemetry/` without bound below a 50 MB rotation. Nothing in the plugin read the telemetry except the SessionStart banner that printed its counts.
+- The SessionStart banner. `hooks/inspect-session.py` now only primes the CLI path cache when it does not resolve, which it already did before the banner; the `quietMode` and `banner.enabled` settings had no other reader and are gone with it. `guard-runtime-state.py` no longer guards `~/.aimi/learnings/` and `~/.aimi/telemetry/`, and `hook_utils.py` drops `redact_secrets`, `is_quiet_mode`, `resolve_session_id` and `extract_skill_name`, which only the removed hooks called.
+
 ## [1.151.1] - 2026-10-25
 
 ### Removed

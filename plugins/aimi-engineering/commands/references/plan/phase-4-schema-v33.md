@@ -132,10 +132,11 @@
       "project": "string (optional, relative path for multi-repo, no '..' components)",
       "wave": "number (required, DERIVED from dependsOn — roots=1, others=max(dep waves)+1 — informational only, never consumed by dispatch; a stale value is corrected with the normalize-waves verb, not by hand)",
       "implementation": {
-        "files": ["string[] (required, concrete file paths from research)"],
+        "files": ["string[] (required, concrete in-repository paths from research, plain relative: no .. segment, no leading / or ~, no ./, no whitespace)"],
         "approach": "string (required, actionable strategy referencing codebase patterns)",
         "verify": "string (required, executable command or checkable assertion)",
         "guardRails": ["string[] (optional, exact text of each verify segment that is supposed to pass before and after the work, as the probe segmenter splits it)"],
+        "outputs": ["string[] (optional, files written outside the repository, each a path relative to the AIMI root starting with .aimi/)"],
         "prototypeAnchor": "string (optional, relative path to the single prototype file most relevant to this story; set by Pass 2 sub-agent when AC cites exactly one prototype via F3 syntax; absent when AC cites zero or multiple prototypes)"
       },
       "verification": {

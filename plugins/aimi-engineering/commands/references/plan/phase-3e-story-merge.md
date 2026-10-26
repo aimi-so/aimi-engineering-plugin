@@ -39,7 +39,7 @@ done <<< "$STAGED_PROJECTS"
 [ "$BAD_PROJECTS" -eq 0 ] || exit 1
 ```
 
-The `case` list and the regex are the same two checks `commands/execute.md` applies to `metadata.splitGroup.project` in its Step 0.9 split loop (`execute.md`, Invalid splitGroup.project) — keep them byte-identical so the two sites stay diffable. `"."` is the root group's own routing key and is always allowed; a blank or absent `.project` never reaches the loop.
+The `case` list and the regex are the same two checks `references/execute/step-0-9-split-flow.md` applies to `metadata.splitGroup.project` in its Step 0.9 split loop (Invalid splitGroup.project) — keep them byte-identical so the two sites stay diffable. `"."` is the root group's own routing key and is always allowed; a blank or absent `.project` never reaches the loop.
 
 **On failure:** report every offending value and **STOP**. Do not invoke `story-merge`, do not call `roadmap-set-status`, and do not delete `RUN_DIR` — the staging files are intact and the run is retryable once the offending `project` values are corrected.
 
@@ -109,5 +109,7 @@ $AIMI_CLI roadmap-set-status --feature "$featureSlug" --phase "$SELECTED_PHASE_I
 Proceed to Phase 4.
 
 **Verify refusal.** `story-merge` refuses, with exit 1 and nothing written, a staged story whose multi-line `implementation.verify` can swallow a failing line (no leading `set -e`, and a later line not chained with `&&`). The stderr names the story's `US-NNN` id and the staged idx, and the staging directory is left intact. The refusal is never demoted in agent mode: `--agent-mode` changes nothing about it, and it has no flag or environment escape (specFlow:CriticalQ6). It is the second place the rule runs, because an audit patch that replaces a verify lands after the Phase 3d check. To retry, fix the verify (delete the staged file and re-run the expander for that idx, or apply an audit patch through `apply-audit-patches`) and call `story-merge` again.
+
+**Guard rail and path refusal.** Beside the verify refusal, `story-merge` refuses in the same way (exit 1, nothing written, staging kept, never demoted by `--agent-mode`) a staged story whose `implementation.guardRails` entry is not a whole top-level segment of its verify, or whose `implementation.files` entry is absolute, escapes the repository, holds whitespace or a dot segment, or whose `implementation.outputs` is malformed; a file outside the repository belongs in `implementation.outputs`. The stderr names the `US-NNN` id, the staged idx and the field.
 
 On **failure** (non-zero exit): do NOT proceed, and do NOT call `roadmap-set-status`. Surface the error to the user. The staging directory is preserved for inspection. Do not attempt to write tasks.json manually.
