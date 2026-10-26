@@ -41,8 +41,8 @@ set -uo pipefail
 #   (a prototype author agent told outputPath by its caller) with no
 #   `.aimi/` literal of its own.
 #
-#   Arm (b): the file's frontmatter `allowed-tools:` or `tools:` line
-#   names `Write`. Misses a writer with no `allowed-tools` key at all
+#   Arm (b): the file's frontmatter `tools:` (or legacy `allowed-tools:`) line
+#   names `Write`. Misses a writer with no `tools` key at all
 #   (a research agent whose frontmatter is name/description/model only).
 #
 #   Neither arm alone is sufficient -- each misses real writers the other
@@ -251,7 +251,7 @@ _is_arm_a() {
 }
 
 # ---------------------------------------------------------------------------
-# Predicate arm (b): frontmatter `allowed-tools:`/`tools:` names `Write`.
+# Predicate arm (b): frontmatter `tools:` (or legacy `allowed-tools:`) names `Write`.
 # ---------------------------------------------------------------------------
 _frontmatter() {
   awk 'NR==1{if($0!="---"){exit}; infm=1; next} infm && /^---[[:space:]]*$/{exit} infm{print}' "$1" 2>/dev/null
@@ -447,7 +447,7 @@ check_discrimination() {
   mkdir -p "$fixture/commands" "$fixture/agents"
 
   printf 'Write to `.aimi/research/a.md`.\n' > "$fixture/commands/arm-a-only.md"
-  printf -- '---\nname: x\nallowed-tools: Read, Write\n---\n\nAuthor and save.\n' > "$fixture/agents/arm-b-only.md"
+  printf -- '---\nname: x\ntools: Read, Write\n---\n\nAuthor and save.\n' > "$fixture/agents/arm-b-only.md"
   printf 'Write to `.aimi/research/w.md`. Keep the language the same language throughout.\n' > "$fixture/commands/word-only.md"
   printf 'Write to `.aimi/research/s.md`.\n\n## Test Anchor Section\n\nStated inline.\n' > "$fixture/commands/form-s.md"
   printf 'Write to `.aimi/research/r.md`. See test/home.md for the rule.\n' > "$fixture/commands/form-r.md"
