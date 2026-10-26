@@ -77,4 +77,4 @@ agents/research/aimi-foundation-architect.md	22980
 agents/workflow/aimi-story-expander.md	51613
 agents/research/aimi-learnings-researcher.md	16719
 agents/research/aimi-design-bundle-researcher.md	16839
-agents/review/aimi-cross-story-auditor.md	19717
+agents/review/aimi-cross-story-auditor.md	20048
