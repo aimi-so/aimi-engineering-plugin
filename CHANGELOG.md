@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.155.0] - 2026-10-26
+
+The cross-story auditor reads its corpus from disk, a failed audit can be retried, and aimi agents declare their tools under the key Claude Code reads (#175).
+
+### Fixed
+- Agent files listed their tools under `allowed-tools`, a key Claude Code ignores on an agent, so no agent was restricted. They now use `tools`, and `scripts/tests/test_agent_tools.py` pins each list. The list is an accident guard and not a sandbox: an agent that lists Bash can still write (#175).
+- A deferral over an `audit-failed` stub annotated no story, so a plan shipped unaudited without any story saying so. `apply-audit-patches --annotate-deferred` now annotates every staged story with a note that the cross-story audit did not run, and records one `auditUnresolved:_audit` decision. Any other `_audit` entry is unchanged (#175).
+
+### Changed
+- The cross-story auditor has `tools: Read` and reads the staged stories, the outline, the research files and a new `RUN_DIR/consolidation.md` sidecar from paths in its prompt. Nothing is inlined, so the 50 KB, 20 KB and 150 KB inline caps are gone. Each audit attempt writes the sidecar only when it is missing or empty, and Edit outline rewrites it. A sidecar that is still missing or empty takes the Failure Fallback (#175).
+- `phase-3d-prep-blocks.md` no longer says the research blocks feed the auditor (#175).
+- `install.sh --to opencode` translates an agent's `tools` line into an OpenCode `permission` block. An unmapped tool name fails the install and an `mcp__` pattern is skipped with a warning (#175).
+
+### Added
+- Retry audit: when `audit-result.json` is the `audit-failed` stub, the Unresolved Gate offers Retry audit first, then Defer with reason, Edit outline and Abort, and does not offer Apply anyway. At most two retries; after that the usual four options return. Agent mode retries once before it defers (#175).
+- Tests: `test_agent_tools.py`, `test_auditor_reads_run_dir.py`, `test_annotate_audit_failed.py`, `test_retry_audit_option.py`, and permission-block assertions in `test-install-opencode.sh` (#175).
+- Known gaps: Claude Code drops a tool name the host does not have without a message, and Grep and Glob are missing on some builds, so read-only agents also list Bash to keep search working. The check against a real agent is manual and happens after merge: run `/reload-plugins`, spawn one restricted aimi agent, and confirm it lists only its declared tools plus the harness return tool (#175).
+
 ## [1.154.0] - 2026-10-26
 
 Four plan and execute defects fixed, and static plan checks added and backtested against the known-gap corpus (#172, #173).

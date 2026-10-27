@@ -30,7 +30,7 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
-#   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
+#   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 
@@ -5038,7 +5038,7 @@ test_story_merge_missing_dir() {
 }
 
 # apply-audit-patches: the verb that applies the cross-story auditor's patches.
-# Fixtures live under .aimi/ so path confinement accepts them. Nine assertions.
+# Fixtures live under .aimi/ so path confinement accepts them. Twelve assertions.
 test_apply_audit_patches() {
   echo ""
   echo "=== apply-audit-patches: apply, drop, annotate, refuse ==="
@@ -5065,6 +5065,12 @@ test_apply_audit_patches() {
   printf '%s\n' '{"patches":[],"unresolved":[{"storyIdx":"03","message":"agent finding"}]}' > "$stg/audit-result.json"
   "$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "auto" --agent-deferral >/dev/null 2>&1 || true
   assert_eq "[audit-deferred: unresolved — review before execution] agent finding" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notes"])' "$stg/03-story.json")" "apply-audit-patches: --agent-deferral keeps the unresolved marker and no reason text"
+
+  printf '%s\n' '{"status":"audit-failed","auditedIdx":["01","02","03"],"patches":[],"unresolved":[{"storyIdx":"_audit","message":"audit failed - no patches applied"}]}' > "$stg/audit-result.json"
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "01,02,03" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])["annotated"]))' "$output")" "apply-audit-patches: a stub-backed deferral lists every staged idx as annotated"
+  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("cross-story audit did not run" in n and "after review" in n))' "$stg/03-story.json")" "apply-audit-patches: a stub-backed deferral writes the cross-story audit did not run message and the reason into a staged story"
+  assert_eq "1" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(int(len(d["oqDecisions"]) == 1 and d["oqDecisions"][0]["anchor"] == "auditUnresolved:_audit"))' "$output")" "apply-audit-patches: the stub fan-out keeps exactly one auditUnresolved:_audit decision"
 
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --agent-deferral 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "apply-audit-patches: --agent-deferral without --annotate-deferred is refused"

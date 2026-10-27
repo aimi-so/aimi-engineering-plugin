@@ -23,7 +23,7 @@ The line printed carries `applied` (patches landed), `dropped` (the entries abov
 
 ### Failure Fallback
 
-When the auditor Task crashes, times out, returns no parseable fenced `json` block, or `apply-audit-patches` exits non-zero in the apply step:
+When the auditor Task crashes, times out, returns no parseable fenced `json` block, `apply-audit-patches` exits non-zero in the apply step, or `<RUN_DIR>/consolidation.md` is still missing or empty after the consolidation step of `phase-3d5-audit-spawn.md`:
 
 1. Sanitize the error string as Phase 3d retry does (strip `$(`, remove backticks, newlines to spaces, truncate to 500 characters).
 2. Emit exactly one log line: `[plan] Phase 3d.5 audit failed: <sanitized error>; proceeding to story-merge without patches`
@@ -35,6 +35,8 @@ printf '{"status":"audit-failed","auditedIdx":[%s],"patches":[],"unresolved":[{"
 ```
 
 4. Set `auditFailed = true` and use the stub's one `_audit` entry as the working-memory `unresolved[]`. No patch is applied; continue to the Unresolved Gate.
+
+A retry (see the gate's **Retry audit** bullet) re-enters at the `consolidation.md` step of `phase-3d5-audit-spawn.md`, which reuses a non-empty `consolidation.md` and writes it only when missing or empty, then spawns the auditor. The stub stays in place and valid while the retry runs, so story-merge's gate still passes if the retry is cut short. On success the normal Persist audit-result.json and Patch Validation and Application steps replace it and the gate re-evaluates the new `unresolved[]`; on failure this section rewrites the stub. A retry never re-expands a story. Keep `auditRetries` (starts at 0, working memory beside `auditFailed`) and add 1 each time a retry starts.
 
 ### Agent-Mode Behavior
 
@@ -62,7 +64,18 @@ The working-memory `unresolved[]` list (`{storyIdx: string, message: string}`) i
 …
 ```
 
-with exactly four options, verbatim:
+with exactly four options, verbatim. **Only the stub's `status` field, `audit-failed`, selects the stub option set below.** The `_audit` sentinel alone never offers Retry audit, because `apply-audit-patches` also writes `_audit` entries for a malformed auditor entry and for the patch-cap notice. When `audit-result.json` is the stub and `auditRetries` is below 2, the prompt names the attempt number (`audit attempt <auditRetries + 1>`) and the four options are Retry audit (first), Defer with reason, Edit outline and Abort; Apply anyway is not offered then, because shipping an unaudited plan without annotation is the failure this prevents:
+
+```
+Retry audit — re-run the cross-story audit on the same staged stories
+Defer with reason — annotate the affected stories and proceed
+Edit outline — change the outline and re-expand only what the edit affects
+Abort — stop before story-merge; nothing is written this run
+```
+
+Every option label is shown in the reader's language, as `commands/references/user-communication.md` states; the English text here is the canonical form.
+
+After the second retry (`auditRetries` is 2) the stub gate falls back to the normal options, and Retry audit is no longer listed. Without the stub the options are these four, unchanged:
 
 ```
 Apply anyway — proceed to story-merge without acting on these findings
@@ -70,6 +83,8 @@ Defer with reason — annotate the affected stories and proceed
 Edit outline — change the outline and re-expand only what the edit affects
 Abort — stop before story-merge; nothing is written this run
 ```
+
+- **[Retry audit]:** add 1 to `auditRetries`, then re-enter the audit at the `consolidation.md` step of `phase-3d5-audit-spawn.md` as the Failure Fallback section describes: a non-empty `consolidation.md` is reused and never rewritten, no story is re-expanded, and a Failure Fallback caused by a missing or empty `consolidation.md` can recover here. Then run Persist audit-result.json and Patch Validation and Application on success, or the Failure Fallback on failure, and fire this gate again on the resulting `unresolved[]`. No `oqDecisions[]` entry is recorded for this choice.
 
 - **[Apply anyway]:** proceed straight to Phase 3e — no staging-file change. Still record one `oqDecisions[]` entry per `unresolved[]` item:
   ```json
@@ -91,13 +106,13 @@ Abort — stop before story-merge; nothing is written this run
   $AIMI_CLI apply-audit-patches --staging-dir "$RUN_DIR" --result "$RUN_DIR/audit-result.json" --annotate-deferred --reason "$REASON"
   ```
 
-  It annotates the `notes` of each staged story an entry names with `[audit-deferred: resolved at plan review]`, the uncut finding (2000-character sanity cap) and the reason you typed (the `_audit` sentinel, or an idx with no staged file, is never annotated) and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
+  It annotates the `notes` of each staged story an entry names with `[audit-deferred: resolved at plan review]`, the uncut finding (2000-character sanity cap) and the reason you typed (an idx with no staged file is never annotated). When `audit-result.json` is the Failure Fallback stub (only its `status` of `audit-failed` marks it, never the `_audit` sentinel), the deferral annotates every staged story with a note that the cross-story audit did not run, and `annotated` lists every staged idx; any other `_audit` entry is recorded in `oqDecisions[]` only, with no story annotated, and the stub still yields one `auditUnresolved:_audit` decision and prints `{annotated, oqDecisions}`. Append every `oqDecisions[]` entry it returns to the working-memory `oqDecisions[]` — one per unresolved item, annotated or not. A non-zero exit stops the plan here with `RUN_DIR` preserved; story-merge has not run. Proceed to Phase 3e.
 
-- **[Edit outline]:** follow the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md` (Read it first). It ends by re-running Phase 3d.5 in full, so this gate fires again on the new `unresolved[]`; no `oqDecisions[]` entry is recorded for this choice.
+- **[Edit outline]:** follow the section Edit Outline After Expansion in `commands/references/plan/phase-3c-outline-gate.md` (Read it first). It ends by re-running Phase 3d.5 in full, so this gate fires again on the new `unresolved[]`; it resets `auditRetries` to 0 and rewrites `consolidation.md` unconditionally (Retry audit does neither). No `oqDecisions[]` entry is recorded for this choice.
 
 - **[Abort]:** stop plan generation before `story-merge` is invoked. `RUN_DIR` is preserved for inspection (never deleted on this path, matching the existing Phase 3e story-merge-failure convention). No `tasks.json` is written this run, `roadmap-set-status` is not called, and no `oqDecisions[]` entries are recorded for this gate.
 
-**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. It auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call with `--agent-deferral` added (notes keep the unresolved marker, no reason text) and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
+**Agent-mode fallback:** when `INTERACTIVE_MODE=agent`, this gate never presents AskUserQuestion and `Edit outline` does not exist. When `audit-result.json` is the stub (status `audit-failed`) and `auditRetries` is 0, first retry the audit once automatically, with one log line per attempt, `[plan] agent-mode: phase-3d.5 audit retry <auditRetries> of 1`; a second failure falls through to the auto-deferral below unchanged. It then auto-selects **Defer with reason** with the fixed system-authored reason `"agent-mode auto-deferral (no interactive review available)"` (a hardcoded literal, not re-sanitized), running the same `--annotate-deferred` call with `--agent-deferral` added (notes keep the unresolved marker, no reason text) and `oqDecisions[]` recording as the interactive path. Emit exactly one log line:
 
 ```
 agent-mode: phase-3d.5-unresolved-gate deferred <N> unresolved item(s); flagged <F> stories for review

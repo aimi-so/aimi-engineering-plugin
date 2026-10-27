@@ -34,7 +34,9 @@ Render the template's proposal block from `foundationProposalBlockByRoot[entryPr
 
 ### Per-Entry Section-Scoped Research Block Preparation
 
-Replaces the full-corpus `researchFileBlocks` broadcast (previously inlined verbatim into every sub-agent spawn — see the old `[If researchFileBlocks is non-empty]` block this template used to carry) with a per-outline-entry slice, so token cost scales with what each entry actually needs rather than with the size of the entire research corpus. Wires in the `extract-sections` verb (`scripts/aimi-cli.sh` `cmd_extract_sections`, delivered by story outline:01) as the slicing mechanism. Phase 1.7's on-disk ingestion (above) is unchanged and remains the fallback source this step slices from — `researchFileBlocks` itself is untouched and keeps feeding Phase 3b (outline generation) and the Phase 3d.5 auditor exactly as before; only the per-expander broadcast below is replaced.
+Replaces the full-corpus `researchFileBlocks` broadcast (previously inlined verbatim into every sub-agent spawn — see the old `[If researchFileBlocks is non-empty]` block this template used to carry) with a per-outline-entry slice, so token cost scales with what each entry actually needs rather than with the size of the entire research corpus. Wires in the `extract-sections` verb (`scripts/aimi-cli.sh` `cmd_extract_sections`, delivered by story outline:01) as the slicing mechanism. Phase 1.7's on-disk ingestion (above) is unchanged and remains the fallback source this step slices from — `researchFileBlocks` itself is untouched and keeps feeding Phase 3b (outline generation) only; only the per-expander broadcast below is replaced.
+
+The Phase 3d.5 auditor reads the research files from disk, by the paths its prompt lists (`phase-3d5-audit-spawn.md`); no block from this step reaches it.
 
 **Trigger:** only when `allResearchPaths` (defined at the end of Phase 1.6 above) is non-empty. When it is empty, skip this entire step — every sub-agent's section-scoped block is simply empty, the same outcome an empty `researchFileBlocks` produced before.
 
