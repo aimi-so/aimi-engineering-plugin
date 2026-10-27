@@ -15960,7 +15960,9 @@ _SPLIT_DETECT_DESCRIBE_JQ='
     hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
     declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
     siblings: (if ($sg.siblings | type) == "array"
-               then [$sg.siblings[] | tostring] else [] end)
+               then [$sg.siblings[] | tostring] else [] end),
+    after: (if ($sg.after | type) == "array"
+            then [$sg.after[] | tostring] else [] end)
   }
 | . + {active: (.pendingCount > 0)}
 '
@@ -15976,7 +15978,7 @@ _split_detect_describe() {
   if [ -z "$desc" ]; then
     desc=$(jq -nc --arg path "$file" '{path: $path, project: ".", branchName: null,
       storyCount: 0, pendingCount: 0, hasMarker: false, declaredTotal: "",
-      siblings: [], active: false}')
+      siblings: [], after: [], active: false}')
   fi
   printf '%s' "$desc"
 }
@@ -16206,6 +16208,20 @@ cmd_split_detect() {
 
       group_mode="project-split"
       group_total="$anchor_total"
+
+      # Ordering only: rewrite every member's after[] to the same
+      # <anchor dir>/<basename> form the members themselves resolve to, and keep
+      # an entry only when it names ANOTHER member. A traversal-shaped entry,
+      # one naming a file outside the group, or one naming the file itself is
+      # inert, exactly as an unresolvable sibling is.
+      group=$(printf '%s' "$group" | jq -c --arg dir "$newest_dir" '
+        [.[].path] as $paths
+        | map(. as $m
+              | .after = ([ .after[]
+                            | ($dir + "/" + (split("/") | last)) as $r
+                            | select(($paths | index($r)) != null and $r != $m.path)
+                            | $r
+                          ] | unique))')
     else
       # -- No marker on the newest candidate: try the legacy
       #    -frontend-tasks.json / -backend-tasks.json pair rule over the pool.
@@ -16349,7 +16365,8 @@ cmd_split_detect() {
     '{
       mode: $mode,
       anchor: $anchor,
-      members: [.[] | {path, project, branchName, storyCount, pendingCount, active}],
+      members: [.[] | {path, project, branchName, storyCount, pendingCount, active,
+                       after: (if $mode == "project-split" then (.after // []) else [] end)}],
       activeCount: ([.[] | select(.active)] | length),
       total: $total,
       degradedReason: (if ($reason | length) > 0 then $reason else null end)
@@ -18898,8 +18915,13 @@ COMMANDS:
                               Output. One JSON object: {mode: "project-split"|
                               "paired-split"|"single"|"none"|"ambiguous", anchor,
                               members: [{path,project,branchName,storyCount,
-                              pendingCount,active}], activeCount, total,
-                              degradedReason}. "ambiguous" (flat scope only) means
+                              pendingCount,active,after}], activeCount, total,
+                              degradedReason}. after is the list of member
+                              paths this member must follow (metadata.splitGroup
+                              .after, resolved by basename against the anchor's
+                              directory like siblings): ordering only, empty
+                              unless the group is a marked project-split and the
+                              entry names another member. "ambiguous" (flat scope only) means
                               the flat plan has no pending story but a failed one,
                               while a roadmap phase is waiting to be claimed; it
                               adds failedCount and claimablePhases.

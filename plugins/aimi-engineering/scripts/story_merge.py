@@ -2601,6 +2601,36 @@ def _derived_name_errors(group, branch_regex):
     return ['  project "' + group["project"] + '": ' + error for error in errors]
 
 
+def _follow_cycle(follows):
+    """Return one cycle of the file-level `follows` graph as an ordered list of
+    paths (each follows the next, the last follows the first), or [] when the
+    graph is acyclic. Nodes and neighbours are visited in sorted order so the
+    cycle named is deterministic."""
+    state = {}
+    stack = []
+
+    def visit(node):
+        state[node] = 1
+        stack.append(node)
+        for nxt in sorted(follows.get(node, ())):
+            if state.get(nxt) == 1:
+                return stack[stack.index(nxt) :]
+            if nxt not in state:
+                found = visit(nxt)
+                if found:
+                    return found
+        stack.pop()
+        state[node] = 2
+        return []
+
+    for node in sorted(follows):
+        if node not in state:
+            found = visit(node)
+            if found:
+                return found
+    return []
+
+
 def write_project_split(
     stories, output_path, staging_dir, smells, phase_aware, foundation_ids, branch_regex
 ):
@@ -2794,6 +2824,31 @@ def write_project_split(
             bad_derived,
         )
 
+    # Cross-repository order. Every dropped edge in `cross` is one file that has to
+    # follow another, so fold them into project -> {target projects} and translate
+    # through `plan` into the strings siblings[] carries, never a position. A target
+    # of "unknown" (a dropped id global_map never held) names no file and is skipped,
+    # as is an edge back into its own project. Done after the refusals above, so a
+    # name that was going to be refused is never reported as a place to follow.
+    path_of = {group["project"]: group["path"] for group in plan}
+    follows = {}
+    for entry in cross:
+        owner = path_of.get(entry["project"])
+        if owner is None:
+            continue
+        for dep in entry["droppedDeps"]:
+            target = path_of.get(dep["project"])
+            if target is not None and target != owner:
+                follows.setdefault(owner, set()).add(target)
+    cycle = _follow_cycle(follows)
+    if cycle:
+        die_list(
+            "Error: story-merge: --split full-stack: the files form a cross-repository"
+            " ordering cycle, so none can follow the others; no files were written"
+            " (remove one of the dependsOn edges that reaches across the split):",
+            ["  " + cycle[i] + " follows " + cycle[(i + 1) % len(cycle)] for i in range(len(cycle))],
+        )
+
     # 4. Write every group's file atomically.
     os.makedirs(directory, exist_ok=True)
     written = []
@@ -2807,6 +2862,11 @@ def write_project_split(
             "total": len(plan),
             "siblings": [s["path"] for s in plan if s["index"] != group["index"]],
         }
+        # `after` is ordering only: the sibling paths this file must follow. It is
+        # omitted, not emitted empty, when no edge of this file was dropped, which
+        # keeps every file without a cross-repository edge byte-identical.
+        if follows.get(group["path"]):
+            split_group["after"] = sorted(follows[group["path"]])
         document = _document(
             _metadata(
                 "feat: merged tasks (" + group["slug"] + ")",
