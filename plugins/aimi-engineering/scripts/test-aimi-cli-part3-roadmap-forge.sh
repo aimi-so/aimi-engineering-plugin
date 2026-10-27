@@ -821,6 +821,219 @@ test_detect_design_bundle_help_documents_phase_dir_flag() {
   fi
 }
 
+# ----------------------------------------------------------------------------
+# detect-design-bundle --feature-stdin (relevance filter) Tests
+# ----------------------------------------------------------------------------
+# Helper: a Claude Design bundle with a BusinessSpec whose first H1 is <title>
+# (omitted when empty), built under <parent>/<name>.
+# Usage: _make_titled_bundle <parent_dir> <bundle_name> [title]
+_make_titled_bundle() {
+  local parent="$1" name="$2" title="${3:-}"
+  _make_bundle "$parent" "$name" >/dev/null
+  if [ -n "$title" ]; then
+    printf '# %s\n' "$title" > "${parent}/${name}/project/BusinessSpec.md"
+  fi
+}
+
+# Helper: the leaked-fixture shape -- a verify-import-<n> directory whose
+# BusinessSpec.md is the 11-byte placeholder biz-CHANGED.
+# Usage: _make_leaked_bundle <parent_dir>
+_make_leaked_bundle() {
+  _make_bundle "$1" "verify-import-2923383" >/dev/null
+  printf 'biz-CHANGED' > "$1/verify-import-2923383/project/BusinessSpec.md"
+}
+
+# Two scan-tier bundles, one relevant: the relevant one is selected instead of
+# the exit-3 refusal, the discarded one is listed in filtered[] and on stderr.
+test_detect_design_bundle_feature_stdin_selects_the_relevant_bundle() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: one relevant bundle beside a leaked fixture is selected ==="
+
+  local tmp stderr_file stdout exit_code
+  tmp=$(mktemp -d)
+  stderr_file=$(mktemp)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf 'Improve the invoice dashboard' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --feature-stdin one relevant: exit code"
+  assert_eq "billing-portal" "$(printf '%s' "$stdout" | jq -r '.path')" "detect-design-bundle --feature-stdin one relevant: the relevant bundle is selected"
+  assert_eq "verify-import-2923383" "$(printf '%s' "$stdout" | jq -r '.filtered | join(",")')" "detect-design-bundle --feature-stdin one relevant: filtered names the leaked bundle"
+  assert_contains "verify-import-2923383" "$(cat "$stderr_file")" "detect-design-bundle --feature-stdin one relevant: stderr names the discarded bundle"
+
+  rm -rf "$tmp" "$stderr_file"
+}
+
+# The only bundle is unrelated: the answer is the literal null at exit 0 and
+# the discarded bundle is named on stderr (null cannot carry a filtered key).
+test_detect_design_bundle_feature_stdin_alone_and_unrelated_is_null() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: an unrelated bundle alone answers null ==="
+
+  local tmp stderr_file stdout exit_code
+  tmp=$(mktemp -d)
+  stderr_file=$(mktemp)
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf 'Improve the invoice dashboard' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>"$stderr_file") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --feature-stdin alone unrelated: exit code"
+  assert_eq "null" "$stdout" "detect-design-bundle --feature-stdin alone unrelated: output is the literal null"
+  assert_contains "verify-import-2923383" "$(cat "$stderr_file")" "detect-design-bundle --feature-stdin alone unrelated: stderr names the discarded bundle"
+
+  rm -rf "$tmp" "$stderr_file"
+}
+
+# Two relevant bundles still tie (exit 3), listing only the relevant ones; the
+# unrelated one is reported in filtered[].
+test_detect_design_bundle_feature_stdin_two_relevant_still_refuse() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: two relevant bundles tie, exit 3 lists only them ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  _make_titled_bundle "$tmp" "invoice-archive" "Archive"
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf 'invoice dashboard archive' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "3" "$exit_code" "detect-design-bundle --feature-stdin tie: exits 3"
+  assert_eq "2" "$(printf '%s' "$stdout" | jq '.candidates | length')" "detect-design-bundle --feature-stdin tie: only the relevant bundles are candidates"
+  assert_eq "verify-import-2923383" "$(printf '%s' "$stdout" | jq -r '.filtered | join(",")')" "detect-design-bundle --feature-stdin tie: the unrelated bundle is in filtered"
+
+  rm -rf "$tmp"
+}
+
+# Unfiltered twin: the same tree without the flag is exactly today's answer --
+# three candidates, exit 3, no filtered key.
+test_detect_design_bundle_without_feature_stdin_is_unchanged() {
+  echo ""
+  echo "=== Testing detect-design-bundle: without --feature-stdin nothing is filtered ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  _make_titled_bundle "$tmp" "invoice-archive" "Archive"
+  _make_leaked_bundle "$tmp"
+
+  stdout=$("$CLI" detect-design-bundle --root "$tmp" 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "3" "$exit_code" "detect-design-bundle unfiltered twin: exits 3"
+  assert_eq "3" "$(printf '%s' "$stdout" | jq '.candidates | length')" "detect-design-bundle unfiltered twin: all three are candidates"
+  assert_eq "false" "$(printf '%s' "$stdout" | jq 'has("filtered")')" "detect-design-bundle unfiltered twin: no filtered key"
+
+  rm -rf "$tmp"
+}
+
+# A description with no usable word turns the filter off: same as the twin.
+test_detect_design_bundle_feature_stdin_blank_description_filters_nothing() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: blank and all-stop-word descriptions turn the filter off ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf '   \n' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "3" "$exit_code" "detect-design-bundle --feature-stdin blank: exits 3 as without the flag"
+  assert_eq "false" "$(printf '%s' "$stdout" | jq 'has("filtered")')" "detect-design-bundle --feature-stdin blank: no filtered key"
+
+  stdout=$(printf 'the new app for you' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "3" "$exit_code" "detect-design-bundle --feature-stdin all stop-words: exits 3 as without the flag"
+  assert_eq "false" "$(printf '%s' "$stdout" | jq 'has("filtered")')" "detect-design-bundle --feature-stdin all stop-words: no filtered key"
+
+  rm -rf "$tmp"
+}
+
+# An accented description matches an unaccented directory name (ascii_fold).
+test_detect_design_bundle_feature_stdin_folds_accents() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: an accented description matches an unaccented directory ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  _make_bundle "$tmp" "configuracao-conta" >/dev/null
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf 'Melhorar a configuração da conta' | "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --feature-stdin accents: exit code"
+  assert_eq "configuracao-conta" "$(printf '%s' "$stdout" | jq -r '.path')" "detect-design-bundle --feature-stdin accents: the accented description selects the unaccented directory"
+
+  rm -rf "$tmp"
+}
+
+# --all and --bundle are never filtered, and neither is the phase tier.
+test_detect_design_bundle_feature_stdin_never_filters_all_bundle_or_phase_tier() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: --all, --bundle and the phase tier are never filtered ==="
+
+  local tmp stdout exit_code
+  tmp=$(mktemp -d)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  _make_leaked_bundle "$tmp"
+
+  stdout=$(printf 'Improve the invoice dashboard' | "$CLI" detect-design-bundle --root "$tmp" --all --feature-stdin 2>/dev/null)
+  assert_eq "2" "$(printf '%s' "$stdout" | jq 'length')" "detect-design-bundle --feature-stdin --all: both bundles are returned"
+
+  # --bundle must sit inside the project, so this bundle lives in the cwd.
+  _make_leaked_bundle "$(pwd)"
+  stdout=$(printf 'Improve the invoice dashboard' | "$CLI" detect-design-bundle --bundle "verify-import-2923383" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_eq "verify-import-2923383" "$(printf '%s' "$stdout" | jq -r '.path')" "detect-design-bundle --feature-stdin --bundle: the named bundle is reported as is"
+  assert_eq "false" "$(printf '%s' "$stdout" | jq 'has("filtered")')" "detect-design-bundle --feature-stdin --bundle: no filtered key"
+  rm -rf "verify-import-2923383"
+
+  local phase_dir
+  phase_dir="$(pwd)/.aimi/tasks/myfeature-relevance/phase-1-foo"
+  mkdir -p "${phase_dir}/design-bundle/project"
+  printf 'This is a **handoff bundle** from Claude Design (claude.ai/design).\n' > "${phase_dir}/design-bundle/README.md"
+  stdout=$(printf 'Improve the invoice dashboard' | "$CLI" detect-design-bundle --phase-dir "$phase_dir" --root "$tmp" --feature-stdin 2>/dev/null)
+  assert_eq ".aimi/tasks/myfeature-relevance/phase-1-foo/design-bundle" "$(printf '%s' "$stdout" | jq -r '.path')" "detect-design-bundle --feature-stdin phase tier: the phase bundle still wins"
+  assert_eq "false" "$(printf '%s' "$stdout" | jq 'has("filtered")')" "detect-design-bundle --feature-stdin phase tier: no filtered key"
+
+  rm -rf "$tmp" ".aimi/tasks/myfeature-relevance"
+}
+
+# --feature-stdin refuses at exit 1 without python3; the same call without the
+# flag still answers.
+test_detect_design_bundle_feature_stdin_requires_python3() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin: refuses without python3, other invocations do not ==="
+
+  local tmp nopy
+  tmp=$(mktemp -d)
+  nopy=$(mktemp -d)
+  _make_titled_bundle "$tmp" "billing-portal" "Invoice dashboard"
+  local f
+  for f in /usr/bin/* /bin/*; do
+    case "$(basename "$f")" in python3*|python) continue ;; esac
+    [ -e "$nopy/$(basename "$f")" ] || ln -s "$f" "$nopy/$(basename "$f")" 2>/dev/null
+  done
+
+  local stderr_out exit_code stdout
+  stderr_out=$(printf 'invoice' | PATH="$nopy" "$CLI" detect-design-bundle --root "$tmp" --feature-stdin 2>&1 >/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "detect-design-bundle --feature-stdin without python3: exit code"
+  assert_contains "python3 is required" "$stderr_out" "detect-design-bundle --feature-stdin without python3: names the missing interpreter"
+
+  stdout=$(PATH="$nopy" "$CLI" detect-design-bundle --root "$tmp" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle without the flag and without python3: still answers"
+
+  rm -rf "$tmp" "$nopy"
+}
+
+# --help documents the flag and its contract.
+test_detect_design_bundle_help_documents_feature_stdin_flag() {
+  echo ""
+  echo "=== Testing detect-design-bundle --help: documents the --feature-stdin flag ==="
+
+  local stdout
+  stdout=$("$CLI" detect-design-bundle --help 2>&1)
+  assert_contains "--feature-stdin" "$stdout" "detect-design-bundle --help: documents --feature-stdin"
+}
+
 # ============================================================================
 # import-design-bundle Tests
 # ============================================================================
@@ -9897,6 +10110,15 @@ main() {
   test_detect_design_bundle_phase_dir_nonexistent_inside_project_falls_back_to_scan
   test_detect_design_bundle_phase_dir_outside_project_refused
   test_detect_design_bundle_help_documents_phase_dir_flag
+  test_detect_design_bundle_feature_stdin_selects_the_relevant_bundle
+  test_detect_design_bundle_feature_stdin_alone_and_unrelated_is_null
+  test_detect_design_bundle_feature_stdin_two_relevant_still_refuse
+  test_detect_design_bundle_without_feature_stdin_is_unchanged
+  test_detect_design_bundle_feature_stdin_blank_description_filters_nothing
+  test_detect_design_bundle_feature_stdin_folds_accents
+  test_detect_design_bundle_feature_stdin_never_filters_all_bundle_or_phase_tier
+  test_detect_design_bundle_feature_stdin_requires_python3
+  test_detect_design_bundle_help_documents_feature_stdin_flag
 
   # import-design-bundle Tests
   echo ""

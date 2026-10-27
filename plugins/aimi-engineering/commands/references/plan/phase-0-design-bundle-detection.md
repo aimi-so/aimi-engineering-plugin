@@ -93,20 +93,20 @@ BUNDLE_ERR_FILE=$(mktemp)
 if [ -n "$BUNDLE_FINAL" ]; then
   BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_FINAL" 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ] && [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 else
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --feature-stdin 2>"$BUNDLE_ERR_FILE")
 fi
 BUNDLE_EXIT=$?
 BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
 rm -f "$BUNDLE_ERR_FILE"
 ```
 
-`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode.
+`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode. Every arm except `--bundle` pipes `$FEATURE_DESCRIPTION` to `--feature-stdin` — on stdin, never as an argument — so a scan-tier bundle sharing no word with the description (a stray or placeholder bundle) is dropped before the election; the phase tier, `--bundle` and `--all` are never filtered, and an empty or all-stop-word description turns the filter off. When it discards bundles the verb names them on stderr, and a JSON object answer carries them in a `filtered` array of paths (`null` is still the bare literal, with the discarded names on stderr only).
 
 **Branch on `BUNDLE_EXIT`:**
 
@@ -115,7 +115,7 @@ rm -f "$BUNDLE_ERR_FILE"
 - **`3` (ambiguous):** see below.
 - **anything else:** report `$BUNDLE_STDERR` as a single warning line and STOP the entire `/aimi:plan` invocation. This is unlike the Pre-Expansion Contract Gate's and Roadmap Materialization's own "surface the CLI's stderr and continue the rest of the plan pipeline" precedent for an unhandled failure shape: every exit `detect-design-bundle` can produce by design is already one of the three cases above, so a fourth one means something this command does not understand happened, before any planning context exists for the rest of the pipeline to fall back on.
 
-**On exit 3 — ambiguous, two or more same-tier candidates and no bundle was named:** `BUNDLE_STDOUT` parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in `.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null` when that spec is absent).
+**On exit 3 — ambiguous, two or more same-tier candidates and no bundle was named:** with `--feature-stdin` in effect this now means two or more RELEVANT bundles tie, since unrelated ones were already discarded (they appear in `.filtered[]`, which is not a candidate list and is never offered). `BUNDLE_STDOUT` parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in `.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null` when that spec is absent).
 
 - **Interactive** (`INTERACTIVE_MODE` is not `agent`): present exactly one AskUserQuestion, naming the count and listing the first 4 entries of `.candidates[]` in its own path order:
   ```
