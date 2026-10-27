@@ -483,6 +483,86 @@ def test_outline_shift_removed_entry_deletes_its_staged_file(tmp_path):
     assert sorted(p.name for p in run.iterdir()) == ["01-beta.json"]
 
 
+def stamp(run, name, digest="a" * 64):
+    path = run / (name + ".validated")
+    path.write_text(digest + "\n", encoding="utf-8")
+    return path
+
+
+def test_outline_shift_stamp_is_renamed_together_with_its_story_file(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stage(run, "02", "beta")
+    stamp(run, "01-alpha.json", "1" * 64)
+    stamp(run, "02-beta.json", "2" * 64)
+    old = [oe("01", "Alpha"), oe("02", "Beta")]
+    new = [oe("01", "Fresh"), oe("02", "Alpha"), oe("03", "Beta")]
+    report = report_of(shift(tmp_path, old, new, run)[0])
+    assert report["renamed"] == [
+        {"from": "01", "to": "02", "file": "02-alpha.json"},
+        {"from": "02", "to": "03", "file": "03-beta.json"},
+    ]
+    assert sorted(p.name for p in run.iterdir()) == [
+        "02-alpha.json", "02-alpha.json.validated", "03-beta.json", "03-beta.json.validated",
+    ]
+    assert (run / "02-alpha.json.validated").read_text() == "1" * 64 + "\n"
+    assert (run / "03-beta.json.validated").read_text() == "2" * 64 + "\n"
+
+
+def test_outline_shift_stamp_is_deleted_together_with_a_removed_story_file(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stage(run, "02", "beta")
+    stamp(run, "01-alpha.json")
+    stamp(run, "02-beta.json", "b" * 64)
+    old = [oe("01", "Alpha"), oe("02", "Beta")]
+    new = [oe("01", "Beta")]
+    report = report_of(shift(tmp_path, old, new, run)[0])
+    assert report["removed"] == ["01"]
+    assert sorted(p.name for p in run.iterdir()) == ["01-beta.json", "01-beta.json.validated"]
+    assert (run / "01-beta.json.validated").read_text() == "b" * 64 + "\n"
+
+
+def test_outline_shift_stamp_beside_a_story_that_stays_put_is_left_alone(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stamp(run, "01-alpha.json")
+    outline = [oe("01", "Alpha")]
+    before = tree(run)
+    report_of(shift(tmp_path, outline, outline, run)[0])
+    assert tree(run) == before
+
+
+def test_outline_shift_stamp_is_never_read_as_a_staged_story(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stamp(run, "01-alpha.json")
+    outline = [oe("01", "Alpha")]
+    # A staged-index collision or an unmatched idx would refuse; neither happens.
+    assert report_of(shift(tmp_path, outline, outline, run)[0])["auditInvalidated"] is False
+
+
+def test_outline_shift_leaves_no_orphaned_stamp(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    stage(run, "01", "alpha")
+    stage(run, "02", "beta")
+    stage(run, "03", "gamma")
+    for name in ("01-alpha.json", "02-beta.json", "03-gamma.json"):
+        stamp(run, name)
+    old = [oe("01", "Alpha"), oe("02", "Beta"), oe("03", "Gamma")]
+    new = [oe("01", "Gamma"), oe("02", "Alpha")]
+    report_of(shift(tmp_path, old, new, run)[0])
+    names = sorted(p.name for p in run.iterdir())
+    stories = [n for n in names if n.endswith(".json")]
+    assert stories == ["01-gamma.json", "02-alpha.json"]
+    assert [n for n in names if n.endswith(".validated")] == [n + ".validated" for n in stories]
+
+
 def test_outline_shift_unchanged_outline_leaves_the_audit_and_reports_nothing(tmp_path):
     run = tmp_path / "run"
     run.mkdir()

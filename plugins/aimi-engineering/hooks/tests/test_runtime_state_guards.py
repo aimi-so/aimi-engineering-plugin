@@ -35,25 +35,37 @@ _GUARD_TASKS_PRESENCE_PATH = _HOOKS_DIR / "guard-tasks-presence.py"
 # ---------------------------------------------------------------------------
 
 
-def _make_write_input(file_path: str) -> str:
-    """Return a JSON-encoded PreToolUse payload for a Write tool call."""
+def _make_write_input(file_path: str, agent_type: str | None = None) -> str:
+    """Return a JSON-encoded PreToolUse payload for a Write tool call.
+
+    *agent_type* adds the field Claude Code puts on a call made from inside a
+    subagent; the main session carries none.
+    """
     payload = {
         "tool_name": "Write",
         "tool_input": {
             "file_path": file_path,
         },
     }
+    if agent_type is not None:
+        payload["agent_type"] = agent_type
     return json.dumps(payload)
 
 
-def _make_edit_input(file_path: str) -> str:
-    """Return a JSON-encoded PreToolUse payload for an Edit tool call."""
+def _make_edit_input(file_path: str, agent_type: str | None = None) -> str:
+    """Return a JSON-encoded PreToolUse payload for an Edit tool call.
+
+    *agent_type* adds the field Claude Code puts on a call made from inside a
+    subagent; the main session carries none.
+    """
     payload = {
         "tool_name": "Edit",
         "tool_input": {
             "file_path": file_path,
         },
     }
+    if agent_type is not None:
+        payload["agent_type"] = agent_type
     return json.dumps(payload)
 
 
@@ -689,6 +701,202 @@ def test_staged_story_env_bypass_allows_edit(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert "deny" not in output
+
+
+# -- validation stamp (`NN-*.json.validated`) and the subagent signal ---------
+
+
+def _subagent_payload(tool: str, target: Path, **extra) -> str:
+    payload = {"tool_name": tool, "tool_input": {"file_path": str(target)}}
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "extra, expected",
+    [
+        ({}, False),
+        ({"agent_type": ""}, False),
+        ({"agent_id": ""}, False),
+        ({"agent_type": None, "agent_id": None}, False),
+        ({"agent_type": "aimi-story-expander"}, True),
+        ({"agent_id": "a1b2c3"}, True),
+        ({"agent_type": "general-purpose", "agent_id": "a1b2c3"}, True),
+    ],
+)
+def test_is_subagent_write_reads_agent_type_or_agent_id(extra, expected):
+    mod = _load_runtime_state_module()
+    payload = {"tool_name": "Write", "tool_input": {"file_path": "x"}, **extra}
+    assert mod.is_subagent_write(payload) is expected
+
+
+def test_staging_stamp_is_the_story_name_plus_validated(tmp_path):
+    mod = _load_runtime_state_module()
+    story = tmp_path / "01-story.json"
+    assert mod.staging_stamp(story) == tmp_path / "01-story.json.validated"
+
+
+def test_staged_story_subagent_write_over_unstamped_existing_allowed(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json"
+    target.write_text("{}")
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _make_write_input(str(target), agent_type="aimi-story-expander")
+    )
+
+    assert exit_code == 0
+    assert "deny" not in output
+
+
+def test_staged_story_subagent_write_over_stamped_story_denied(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json"
+    target.write_text("{}")
+    (run / "01-story.json.validated").write_text("0" * 64)
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _make_write_input(str(target), agent_type="aimi-story-expander")
+    )
+
+    assert exit_code == 0
+    message = _parse_deny_output(output)["hookSpecificOutput"]["userMessage"]
+    assert "apply-audit-patches" in message
+    assert "delete the file and re-run the expander" in message
+
+
+def test_staged_story_main_session_write_over_existing_denied_in_both_stamp_states(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json"
+    target.write_text("{}")
+
+    for stamped in (False, True):
+        if stamped:
+            (run / "01-story.json.validated").write_text("0" * 64)
+        output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+        assert exit_code == 0
+        assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_staged_story_subagent_edit_denied_in_both_stamp_states(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json"
+    target.write_text("{}")
+
+    for stamped in (False, True):
+        if stamped:
+            (run / "01-story.json.validated").write_text("0" * 64)
+        output, exit_code = _run_guard_runtime_state(
+            monkeypatch, _make_edit_input(str(target), agent_type="aimi-story-expander")
+        )
+        assert exit_code == 0
+        assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_staged_story_subagent_creating_new_story_allowed_in_both_stamp_states(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    # A stamp left beside a story that is gone does not matter to a CREATE.
+    (run / "01-new.json.validated").write_text("0" * 64)
+
+    for name in ("01-new.json", "02-other.json"):
+        output, exit_code = _run_guard_runtime_state(
+            monkeypatch, _make_write_input(str(run / name), agent_type="aimi-story-expander")
+        )
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+@pytest.mark.parametrize("name", ["metadata.json", "outline.json", "audit-result.json", "03-research-outline.json"])
+def test_staged_sidecars_stay_writable_by_a_subagent(tmp_path, monkeypatch, name):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / name
+    target.write_text("{}")
+
+    for make in (_make_edit_input, _make_write_input):
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target), agent_type="x"))
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+@pytest.mark.parametrize("make", [_make_write_input, _make_edit_input])
+def test_stamp_subagent_write_or_edit_denied_in_every_state(tmp_path, monkeypatch, make):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json.validated"
+
+    # absent, then present: both denied for a subagent.
+    for present in (False, True):
+        if present:
+            target.write_text("0" * 64)
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target), agent_type="aimi-story-expander"))
+        assert exit_code == 0
+        assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_stamp_denied_for_agent_id_alone(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json.validated"
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _subagent_payload("Write", target, agent_id="a1b2c3")
+    )
+
+    assert exit_code == 0
+    assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_stamp_main_session_write_allowed(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    target = run / "01-story.json.validated"
+
+    for present in (False, True):
+        if present:
+            target.write_text("0" * 64)
+        output, exit_code = _run_guard_runtime_state(monkeypatch, _make_write_input(str(target)))
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+def test_stamp_name_is_never_judged_as_a_story_or_sidecar(tmp_path, monkeypatch):
+    mod = _load_runtime_state_module()
+    run = tmp_path / ".aimi" / ".tasks-staging" / "run-1"
+
+    assert mod._is_staged_stamp(run / "01-story.json.validated")
+    assert not mod._is_staged_story(run / "01-story.json.validated")
+    assert not mod._is_staged_stamp(run / "01-story.json")
+    assert not mod._is_staged_stamp(run / "metadata.json.validated")
+    assert not mod._is_staged_stamp(run / "03-research-outline.json.validated")
+    # The same name outside a staging run directory is not a stamp.
+    assert not mod._is_staged_stamp(tmp_path / ".aimi" / "elsewhere" / "run-1" / "01-story.json.validated")
+
+
+def test_stamp_same_name_outside_tasks_staging_allowed_for_a_subagent(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    other = tmp_path / ".aimi" / "elsewhere" / "run-1"
+    other.mkdir(parents=True)
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _make_write_input(str(other / "01-story.json.validated"), agent_type="x")
+    )
+
+    assert exit_code == 0
+    assert "deny" not in output
+
+
+def test_stamp_and_subagent_rewrite_env_bypass_unchanged(tmp_path, monkeypatch):
+    run = _staged_story_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("AIMI_RUNTIME_STATE_GUARD", "off")
+    story = run / "01-story.json"
+    story.write_text("{}")
+    (run / "01-story.json.validated").write_text("0" * 64)
+
+    for target, make in (
+        (story, _make_write_input),
+        (story, _make_edit_input),
+        (run / "01-story.json.validated", _make_write_input),
+    ):
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(target), agent_type="x"))
+        assert exit_code == 0
+        assert "deny" not in output
 
 
 # ---------------------------------------------------------------------------

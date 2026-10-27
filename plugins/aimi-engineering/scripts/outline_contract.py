@@ -306,6 +306,10 @@ def validate_outline(outline):
 # --- Outline shift --------------------------------------------------------
 
 _TMP_PREFIX = ".outline-shift-"
+# The validation stamp the orchestrator writes beside a staged story file
+# (`NN-<slug>.json.validated`). Its name never ends in `.json`, so the staged
+# index map does not see it; the shift moves and deletes it with its story.
+STAMP_SUFFIX = ".validated"
 
 
 def _load_outline_file(path, label):
@@ -494,7 +498,15 @@ def plan_shift(staging_dir, old_entries, new_entries):
             ops.append((path, new_name, doc if changed else None))
         if new_name != name:
             renamed.append({"from": old_idx, "to": new_idx, "file": new_name})
-    deletions = [staged[i] for i in sorted(staged) if i in removed]
+            # A validation stamp travels with its story file.
+            if os.path.lexists(path + STAMP_SUFFIX):
+                ops.append((path + STAMP_SUFFIX, new_name + STAMP_SUFFIX, None))
+    deletions = []
+    for i in sorted(staged):
+        if i in removed:
+            deletions.append(staged[i])
+            if os.path.lexists(staged[i] + STAMP_SUFFIX):
+                deletions.append(staged[i] + STAMP_SUFFIX)
 
     touched = bool(ops or deletions or reexpand or expand)
     return {

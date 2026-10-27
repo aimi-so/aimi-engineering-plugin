@@ -131,6 +131,17 @@ def test_staged_idx_map_refuses_two_files_sharing_an_idx(stg):
         AP.staged_idx_map(str(stg))
 
 
+def test_staged_idx_map_ignores_a_validation_stamp(stg):
+    """A stamp shares the story's name plus `.validated`, so it never matches
+    the `NN-*.json` glob and cannot collide with the story it stamps."""
+    for name in ("01-alpha.json", "02-beta.json"):
+        (stg / (name + ".validated")).write_text("0" * 64 + "\n")
+    (stg / "09-orphan.json.validated").write_text("0" * 64 + "\n")
+    mapping = AP.staged_idx_map(str(stg))
+    assert sorted(mapping) == ["01", "02", "03"]
+    assert all(not path.endswith(".validated") for path in mapping.values())
+
+
 # --- refusals leave the tree untouched ---------------------------------------
 
 

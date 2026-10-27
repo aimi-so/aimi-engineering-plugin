@@ -1740,6 +1740,17 @@ def test_a_file_with_no_numeric_prefix_is_ordered_but_not_index_checked(tmp_path
     assert CASES["sem-prefixo-numerico"]["exit"] == 1
 
 
+def test_a_validation_stamp_beside_the_staged_stories_is_never_read_as_a_story(tmp_path):
+    """`NN-<slug>.json.validated` does not end in `.json`, so the staging scan
+    passes over it and the story it stamps is the only thing read."""
+    for name, title in (("01-a.json", "A"), ("02-b.json", "B")):
+        (tmp_path / name).write_text(json.dumps(_staging_story(title)), encoding="utf-8")
+        (tmp_path / (name + ".validated")).write_text("0" * 64 + "\n", encoding="utf-8")
+    paths = SM.staging_files(str(tmp_path))
+    assert [os.path.basename(p) for p in paths] == ["01-a.json", "02-b.json"]
+    assert [s["title"] for s in SM.read_staging(paths)] == ["A", "B"]
+
+
 def test_ids_follow_file_order_not_the_digits_in_the_names():
     stories = _doc("ordem-lexicografica", ".aimi/tasks/out-tasks.json")["userStories"]
     assert [(s["id"], s["title"]) for s in stories] == [

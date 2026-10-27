@@ -117,7 +117,6 @@ unassigned	references/plan/phase-3a-3b-setup-and-outline.md	topicSlug	# ${topicS
 unassigned	references/plan/phase-3c-outline-gate.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
 unassigned	references/plan/phase-3d-prep-blocks.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; the validate-outline block reads it the way phase-3d-validate-retry.md does
 unassigned	references/plan/phase-3d-tree-guard.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; the guard reads it the way phase-3d-validate-retry.md does
-unassigned	references/plan/phase-3d-validate-retry.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
 unassigned	references/plan/phase-3d5-audit-apply-gate.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
 unassigned	references/plan/phase-3d5-audit-spawn.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
 unassigned	references/plan/phase-3e-story-merge.md	RUN_DIR	# assigned by an earlier plan phase and carried in working memory; this block moved out of plan.md verbatim and cannot see that assignment
