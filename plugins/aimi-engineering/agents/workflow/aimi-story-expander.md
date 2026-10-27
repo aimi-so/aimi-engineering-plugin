@@ -122,7 +122,7 @@ Write exactly one JSON object to `outputPath`. Fields:
   "verification": {
     "strategy": "test | visual | api",
     "status": "pending",
-    "url": "<optional, only for visual/api>",
+    "url": "<optional, only for visual/api; a path or URL, never an HTTP method: /api/x and https://host/x are accepted, POST /api/x and GET x are rejected>",
     "expect": "<optional, natural language expectation>"
   },
   "gate": {

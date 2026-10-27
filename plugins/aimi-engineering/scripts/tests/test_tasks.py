@@ -11568,3 +11568,42 @@ def test_r23_verify_is_appended_after_r22_so_no_recorded_line_moves(tmp_path):
         source = handle.read()
     assert source.index("    # R23 -- ") > source.index("    # R22 -- ")
     assert source.index("    # R23 -- ") < source.index("    return errors\n", source.index("    # R22 -- "))
+
+
+# ---------------------------------------------------------------------------
+# verification_url_findings: one sentence for validate-tasks R15 and validate-staging
+# ---------------------------------------------------------------------------
+
+
+def test_verification_url_findings_judge_one_story():
+    sentence = 'verification.url "POST /api/x" contains characters outside the allowed charset'
+    assert T.verification_url_findings({"verification": {"url": "POST /api/x"}}) == [sentence]
+    for url in ("/api/x", "https://host/x", "http://localhost:3000/api/tasks/1/status"):
+        assert T.verification_url_findings({"verification": {"url": url}}) == [], url
+    for story in (
+        {},
+        {"verification": None},
+        {"verification": "x"},
+        {"verification": {}},
+        {"verification": {"url": None}},
+        {"verification": {"url": ""}},
+        {"verification": {"url": 7}},
+    ):
+        assert T.verification_url_findings(story) == [], story
+
+
+@pytest.mark.parametrize("label", ["url-invalida", "url-duas-ruins"])
+def test_verification_url_sentence_is_the_one_r15_reports(label):
+    """R15's recorded errors are `<tasks_file>: <id> <finding>` -- the same
+    sentence verification_url_findings builds, so the two cannot drift."""
+    recorded = VALIDATE_TASKS[label]
+    document = json.loads(recorded["input"]["tasks"])
+    expected = []
+    for story in document["userStories"]:
+        for finding in T.verification_url_findings(story):
+            expected.append(": " + story["id"] + " " + finding)
+    actual = [e for e in _vt_errors(label) if "verification.url" in e]
+    assert expected and len(expected) == len(actual)
+    # the recording prefixes the tasks file's resolved path; the rest is the sentence
+    for suffix, error in zip(expected, actual):
+        assert error.endswith(suffix), (suffix, error)

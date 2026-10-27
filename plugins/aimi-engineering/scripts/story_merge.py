@@ -2915,6 +2915,24 @@ def rail_and_path_findings(story):
     ]
 
 
+def verification_url_findings_sanitized(story):
+    """Sanitized verification.url findings for one story; [] for a clean one.
+
+    The rule is tasks.py's verification_url_findings, imported INSIDE this body
+    for the reason verify_refusal_findings gives. validate-staging reports it;
+    story-merge deliberately does not refuse it, so validate-tasks R15 stays the
+    last gate.
+    """
+    if not isinstance(story, dict):
+        return []
+    from tasks import verification_url_findings
+
+    return [
+        rm_sanitize(finding, _FINDING_MAXLEN)
+        for finding in verification_url_findings(story)
+    ]
+
+
 def _depends_on_tokens(entries):
     tokens = set()
     for entry in entries:
@@ -2951,6 +2969,7 @@ def validate_staging(staging_dir, outline=None):
         for entry in entries:
             findings.extend(verify_refusal_findings(entry))
             findings.extend(rail_and_path_findings(entry))
+            findings.extend(verification_url_findings_sanitized(entry))
         if entries:
             tokens = _depends_on_tokens(entries)
             for edge in edges:

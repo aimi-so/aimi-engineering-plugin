@@ -74,7 +74,7 @@ skills/story-executor/SKILL.md	67432
 skills/task-planner/SKILL.md	23241
 
 agents/research/aimi-foundation-architect.md	23014
-agents/workflow/aimi-story-expander.md	52476
+agents/workflow/aimi-story-expander.md	52589
 agents/research/aimi-learnings-researcher.md	16750
 agents/research/aimi-design-bundle-researcher.md	16870
 agents/review/aimi-cross-story-auditor.md	20048

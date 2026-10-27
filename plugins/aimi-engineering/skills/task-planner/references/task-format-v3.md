@@ -161,7 +161,7 @@ Optional object describing how to verify the story after execution. Verification
 |-------|------|----------|---------|-------------|
 | `strategy` | string | Yes | — | One of: `test`, `visual`, `api`. Determines how verification is performed. |
 | `status` | string | Yes | `"pending"` | One of: `pending`, `passed`, `failed`, `skipped`. Tracks the outcome of verification. |
-| `url` | string | No | — | URL to hit for `api` strategy, or screenshot/page URL for `visual` strategy. |
+| `url` | string | No | — | URL to hit for `api` strategy, or screenshot/page URL for `visual` strategy. A path or URL, never an HTTP method: `/api/x` and `https://host/x` are accepted, `POST /api/x` and `GET x` are rejected (charset `^[A-Za-z0-9/][A-Za-z0-9:/?#@!&*+,._~%=-]*$`, so no space). |
 | `expect` | string | No | — | Expected result description (e.g., `"200 OK with token"`, `"login button visible"`). |
 | `skipReason` | string | No | — | Reason the verification was skipped. Present only alongside `status: "skipped"`; written by the `set-verification`/`judge-verification` verbs, never by the planner. A legacy `skipped` with no `skipReason` is valid -- absence means no reason was recorded. |
 
