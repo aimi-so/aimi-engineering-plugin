@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.155.1] - 2026-10-27
+
+`/aimi:plan` stops when a story expander changes the repository or the stash.
+
+### Fixed
+- Story expanders, which hold every tool, edited the repository and ran a bare `git stash` to try the story they were writing, in a tree that can hold the user's own uncommitted work. Phase 3d now runs every batch of expanders (a wave, a retry, a re-expansion) inside a Working Tree Guard, `commands/references/plan/phase-3d-tree-guard.md`: it records `git status` and the stash of every repository under AIMI_ROOT, ignoring `.aimi/`, before the batch, and stops the plan with the diff when either changed. Nothing is reverted automatically. This is detection, not prevention, and it applies on both hosts.
+
+### Changed
+- `aimi-story-expander` states that it never changes the repository to check a story: no edits, no files created or deleted through Bash, and no git command that changes the working tree, the index, a branch or the stash, including to undo something.
+
+### Added
+- `scripts/tests/test_tree_guard.py`, which runs the guard block under bash and zsh against throwaway repositories.
+
 ## [1.155.0] - 2026-10-26
 
 The cross-story auditor reads its corpus from disk, a failed audit can be retried, and aimi agents declare their tools under the key Claude Code reads (#175).

@@ -33,7 +33,7 @@ Previous attempt failed validation. Error: <sanitized error string>
 Please fix the JSON and write the file again at outputPath.
 ```
 
-Before every re-spawn, delete the stale staging file with Bash `rm -f "$RUN_DIR/<idx>-<slug>.json"`: the guard hook denies Edit and Write over an existing staging `NN-*.json`, so the expander's rewrite would otherwise be refused. Never Edit or Write a staging file by hand. An expander that dies after the delete leaves no file, which fails validation and counts as a failed expansion under the Failure Budget.
+A re-spawn is a batch of its own and runs inside the Working Tree Guard (`phase-3d-tree-guard.md`): `snapshot` before it, `check` after it. Before every re-spawn, delete the stale staging file with Bash `rm -f "$RUN_DIR/<idx>-<slug>.json"`: the guard hook denies Edit and Write over an existing staging `NN-*.json`, so the expander's rewrite would otherwise be refused. Never Edit or Write a staging file by hand. An expander that dies after the delete leaves no file, which fails validation and counts as a failed expansion under the Failure Budget.
 
 After 2 failed retries (3 total attempts), mark this expansion as **permanently failed**. Record the story title and outline index.
 

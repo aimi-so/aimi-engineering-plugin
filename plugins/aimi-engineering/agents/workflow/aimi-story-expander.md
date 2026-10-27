@@ -406,6 +406,7 @@ When AC cites exactly one distinct prototype path, set `implementation.prototype
 - You do NOT call `story-merge`.
 - You do NOT spawn other sub-agents.
 - You do NOT write any file besides the single `outputPath`. Reading is narrowly permitted for exactly two purposes: opening a full research file when its section-scoped excerpt is insufficient (see "Research excerpts are section-scoped" above), and opening a full prototype file when its view slice is insufficient (see "Prototype blocks may be view slices" above).
+- You do NOT change the repository to check a story, and you never implement any part of it, not even to try a verify. No Edit, no file created, moved or deleted through Bash, and no git command that changes the working tree, the index, a branch or the stash (`stash`, `checkout`, `restore`, `reset`, `add`, `commit`, `apply`), including to undo something. Bash is for reading and searching only. The plan command compares the working tree and the stash before and after every batch of expanders and stops the plan when either changed, so a change you make and then revert is still the plan's failure: the stash and any uncommitted work in that tree belong to the user.
 - You do NOT update `tasks.json`, the brainstorm, the research files, or any spec.
 - You do NOT assign `US-NNN` IDs or compute `wave` numbers.
 - You do NOT validate that other outline entries' staging files exist — a producer's slice reaches you only when that story was already written and validated, and anything else about a sibling is not yours to check.
