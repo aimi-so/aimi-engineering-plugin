@@ -163,7 +163,7 @@ Either way, every worktree or container lands at that record's `worktree` value 
 
 ### Parallel Execution for Split Files
 
-In a **single tool-call turn**, emit one foreground Task per plan record — `activeCount` Tasks in total (two for a legacy pair, three for a three-repo project split, N for N). Never one turn per record; that would serialize them. Each Task reads the router and follows its Spawned Tasks table row for the marker below, scoped to its own file:
+In a **single tool-call turn**, emit one foreground Task per plan record — `activeCount` Tasks in total (two for a legacy pair, three for a three-repo project split, N for N). Never one turn per record; that would serialize them. The one exception is a split where some active member's `after` names another active member: Read the **Split File Waves** entry and emit one turn per wave instead, with the Task template below unchanged. Each Task reads the router and follows its Spawned Tasks table row for the marker below, scoped to its own file:
 
 ```
 For each record in SPLIT_PLAN, all Task( calls in one turn:
