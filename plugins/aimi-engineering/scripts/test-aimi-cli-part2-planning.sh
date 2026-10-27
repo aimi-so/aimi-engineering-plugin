@@ -30,9 +30,9 @@ set -uo pipefail
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
-#   - apply-audit-patches Tests (nine assertions, inside the story-merge section)
+#   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
-#   - split-detect Tests (TC36-TC46, TC50-TC53)
+#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -1552,6 +1552,65 @@ RESEOF
   assert_exit_code "1" "$exit_code" "extract-sections: symlink inside project pointing outside rejected (exit non-zero)"
   assert_contains "escapes project root" "$stderr_out" "extract-sections: symlink escape error on stderr"
   rm -f "$symlink_target" "$symlink_path"
+
+  # --- Test 13: any heading level >= 2 is addressable (#### / #####), closed at the
+  # next heading of the same-or-higher level, fence-aware ---
+  local deep_file="$es_dir/.aimi/deep.md"
+  cat > "$deep_file" << 'RESEOF'
+# Deep Research
+
+## Top
+### Mid
+#### Deep A
+body a
+##### Deeper
+body deeper
+#### Deep B
+body b
+
+```bash
+#### Fake Deep
+```
+## Next
+next body
+RESEOF
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deep A" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "extract-sections: #### anchor exits 0"
+  assert_contains "#### Deep A" "$stdout" "extract-sections: #### anchor includes its own heading"
+  assert_contains "body deeper" "$stdout" "extract-sections: #### anchor includes its nested ##### lines"
+  local deep_bleed="no"
+  case "$stdout" in *"body b"*|*"Deep B"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: #### section stops at the next #### heading"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deeper" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_exit_code "0" "$exit_code" "extract-sections: ##### anchor exits 0"
+  assert_contains "##### Deeper" "$stdout" "extract-sections: ##### anchor includes its own heading"
+  deep_bleed="no"
+  case "$stdout" in *"body b"*|*"body a"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: ##### section stops at the next #### heading"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Top" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "#### Deep B" "$stdout" "extract-sections: h2 anchor includes nested #### lines"
+  deep_bleed="no"
+  case "$stdout" in *"next body"*) deep_bleed="yes" ;; esac
+  assert_eq "no" "$deep_bleed" "extract-sections: h2 anchor still stops at the next h2"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Fake Deep" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections: a #### line inside a code fence is not matched"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$deep_file" --anchors "Deep Research" 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_eq "" "$stdout" "extract-sections: h1 stays unmatchable"
 
   rm -rf "$es_dir"
 }
@@ -4979,7 +5038,7 @@ test_story_merge_missing_dir() {
 }
 
 # apply-audit-patches: the verb that applies the cross-story auditor's patches.
-# Fixtures live under .aimi/ so path confinement accepts them. Nine assertions.
+# Fixtures live under .aimi/ so path confinement accepts them. Twelve assertions.
 test_apply_audit_patches() {
   echo ""
   echo "=== apply-audit-patches: apply, drop, annotate, refuse ==="
@@ -5000,6 +5059,21 @@ test_apply_audit_patches() {
 
   output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
   assert_eq "02|cross-checked" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); n=json.load(open(sys.argv[2]))["notes"]; print(",".join(d["annotated"]) + "|" + n)' "$output" "$stg/01-story.json")" "apply-audit-patches: --annotate-deferred touches only the story an unresolved entry names"
+  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("[audit-deferred: resolved at plan review] endpoint name drift" in n and "after review" in n))' "$stg/02-story.json")" "apply-audit-patches: the human --reason and the finding land in the annotated story's notes"
+
+  printf '%s\n' '{"title":"S03","description":"d","acceptanceCriteria":["Typecheck passes"],"status":"pending","dependsOn":[],"notes":"","verification":{"strategy":"test","status":"pending"}}' > "$stg/03-story.json"
+  printf '%s\n' '{"patches":[],"unresolved":[{"storyIdx":"03","message":"agent finding"}]}' > "$stg/audit-result.json"
+  "$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "auto" --agent-deferral >/dev/null 2>&1 || true
+  assert_eq "[audit-deferred: unresolved — review before execution] agent finding" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["notes"])' "$stg/03-story.json")" "apply-audit-patches: --agent-deferral keeps the unresolved marker and no reason text"
+
+  printf '%s\n' '{"status":"audit-failed","auditedIdx":["01","02","03"],"patches":[],"unresolved":[{"storyIdx":"_audit","message":"audit failed - no patches applied"}]}' > "$stg/audit-result.json"
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" --annotate-deferred --reason "after review" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "01,02,03" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])["annotated"]))' "$output")" "apply-audit-patches: a stub-backed deferral lists every staged idx as annotated"
+  assert_eq "1" "$(python3 -c 'import json,sys; n=json.load(open(sys.argv[1]))["notes"]; print(int("cross-story audit did not run" in n and "after review" in n))' "$stg/03-story.json")" "apply-audit-patches: a stub-backed deferral writes the cross-story audit did not run message and the reason into a staged story"
+  assert_eq "1" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(int(len(d["oqDecisions"]) == 1 and d["oqDecisions"][0]["anchor"] == "auditUnresolved:_audit"))' "$output")" "apply-audit-patches: the stub fan-out keeps exactly one auditUnresolved:_audit decision"
+
+  output=$("$CLI" apply-audit-patches --staging-dir "$stg" --agent-deferral 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "apply-audit-patches: --agent-deferral without --annotate-deferred is refused"
 
   output=$("$CLI" apply-audit-patches --staging-dir "/tmp" 2>&1) && exit_code=0 || exit_code=$?
   assert_exit_code "1" "$exit_code" "apply-audit-patches: an escaping --staging-dir exits 1"
@@ -8058,7 +8132,7 @@ test_story_merge_project_split_partial_write_failure() {
 }
 
 # ============================================================================
-# split-detect Tests (TC36-TC46, TC50-TC53)
+# split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 # ============================================================================
 # The read side of metadata.splitGroup. Every rule here used to live only in
 # execute.md's executable prose — twice, in two already-divergent copies — where
@@ -8752,6 +8826,129 @@ test_split_detect_empty_dir_with_decoy() {
   rm -rf "$d"
 }
 
+# TC57: a stale flat plan (no pending/in_progress story, at least one failed)
+# beside a claimable planned roadmap phase is ambiguous, not silently re-run.
+# Every neighbouring shape keeps its old answer.
+_sd_roadmap() {
+  local dir="$1" phases="$2"
+  mkdir -p "$dir/.aimi/tasks/myfeat"
+  printf '{"phases": %s}' "$phases" > "$dir/.aimi/tasks/myfeat/roadmap.json"
+}
+
+test_split_detect_stale_flat_plan_versus_planned_phase() {
+  echo ""
+  echo "=== TC57: split-detect — stale flat plan beside a claimable planned phase ==="
+
+  local planned='[{"id": 2, "name": "Auth", "status": "planned"}]'
+  local d out exit_code
+
+  # (a) failed-only flat file + claimable phase -> ambiguous
+  d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed completed)"
+  _sd_roadmap "$d" "$planned"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC57: ambiguous still exits 0"
+  assert_eq "ambiguous" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: stale flat plan plus planned phase is ambiguous"
+  assert_eq "2026-07-27-old-tasks.json" "$(_sd_member_names "$out")" "TC57: the flat anchor is still carried as a member"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.failedCount')" "TC57: the failed count is reported"
+  assert_eq "1" "$(printf '%s' "$out" | jq -r '.claimablePhases | length')" "TC57: one claimable phase listed"
+  assert_eq "myfeat" "$(printf '%s' "$out" | jq -r '.claimablePhases[0].feature')" "TC57: phase feature reported"
+  assert_eq "2 Auth" "$(printf '%s' "$out" | jq -r '.claimablePhases[0] | "\(.id) \(.name)"')" "TC57: phase id and name reported"
+
+  # (b) a flat file that still has a pending story keeps winning
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed pending)"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: flat file with a pending story keeps mode single"
+  assert_eq "false" "$(printf '%s' "$out" | jq 'has("claimablePhases")')" "TC57: no claimablePhases key outside ambiguous"
+
+  # (c) a phase claimed by a session is not claimable
+  _sd_write "$d/.aimi/tasks/2026-07-27-old-tasks.json" "feat/old" "$(_sd_stories failed)"
+  _sd_roadmap "$d" '[{"id": 2, "name": "Auth", "status": "planned", "claim": {"claimedPid": 1}}]'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a claimed phase does not trigger ambiguous"
+
+  # (d) a phase whose dependency is not completed is not claimable
+  _sd_roadmap "$d" '[{"id": 1, "name": "Base", "status": "in_progress"}, {"id": 2, "name": "Auth", "status": "planned", "dependsOn": [1]}]'
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a dependency-blocked phase does not trigger ambiguous"
+
+  # (e) a corrupt roadmap degrades to the old answer
+  printf '{not json' > "$d/.aimi/tasks/myfeat/roadmap.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC57: a corrupt roadmap does not fail split-detect"
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: a corrupt roadmap degrades to mode single"
+
+  # (f) --dir scope never reports ambiguous
+  _sd_roadmap "$d" "$planned"
+  out=$(_sd_run "$d" --dir "$d/.aimi/tasks") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC57: --dir scope is unaffected by a planned phase"
+  assert_eq "false" "$(printf '%s' "$out" | jq 'has("claimablePhases")')" "TC57: --dir scope output carries no claimablePhases"
+
+  rm -rf "$d"
+}
+
+# TC58: --include-completed (--dir scope only) keeps a group whose every story
+# is completed, so Phase Completion can still list the repositories that took
+# part. Without the flag the same directory answers exactly as before, and an
+# empty membership on a non-git AIMI_ROOT is refused rather than left for a
+# caller to fall back to ".".
+test_split_detect_include_completed() {
+  echo ""
+  echo "=== TC58: split-detect --dir --include-completed — completed groups, flag scope, non-git refusal ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks/myfeat/phase-2-auth"
+  local p="$d/.aimi/tasks/myfeat/phase-2-auth"
+
+  _sd_write "$p/myfeat-phase-2-apps-web-tasks.json" "feat/myfeat-phase-2-apps-web" \
+    "$(_sd_stories completed)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":["myfeat-phase-2-services-api-tasks.json"]}'
+  _sd_write "$p/myfeat-phase-2-services-api-tasks.json" "feat/myfeat-phase-2-services-api" \
+    "$(_sd_stories completed completed)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":["myfeat-phase-2-apps-web-tasks.json"]}'
+
+  local out exit_code
+  out=$(_sd_run "$d" --dir "$p" --include-completed) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC58: --include-completed on an all-completed group exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC58: mode reports the group's kind"
+  assert_eq "2" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: every member of the group is listed"
+  assert_eq "apps/web,services/api" \
+    "$(printf '%s' "$out" | jq -r '[.members[].project] | sort | join(",")')" \
+    "TC58: each member carries its project"
+  assert_eq "0,0" "$(printf '%s' "$out" | jq -r '[.members[].pendingCount] | map(tostring) | join(",")')" \
+    "TC58: each member carries a pendingCount of 0"
+
+  out=$(_sd_run "$d" --dir "$p") && exit_code=0 || exit_code=$?
+  assert_eq "none" "$(printf '%s' "$out" | jq -r '.mode')" \
+    "TC58: the same call without the flag still reports none"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: the same call without the flag still lists no members"
+  assert_contains "fully completed" "$(printf '%s' "$out" | jq -r '.degradedReason')" \
+    "TC58: without the flag the exhausted-pool reason is unchanged"
+
+  local err
+  err=$( cd "$d" && "$CLI" split-detect --include-completed 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC58: --include-completed without --dir exits 1"
+  assert_contains "--include-completed" "$err" "TC58: the refusal names --include-completed"
+  assert_contains "--dir" "$err" "TC58: the refusal names --dir"
+
+  # Empty membership: a non-git AIMI_ROOT is refused, a git one is not.
+  local e="$d/.aimi/tasks/myfeat/phase-3-empty"; mkdir -p "$e"
+  err=$( cd "$d" && "$CLI" split-detect --dir "$e" --include-completed 2>&1 >/dev/null ) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC58: empty membership on a non-git root exits 1"
+  assert_contains "phase-3-empty" "$err" "TC58: the refusal names the phase directory"
+  assert_contains 'cannot fall back to "."' "$err" "TC58: the refusal states the root cannot fall back to \".\""
+
+  git init -q "$d" >/dev/null 2>&1
+  out=$(_sd_run "$d" --dir "$e" --include-completed) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC58: empty membership on a git root still exits 0"
+  assert_eq "0" "$(printf '%s' "$out" | jq -r '.members | length')" \
+    "TC58: empty membership on a git root lists no members"
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -8972,7 +9169,7 @@ main() {
   # project dir. TC47-TC49 are used by the story-merge project-axis tests
   # above, not by split-detect.
   echo ""
-  echo "--- split-detect Tests (TC36-TC46, TC50-TC53) ---"
+  echo "--- split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58) ---"
   test_split_detect_project_split_three_members
   test_split_detect_flat_scope_excludes_phase_dir
   test_split_detect_dir_scope_matches_phase_split
@@ -8989,6 +9186,8 @@ main() {
   test_split_detect_marked_group_unaffected_by_non_git_aimi_root
   test_split_detect_dir_scope_refusal_matches_flat_scope
   test_split_detect_empty_dir_with_decoy
+  test_split_detect_stale_flat_plan_versus_planned_phase
+  test_split_detect_include_completed
 
   cleanup
 

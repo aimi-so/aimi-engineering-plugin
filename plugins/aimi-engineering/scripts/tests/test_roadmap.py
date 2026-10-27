@@ -3347,7 +3347,7 @@ def test_the_diagnostic_names_the_verb_a_caller_can_run_not_the_internal_op():
     # roadmap-* verb. list-archivable is a tasks.json verb that reads one
     # roadmap.json per feature folder, so it is named rather than dropped.
     for op in R._VERB_FOR_OP.values():
-        assert op.startswith("roadmap-") or op == "list-archivable", op
+        assert op.startswith("roadmap-") or op in ("list-archivable", "split-detect"), op
     assert R._VERB_FOR_OP["list-archivable-phases"] == "list-archivable"
     # Every op either appears in the map or is already named after its verb.
     for op in R._OPS:

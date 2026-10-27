@@ -9412,6 +9412,49 @@ def op_structural_vocabulary(argv):
     return 0
 
 
+# The static verify detectors `triage-verify` runs. This is the backtest
+# verdict (BACKTEST_VERDICT in scripts/tests/backtest_known_gaps.py) as it stood
+# when the verb was written: only a detector that cleared its threshold against
+# the known-gap corpus is named here, and one that did not is never enabled.
+# runner-summary-colour and negated-grep-no-twin did not clear it. Re-run the
+# backtest and move this tuple in the same commit as any change to its verdict.
+SHIPPED_TRIAGE_DETECTORS = ("pipefail-grep-q", "git-diff-unstaged")
+
+
+def op_triage_verify(argv):
+    """Static findings for the verify of a story that has already failed.
+
+    Read-only and lock-free: the tasks file is read once and nothing is
+    written. `plan_checks` is imported here, not at module level, so the
+    tasks -> story_merge -> audit_patches chain stays free of it. A story with
+    no verify, an empty one or an unterminated one answers empty findings at
+    exit 0 -- plan_checks.verify_static_findings returns [] for each -- and
+    never a refusal, because the caller is already on a failure path.
+    """
+    path = _flag(argv, "--tasks-file")
+    story_id = _flag(argv, "--story-id")
+    if not path or story_id is None:
+        die("Usage: tasks.py triage-verify --tasks-file <path> --story-id <id>")
+    import plan_checks
+
+    shipped = list(SHIPPED_TRIAGE_DETECTORS)
+    if not shipped:
+        sys.stderr.write("triage-verify: no shipped detector\n")
+    text = ""
+    for doc in read_docs(path, "triage-verify"):
+        for story in stories_with_id(doc, story_id):
+            implementation = story.get("implementation") if isinstance(story, dict) else None
+            verify = implementation.get("verify") if isinstance(implementation, dict) else None
+            if isinstance(verify, str) and verify.strip():
+                text = verify
+                break
+        if text:
+            break
+    findings = plan_checks.verify_static_findings(text, shipped) if shipped else []
+    _emit({"id": story_id, "findings": findings, "shipped": shipped})
+    return 0
+
+
 _OPS = {
     "status": op_status,
     "metadata": op_metadata,
@@ -9419,6 +9462,7 @@ _OPS = {
     "project-groups": op_project_groups,
     "get-story": op_get_story,
     "get-story-context": op_get_story_context,
+    "triage-verify": op_triage_verify,
     "current-story": op_current_story,
     "get-state": op_get_state,
     "count-pending": op_count_pending,

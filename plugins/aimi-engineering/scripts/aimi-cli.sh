@@ -1973,6 +1973,34 @@ cmd_get_story_context() {
     --project-root "$PROJECT_ROOT" --skills-base-dir "$skills_base_dir"
 }
 
+# Static triage of a failed story's implementation.verify: prints
+# {id, findings[], shipped[]}. Read-only, takes no lock, one crossing.
+# Usage: triage-verify <story-id> [--tasks-file <path>]
+cmd_triage_verify() {
+  local tasks_file positional=()
+  _parse_positional_tasks_file tasks_file positional "$@"
+  local story_id="${positional[0]:-}"
+
+  if [ -z "$story_id" ]; then
+    echo "Usage: aimi-cli.sh triage-verify <story-id> [--tasks-file <path>]" >&2
+    exit 1
+  fi
+
+  validate_story_id "$story_id"
+
+  if [ -n "$tasks_file" ]; then
+    tasks_file=$(resolve_path "$tasks_file")
+    validate_path_in_project "$tasks_file"
+  else
+    tasks_file=$(get_tasks_file)
+  fi
+  validate_story_exists "$story_id" "$tasks_file"
+
+  check_python3
+  python3 "$(_aimi_tasks_py)" triage-verify \
+    --tasks-file "$tasks_file" --story-id "$story_id"
+}
+
 # The directory holding .aimi/, handed to a probe as --aimi-root so every
 # probed segment sees it as AIMI_ROOT beside TASKS_FILE_PATH. It is AIMI_DIR
 # (find_aimi_root's own export, absolute) minus its trailing /.aimi -- NOT
@@ -14340,11 +14368,13 @@ cmd_research_lookup() {
 }
 
 # Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
-# Print only the requested '## '/'### ' sections of a research .md file, concatenated
-# verbatim in the order the anchors were requested.
+# Print only the requested sections of a research .md file (any heading level 2 or
+# deeper: '## ', '### ', '#### ', ...), concatenated verbatim in the order the anchors
+# were requested. An h1 is never matchable.
 # Each section spans from its matching heading line up to (but not including) the next
-# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested h3s
-# and stops at the next h2 (or h1); an h3 anchor stops at the next h3/h2 (or h1).
+# heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested
+# h3/h4 lines and stops at the next h2 (or h1); an h4 anchor stops at the next
+# h4/h3/h2 (or h1).
 # Anchor text is matched case-insensitively against the heading text (leading #s and
 # surrounding whitespace stripped). An anchor with no matching heading is skipped (not
 # a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
@@ -14437,8 +14467,8 @@ cmd_extract_sections() {
           in_section = 0
         }
 
-        # Only ## / ### headings are matchable anchors; first match wins.
-        if (!in_section && !matched_done && (level == 2 || level == 3)) {
+        # Any heading of level 2 or deeper is a matchable anchor (h1 is not); first match wins.
+        if (!in_section && !matched_done && level >= 2) {
           heading_text = substr($0, level + 1)
           gsub(/^[[:space:]]+/, "", heading_text)
           gsub(/[[:space:]]+$/, "", heading_text)
@@ -15344,7 +15374,7 @@ cmd_story_merge() {
 # ============================================================================
 # apply-audit-patches: validate and apply the cross-story auditor's patches
 # Usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>]
-#           [--annotate-deferred --reason <text>]
+#           [--annotate-deferred --reason <text> [--agent-deferral]]
 # ============================================================================
 #
 # Modelled on cmd_story_merge rather than on the tasks.json verbs: there is no
@@ -15355,8 +15385,8 @@ cmd_story_merge() {
 # (the idx lookup, every patch rule, the writes) is audit_patches.py's, behind
 # one crossing.
 cmd_apply_audit_patches() {
-  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]"
-  local staging_dir="" result_path="" annotate=false reason="" reason_given=false
+  local usage="usage: aimi-cli.sh apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]"
+  local staging_dir="" result_path="" annotate=false reason="" reason_given=false agent_deferral=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -15374,6 +15404,10 @@ cmd_apply_audit_patches() {
         ;;
       --annotate-deferred)
         annotate=true
+        shift
+        ;;
+      --agent-deferral)
+        agent_deferral=true
         shift
         ;;
       *)
@@ -15396,6 +15430,11 @@ cmd_apply_audit_patches() {
     exit 1
   fi
 
+  if [ "$annotate" != true ] && [ "$agent_deferral" = true ]; then
+    echo "Error: apply-audit-patches: --agent-deferral is only valid with --annotate-deferred ($usage)" >&2
+    exit 1
+  fi
+
   validate_path_in_project "$staging_dir"
   if [ -n "$result_path" ]; then
     validate_path_in_project "$result_path"
@@ -15413,6 +15452,9 @@ cmd_apply_audit_patches() {
   fi
   if [ "$annotate" = true ]; then
     aa_args+=(--annotate-deferred --reason "$reason")
+    if [ "$agent_deferral" = true ]; then
+      aa_args+=(--agent-deferral)
+    fi
   fi
   python3 "$(_aimi_script_py audit_patches.py)" "${aa_args[@]}"
 }
@@ -15707,6 +15749,7 @@ _split_detect_phase_main_file() {
 cmd_split_detect() {
   local scope_dir=""
   local dir_mode=false
+  local include_completed=false
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -15719,12 +15762,21 @@ cmd_split_detect() {
         dir_mode=true
         shift 2
         ;;
+      --include-completed)
+        include_completed=true
+        shift
+        ;;
       *)
         echo "Error: split-detect: unknown argument: $1" >&2
         exit 1
         ;;
     esac
   done
+
+  if [ "$include_completed" = true ] && [ "$dir_mode" != true ]; then
+    echo "Error: split-detect: --include-completed requires --dir (it lists a phase directory's members after all are completed)" >&2
+    exit 1
+  fi
 
   # ------------------------------------------------------------------
   # 1. Build the candidate pool, newest mtime first
@@ -15942,9 +15994,11 @@ cmd_split_detect() {
     # A group with nothing left to do is not this run's work. Drop ALL of its
     # members from the pool and look again, rather than letting a completed
     # stale split route today's real work to a single-file fallback.
+    # --include-completed (--dir scope only) keeps the group: Phase Completion
+    # needs the members of a phase whose stories are all done.
     local group_active=0
     group_active=$(printf '%s' "$group" | jq '[.[] | select(.active)] | length')
-    if [ "$group_active" -eq 0 ]; then
+    if [ "$group_active" -eq 0 ] && [ "$include_completed" != true ]; then
       pool=$(printf '%s\n%s' "$pool" "$group" | jq -sc '
         .[1] as $g | [.[0][] | select(.path as $p | ($g | map(.path) | index($p)) == null)]')
       continue
@@ -15958,6 +16012,53 @@ cmd_split_detect() {
   done
 
   # ------------------------------------------------------------------
+  # 2b. Stale flat plan versus a claimable planned phase
+  # ------------------------------------------------------------------
+  # A flat file with no pending/in_progress story and at least one failed one
+  # still reads as active (the describe predicate counts failed as unfinished),
+  # so it wins over a roadmap phase waiting to be claimed. Only that winner,
+  # only in flat scope, is checked; the roadmap crossing happens at most once.
+  # python3 absent degrades to the old answer with one hint -- never a refusal.
+  local claimable="[]" failed_count=0
+  if [ "$dir_mode" != true ] && [ "$mode" = "single" ] && [ -z "$degraded_reason" ] && [ "$anchor" != "null" ]; then
+    local anchor_file counts live_count
+    anchor_file=$(printf '%s' "$anchor" | jq -r '.')
+    counts=$(jq -r '[(.userStories // [])[]? | (.status? // "pending")] |
+      "\([.[] | select(. == "pending" or . == "in_progress")] | length) \([.[] | select(. == "failed")] | length)"' \
+      "$anchor_file" 2>/dev/null) || counts=""
+    live_count=${counts%% *}
+    failed_count=${counts##* }
+    case "$live_count$failed_count" in
+      ''|*[!0-9]*) live_count=1; failed_count=0 ;;
+    esac
+    if [ "$live_count" -eq 0 ] && [ "$failed_count" -gt 0 ]; then
+      local roadmaps=() rm_file
+      for rm_file in "$TASKS_DIR"/*/roadmap.json; do
+        [ -f "$rm_file" ] && roadmaps+=("$rm_file")
+      done
+      if [ ${#roadmaps[@]} -gt 0 ]; then
+        if command -v python3 >/dev/null 2>&1; then
+          claimable=$(python3 "$(_aimi_roadmap_py)" planned-phases "${roadmaps[@]}" | jq -c '.') || claimable="[]"
+          [ -n "$claimable" ] || claimable="[]"
+          if [ "$(printf '%s' "$claimable" | jq 'length')" -gt 0 ]; then
+            mode="ambiguous"
+          fi
+        else
+          echo "split-detect: python3 not found; skipping the roadmap check for a stale flat plan" >&2
+        fi
+      fi
+    fi
+  fi
+
+  # An empty membership under --include-completed would let a caller fall
+  # back to "." as the git target; on a non-git root that is not a repository.
+  if [ "$include_completed" = true ] && [ "$aimi_root_is_git" != true ] \
+     && [ "$(printf '%s' "$members" | jq 'length')" -eq 0 ]; then
+    echo "Error: split-detect: --include-completed found no members in phase directory $scope_dir, and AIMI_ROOT ($PWD) is not a git repository, so the root cannot fall back to \".\"" >&2
+    exit 1
+  fi
+
+  # ------------------------------------------------------------------
   # 3. Emit
   # ------------------------------------------------------------------
   printf '%s' "$members" | jq \
@@ -15965,6 +16066,8 @@ cmd_split_detect() {
     --argjson anchor "$anchor" \
     --argjson total "$declared_total" \
     --arg reason "$degraded_reason" \
+    --argjson claimable "$claimable" \
+    --argjson failed "$failed_count" \
     '{
       mode: $mode,
       anchor: $anchor,
@@ -15972,7 +16075,7 @@ cmd_split_detect() {
       activeCount: ([.[] | select(.active)] | length),
       total: $total,
       degradedReason: (if ($reason | length) > 0 then $reason else null end)
-    }'
+    } + (if $mode == "ambiguous" then {failedCount: $failed, claimablePhases: $claimable} else {} end)'
 }
 
 # ============================================================================
@@ -17546,7 +17649,7 @@ COMMANDS:
                               prints the entry. Refuses (writes nothing) in agent
                               mode, on a malformed id, with no matching entry, or with
                               an empty --reason. Idempotent: a repeat call is a no-op.
-    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text>]
+    apply-audit-patches --staging-dir <dir> [--result <path>] [--annotate-deferred --reason <text> [--agent-deferral]]
                               Validate and apply the cross-story auditor's patches to the
                               staged NN-*.json story files in one crossing: one read and one
                               atomic write per affected file, every refusal decided before
@@ -17556,8 +17659,11 @@ COMMANDS:
                               dropped; exit 1 on an unreadable result, a duplicate idx, an
                               escaping symlink or an array-valued staging file.
                               --annotate-deferred --reason <text> instead appends the
-                              audit-deferred marker to the notes of every story an unresolved
-                              entry names and prints {annotated, oqDecisions}.
+                              audit-deferred marker, the uncut finding and the reason to the
+                              notes of every story an unresolved entry names and prints
+                              {annotated, oqDecisions}. --agent-deferral (only with
+                              --annotate-deferred) keeps the unresolved marker and adds no
+                              reason text.
     validate-outline --outline <path>
                               Check an outline.json array's produces/consumes contract
                               ([ext:]<kind>:<name>, kind sym|path|cli|http; ext: only in
@@ -17643,6 +17749,9 @@ COMMANDS:
                               nothing, and reports why, for a story whose verification.
                               status is not pending, whose strategy is visual, or that
                               carries no verification object at all.
+    triage-verify <id> [--tasks-file <path>]
+                              Static verify-detector findings for a failed story (returns
+                              {id, findings, shipped} JSON). Read-only, no lock.
     validate-waves [--tasks-file <path>]
                               Compute waves from dependsOn, compare to stored wave, report mismatches
     validate-wave-contention [--tasks-file <path>]
@@ -18151,12 +18260,13 @@ COMMANDS:
                               on the ARGUMENT, before the file is opened); missing file or
                               missing <path> arg -> error/usage on stderr, exit 1.
     extract-sections <file> --anchors "<titles>"
-                              Print only the requested '## '/'### ' sections of a
-                              research .md file, concatenated verbatim in request order.
+                              Print only the requested sections (any heading level 2 or
+                              deeper; h1 is not matchable) of a research .md file,
+                              concatenated verbatim in request order.
                               Each section spans its matching heading up to the next
                               heading of the same-or-higher level (or EOF) -- an h2
-                              anchor includes nested h3s and stops at the next h2/h1;
-                              an h3 anchor stops at the next h3/h2/h1.
+                              anchor includes nested h3/h4 lines and stops at the next
+                              h2/h1; an h4 anchor stops at the next h4/h3/h2/h1.
                               --anchors accepts comma- or newline-separated heading
                               titles; matching is case-insensitive on heading text.
                               An anchor with no matching heading is skipped (not an
@@ -18431,14 +18541,18 @@ COMMANDS:
                               keys stay absent, byte-unchanged.
                               --agent-mode demotes Phase 3.1 and Phase 4.1
                               hard rejects to warnings and proceeds.
-    split-detect [--dir <phase-dir>]
+    split-detect [--dir <phase-dir> [--include-completed]]
                               Read side of metadata.splitGroup: decide whether
                               the tasks files in scope form ONE split group that
                               must execute together, and report which members
                               still have pending work. A query, never a gate —
                               every outcome, including "single" and "none",
                               exits 0; non-zero is a real error (bad argument,
-                              unreadable --dir).
+                              unreadable --dir). --include-completed (needs
+                              --dir) keeps a group whose stories are all
+                              completed so Phase Completion can list its
+                              members; on a non-git AIMI_ROOT an empty
+                              membership is refused (exit 1).
                               Scope. Without --dir: FLAT — *-tasks.json whose
                               parent directory is .aimi/tasks itself, depth 1
                               only. The depth restriction is load-bearing:
@@ -18475,9 +18589,13 @@ COMMANDS:
                               one definition for every count reported, so an
                               in_progress story is pending everywhere.
                               Output. One JSON object: {mode: "project-split"|
-                              "paired-split"|"single"|"none", anchor, members:
-                              [{path,project,branchName,storyCount,pendingCount,
-                              active}], activeCount, total, degradedReason}.
+                              "paired-split"|"single"|"none"|"ambiguous", anchor,
+                              members: [{path,project,branchName,storyCount,
+                              pendingCount,active}], activeCount, total,
+                              degradedReason}. "ambiguous" (flat scope only) means
+                              the flat plan has no pending story but a failed one,
+                              while a roadmap phase is waiting to be claimed; it
+                              adds failedCount and claimablePhases.
                               degradedReason explains any fall-back so the caller
                               can report it without re-deriving why.
     verify-creates --feature <slug> --phase <id> [--dir <container-path>]
@@ -19085,6 +19203,7 @@ main() {
     acknowledge-smell) shift; cmd_acknowledge_smell "$@" ;;
     acknowledge-evidence) shift; cmd_acknowledge_evidence "$@" ;;
     judge-verification) shift; cmd_judge_verification "$@" ;;
+    triage-verify) shift; cmd_triage_verify "$@" ;;
     validate-waves)    shift; cmd_validate_waves "$@" ;;
     validate-wave-contention) shift; cmd_validate_wave_contention "$@" ;;
     validate-tasks)    shift; cmd_validate_tasks "$@" ;;

@@ -2,7 +2,7 @@
 name: aimi-learnings-researcher
 description: "Searches .aimi/solutions/ for relevant past solutions by frontmatter metadata. Use before implementing features or fixing problems to surface institutional knowledge and prevent repeated mistakes."
 model: inherit
-allowed-tools: Read, Grep, Glob, Write
+tools: Read, Grep, Glob, Write, Bash
 ---
 
 <examples>
@@ -238,13 +238,13 @@ Before returning results, persist full findings to a research file.
      - <headline finding 2>
      - <headline finding 3>
    sections:
-     - "## <h2 or h3 heading from the file>"
+     - "## <h2, h3 or h4 heading from the file>"
      - "## ..."
    # unwritten_findings: |
    #   <complete findings body, verbatim — present only when step 4's file does not exist>
    ```
 
-   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2/h3 anchor written to the file, in document order. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2, h3 or h4 anchor written to the file, in document order. A heading must not contain `$`, a backtick, a double quote or a backslash: the planner passes anchors to `extract-sections` inside a double-quoted shell argument and drops any anchor that carries one, so that slice is lost. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
 
 6. **Safety escape:** Security findings, compliance issues, or conflicts with other researchers auto-expand beyond caps — user safety overrides brevity.
 
@@ -266,13 +266,13 @@ Structure your findings as:
 
 ### Relevant Learnings
 
-#### 1. [Title]
+### 1. [Title]
 - **File**: [path]
 - **Module**: [module]
 - **Relevance**: [why this matters for current task]
 - **Key Insight**: [the gotcha or pattern to apply]
 
-#### 2. [Title]
+### 2. [Title]
 ...
 
 ### Recommendations

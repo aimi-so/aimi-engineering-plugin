@@ -76,7 +76,11 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 if [ "$PHASE_SPLIT_MODE" = true ]; then
   PHASE_DIR_PATH="$AIMI_ROOT/.aimi/tasks/$FEATURE/$PHASE_DIR"
   # Hoisted once, above the loop -- never re-called per split_file.
-  PHASE_MEMBERS_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" | jq -c '.members[]')
+  PHASE_SPLIT_JSON=$($AIMI_CLI split-detect --dir "$PHASE_DIR_PATH" --include-completed) || {
+    echo "split-detect --include-completed failed for $PHASE_DIR_PATH" >&2
+    exit 1
+  }
+  PHASE_MEMBERS_JSON=$(printf '%s' "$PHASE_SPLIT_JSON" | jq -c '.members[]')
   PHASE_GROUP_RAW=""
   while IFS= read -r split_file; do
     [ -n "$split_file" ] || continue
@@ -85,6 +89,23 @@ if [ "$PHASE_SPLIT_MODE" = true ]; then
   done <<< "$PHASE_SPLIT_FILES"
   PHASE_GROUP_PROJECTS=$(printf '%s\n' "$PHASE_GROUP_RAW" | grep -v '^$' | sort -u)
   [ -n "$PHASE_GROUP_PROJECTS" ] || PHASE_GROUP_PROJECTS="."
+  # A member's project is a git/serve target below: refuse a traversal-shaped
+  # value or one outside the project character class, as creates-verification does.
+  while IFS= read -r GROUP_PROJECT; do
+    case "$GROUP_PROJECT" in
+      ''|.) ;;
+      /*|..|../*|*/..|*/../*)
+        echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+        exit 1
+        ;;
+      *)
+        if ! [[ "$GROUP_PROJECT" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_.-]*$ ]]; then
+          echo "Invalid project \"$GROUP_PROJECT\" for phase $PHASE_ID" >&2
+          exit 1
+        fi
+        ;;
+    esac
+  done <<< "$PHASE_GROUP_PROJECTS"
 else
   # project-groups now owns the jq, the sort-unique pipeline and the
   # empty-fallback this branch used to run inline. Status is already

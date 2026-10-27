@@ -535,6 +535,103 @@ translate_command() {
 }
 
 # ---------------------------------------------------------------------------
+# agent_tool_to_opencode — map one Claude tool name to its OpenCode permission
+# name. Prints the name; prints nothing for an mcp__ pattern (skipped, the
+# OpenCode MCP permission naming is not documented); returns 1 when unmapped.
+# ---------------------------------------------------------------------------
+agent_tool_to_opencode() {
+  case "$1" in
+    Read) printf 'read' ;;
+    Grep) printf 'grep' ;;
+    Glob) printf 'glob' ;;
+    Bash) printf 'bash' ;;
+    Write|Edit) printf 'edit' ;;
+    WebFetch) printf 'webfetch' ;;
+    WebSearch) printf 'websearch' ;;
+    Task) printf 'task' ;;
+    TodoWrite) printf 'todowrite' ;;
+    Skill) printf 'skill' ;;
+    mcp__*) ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# agent_permission_block — build the permission frontmatter block for the
+# agent whose frontmatter parse_frontmatter just loaded. Prints nothing when
+# the source declares no tools line. Dies on an unmapped tool. Pure builder:
+# the caller captures it before opening the destination file.
+# ---------------------------------------------------------------------------
+agent_permission_block() {
+  local src_file="$1"
+  local tools_val="" have_tools=0 i=0 key
+  while [ "$i" -lt "${#FM_KEYS[@]}" ]; do
+    if [ "${FM_KEYS[$i]}" = "tools" ]; then
+      have_tools=1
+      tools_val="${FM_VALS[$i]}"
+      [ "$tools_val" = "tools:" ] && tools_val=""
+      if [ -z "$tools_val" ]; then
+        # YAML list form: collect the dash lines that follow
+        local j=$((i + 1)) item
+        while [ "$j" -lt "${#FM_KEYS[@]}" ]; do
+          key="${FM_KEYS[$j]}"
+          case "$key" in
+            *[![:space:]]*) ;;
+            *) j=$((j + 1)); continue ;;
+          esac
+          case "$key" in
+            [[:space:]]*-*|-*) ;;
+            *) break ;;
+          esac
+          item="${FM_VALS[$j]}"
+          item="${item#"${item%%[![:space:]]*}"}"
+          item="${item#-}"
+          tools_val="${tools_val:+$tools_val,}$item"
+          j=$((j + 1))
+        done
+      fi
+      break
+    fi
+    i=$((i + 1))
+  done
+  [ "$have_tools" -eq 1 ] || return 0
+
+  local granted=" " tool mapped old_ifs="$IFS" noglob=1
+  case "$-" in *f*) noglob=0 ;; esac
+  set -f
+  IFS=','
+  # shellcheck disable=SC2086
+  set -- $tools_val
+  IFS="$old_ifs"
+  [ "$noglob" -eq 1 ] && set +f
+  for tool in "$@"; do
+    tool="${tool#"${tool%%[![:space:]]*}"}"
+    tool="${tool%"${tool##*[![:space:]]}"}"
+    tool="${tool#\"}"; tool="${tool%\"}"
+    [ -n "$tool" ] || continue
+    if mapped=$(agent_tool_to_opencode "$tool"); then
+      if [ -n "$mapped" ]; then
+        granted="${granted}${mapped} "
+      else
+        warn "$src_file: skipping MCP tool pattern '$tool' (OpenCode MCP permission naming is not documented)"
+      fi
+    else
+      die "$src_file: no OpenCode mapping for Claude tool '$tool'"
+    fi
+  done
+
+  local name
+  printf '%s\n' "permission:"
+  for name in read grep glob bash edit webfetch websearch task todowrite skill; do
+    case "$granted" in
+      *" $name "*) printf '  %s: allow\n' "$name" ;;
+      *) printf '  %s: deny\n' "$name" ;;
+    esac
+  done
+}
+
+# ---------------------------------------------------------------------------
 # translate_agent — convert Claude agent .md to OpenCode agent .md
 # ---------------------------------------------------------------------------
 translate_agent() {
@@ -549,12 +646,19 @@ translate_agent() {
   local model
   model=$(fm_get "model") || model=""
 
+  # Built before the redirect so a die leaves no half-written destination.
+  local perm
+  perm=$(agent_permission_block "$src_file") || exit 1
+
   {
     printf '%s\n' "---"
     printf '%s\n' "mode: subagent"
     printf 'description: %s\n' "$desc"
     if [ -n "$model" ] && [ "$model" != "inherit" ]; then
       printf 'model: %s\n' "$model"
+    fi
+    if [ -n "$perm" ]; then
+      printf '%s\n' "$perm"
     fi
     printf '%s\n' "---"
     printf '%s' "$FM_BODY"

@@ -92,6 +92,10 @@ distinct field names an applied patch changed}, with an entry only for an idx
 that received at least one applied patch.
 
 `--annotate-deferred --reason <text>` prints `{annotated, oqDecisions}` instead.
+Each annotated note holds `[audit-deferred: resolved at plan review]`, the finding
+message (2000-character sanity cap) and the labelled batch reason; with
+`--agent-deferral`, or an empty reason, it keeps the unresolved marker and the
+message alone.
 Annotate mode is not idempotent by design: the orchestrator calls it once per
 Defer decision.
 """
@@ -163,7 +167,18 @@ MAX_PATCHES_PER_STORY = 10
 MAX_TASKS = 50
 NOTES_SEPARATOR = "\n\n---\n\n"
 DEFER_MARKER = "[audit-deferred: unresolved — review before execution]"
+DEFER_MARKER_RESOLVED = "[audit-deferred: resolved at plan review]"
+DEFER_MARKER_PREFIX = "[audit-deferred:"
+REASON_LIMIT = 1000
+NOTE_MESSAGE_LIMIT = 2000
+DECISION_MESSAGE_LIMIT = 200
+TRUNCATION_SUFFIX = "… [truncated]"
+REASON_LABEL = "Reason recorded for the deferred findings of this batch:"
 AUDIT_SENTINEL = "_audit"
+AUDIT_FAILED_STATUS = "audit-failed"
+AUDIT_DID_NOT_RUN_MESSAGE = (
+    "The cross-story audit did not run, so no cross-story check covered this story."
+)
 
 _STAGED_NAME = re.compile(r"[0-9]{2}-.*\.json", re.S)
 _IDX = re.compile(r"[0-9]{2}")
@@ -764,21 +779,39 @@ def _one_line(text):
     return re.sub(r"\r\n|\r|\n", " ", text)
 
 
-def sanitize_reason(reason):
-    return _strip_shell_markers(_one_line(reason))[:500]
+def _neutralise_marker(text):
+    """Replace the marker prefix so recorded text cannot forge a second marker."""
+    return text.replace(DEFER_MARKER_PREFIX, "[audit-deferred;")
 
 
-def sanitize_message(message):
-    text = _strip_shell_markers(_one_line(message))
-    return text[:200] + "…" if len(text) > 200 else text
+def _clean(text):
+    return _neutralise_marker(_strip_shell_markers(_one_line(text)))
 
 
-def run_annotate(staging_dir, result_path, reason):
+def sanitize_reason(reason, limit=REASON_LIMIT):
+    return _clean(reason)[:limit]
+
+
+def sanitize_message(message, limit=DECISION_MESSAGE_LIMIT):
+    text = _clean(message)
+    return text[:limit] + "…" if len(text) > limit else text
+
+
+def sanitize_note_message(message):
+    text = _clean(message)
+    if len(text) > NOTE_MESSAGE_LIMIT:
+        return text[:NOTE_MESSAGE_LIMIT] + TRUNCATION_SUFFIX
+    return text
+
+
+def run_annotate(staging_dir, result_path, reason, agent_deferral=False):
     idx_map = staged_idx_map(staging_dir)
     docs = _load_staged(idx_map)
     result = load_result(result_path)
     reason_text = sanitize_reason(reason)
+    resolved = bool(reason_text) and not agent_deferral
 
+    stub = result.get("status") == AUDIT_FAILED_STATUS
     entries = [_normalise_unresolved(e) for e in result.get("unresolved", [])]
     additions = {}
     decisions = []
@@ -793,8 +826,37 @@ def run_annotate(staging_dir, result_path, reason):
                 "resolution": "deferred",
             }
         )
-        if idx != AUDIT_SENTINEL and idx in idx_map:
-            additions.setdefault(idx, []).append(DEFER_MARKER + " " + message)
+        if stub and idx == AUDIT_SENTINEL:
+            # The Failure Fallback stub: no story was audited, so every staged
+            # story carries the notice. The decision above stays a single entry.
+            for staged in idx_map:
+                if resolved:
+                    addition = (
+                        DEFER_MARKER_RESOLVED
+                        + " "
+                        + AUDIT_DID_NOT_RUN_MESSAGE
+                        + "\n"
+                        + REASON_LABEL
+                        + " "
+                        + reason_text
+                    )
+                else:
+                    addition = DEFER_MARKER + " " + AUDIT_DID_NOT_RUN_MESSAGE
+                additions.setdefault(staged, []).append(addition)
+        elif idx != AUDIT_SENTINEL and idx in idx_map:
+            if resolved:
+                addition = (
+                    DEFER_MARKER_RESOLVED
+                    + " "
+                    + sanitize_note_message(entry["message"])
+                    + "\n"
+                    + REASON_LABEL
+                    + " "
+                    + reason_text
+                )
+            else:
+                addition = DEFER_MARKER + " " + message
+            additions.setdefault(idx, []).append(addition)
 
     writes = []
     annotated = []
@@ -834,7 +896,12 @@ def main(argv):
         if not staging_dir or not os.path.isdir(staging_dir):
             raise AuditRefusal("staging directory does not exist: " + staging_dir)
         if annotate:
-            report = run_annotate(staging_dir, result_path, _flag(args, "--reason"))
+            report = run_annotate(
+                staging_dir,
+                result_path,
+                _flag(args, "--reason"),
+                "--agent-deferral" in args,
+            )
         else:
             report = run_apply(staging_dir, result_path)
     except AuditRefusal as refusal:
