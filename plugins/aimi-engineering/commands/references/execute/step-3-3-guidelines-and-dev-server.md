@@ -33,7 +33,7 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 # (tasks.py) -- any non-string shape collapsed to null there -- so `// "DEFAULT"`
 # below fires on exactly the cases it always did, and `unique` never sees an
 # array pretty-printed across several lines masquerading as several group keys.
-VISUAL_GROUP_KEYS=$($AIMI_CLI verification-report --tasks-file "$AIMI_ROOT/$TASKS_PATH" | jq -r '[.visual[] | (.project // "DEFAULT")] | unique | .[]')
+VISUAL_GROUP_KEYS=$($AIMI_CLI verification-report --tasks-file "$TASKS_PATH" | jq -r '[.visual[] | (.project // "DEFAULT")] | unique | .[]')
 ```
 
 For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):

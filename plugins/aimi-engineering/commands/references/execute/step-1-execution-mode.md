@@ -54,13 +54,10 @@ Check for and reset stories stuck in `in_progress` status (from interrupted prev
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AIMI_ROOT="$PWD"
-while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
-[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if [ "$PHASE_MODE" = "true" ]; then
   STEP1_TASKS_FILE="$PHASE_TASKS_PATH"
 else
-  STEP1_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+  STEP1_TASKS_FILE="$TASKS_PATH"
 fi
 $AIMI_CLI reset-orphaned --tasks-file "$STEP1_TASKS_FILE"
 ```
@@ -76,18 +73,15 @@ Note: These stories will appear as "failed" in status. The user can review and r
 
 ### Content Validation
 
-Same resolution as Orphaned Story Recovery immediately above — a fresh `AIMI_ROOT` derivation (each Bash call is an isolated shell) feeding the identical `PHASE_MODE`-conditioned formula:
+Same resolution as Orphaned Story Recovery immediately above — the identical `PHASE_MODE`-conditioned formula, re-stated because each Bash call is an isolated shell. `TASKS_PATH` is used as-is: `init-session` always prints it absolute, so prefixing `$AIMI_ROOT/` would double it:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AIMI_ROOT="$PWD"
-while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
-[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if [ "$PHASE_MODE" = "true" ]; then
   STEP1_TASKS_FILE="$PHASE_TASKS_PATH"
 else
-  STEP1_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+  STEP1_TASKS_FILE="$TASKS_PATH"
 fi
 $AIMI_CLI validate-stories --tasks-file "$STEP1_TASKS_FILE"
 ```

@@ -13,13 +13,13 @@ CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populate
 
 # WAVE_TASKS_FILE — this run's own tasks file, resolved once here with the
 # same PHASE_MODE-conditioned formula Step 3 above already applied ($PHASE_TASKS_PATH
-# when PHASE_MODE=true, else $AIMI_ROOT/$TASKS_PATH — both already resolved by
+# when PHASE_MODE=true, else $TASKS_PATH (absolute) — both already resolved by
 # this point in every flow, including a split sub-orchestrator, which pre-sets
 # PHASE_TASKS_PATH before it ever reaches here). Every CLI call in this loop
 # passes it explicitly as --tasks-file instead of falling through to the
 # shared current-tasks pointer, which is what let two concurrent split
 # orchestrators silently read and mutate each other's file.
-WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else (AIMI_ROOT + "/" + TASKS_PATH)
+WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else TASKS_PATH
 
 # PLAN_DISC — this run's own plan identity, the sanitized stem of the file
 # above. Derived by the block in Multi-Repo Handling's `### Plan Discriminator`;
@@ -701,7 +701,7 @@ while true:
                         # url to the empty string, so no `// empty` is needed
                         # here — see the closed jq -r non-string hazard note
                         # above Container Dev Server Bootstrap.
-                        STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+                        STORY_TASKS_FILE="$TASKS_PATH"
                         STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                         EFFECTIVE_URL="$STORY_VERIFICATION_URL"
                     else:
@@ -756,13 +756,13 @@ while true:
                                 ```bash
                                 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                                 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
-                                BRANCH_NAME=$(jq -r '.metadata.branchName' "$AIMI_ROOT/$TASKS_PATH")
+                                BRANCH_NAME=$(jq -r '.metadata.branchName' "$TASKS_PATH")
                                 if [ "[group_key]" = "DEFAULT" ]; then
                                   cd "$AIMI_ROOT"
                                 else
                                   cd "$AIMI_ROOT/[group_key]"
                                 fi
-                                STORY_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+                                STORY_TASKS_FILE="$TASKS_PATH"
                                 STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                                 SERVE_URL_JSON=$($WORKTREE_MGR serve url "$BRANCH_NAME" "$STORY_VERIFICATION_URL")
                                 EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')

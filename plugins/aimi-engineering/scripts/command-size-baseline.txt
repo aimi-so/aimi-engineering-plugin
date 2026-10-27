@@ -53,7 +53,7 @@ execute.md	32908
 references/execute/phase-completion-creates-verification.md	31594
 references/execute/phase-completion-handoff-and-mark.md	20312
 references/execute/phase-completion-offer-pull-request.md	26013
-references/execute/step-4-wave-execution-loop.md	59737
+references/execute/step-4-wave-execution-loop.md	59684
 references/execute/step-5-completion.md	30094
 references/execute/paired-split-merge-and-continue.md	21738
 references/execute/step-1-7-claim-the-phase.md	18178
