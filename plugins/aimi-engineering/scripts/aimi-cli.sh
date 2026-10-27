@@ -15556,6 +15556,22 @@ cmd_validate_staging() {
 }
 
 # ============================================================================
+# slugify: derive an ASCII directory slug from free text
+# Usage: aimi-cli.sh slugify <text> | slugify --stdin
+# ============================================================================
+#
+# Takes no tasks file, no lock and no project: it is dispatched ahead of
+# find_aimi_root, so it answers from any directory. The text is one argument or
+# the stdin bytes and goes straight to slug.py, never through a shell, so
+# metacharacters in it are inert. check_python3 refuses rather than degrading:
+# a slug built without the interpreter would be a different slug, and the
+# callers name directories after it. Every rule is slug.py's, behind one crossing.
+cmd_slugify() {
+  check_python3
+  python3 "$(_aimi_script_py slug.py)" "$@"
+}
+
+# ============================================================================
 # validate-outline: check an outline's produces/consumes contract, derive waves
 # Usage: aimi-cli.sh validate-outline --outline <path>
 # ============================================================================
@@ -18166,6 +18182,16 @@ COMMANDS:
                               non-zero, since there is no gh subcommand or
                               REST fallback for resolving a review thread.
                               github, gitlab and gitea each have an adapter.
+    slugify (--stdin | <text>)
+                              Print an ASCII directory slug for free text: NFKD
+                              fold to ASCII, lowercase, runs of non-alphanumerics
+                              become one hyphen, ends trimmed, cut to 50 characters
+                              and trimmed again. A character with no NFKD form
+                              (o-slash, sharp s, ae) is dropped. Text with no ASCII
+                              letter or digit left is refused on stderr with exit
+                              1 and nothing on stdout; no fallback name is made up.
+                              The text is one argument or the stdin bytes (never
+                              both), works from any directory and takes no lock.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -19166,6 +19192,7 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
+    slugify) shift; cmd_slugify "$@"; return ;;
     list-models) cmd_list_models; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
     get-current-models) cmd_get_current_models; return ;;

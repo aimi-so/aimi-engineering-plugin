@@ -179,7 +179,7 @@ Every prose field you write — `title`, `description`, every `acceptanceCriteri
 
 **A project's own declared commit-language convention wins over this default.** When the target project's own `CLAUDE.md` states a commit-language convention, that convention governs the commit subject `title` becomes there — this rule is about artifacts the plugin owns, never about overriding a convention a project has written down for itself.
 
-**Derived identifiers stay ASCII and are never translated.** `featureSlug`, the phase slug and its `dir`, and `branchName` are identifiers, not prose: the five-step algorithm in `commands/references/topic-slug.md` has no transliteration step, so a title carrying accents silently loses them and a non-Latin-script title slugs to empty, then fails the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` validation `plan.md` applies to `featureSlug`. Never translate a slug, a phase dir, or a branch name, into or out of any language.
+**Derived identifiers stay ASCII and are never translated.** `featureSlug`, the phase slug and its `dir`, and `branchName` are identifiers, not prose: the `slugify` verb (`aimi-cli.sh slugify`, the deterministic form of the five-step algorithm in `commands/references/topic-slug.md`) transliterates by NFKD only, so an accent folds to its ASCII letter but a letter with no NFKD form (o-slash, sharp s, ae) is dropped, and a non-Latin-script title slugs to empty, which the verb refuses instead of inventing a name; an empty slug also fails the `^[a-zA-Z0-9][a-zA-Z0-9_-]*$` validation `plan.md` applies to `featureSlug`. Never translate a slug, a phase dir, or a branch name, into or out of any language.
 
 ## Verify working directory
 

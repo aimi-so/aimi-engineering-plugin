@@ -32,6 +32,7 @@ set -uo pipefail
 #   - story-merge Tests
 #   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
+#   - slugify Tests (sixteen assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -5283,6 +5284,55 @@ test_outline_shift() {
   rm -rf "$dir"
 }
 
+test_slugify() {
+  echo ""
+  echo "=== slugify: ASCII directory slug from free text ==="
+
+  # Run from a directory with no .aimi/ so the verb is shown to need none.
+  local w; w=$(mktemp -d)
+  local output exit_code long
+
+  output=$(cd "$w" && "$CLI" slugify "Café Résumé Über" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "slugify: accented text exits 0 from a directory with no .aimi/"
+  assert_eq "cafe-resume-uber" "$output" "slugify: accents fold to their ASCII letters"
+
+  output=$(printf '  --Hello, World!  ' | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "hello-world" "$output" "slugify: --stdin collapses runs and trims both ends"
+
+  output=$(cd "$w" && "$CLI" slugify "Søren Straße Ærø" 2>/dev/null)
+  assert_eq "sren-strae-r" "$output" "slugify: characters with no NFKD form are dropped"
+
+  long=$(printf 'a%.0s' $(seq 1 49))
+  output=$(printf '%s b' "$long" | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "$long" "$output" "slugify: the cut to 50 is trimmed again"
+
+  output=$(printf '%s' '$(touch PWNED) `id`' | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "touch-pwned-id" "$output" "slugify: shell metacharacters in the text slug to their words"
+  assert_eq "absent" "$([ -e "$w/PWNED" ] && echo present || echo absent)" "slugify: the text was not executed"
+
+  output=$(cd "$w" && "$CLI" slugify "日本語" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: a text with no ASCII letter or digit exits 1"
+  assert_eq "" "$output" "slugify: a refusal prints nothing on stdout"
+  output=$(cd "$w" && "$CLI" slugify "日本語" 2>&1 >/dev/null) || true
+  assert_contains "no ASCII letter or digit to build a slug from" "$output" "slugify: the refusal says why on stderr"
+
+  output=$(cd "$w" && "$CLI" slugify 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: a missing text source exits 1"
+  assert_contains "slugify: a text argument or --stdin is required" "$output" "slugify: a missing text source is refused"
+
+  output=$(cd "$w" && "$CLI" slugify --bogus 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: an unknown flag exits 1"
+  assert_contains "slugify: unknown flag: --bogus" "$output" "slugify: an unknown flag is named"
+
+  output=$(cd "$w" && "$CLI" slugify --stdin extra </dev/null 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: --stdin with another argument exits 1"
+
+  output=$("$CLI" help 2>&1)
+  assert_contains "slugify (--stdin | <text>)" "$output" "slugify: help lists both forms"
+
+  rm -rf "$w"
+}
+
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
 test_story_merge_malformed_json() {
   echo ""
@@ -9208,6 +9258,7 @@ main() {
   test_validate_staging
   test_validate_outline
   test_outline_shift
+  test_slugify
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_audit_gate

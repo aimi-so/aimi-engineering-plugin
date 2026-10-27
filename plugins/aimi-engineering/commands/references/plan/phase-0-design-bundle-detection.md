@@ -57,7 +57,7 @@ esac
 - **`BUNDLE_FINAL` non-empty (the path, symlinks resolved, already sits inside `AIMI_ROOT`):** use `$BUNDLE_ARG` as-is — no import needed.
 - **`BUNDLE_FINAL` empty (the path resolves outside `AIMI_ROOT`):** bring it into the project first with `import-design-bundle`, then point `BUNDLE_FINAL` at the imported copy. The destination (`BUNDLE_DEST`) depends on `ROADMAP_MODE` (set above, in Rolling-Wave Phase Selection):
   - `ROADMAP_MODE=true`: `$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle` — D2's fixed phase-scoped location, reusing `$featureSlug`/`$PHASE_DIR` from `#### Extract selected-phase working memory` above; this is the same `<phase-dir>/design-bundle/README.md` layout `_select_design_bundle`'s phase tier already expects.
-  - `ROADMAP_MODE=false`: `$AIMI_ROOT/.aimi/design-bundles/<slug>`, `<slug>` derived from `$FEATURE_DESCRIPTION` via the same five-step algorithm in `commands/references/topic-slug.md` (lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) that Phase 1's own `topicSlug` derivation applies below — that derivation has not run yet for a flat feature at this point in the pipeline, so this is a local, one-off derivation rather than a reuse of it.
+  - `ROADMAP_MODE=false`: `$AIMI_ROOT/.aimi/design-bundles/<slug>`, `<slug>` derived from `$FEATURE_DESCRIPTION` by `$AIMI_CLI slugify --stdin`, the deterministic form of the derivation in `commands/references/topic-slug.md` (accents folded to ASCII, lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) that Phase 1's own `topicSlug` derivation applies below — that derivation has not run yet for a flat feature at this point in the pipeline, so this is a local, one-off derivation rather than a reuse of it.
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -65,7 +65,8 @@ esac
   if [ "$ROADMAP_MODE" = true ]; then
     BUNDLE_DEST="$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle"
   else
-    BUNDLE_IMPORT_SLUG=$(printf '%s' "$FEATURE_DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | cut -c1-50 | sed 's/-*$//')
+    BUNDLE_IMPORT_SLUG=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI slugify --stdin) || BUNDLE_IMPORT_SLUG=""
+    [ -n "$BUNDLE_IMPORT_SLUG" ] || { echo "Error: no slug can be derived from the feature description" >&2; exit 1; }
     BUNDLE_DEST="$AIMI_ROOT/.aimi/design-bundles/$BUNDLE_IMPORT_SLUG"
   fi
   IMPORT_ERR_FILE=$(mktemp)
@@ -78,6 +79,8 @@ esac
   IMPORT_STDERR=$(cat "$IMPORT_ERR_FILE" 2>/dev/null)
   rm -f "$IMPORT_ERR_FILE"
   ```
+
+  **When the slug is empty** (the description holds no ASCII letter or digit once accents are folded, so `slugify` refused it), the block above prints the verb's own stderr line and its own `Error: no slug can be derived` line and STOPS the entire `/aimi:plan` invocation before `import-design-bundle` runs. No fallback slug is made up.
 
   **On `IMPORT_EXIT != 0`:** report `$IMPORT_STDERR` as a single warning line — the CLI's own refusal already names both the source and the destination when a different copy already lives there, and names `--reimport` as the way to replace it — and STOP the entire `/aimi:plan` invocation before any `detect-design-bundle` call runs. **On `IMPORT_EXIT = 0`:** `BUNDLE_FINAL="$BUNDLE_DEST"`.
 
