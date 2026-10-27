@@ -33,6 +33,7 @@ set -uo pipefail
 #   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
 #   - slugify Tests (sixteen assertions, inside the story-merge section)
+#   - path-argument resolution Tests (four assertions, inside the story-merge section)
 #   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58, TC60)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -5218,6 +5219,33 @@ test_validate_staging() {
   rm -rf "$bad" "$good"
 }
 
+test_invocation_relative_paths() {
+  echo ""
+  echo "=== path arguments resolve against the caller's directory, falling back to the .aimi/ root ==="
+
+  # A directory under the project with no .aimi/ of its own, the shape of a
+  # story worktree under .worktrees/: find_aimi_root walks past it to the root.
+  local wt=".worktrees/inv-$$" root_stg=".aimi/.inv-root-$$"
+  mkdir -p "$wt/.rel" "$root_stg"
+  local story='{"title":"T","description":"d","acceptanceCriteria":["x"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"true\nfalse\n"}}'
+  printf '%s' "$story" > "$wt/.rel/01-a.json"
+  printf '%s' "$story" > "$root_stg/01-a.json"
+
+  local output exit_code
+  output=$(cd "$wt" && "$CLI" validate-staging --staging-dir .rel 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "1|01" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output" 2>/dev/null)" "path args: a relative --staging-dir that exists only in the caller's directory is found there"
+
+  output=$(cd "$wt" && "$CLI" validate-staging --staging-dir "$root_stg" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "1|01" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output" 2>/dev/null)" "path args: a relative .aimi/ path absent from the caller's directory still resolves against the root"
+
+  mkdir -p "$wt/esc"
+  output=$(cd "$wt/esc" && "$CLI" validate-staging --staging-dir ../../../.. 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "path args: a rebased path outside the project is still refused"
+  assert_contains "escapes project root" "$output" "path args: the refusal comes from confinement, unchanged"
+
+  rm -rf "$wt" "$root_stg"
+}
+
 test_validate_outline() {
   echo ""
   echo "=== validate-outline: contract check, waves, refusals ==="
@@ -9344,6 +9372,7 @@ main() {
   test_story_merge_missing_dir
   test_apply_audit_patches
   test_validate_staging
+  test_invocation_relative_paths
   test_validate_outline
   test_outline_shift
   test_slugify

@@ -97,6 +97,52 @@ find_aimi_root() {
   done
 }
 
+# Print, NUL-separated, the argument list of one verb with every relative path
+# argument rebased onto the directory the caller invoked the CLI from.
+#
+# find_aimi_root cds to the directory holding .aimi/, so a relative path
+# argument used to resolve against THAT directory rather than against the
+# caller's. A caller standing in a git worktree under .worktrees/ (which has no
+# .aimi/ of its own) and passing `--staging-dir .fixture` had it looked up in
+# the main checkout, where it does not exist. A path argument is now rebased
+# onto AIMI_INVOCATION_DIR when it EXISTS there; otherwise it is left as it
+# was, root-relative, so `.aimi/...` arguments from a container cwd and output
+# paths that do not exist yet behave exactly as before. Confinement is
+# unchanged: every verb still runs validate_path_in_project on the value it
+# receives, so a rebased path outside PROJECT_ROOT is refused the same way.
+#
+# Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
+# bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
+# the value of a flag); a story id, a reason or a branch name is never touched.
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
+_rebase_invocation_relative_args() {
+  local verb="$1"; shift
+  local prev="" arg candidate
+  for arg in "$@"; do
+    candidate=0
+    case "$_PATH_ARG_FLAGS" in
+      *" $prev "*) candidate=1 ;;
+    esac
+    # A positional path: the verb takes one, the argument is not a flag, and
+    # it is not the value of --anchors (the only text-valued flag those verbs
+    # take).
+    if [ "$candidate" -eq 0 ] && [ "$prev" != "--anchors" ]; then
+      case "$_PATH_ARG_POSITIONAL_VERBS" in
+        *" $verb "*) case "$arg" in -*|"") ;; *) candidate=1 ;; esac ;;
+      esac
+    fi
+    if [ "$candidate" -eq 1 ] && [ -n "$arg" ] && [ "${arg#/}" = "$arg" ] \
+       && [ "$AIMI_INVOCATION_DIR" != "$PWD" ] && [ -e "$AIMI_INVOCATION_DIR/$arg" ]; then
+      prev="$arg"
+      arg="$AIMI_INVOCATION_DIR/$arg"
+    else
+      prev="$arg"
+    fi
+    printf '%s\0' "$arg"
+  done
+}
+
 # Resolve $1 to the exact form the project-confinement check compares against
 # PROJECT_ROOT: realpath when the path already exists, realpath(parent)/
 # basename when only the parent does, and the raw path when neither does --
@@ -19500,6 +19546,18 @@ main() {
 
   find_aimi_root
   check_jq
+
+  # Relative path arguments mean what they mean in the caller's directory, not
+  # in the .aimi/ root find_aimi_root just cd'd to; see
+  # _rebase_invocation_relative_args. A caller already at the root is untouched.
+  if [ "$#" -gt 1 ] && [ "$AIMI_INVOCATION_DIR" != "$PWD" ]; then
+    local _verb="$1" _rebased_arg
+    local -a _rebased=()
+    while IFS= read -r -d '' _rebased_arg; do
+      _rebased+=("$_rebased_arg")
+    done < <(_rebase_invocation_relative_args "$@")
+    set -- "$_verb" "${_rebased[@]}"
+  fi
 
   case "${1:-help}" in
     init-session)      shift; cmd_init_session "$@" ;;
