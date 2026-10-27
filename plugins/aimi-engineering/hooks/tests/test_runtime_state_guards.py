@@ -899,6 +899,119 @@ def test_stamp_and_subagent_rewrite_env_bypass_unchanged(tmp_path, monkeypatch):
         assert "deny" not in output
 
 
+# -- shared expander context files (`<RUN_DIR>/context/...`) -------------------
+
+
+def _context_dir(root: Path) -> Path:
+    ctx = root / ".aimi" / ".tasks-staging" / "run-1" / "context"
+    ctx.mkdir(parents=True)
+    return ctx
+
+
+def _assert_denied(output: str, exit_code) -> None:
+    assert exit_code == 0
+    assert _parse_deny_output(output)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.parametrize("make", [_make_write_input, _make_edit_input])
+@pytest.mark.parametrize("rel", ["outline.md", "foundation-1.md", "nested/deeper/file.md"])
+def test_expander_context_subagent_write_or_edit_denied(tmp_path, monkeypatch, make, rel):
+    _staged_story_setup(tmp_path, monkeypatch)
+    ctx = tmp_path / ".aimi" / ".tasks-staging" / "run-1" / "context"
+    (ctx / rel).parent.mkdir(parents=True)
+
+    for present in (False, True):
+        if present:
+            (ctx / rel).write_text("x")
+        output, exit_code = _run_guard_runtime_state(
+            monkeypatch, make(str(ctx / rel), agent_type="aimi-story-expander")
+        )
+        _assert_denied(output, exit_code)
+        assert "orchestrator" in _parse_deny_output(output)["systemMessage"]
+
+
+def test_expander_context_denied_for_agent_id_alone(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    ctx = tmp_path / ".aimi" / ".tasks-staging" / "run-1" / "context"
+    ctx.mkdir()
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _subagent_payload("Write", ctx / "outline.md", agent_id="a1b2c3")
+    )
+
+    _assert_denied(output, exit_code)
+
+
+@pytest.mark.parametrize("make", [_make_write_input, _make_edit_input])
+def test_expander_context_main_session_allowed(tmp_path, monkeypatch, make):
+    _staged_story_setup(tmp_path, monkeypatch)
+    ctx = tmp_path / ".aimi" / ".tasks-staging" / "run-1" / "context"
+    ctx.mkdir()
+    (ctx / "outline.md").write_text("x")
+
+    for name in ("outline.md", "nested/new.md"):
+        output, exit_code = _run_guard_runtime_state(monkeypatch, make(str(ctx / name)))
+        assert exit_code == 0
+        assert "deny" not in output
+
+
+def test_expander_context_lookalikes_outside_the_staging_run_allowed_for_a_subagent(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    for rel in (
+        ".aimi/elsewhere/run-1/context/outline.md",  # not under .tasks-staging
+        "src/context/outline.md",  # no .aimi/.tasks-staging at all
+        ".tasks-staging/run-1/context/outline.md",  # .tasks-staging without .aimi before it
+        ".aimi/.tasks-staging/context/outline.md",  # `context` is the run dir, not below it
+        ".aimi/.tasks-staging/run-1/contexts/outline.md",  # different directory name
+        ".aimi/.tasks-staging/run-1/context.md",  # a file, not a directory
+        ".aimi/.tasks-staging/run-1/nested/context/outline.md",  # `context` is three below the run dir
+    ):
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        output, exit_code = _run_guard_runtime_state(
+            monkeypatch, _make_write_input(str(target), agent_type="aimi-story-expander")
+        )
+        assert exit_code == 0, rel
+        assert "deny" not in output, rel
+
+
+def test_expander_context_worktree_nested_run_dir_judged_like_main_checkout(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    wt = tmp_path / ".worktrees" / "feat"
+    ctx = _context_dir(wt)
+
+    output, exit_code = _run_guard_runtime_state(
+        monkeypatch, _make_write_input(str(ctx / "outline.md"), agent_type="x")
+    )
+
+    _assert_denied(output, exit_code)
+
+
+def test_expander_context_predicate_judges_components_only(tmp_path):
+    mod = _load_runtime_state_module()
+    run = tmp_path / ".aimi" / ".tasks-staging" / "run-1"
+
+    assert mod._is_expander_context_dir(run / "context" / "outline.md")
+    assert mod._is_expander_context_dir(run / "context" / "a" / "b.md")
+    assert not mod._is_expander_context_dir(run / "context")
+    assert not mod._is_expander_context_dir(run / "01-story.json")
+    assert not mod._is_expander_context_dir(run / "outline.json")
+
+
+def test_expander_context_env_bypass_allows_a_subagent(tmp_path, monkeypatch):
+    _staged_story_setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("AIMI_RUNTIME_STATE_GUARD", "off")
+    ctx = tmp_path / ".aimi" / ".tasks-staging" / "run-1" / "context"
+    ctx.mkdir()
+
+    for make in (_make_write_input, _make_edit_input):
+        output, exit_code = _run_guard_runtime_state(
+            monkeypatch, make(str(ctx / "outline.md"), agent_type="x")
+        )
+        assert exit_code == 0
+        assert "deny" not in output
+
+
 # ---------------------------------------------------------------------------
 # guard-tasks-presence.py tests
 # ---------------------------------------------------------------------------

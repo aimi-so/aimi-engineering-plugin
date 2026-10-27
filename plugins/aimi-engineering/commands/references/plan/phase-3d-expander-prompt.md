@@ -6,6 +6,8 @@
 
 ### Sub-Agent Prompt Template
 
+In `files` mode (`phase-3d-context-files.md`) shared blocks become a path list.
+
 Spawn each sub-agent with:
 
 ```

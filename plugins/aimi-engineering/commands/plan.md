@@ -289,6 +289,11 @@ Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/p
 Applies when: `resolvedPrototypePaths` holds at least one `.html` path; otherwise skip, with no prototype slicing.
 Before running this phase (prototypes present), Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-prototype-blocks.md in full.
 
+### Shared Context Files
+
+Applies when: every run; sets `expanderContextMode` to `files` or `inline` once, before the first expander spawn.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-context-files.md in full.
+
 ### Sub-Agent Prompt Template
 
 Applies when: every run; holds the expander spawn prompt.

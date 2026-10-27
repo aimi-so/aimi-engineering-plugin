@@ -67,14 +67,14 @@ next.md	22371
 references/cli-path-resolution.md	38829
 review.md	22577
 references/scope-contexts.md	20743
-plan.md	20561
+plan.md	20816
 deepen.md	18696
 
 skills/story-executor/SKILL.md	67432
 skills/task-planner/SKILL.md	23241
 
 agents/research/aimi-foundation-architect.md	23014
-agents/workflow/aimi-story-expander.md	52978
+agents/workflow/aimi-story-expander.md	54290
 agents/research/aimi-learnings-researcher.md	16750
 agents/research/aimi-design-bundle-researcher.md	16870
 agents/review/aimi-cross-story-auditor.md	20048

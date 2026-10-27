@@ -46,6 +46,9 @@ _STAGING_PARTS = (".aimi", ".tasks-staging")
 # `_STAGED_STORY_NAME` above does not match it either.  The hook only checks
 # that the file EXISTS; the digest is for a later reader.
 _STAMP_SUFFIX = ".validated"
+# The shared expander context directory, `<RUN_DIR>/context/`: files the
+# orchestrator writes once per run and every expander reads.
+_CONTEXT_DIR = "context"
 _STAGED_STAMP_NAME = re.compile(r"^[0-9]{2}-.*\.json\.validated$")
 
 
@@ -74,6 +77,28 @@ def _is_staged_stamp(target: Path) -> bool:
         return False
     name = parts[-1]
     return bool(_STAGED_STAMP_NAME.match(name)) and not name.endswith("-outline.json" + _STAMP_SUFFIX)
+
+
+def _is_expander_context_dir(target: Path) -> bool:
+    """True when *target* sits at or below `<RUN_DIR>/context/` of a staging run.
+
+    The shared expander context files live at
+    `<any>/.aimi/.tasks-staging/<run>/context/...`.  Judged by path components
+    alone, like `_is_staged_story`: a `.tasks-staging` component preceded by
+    `.aimi`, with `context` two places after it and at least one more component
+    below that, so a nested path counts and a `context` directory anywhere else
+    does not.
+    """
+    parts = target.parts
+    for i in range(1, len(parts)):
+        if (
+            parts[i] == _STAGING_PARTS[1]
+            and parts[i - 1] == _STAGING_PARTS[0]
+            and len(parts) >= i + 4
+            and parts[i + 2] == _CONTEXT_DIR
+        ):
+            return True
+    return False
 
 
 def staging_stamp(story: Path) -> Path:
@@ -170,6 +195,19 @@ def main(tool_input: dict) -> None:
             "story passes validation, never by an expander. Write the story "
             "file only",
             # provenance: staged-story validation stamp
+        )
+
+    # Blocked: a subagent writing or editing a shared expander context file.
+    # Every expander of the run reads these files, so one that could rewrite
+    # them would change what its siblings are told.  The orchestrator -- the
+    # main session, which carries no agent_type -- is the only writer.
+    if _is_expander_context_dir(target) and is_subagent_write(tool_input):
+        _deny_path(
+            str(target),
+            "The shared expander context files are written by the orchestrator "
+            "once per run and read by every expander; they are read-only to an "
+            "expander. Write the story file at outputPath only",
+            # provenance: expander shared context files
         )
 
     # Blocked: a hand edit of a staged story file.  It sits before the .aimi/
