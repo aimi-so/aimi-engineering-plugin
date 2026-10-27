@@ -10994,6 +10994,9 @@ _collect_design_bundle_candidates() {
 # scan_root -- so this must only ever be called from within
 # cmd_detect_design_bundle's own execution, after _build_bundle_json is
 # defined.
+# Also reads cmd_detect_design_bundle's feature_stdin/feature_desc the same way:
+# with --feature-stdin, scan-tier candidates unrelated to the description are
+# dropped before the 0/1/2+ branch (see the relevance filter below).
 # Usage: _select_design_bundle "$phase_dir" "$scan_root"
 # Exit: 0 (null, single match, or phase-tier win) or 3 (ambiguous scan tier)
 _select_design_bundle() {
@@ -11034,16 +11037,59 @@ _select_design_bundle() {
     return 0
   fi
 
+  # Relevance filter (--feature-stdin only), applied after the phase-tier
+  # return above so that tier and its pre-filter ignored-count never change.
+  # bundle_relevance.py keeps the scan-tier candidates sharing a word with the
+  # description and reports the rest; a description with no usable word turns
+  # the filter off. filter_active stays false without the flag, so every
+  # output below is then byte-identical to what it was before the flag existed.
+  local filter_active=false filtered_json="[]"
+  if [ "$feature_stdin" = true ] && [ "$scan_count" -gt 0 ]; then
+    local relevance_json
+    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" -- "${scan_candidates[@]}") || {
+      echo "Error: detect-design-bundle: the --feature-stdin relevance filter failed" >&2
+      exit 1
+    }
+    if [ "$(printf '%s' "$relevance_json" | jq -r '.active')" = "true" ]; then
+      filter_active=true
+      local -a kept_candidates=() dropped_candidates=()
+      while IFS= read -r _sdb_line; do
+        [ -n "$_sdb_line" ] && kept_candidates+=("$_sdb_line")
+      done < <(printf '%s' "$relevance_json" | jq -r '.relevant[]')
+      while IFS= read -r _sdb_line; do
+        [ -n "$_sdb_line" ] && dropped_candidates+=("$_sdb_line")
+      done < <(printf '%s' "$relevance_json" | jq -r '.filtered[]')
+      scan_candidates=("${kept_candidates[@]+"${kept_candidates[@]}"}")
+      scan_count=${#scan_candidates[@]}
+      local _sdb_dropped
+      for _sdb_dropped in "${dropped_candidates[@]+"${dropped_candidates[@]}"}"; do
+        filtered_json=$(echo "$filtered_json" | jq --arg p "$(_build_bundle_json "$_sdb_dropped" | jq -r '.path')" '. + [$p]')
+      done
+      if [ "${#dropped_candidates[@]}" -gt 0 ]; then
+        {
+          echo "detect-design-bundle: --feature-stdin discarded ${#dropped_candidates[@]} scan-tier bundle(s) unrelated to the feature description:"
+          printf '%s' "$filtered_json" | jq -r '.[]'
+        } >&2
+      fi
+    fi
+  fi
+
   if [ "$scan_count" -eq 0 ]; then
     echo "null"
     return 0
   elif [ "$scan_count" -eq 1 ]; then
-    _build_bundle_json "${scan_candidates[0]}"
+    if [ "$filter_active" = true ]; then
+      _build_bundle_json "${scan_candidates[0]}" | jq --argjson f "$filtered_json" '. + {filtered:$f}'
+    else
+      _build_bundle_json "${scan_candidates[0]}"
+    fi
     return 0
   fi
 
   # Two or more same-tier candidates with no bundle named: refuse, listing
-  # every candidate -- never silently electing one (mtime or otherwise).
+  # every candidate -- never silently electing one (mtime or otherwise). With
+  # the filter on, "candidate" means a relevant one: the refusal now says that
+  # two or more RELEVANT bundles tie.
   local candidates_json="[]"
   local subdir
   for subdir in "${scan_candidates[@]}"; do
@@ -11052,7 +11098,12 @@ _select_design_bundle() {
     candidates_json=$(echo "$candidates_json" | jq --argjson b "$bundle_json" '. + [$b]')
   done
 
-  jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+  if [ "$filter_active" = true ]; then
+    jq -n --argjson candidates "$candidates_json" --argjson filtered "$filtered_json" \
+      '{ambiguous:true,tier:"scan",candidates:$candidates,filtered:$filtered}'
+  else
+    jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+  fi
 
   {
     echo "detect-design-bundle: $scan_count bundles match and none was named -- pass --bundle <path> to choose one"
@@ -11083,8 +11134,15 @@ _select_design_bundle() {
 # With neither flag naming a bundle, two or more scan-tier candidates tying
 # in the same tier refuse (exit 3) with every candidate listed, rather than
 # silently electing one.
+# With --feature-stdin, the feature description is read from stdin and the
+# scan tier keeps only the bundles whose directory name or BusinessSpec title
+# shares a word with it (scripts/bundle_relevance.py). The phase tier, --bundle
+# and --all are never filtered.
 cmd_detect_design_bundle() {
   local root="" all=false json=false bundle_arg="" phase_dir=""
+  # feature_stdin / feature_desc are read by _select_design_bundle through
+  # dynamic scoping, like _build_bundle_json and scan_root.
+  local feature_stdin=false feature_desc=""
 
   # Parse flags
   while [ $# -gt 0 ]; do
@@ -11094,10 +11152,20 @@ cmd_detect_design_bundle() {
       --phase-dir) shift; phase_dir="${1:-}" ;;
       --all)       all=true ;;
       --json)      json=true ;;
+      --feature-stdin) feature_stdin=true ;;
       *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
   done
+
+  # --feature-stdin is the only way this verb needs python3: bundle_relevance.py
+  # does the scoring. Refused here, before stdin is read or anything scanned, so
+  # a host without an interpreter never answers as though the filter had run.
+  # The description is read once, from stdin only -- never an argument.
+  if [ "$feature_stdin" = true ]; then
+    check_python3
+    feature_desc=$(cat)
+  fi
 
   # --phase-dir is ALWAYS confined to PROJECT_ROOT -- no --root-style
   # absolute-path exception (D5) -- checked before any scan or README read,
@@ -18515,7 +18583,7 @@ COMMANDS:
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
                               30 days. .aimi/archive is ignored. Silent when nothing cleaned.
-    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json]
+    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json] [--feature-stdin]
                               Detect a design handoff bundle -- either a Claude
                               Design export or one this plugin generated itself.
                               --root may point at a bundle directory directly,
@@ -18578,6 +18646,22 @@ COMMANDS:
                               --all        Return every scan-tier match as a JSON
                               array, path-sorted; never refuses, even when the
                               non---all path over the same tree would.
+                              --feature-stdin  Read the feature description
+                              from stdin (never an argument) and keep only
+                              the scan-tier bundles whose directory name or
+                              BusinessSpec title shares a word with it, so a
+                              stray or placeholder bundle is never elected.
+                              Zero relevant prints null; one prints that
+                              bundle; two or more relevant refuse (exit 3)
+                              listing only the relevant ones. The discarded
+                              bundles are named on stderr and, on the JSON
+                              object outputs, listed in a filtered[] array of
+                              paths. An empty, whitespace-only or all-stop-word
+                              description turns the filter off and adds no
+                              filtered key. The phase tier, --bundle and --all
+                              are never filtered. Without the flag every
+                              output is unchanged. Requires python3 and
+                              refuses with exit 1 without it.
                               --json       Alias; output is always JSON
     import-design-bundle --from <path> --to <path> [--reimport]
                               Copy a design bundle from outside the project
