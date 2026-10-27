@@ -225,7 +225,6 @@ unassigned	references/execute/step-3-check-pending.md	PHASE_TASKS_PATH	# assigne
 unassigned	references/execute/step-3-check-pending.md	TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-4-finalize.md	PHASE_MODE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-4-finalize.md	PHASE_TASKS_PATH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
-unassigned	references/execute/step-5-completion.md	AIMI_ROOT	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-5-completion.md	DEFAULT_BRANCH	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-5-completion.md	FEATURE	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment
 unassigned	references/execute/step-5-completion.md	PHASE_ID	# assigned by an earlier execute step and carried in working memory; this block moved out of execute.md verbatim and cannot see that assignment

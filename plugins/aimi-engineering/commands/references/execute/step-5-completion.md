@@ -167,13 +167,17 @@ Commits (project_path): [count]
 Commits (project_path): [count]
 ```
 
-Aggregate known-gap files from this run:
+Aggregate this plan's known-gap files. `.aimi/known-gaps/` is one directory shared by every plan ever run, so the block reads only the files carrying this run's `PLAN_DISC` suffix (Step 4 writes `<date>-<story.id>-<PLAN_DISC>.md`; see `### Plan Discriminator` under Multi-Repo Handling), which also takes in an earlier run of the same plan. It reads them from `$AIMI_ROOT`, never relative to the CWD, because in phase mode this step runs inside the phase container. `find` rather than a glob keeps an empty match silent under zsh:
 ```bash
-if [ -d .aimi/known-gaps ] && [ -n "$(ls .aimi/known-gaps/ 2>/dev/null)" ]; then
+AIMI_ROOT="[this run's already-resolved AIMI_ROOT, the directory holding .aimi/]"
+WAVE_TASKS_FILE="[the tasks file this run executed: PHASE_TASKS_PATH in phase mode, TASKS_PATH otherwise]"
+PLAN_DISC=$(basename "$WAVE_TASKS_FILE" .json | sed 's/[^A-Za-z0-9_-]/-/g')
+case "$PLAN_DISC" in [A-Za-z0-9]*) ;; *) PLAN_DISC="p$PLAN_DISC" ;; esac
+GAP_FILES=$(find "$AIMI_ROOT/.aimi/known-gaps" -maxdepth 1 -type f -name "*-$PLAN_DISC.md" 2>/dev/null | sort)
+if [ -n "$GAP_FILES" ]; then
   echo ""
   echo "## Known Gaps"
-  for gap_file in .aimi/known-gaps/*.md; do
-    [ -f "$gap_file" ] || continue
+  printf '%s\n' "$GAP_FILES" | while IFS= read -r gap_file; do
     story_id=$(basename "$gap_file" .md | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//; s/^(US-[0-9]+).*/\1/')
     echo ""
     echo "### $story_id"

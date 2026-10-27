@@ -628,7 +628,14 @@ while true:
                 # anchored to line start so a KNOWN-GAP mention inside a paragraph is never
                 # extracted as if it were a trailer.
                 ```bash
-                mkdir -p .aimi/known-gaps
+                # Absolute, never relative to the CWD: the merge above cd'd into
+                # EXEC_ROOT, which in container and phase mode is the container,
+                # and a relative .aimi/known-gaps would land inside it and be
+                # deleted with it (it would also leave a stray .aimi/ there that
+                # find_aimi_root stops at). AIMI_ROOT is this run's carried value,
+                # never re-derived from the container's CWD.
+                AIMI_ROOT="[this run's already-resolved AIMI_ROOT, the directory holding .aimi/]"
+                mkdir -p "$AIMI_ROOT/.aimi/known-gaps"
                 # Pseudo: prefer payload; fall back to commit grep
                 payload_gaps="${result_payload_by_id[full_story.id].knownGaps or []}"
                 if [ -n "$payload_gaps" ] && [ "$payload_gaps" != "[]" ]; then
@@ -643,7 +650,7 @@ while true:
                 # each other's finding.
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
-                  GAP_FILE=".aimi/known-gaps/${GAP_DATE}-[full_story.id]-[PLAN_DISC].md"
+                  GAP_FILE="$AIMI_ROOT/.aimi/known-gaps/${GAP_DATE}-[full_story.id]-[PLAN_DISC].md"
                   printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
                 fi
                 # --- Extract verify evidence: the FOURTH result_json field this
