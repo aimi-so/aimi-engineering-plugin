@@ -767,6 +767,99 @@ def test_the_whole_set_is_threaded_in_not_one_group_s_id(tmp_path):
     assert {d["project"] for d in dropped} == {"apps/web", "services/api"}
 
 
+# --- cross-repository order: splitGroup.after -------------------------------
+
+
+def _order_groups(tmp_path, stories, foundation_ids=()):
+    """Run the PROJECT writer and return {project: metadata.splitGroup} plus the
+    directory it wrote into."""
+    staging = str(tmp_path / "stg")
+    os.makedirs(staging, exist_ok=True)
+    output = str(tmp_path / "tasks" / "out-tasks.json")
+    SM.write_project_split(
+        stories, output, staging, [], False, list(foundation_ids), r"^[a-z0-9/-]+$"
+    )
+    groups = {}
+    for name in sorted(os.listdir(str(tmp_path / "tasks"))):
+        if name.endswith("-tasks.json"):
+            with open(str(tmp_path / "tasks" / name), encoding="utf-8") as handle:
+                group = json.load(handle)["metadata"]["splitGroup"]
+            groups[group["project"]] = group
+    return groups
+
+
+def test_project_split_cross_repository_order_lists_the_files_a_file_follows(tmp_path):
+    groups = _order_groups(tmp_path, [_story(1, "apps/web"), _story(2, "services/api", ["US-001"])])
+    assert "after" not in groups["apps/web"]
+    assert groups["services/api"]["after"] == groups["services/api"]["siblings"]
+    assert groups["services/api"]["after"][0].endswith("-apps-web-tasks.json")
+
+
+def test_project_split_cross_repository_order_is_sorted_unique_and_uses_sibling_strings(tmp_path):
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "apps/mobile"),
+        _story(3, "services/api", ["US-001", "US-002", "US-001"]),
+    ]
+    group = _order_groups(tmp_path, stories)["services/api"]
+    assert group["after"] == sorted(set(group["after"])) and len(group["after"]) == 2
+    assert group["after"] == sorted(group["siblings"])
+    assert list(group)[-1] == "after"
+
+
+def test_project_split_cross_repository_order_counts_a_foundation_edge(tmp_path):
+    groups = _order_groups(
+        tmp_path, [_story(1, "apps/web"), _story(2, "services/api", ["US-001"])], ["US-001"]
+    )
+    assert len(groups["services/api"]["after"]) == 1
+
+
+def test_project_split_cross_repository_order_is_omitted_without_a_dropped_edge(tmp_path):
+    stories = [_story(1, "apps/web"), _story(2, "apps/web", ["US-001"]), _story(3, "services/api")]
+    assert all("after" not in g for g in _order_groups(tmp_path, stories).values())
+
+
+def test_project_split_cross_repository_order_skips_a_target_no_file_holds(tmp_path):
+    groups = _order_groups(tmp_path, [_story(1, "apps/web"), _story(2, "services/api", ["US-099"])])
+    assert all("after" not in g for g in groups.values())
+
+
+def test_project_split_cross_repository_order_refuses_a_two_file_cycle(tmp_path, capsys):
+    stories = [
+        _story(1, "apps/web"),
+        _story(2, "apps/web", ["US-004"]),
+        _story(3, "services/api", ["US-001"]),
+        _story(4, "services/api"),
+    ]
+    with pytest.raises(SystemExit) as exc:
+        _order_groups(tmp_path, stories)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "cross-repository ordering cycle" in err
+    assert "out-tasks-apps-web-tasks.json follows" in err
+    assert "out-tasks-services-api-tasks.json follows" in err
+    assert not os.path.exists(str(tmp_path / "tasks"))
+    assert os.path.isdir(str(tmp_path / "stg"))
+
+
+def test_project_split_cross_repository_order_refuses_a_longer_cycle(tmp_path, capsys):
+    stories = [
+        _story(1, "a/one", ["US-002"]),
+        _story(2, "b/two", ["US-003"]),
+        _story(3, "c/three", ["US-001"]),
+    ]
+    with pytest.raises(SystemExit):
+        _order_groups(tmp_path, stories)
+    err = capsys.readouterr().err
+    assert err.count(" follows ") == 3
+
+
+def test_project_split_cross_repository_order_leaves_stdout_and_side_axis_alone():
+    for label in ("side-particao", "feliz-tres-historias"):
+        for doc in _docs(label):
+            assert "splitGroup" not in doc["metadata"]
+
+
 # ---------------------------------------------------------------------------
 # --phase-aware
 # ---------------------------------------------------------------------------

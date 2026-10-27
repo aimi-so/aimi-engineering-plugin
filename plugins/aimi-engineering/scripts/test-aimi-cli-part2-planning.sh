@@ -33,7 +33,7 @@ set -uo pipefail
 #   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
 #   - slugify Tests (sixteen assertions, inside the story-merge section)
-#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
+#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58, TC60)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -7884,8 +7884,53 @@ test_story_merge_project_split_project_keyed_warnings() {
     ((TESTS_PASSED++))
   fi
 
+  # Cross-repository order: a file whose stories lost an edge to another
+  # repository's story records the sibling path it must follow, the same string
+  # siblings[] carries; the file nobody had to wait on has no after key at all.
+  assert_eq '[".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"]' \
+    "$(jq -c '.metadata.splitGroup.after' "$web_file" 2>/dev/null)" \
+    "TC34: the web file follows the api file (splitGroup.after)"
+  assert_eq '[".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"]' \
+    "$(jq -c '.metadata.splitGroup.after' "$mobile_file" 2>/dev/null)" \
+    "TC34: the mobile file follows the api file (splitGroup.after)"
+  assert_eq "false" "$(jq -c '.metadata.splitGroup | has("after")' "$api_file" 2>/dev/null)" \
+    "TC34: the api file lost no cross-file edge and carries no after key"
+
   rm -rf "$stg"
   rm -f .aimi/tasks/sm-tc34-*
+}
+
+# TC59: a file-level cycle in the cross-repository order refuses the merge. The
+# story graph stays acyclic (03 -> 02 -> 01), but repository api must follow web
+# through story 02 while web must follow api through story 03, so neither file
+# could ever run first: exit 1, the files named, nothing written, the staging
+# directory kept for retry.
+test_story_merge_project_split_order_cycle_refused() {
+  echo ""
+  echo "=== TC59: story-merge project axis — a file-level ordering cycle is refused ==="
+
+  local stg=".aimi/.tasks-staging-tc59"
+  local out_file=".aimi/tasks/sm-tc59-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc59-*
+
+  _sm_make_project_story "$stg/01-web.json"  "Web shell"       "apps/web"     "src/shell.tsx"
+  _sm_make_project_story "$stg/02-api.json"  "API endpoint"    "services/api" "app/api.rb"   '["outline:01"]'
+  _sm_make_project_story "$stg/03-web2.json" "Web data screen" "apps/web"     "src/data.tsx" '["outline:02"]'
+
+  local output exit_code
+  _sm_audit_sidecar "$stg"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC59: a file-level ordering cycle exits 1"
+  assert_contains "cross-repository ordering cycle" "$output" "TC59: the refusal names the cycle"
+  assert_contains "sm-tc59-tasks-apps-web-tasks.json follows" "$output" "TC59: the web file is named in the cycle"
+  assert_contains "sm-tc59-tasks-services-api-tasks.json follows" "$output" "TC59: the api file is named in the cycle"
+  assert_eq "0" "$(ls .aimi/tasks/sm-tc59-* 2>/dev/null | wc -l | tr -d ' ')" "TC59: no output file was written"
+  assert_eq "true" "$([ -f "$stg/01-web.json" ] && echo true || echo false)" "TC59: the staging directory was kept"
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc59-*
 }
 
 # TC35: --foundation crossed with a multi-repo split, after injection became
@@ -9082,6 +9127,49 @@ test_split_detect_include_completed() {
   rm -rf "$d"
 }
 
+# TC60: split-detect exposes metadata.splitGroup.after in every member record,
+# as member paths. Each entry resolves BY BASENAME against the anchor's own
+# directory like siblings, and an entry that names a file outside the group,
+# the member itself, or a traversal-shaped path is inert. A scope that is not a
+# marked project split reports an empty after for every member.
+test_split_detect_after_lists_member_paths() {
+  echo ""
+  echo "=== TC60: split-detect — after resolves to member paths, inert otherwise ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-ord-apps-web-tasks.json" "feat/ord-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":[".aimi/tasks/2026-07-27-ord-services-api-tasks.json"]}'
+  _sd_write "$t/2026-07-27-ord-services-api-tasks.json" "feat/ord-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":[".aimi/tasks/2026-07-27-ord-apps-web-tasks.json"],"after":[".aimi/tasks/2026-07-27-ord-apps-web-tasks.json","../../etc/2026-07-27-ord-apps-web-tasks.json","elsewhere-tasks.json","2026-07-27-ord-services-api-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-ord-services-api-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC60: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC60: the group is a project split"
+  assert_eq "[\"$t/2026-07-27-ord-apps-web-tasks.json\"]" \
+    "$(printf '%s' "$out" | jq -c '.members[] | select(.project == "services/api") | .after')" \
+    "TC60: after resolves by basename to a member path; foreign, self and traversal entries are dropped"
+  assert_eq "[]" \
+    "$(printf '%s' "$out" | jq -c '.members[] | select(.project == "apps/web") | .after')" \
+    "TC60: a member whose marker carries no after reports an empty list"
+
+  # Not a marked project split: the same marker degraded to a single file, and a
+  # plain unmarked file, both report an empty after.
+  rm -f "$t/2026-07-27-ord-apps-web-tasks.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC60: a group missing a member degrades to single"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.members[0].after')" \
+    "TC60: a degraded scope reports an empty after"
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9294,6 +9382,7 @@ main() {
   test_story_merge_project_split_dot_project_slug
   test_story_merge_project_split_basename_collision
   test_story_merge_project_split_project_keyed_warnings
+  test_story_merge_project_split_order_cycle_refused
   test_story_merge_project_split_foundation_edge
   test_story_merge_project_split_foundation_qualified
   test_story_merge_project_split_phase_aware
@@ -9322,6 +9411,7 @@ main() {
   test_split_detect_empty_dir_with_decoy
   test_split_detect_stale_flat_plan_versus_planned_phase
   test_split_detect_include_completed
+  test_split_detect_after_lists_member_paths
 
   cleanup
 
