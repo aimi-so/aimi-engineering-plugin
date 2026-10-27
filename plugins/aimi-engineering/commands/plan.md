@@ -294,6 +294,11 @@ Before running this phase (prototypes present), Read ${CLAUDE_PLUGIN_ROOT}/comma
 Applies when: every run; holds the expander spawn prompt.
 Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-expander-prompt.md in full.
 
+### Working Tree Guard
+
+Applies when: every run; every batch of expander spawns (a wave, a retry, a re-expansion) runs inside it.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-3d-tree-guard.md in full.
+
 ### Schema Validation and Retry
 
 Applies when: every run, after the expanders return.
