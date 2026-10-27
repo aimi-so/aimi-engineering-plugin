@@ -14367,6 +14367,28 @@ cmd_research_lookup() {
   fi
 }
 
+# One awk function source for the match key, held once: the section scan prepends it
+# so heading and anchor are keyed by the same text. One gsub per character with simple
+# regex literals (no bracket expression holding a backslash) so gawk, mawk and BusyBox
+# awk agree.
+_EXTRACT_SECTIONS_KEY_AWK='function mkey(s) {
+  gsub(/"/, "", s)
+  gsub(/\\/, "", s)
+  gsub(/\$/, "", s)
+  gsub(/`/, "", s)
+  gsub(/[[:space:]]+/, " ", s)
+  sub(/^ /, "", s)
+  sub(/ $/, "", s)
+  return tolower(s)
+}
+'
+
+# Usage: _extract_sections_match_key <text>
+# Prints the match key of one anchor or heading text (see extract-sections).
+_extract_sections_match_key() {
+  AIMI_ES_TEXT="$1" awk "$_EXTRACT_SECTIONS_KEY_AWK"'BEGIN { print mkey(ENVIRON["AIMI_ES_TEXT"]) }'
+}
+
 # Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
 # Print only the requested sections of a research .md file (any heading level 2 or
 # deeper: '## ', '### ', '#### ', ...), concatenated verbatim in the order the anchors
@@ -14375,13 +14397,20 @@ cmd_research_lookup() {
 # heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested
 # h3/h4 lines and stops at the next h2 (or h1); an h4 anchor stops at the next
 # h4/h3/h2 (or h1).
-# Anchor text is matched case-insensitively against the heading text (leading #s and
-# surrounding whitespace stripped). An anchor with no matching heading is skipped (not
-# a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
-# whose anchors match nothing prints empty output, still exit 0.
-# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
-# stderr and skipped -- defense in depth, since anchor text originates from untrusted
-# research-file heading content.
+# Anchor and heading are compared on one match key (_extract_sections_match_key):
+# double quote, backslash, dollar sign and backtick are removed, whitespace runs
+# collapse to one space, the ends are trimmed and the result is lowercased -- so the
+# sanitized anchor the orchestrator produces ('The foo flow') matches the heading
+# '## The "foo" flow'. An anchor whose key is empty matches nothing. An anchor with no
+# matching heading is skipped (not a fatal error) but is named in a "no section
+# matched anchor" warning on stderr; a run whose anchors match nothing prints empty
+# output, still exit 0.
+# Defense in depth for RAW anchors: one carrying "$(", a backtick, or a dollar sign
+# followed by a letter is rejected with a warning on stderr and skipped, since anchor
+# text originates from untrusted research-file heading content and a double-quoted
+# shell argument evaluates those before this CLI runs. A double quote, a backslash or
+# a dollar sign followed by anything else reaches the CLI intact as argv and is
+# compared by its key.
 # Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
 # Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
 cmd_extract_sections() {
@@ -14425,31 +14454,41 @@ cmd_extract_sections() {
   validate_path_in_project "$resolved_file"
 
   # Split --anchors on newlines only (comma is valid heading-text punctuation and must
-  # NOT be treated as a delimiter); trim and lowercase each entry; skip blanks.
-  # Extract each anchor's section (first matching heading only) in request order.
-  local anchor anchor_lc unmatched_anchors=""
+  # NOT be treated as a delimiter); trim each entry; skip blanks. Extract each anchor's
+  # section (first matching heading only) in request order.
+  local anchor anchor_key unmatched_anchors=""
   while IFS= read -r anchor; do
     anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$anchor" ] && continue
 
     # Defense in depth: anchors originate from untrusted research-file heading text.
     # The orchestrator sanitizes before interpolating, but this CLI must not rely on
-    # that. Reject only characters dangerous inside a double-quoted shell argument --
-    # &, comma, parens, colon, slash, hyphen, underscore, period, and single-quote are
-    # all legitimate heading punctuation and MUST keep working.
+    # that. Reject only what a double-quoted shell argument would already have
+    # evaluated before this CLI ran: "$(", a backtick, and "$" before a letter.
+    # A double quote, a backslash, and a "$" before anything else arrive intact as
+    # argv and are compared by their key; &, comma, parens, colon, slash, hyphen,
+    # underscore, period, and single-quote are legitimate heading punctuation and
+    # MUST keep working.
     case "$anchor" in
-      *'$'*|*'`'*|*'"'*|*'\'*)
+      *'$('*|*'`'*|*'$'[A-Za-z]*)
         echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
         continue ;;
     esac
 
-    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+    anchor_key=$(_extract_sections_match_key "$anchor")
+    if [ -z "$anchor_key" ]; then
+      # An empty key matches nothing; report it through the no-match warning.
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+      continue
+    fi
 
     # awk streams matched section lines straight to stdout (byte-for-byte, blank
     # lines and all) and reports match status via its own exit code -- this avoids
-    # a $(...) capture, which would silently swallow trailing blank lines.
-    if awk -v target="$anchor_lc" '
-      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0 }
+    # a $(...) capture, which would silently swallow trailing blank lines. The key
+    # reaches awk through ENVIRON because -v interprets backslash escapes.
+    if AIMI_ES_TARGET="$anchor_key" awk "$_EXTRACT_SECTIONS_KEY_AWK"'
+      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0; target = ENVIRON["AIMI_ES_TARGET"] }
       {
         if ($0 ~ /^[[:space:]]*(```|~~~)/) { in_fence = !in_fence }
         level = 0
@@ -14470,9 +14509,7 @@ cmd_extract_sections() {
         # Any heading of level 2 or deeper is a matchable anchor (h1 is not); first match wins.
         if (!in_section && !matched_done && level >= 2) {
           heading_text = substr($0, level + 1)
-          gsub(/^[[:space:]]+/, "", heading_text)
-          gsub(/[[:space:]]+$/, "", heading_text)
-          if (tolower(heading_text) == target) {
+          if (mkey(heading_text) == target) {
             in_section = 1
             matched_done = 1
             match_level = level
@@ -18268,7 +18305,8 @@ COMMANDS:
                               anchor includes nested h3/h4 lines and stops at the next
                               h2/h1; an h4 anchor stops at the next h4/h3/h2/h1.
                               --anchors accepts comma- or newline-separated heading
-                              titles; matching is case-insensitive on heading text.
+                              titles; matching is case-insensitive and ignores quote,
+                              backslash, dollar and backtick on both sides.
                               An anchor with no matching heading is skipped (not an
                               error); anchors matching nothing -> empty output, exit 0.
                               Path confinement mirrors research-lookup (resolve_path +

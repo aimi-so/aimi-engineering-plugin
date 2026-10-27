@@ -1500,10 +1500,13 @@ RESEOF
   assert_contains "## Testing, Linting, and CI" "$stdout" "extract-sections: comma-containing heading matches its full text as a single anchor"
   assert_contains "Comma heading body line." "$stdout" "extract-sections: comma-containing heading includes its body"
 
-  # --- Test 10: anchors with shell metacharacters are rejected; other anchors in the
-  # same run still process (FIX 1 regression) ---
+  # --- Test 10: raw anchors that a double-quoted shell argument would already have
+  # evaluated ("$(", a backtick, "$" before a letter) are rejected; other anchors in the
+  # same run still process. A raw '"' or backslash is NOT rejected: it reaches the CLI
+  # intact as argv and is compared by its key, so with no heading matching it falls
+  # through to the no-match warning instead (FIX 1 regression, narrowed) ---
   local metachar_anchors metachar_stderr_file
-  metachar_anchors=$(printf 'Open Questions\n$(evil)\nbad`tick\nbad"quote\nbad\\slash')
+  metachar_anchors=$(printf 'Open Questions\n$(evil)\nbad`tick\nbad$name\nbad"quote\nbad\\slash')
   metachar_stderr_file="$es_dir/.aimi/stderr10.out"
 
   pushd "$es_dir" >/dev/null
@@ -1515,11 +1518,91 @@ RESEOF
   assert_contains "## Open Questions" "$stdout" "extract-sections: valid anchor still processed alongside rejected ones"
   local rejected_count
   rejected_count=$(printf '%s' "$stderr_out" | grep -c "anchor rejected (shell metacharacter)")
-  assert_eq "4" "$rejected_count" "extract-sections: all four dangerous-metacharacter anchors rejected with a warning"
-  assert_contains '$(evil)' "$stderr_out" "extract-sections: rejected-anchor warning names the \$( anchor"
-  assert_contains 'bad`tick' "$stderr_out" "extract-sections: rejected-anchor warning names the backtick anchor"
-  assert_contains 'bad"quote' "$stderr_out" "extract-sections: rejected-anchor warning names the double-quote anchor"
-  assert_contains 'bad\slash' "$stderr_out" "extract-sections: rejected-anchor warning names the backslash anchor"
+  assert_eq "3" "$rejected_count" "extract-sections: the three evaluated-form anchors (\$(, backtick, \$ before a letter) rejected with a warning"
+  assert_contains 'rejected (shell metacharacter): $(evil)' "$stderr_out" "extract-sections: rejected-anchor warning names the \$( anchor"
+  assert_contains 'rejected (shell metacharacter): bad`tick' "$stderr_out" "extract-sections: rejected-anchor warning names the backtick anchor"
+  assert_contains 'rejected (shell metacharacter): bad$name' "$stderr_out" "extract-sections: rejected-anchor warning names the dollar-before-a-letter anchor"
+  assert_contains 'no section matched anchor: bad"quote' "$stderr_out" "extract-sections: a raw double-quote anchor is accepted and falls through to the no-match warning"
+  assert_contains 'no section matched anchor: bad\slash' "$stderr_out" "extract-sections: a raw backslash anchor is accepted and falls through to the no-match warning"
+
+  # --- Test 10b: headings carrying '"', backslash, '$' or a backtick are matched by the
+  # sanitized anchor (both sides keyed identically), with no bleed into a neighbour ---
+  local key_file="$es_dir/.aimi/keyed.md"
+  cat > "$key_file" << 'RESEOF'
+# Keyed Research
+
+## The "foo" flow
+quoted body
+
+## Path C:\tmp and $HOME cost
+slash body
+
+## Backtick `code` heading
+tick body
+
+## Cost is $5
+price body
+
+## "" ``
+punctuation-only body
+
+## Plain
+plain body
+RESEOF
+  local key_err="$es_dir/.aimi/stderr10b.out"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors "The foo flow" 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err")
+  assert_exit_code "0" "$exit_code" "extract-sections: sanitized anchor for a quoted heading exits 0"
+  assert_contains '## The "foo" flow' "$stdout" "extract-sections: sanitized anchor returns the heading containing a double quote"
+  assert_contains "quoted body" "$stdout" "extract-sections: sanitized anchor returns the quoted heading's body"
+  local quote_bleed="yes"
+  [[ "$stdout" == *"slash body"* ]] || quote_bleed="no"
+  assert_eq "no" "$quote_bleed" "extract-sections: quoted heading section does not bleed into the next section"
+  local quote_warned="yes"
+  [[ "$stderr_out" == *"no section matched"* ]] || quote_warned="no"
+  assert_eq "no" "$quote_warned" "extract-sections: sanitized anchor for a quoted heading raises no no-match warning"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'The "foo" flow' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "quoted body" "$stdout" "extract-sections: a raw anchor carrying a double quote is accepted and matched by its key"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Path C:tmp and HOME cost' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "slash body" "$stdout" "extract-sections: sanitized anchor returns the heading containing a backslash and a dollar sign"
+  local slash_bleed="yes"
+  [[ "$stdout" == *"tick body"* ]] || slash_bleed="no"
+  assert_eq "no" "$slash_bleed" "extract-sections: backslash/dollar heading section does not bleed into the next section"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Backtick code heading' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "tick body" "$stdout" "extract-sections: sanitized anchor returns the heading containing a backtick"
+  local tick_bleed="yes"
+  [[ "$stdout" == *"price body"* ]] || tick_bleed="no"
+  assert_eq "no" "$tick_bleed" "extract-sections: backtick heading section does not bleed into the next section"
+
+  # A raw '$' that is not followed by a letter or '(' is accepted and compared by its key.
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Cost is $5' 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err")
+  assert_contains "price body" "$stdout" "extract-sections: a raw anchor with a dollar sign before a digit is accepted and matched"
+  local dollar_rejected="yes"
+  [[ "$stderr_out" == *"anchor rejected"* ]] || dollar_rejected="no"
+  assert_eq "no" "$dollar_rejected" "extract-sections: a dollar sign before a digit is not rejected"
+
+  # An anchor whose key is empty matches nothing, even a heading whose key is empty too.
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors '""' 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err"); rm -f "$key_err"
+  assert_eq "" "$stdout" "extract-sections: an empty-key anchor prints nothing"
+  assert_contains 'no section matched anchor: ""' "$stderr_out" "extract-sections: an empty-key anchor is reported through the no-match warning"
 
   # --- Test 11: absolute path outside project root rejected ---
   local abs_outside_file="$parent_dir/es-abs-outside-$$.md"
