@@ -64,7 +64,7 @@ references/forge-contract.md	45878
 references/container-execution.md	34557
 references/visual-variants.md	27154
 next.md	22371
-references/cli-path-resolution.md	37503
+references/cli-path-resolution.md	38829
 review.md	22577
 references/scope-contexts.md	20743
 plan.md	20561

@@ -4477,6 +4477,63 @@ test_check_version_fix_updates_global_cache() {
   teardown_global_cache_env
 }
 
+# check-version also compares -- and under --fix repairs -- the GLOBAL cli-path
+# pointer. Every assertion is unconditional, and the whole case lives in a
+# throwaway CLAUDE_CONFIG_DIR/AIMI_CONFIG_DIR pair: --fix writes a machine-wide
+# file, so nothing here may name the real one.
+test_check_version_global_pointer() {
+  echo ""
+  echo "=== Testing check-version: a stale or foreign-root global pointer is reported and healed ==="
+
+  local gp_root gp_cfg gp_aimi gp_old gp_new gp_foreign
+  gp_root=$(mktemp -d)
+  gp_cfg="$gp_root/claude-config"
+  gp_aimi="$gp_root/aimi-config"
+  mkdir -p "$gp_aimi"
+  _make_cached_version "$gp_cfg" "abc123" "1.2.3"
+  _make_cached_version "$gp_cfg" "abc123" "1.3.0"
+  gp_old="$gp_cfg/plugins/cache/abc123/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
+  gp_new="$gp_cfg/plugins/cache/abc123/aimi-engineering/1.3.0/scripts/aimi-cli.sh"
+  gp_foreign="$gp_root/other-config/plugins/cache/abc123/aimi-engineering/1.3.0/scripts/aimi-cli.sh"
+
+  "$CLI" clear-state > /dev/null 2>&1 || true
+
+  local output exit_code
+  # Older version, project pointer absent, no --fix: reported, exit 1, untouched.
+  echo "$gp_old" > "$gp_aimi/cli-path"
+  output=$(env -u AIMI_PLUGIN_DIR -u AIMI_DEV_DIR -u AIMI_CLI_PINNED CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$gp_cfg" AIMI_CONFIG_DIR="$gp_aimi" \
+    bash "$CLI" check-version --quiet 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "check-version global pointer: an older global pointer exits 1 without --fix"
+  assert_eq "stale/1.2.3/stale" \
+    "$(printf '%s' "$output" | jq -r '[.status, .storedVersion, .globalCli.status] | join("/")')" \
+    "check-version global pointer: top-level status and storedVersion are the global pointer's, globalCli is stale"
+  assert_eq "$gp_old" "$(cat "$gp_aimi/cli-path")" "check-version global pointer: nothing is written without --fix"
+
+  # --fix repoints it at the newest install.
+  output=$(env -u AIMI_PLUGIN_DIR -u AIMI_DEV_DIR -u AIMI_CLI_PINNED CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$gp_cfg" AIMI_CONFIG_DIR="$gp_aimi" \
+    bash "$CLI" check-version --quiet --fix 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "check-version global pointer: --fix exits 0"
+  assert_eq "$gp_new" "$(cat "$gp_aimi/cli-path")" "check-version global pointer: --fix repoints it at the newest install"
+  assert_eq "fixed" "$(printf '%s' "$output" | jq -r '.globalCli.status')" "check-version global pointer: globalCli reports fixed"
+
+  # A pointer under another Claude config root is stale even at the same version.
+  echo "$gp_foreign" > "$gp_aimi/cli-path"
+  output=$(env -u AIMI_PLUGIN_DIR -u AIMI_DEV_DIR -u AIMI_CLI_PINNED CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$gp_cfg" AIMI_CONFIG_DIR="$gp_aimi" \
+    bash "$CLI" check-version --quiet --fix 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_eq "$gp_new" "$(cat "$gp_aimi/cli-path")" "check-version global pointer: a foreign-root pointer is repointed at this root's install"
+
+  # A current pointer adds no key at all.
+  output=$(env -u AIMI_PLUGIN_DIR -u AIMI_DEV_DIR -u AIMI_CLI_PINNED CLAUDECODE=1 \
+    CLAUDE_CONFIG_DIR="$gp_cfg" AIMI_CONFIG_DIR="$gp_aimi" \
+    bash "$CLI" check-version --quiet 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_eq "false" "$(printf '%s' "$output" | jq -r 'has("globalCli")')" "check-version global pointer: a current pointer adds no globalCli key"
+
+  rm -rf "$gp_root"
+}
+
 # Every assertion below is unconditional and runs on every code path — no early
 # return, no assertion whose existence depends on the environment. That is a
 # deliberate contrast with test_init_session_writes_global_cache (~:2245), whose
@@ -11883,6 +11940,7 @@ main() {
   test_read_global_worktree_cache_tampered
   test_init_session_writes_global_cache
   test_check_version_fix_updates_global_cache
+  test_check_version_global_pointer
   test_forge_account_store_path
 
   # XDG cache location tests — new path + read-both fallback

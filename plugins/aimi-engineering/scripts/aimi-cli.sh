@@ -13105,8 +13105,138 @@ _check_version_resolve_version() {
   _extract_version_from_path "$path"
 }
 
+# Compare -- and under --fix repair -- the GLOBAL cli-path pointer.
+#
+# Usage: _check_version_global_pointer <config_dir> <latest_path> <latest_version> <fix>
+#
+# Prints ONE `globalCli` JSON object -- {status, storedVersion, latestVersion,
+# storedPath, latestPath}, plus `reason` when a requested repair did not take --
+# or nothing at all, and ALWAYS RETURNS 0: the caller reads it through `$( )`
+# under `set -euo pipefail`, so every read below is guarded `|| var=""` for the
+# reason _directory_source_installed_version spells out.
+#
+# WHY THIS EXISTS. check-version compared the PROJECT pointer (.aimi/cli-path)
+# against the newest install and treated the machine-wide pointer only as
+# something to overwrite once the project pointer was found stale. A project
+# whose own pointer was already `current` (or absent) therefore never looked at
+# the global one, so a session in any OTHER project kept resolving an older
+# install -- or an install under a second Claude config root -- for as long as
+# nothing happened to make this project stale.
+#
+# NOTHING IS REPORTED, and nothing is written, when there is nothing to say:
+# a pin (AIMI_CLI_PINNED) names this run's own answer and the global pointer is
+# not consulted under it; a latest path that is not a versioned plugin-cache
+# path (a directory-source install) has no version to compare; and a global
+# pointer that is missing, empty, not a versioned plugin-cache path, or equal
+# to the latest path has nothing to heal. Only the file _global_cache_path
+# names is read -- never the legacy ~/.claude/aimi-engineering-cli-path, which
+# is a read-fallback only and has no writer left to keep it current.
+#
+# STALE means the pointer names an OLDER version (`sort -V`), or one under a
+# Claude config root other than <config_dir> -- the same prefix test
+# _report_foreign_cache_root applies.
+#
+# --fix WRITES THROUGH write_global_cli_cache and only after the target
+# survives four checks (it exists, is executable, is named aimi-cli.sh, and has
+# an x.y.z version segment), then RE-READS the file: write_global_cli_cache
+# declines a `/.worktrees/` path as a no-op success, so "the call returned 0"
+# is not evidence the pointer moved. A repair that cannot be confirmed leaves
+# the status `stale` with a `reason`, rather than reporting a fix that did not
+# happen.
+_check_version_global_pointer() {
+  local config_dir="$1" latest_path="$2" latest_version="$3" fix="$4"
+
+  local pinned=""
+  pinned=$(_pinned_cli_path) || pinned=""
+  [ -n "$pinned" ] && return 0
+
+  case "$latest_path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  local numeric='^[0-9]+\.[0-9]+\.[0-9]+$'
+  [[ "$latest_version" =~ $numeric ]] || return 0
+
+  local cache_file=""
+  cache_file=$(_global_cache_path) || cache_file=""
+  [ -n "$cache_file" ] && [ -f "$cache_file" ] || return 0
+  local stored_path=""
+  IFS= read -r stored_path < "$cache_file" || true
+  [ -n "$stored_path" ] || return 0
+  case "$stored_path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  [ "$stored_path" = "$latest_path" ] && return 0
+
+  local stored_version=""
+  stored_version=$(_extract_version_from_path "$stored_path") || stored_version=""
+  [[ "$stored_version" =~ $numeric ]] || return 0
+
+  local stale=false
+  if [ "${stored_path%%/plugins/cache/*}" != "$config_dir" ]; then
+    stale=true
+  elif [ "$stored_version" != "$latest_version" ]; then
+    local lowest=""
+    lowest=$(printf '%s\n%s\n' "$stored_version" "$latest_version" | sort -V | sed -n 1p) || lowest=""
+    [ "$lowest" = "$stored_version" ] && stale=true
+  fi
+  [ "$stale" = true ] || return 0
+
+  local status="stale" reason=""
+  if [ "$fix" = true ]; then
+    if [ ! -e "$latest_path" ]; then
+      reason="the newest install's aimi-cli.sh does not exist"
+    elif [ ! -x "$latest_path" ]; then
+      reason="the newest install's aimi-cli.sh is not executable"
+    elif [ "${latest_path##*/}" != "aimi-cli.sh" ]; then
+      reason="the newest install's path is not named aimi-cli.sh"
+    else
+      write_global_cli_cache "$latest_path" 2>/dev/null || true
+      local reread=""
+      IFS= read -r reread < "$cache_file" || true
+      if [ "$reread" = "$latest_path" ]; then
+        status="fixed"
+      else
+        reason="the global cli-path was not updated (a /.worktrees/ path is declined, or the write failed)"
+      fi
+    fi
+  fi
+
+  jq -n --arg st "$status" --arg sv "$stored_version" --arg lv "$latest_version" \
+        --arg sp "$stored_path" --arg lp "$latest_path" --arg reason "$reason" \
+    '{status: $st, storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}
+     + (if $reason == "" then {} else {reason: $reason} end)' || true
+  return 0
+}
+
+# Print a check-version result, merging the global pointer's finding into it.
+#
+# Usage: _check_version_emit <project_json> <global_json> <override_top> <jq_flags>
+#
+# With no <global_json> this prints <project_json> and nothing else, byte for
+# byte -- which is what keeps every recorded case replaying unchanged. With one
+# it adds `globalCli`; and when <override_top> is true -- the project pointer is
+# `current` or `missing`, so its own status says nothing a caller must act on --
+# the top-level status, storedVersion and latestVersion become the global
+# pointer's, because those are the only findings left to report.
+_check_version_emit() {
+  local project_json="$1" global_json="$2" override_top="$3" flags="$4"
+  if [ -z "$global_json" ]; then
+    printf '%s\n' "$project_json"
+    return 0
+  fi
+  if [ "$override_top" = true ]; then
+    printf '%s' "$project_json" | jq "$flags" --argjson g "$global_json" \
+      '. + {status: $g.status, storedVersion: $g.storedVersion, latestVersion: $g.latestVersion, globalCli: $g}'
+  else
+    printf '%s' "$project_json" | jq "$flags" --argjson g "$global_json" '. + {globalCli: $g}'
+  fi
+}
+
 # Check CLI version staleness
-# Compares stored cli-path against the glob-resolved latest path
+# Compares stored cli-path against the glob-resolved latest path, and the
+# global cli-path pointer against the same latest path
 # Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
 cmd_check_version() {
   local quiet=false fix=false
@@ -13227,6 +13357,31 @@ cmd_check_version() {
 
   latest_version=$(_check_version_resolve_version "$config_dir" "$latest_path")
 
+  # ---- The GLOBAL pointer, compared here -- after the `unknown` return and the
+  # dev-override / converter returns above, and BEFORE the project pointer is
+  # read, because the `missing` and `current` branches below return early.
+  # Empty when there is nothing to report; see _check_version_global_pointer.
+  local global_json="" global_status=""
+  global_json=$(_check_version_global_pointer "$config_dir" "$latest_path" "$latest_version" "$fix") || global_json=""
+  if [ -n "$global_json" ]; then
+    global_status=$(printf '%s' "$global_json" | jq -r '.status') || global_status=""
+  fi
+  # 1 only for a stale global pointer that --fix was not asked to repair; a
+  # repair that was asked for and did not take is reported, not failed.
+  local global_exit=0
+  if [ "$global_status" = "stale" ] && [ "$fix" = false ]; then
+    global_exit=1
+  fi
+  if [ "$global_status" = "stale" ] && [ "$quiet" = false ]; then
+    local g_reason=""
+    g_reason=$(printf '%s' "$global_json" | jq -r '.reason // empty') || g_reason=""
+    if [ -n "$g_reason" ]; then
+      echo "Warning: global cli-path is stale and could not be repaired: $g_reason" >&2
+    else
+      echo "Warning: global cli-path is stale. Stored: $(printf '%s' "$global_json" | jq -r '.storedVersion'), Latest: $latest_version" >&2
+    fi
+  fi
+
   # Read stored path from state
   stored_path=$(read_state "cli-path")
 
@@ -13235,34 +13390,36 @@ cmd_check_version() {
     if [ "$quiet" = false ]; then
       echo "Warning: No stored cli-path found. Run init-session to persist." >&2
     fi
-    jq -n --arg ver "$latest_version" --arg path "$latest_path" \
-      '{status: "missing", latestVersion: $ver, latestPath: $path}'
-    return 0
+    _check_version_emit "$(jq -n --arg ver "$latest_version" --arg path "$latest_path" \
+      '{status: "missing", latestVersion: $ver, latestPath: $path}')" "$global_json" true "-M"
+    return "$global_exit"
   fi
 
   stored_version=$(_check_version_resolve_version "$config_dir" "$stored_path")
 
   # Case: stored path matches latest — current
   if [ "$stored_path" = "$latest_path" ]; then
-    jq -nc --arg v "$stored_version" '{status:"current",version:$v}'
-    return 0
+    _check_version_emit "$(jq -nc --arg v "$stored_version" '{status:"current",version:$v}')" \
+      "$global_json" true "-c"
+    return "$global_exit"
   fi
 
   # Case: stored path differs — stale
   if [ "$fix" = true ]; then
     write_state "cli-path" "$latest_path"
     write_global_cli_cache "$latest_path"
-    jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
-      '{status: "fixed", storedVersion: $sv, latestVersion: $lv}'
+    _check_version_emit "$(jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+      '{status: "fixed", storedVersion: $sv, latestVersion: $lv}')" "$global_json" false "-M"
     return 0
   fi
 
   if [ "$quiet" = false ]; then
     echo "Warning: CLI version is stale. Stored: $stored_version, Latest: $latest_version" >&2
   fi
-  jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+  _check_version_emit "$(jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
        --arg sp "$stored_path" --arg lp "$latest_path" \
-    '{status: "stale", storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}'
+    '{status: "stale", storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}')" \
+    "$global_json" false "-M"
   return 1
 }
 
@@ -18282,7 +18439,9 @@ COMMANDS:
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
                               --quiet  Suppress stderr warnings
-                              --fix    Auto-update cli-path on stale detection (exits 0)
+                              --fix    Auto-update cli-path on stale detection (exits 0);
+                                       also heals a stale or foreign-root GLOBAL cli-path
+                                       pointer, reported as globalCli in the JSON
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/

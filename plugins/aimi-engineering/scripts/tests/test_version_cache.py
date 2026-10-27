@@ -391,9 +391,16 @@ def _read(path, root):
         return None
 
 
-def replay(spec, root):
-    """Build, run, and record -- the same function the capture used."""
+def replay(spec, root, extra_env=None):
+    """Build, run, and record -- the same function the capture used.
+
+    `extra_env` is for the hand-written tests below only (a dev override, a
+    pin): the corpus never passes it, so every recorded case runs exactly the
+    environment `_build_root` builds.
+    """
     recipe = _build_root(spec, root)
+    if extra_env:
+        recipe["env"].update(extra_env)
     tree_before = _tree(root)
     proc = subprocess.run(
         ["bash", recipe["cli"]] + spec["args"],
@@ -1084,3 +1091,265 @@ def test_a_metacharacter_bearing_config_dir_has_no_side_effect(tmp_path):
         assert not os.path.exists(
             os.path.join(root, "project", "MARKER")
         ), label + ": the injected command ran"
+
+
+# ---------------------------------------------------------------------------
+# check-version and the GLOBAL cli-path pointer
+#
+# check-version used to compare only the project pointer (.aimi/cli-path), so a
+# project whose own pointer was `current` or absent never looked at the
+# machine-wide ~/.config/aimi/cli-path, and a session in any OTHER project kept
+# resolving an older install -- or one under a second Claude config root. Every
+# case here seeds the global pointer through `global_cli_path` and builds its
+# own throwaway root through `replay`, so the quarantine this module's header
+# describes applies unchanged; none of them touches a real cli-path.
+# ---------------------------------------------------------------------------
+
+_TWO_VERSIONS = [
+    {"entry": "mk1", "version": "1.2.3"},
+    {"entry": "mk1", "version": "1.3.0"},
+]
+_OLD_POINTER = "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3/scripts/aimi-cli.sh"
+_FOREIGN_POINTER = "{ROOT}/other-config/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh"
+_FOREIGN_NORMALIZED = "/TMP/other-config/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh"
+
+
+def _global_spec(args, **extra):
+    spec = {"args": ["check-version"] + args, "cache": _TWO_VERSIONS}
+    spec.update(extra)
+    return spec
+
+
+def test_check_version_global_pointer_older_version_is_reported_and_exits_1_without_fix(tmp_path):
+    """A missing project pointer used to answer `missing` at exit 0 and stop."""
+    actual = replay(_global_spec(["--quiet"], global_cli_path=_OLD_POINTER), str(tmp_path))
+
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 1, actual
+    # Top level is the GLOBAL pointer's, because the project pointer has nothing to say.
+    assert (out["status"], out["storedVersion"], out["latestVersion"]) == ("stale", "1.2.3", "1.3.0")
+    assert out["globalCli"] == {
+        "status": "stale",
+        "storedVersion": "1.2.3",
+        "latestVersion": "1.3.0",
+        "storedPath": _cli("mk1", "1.2.3"),
+        "latestPath": _cli("mk1", "1.3.0"),
+    }
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n", "no --fix, so nothing is written"
+    assert actual["tree"] == actual["tree_before"]
+
+
+def test_check_version_global_pointer_fix_repoints_it_while_the_project_pointer_is_current(tmp_path):
+    spec = _global_spec(
+        ["--quiet", "--fix"],
+        global_cli_path=_OLD_POINTER,
+        state_cli_path="{CONFIG}/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh",
+    )
+    actual = replay(spec, str(tmp_path))
+
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 0, actual
+    assert (out["status"], out["storedVersion"], out["latestVersion"]) == ("fixed", "1.2.3", "1.3.0")
+    assert out["globalCli"]["status"] == "fixed"
+    assert out["globalCli"]["latestPath"] == _cli("mk1", "1.3.0")
+    assert actual["global_cli_path"] == _cli("mk1", "1.3.0") + "\n"
+    # Neither a backup nor a stray temp file is left beside the pointer.
+    leftovers = [p for p in actual["tree"] if p.startswith("aimi-config/") and not p.endswith("/")]
+    assert leftovers == ["aimi-config/cli-path"], leftovers
+    assert not any(".bak" in p for p in actual["tree"]), actual["tree"]
+
+
+def test_check_version_global_pointer_foreign_config_root_is_stale_even_at_a_newer_version(tmp_path):
+    """The same prefix test _report_foreign_cache_root applies, now acted on."""
+    spec = _global_spec(["--quiet", "--fix"], global_cli_path=_FOREIGN_POINTER)
+    actual = replay(spec, str(tmp_path))
+
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 0, actual
+    assert out["globalCli"]["status"] == "fixed"
+    assert out["globalCli"]["storedPath"] == _FOREIGN_NORMALIZED
+    assert out["globalCli"]["storedVersion"] == out["globalCli"]["latestVersion"] == "1.3.0"
+    assert actual["global_cli_path"] == _cli("mk1", "1.3.0") + "\n"
+
+
+def test_check_version_global_pointer_stale_project_json_is_unchanged_and_gains_globalcli(tmp_path):
+    base = _global_spec(["--quiet", "--fix"], state_cli_path="/fake/velha/1.0.0/scripts/aimi-cli.sh")
+    without = replay(base, str(tmp_path / "a"))
+    os.makedirs(str(tmp_path / "b"))
+    with_global = replay(dict(base, global_cli_path=_OLD_POINTER), str(tmp_path / "b"))
+
+    plain = json.loads(without["stdout"])
+    merged = json.loads(with_global["stdout"])
+    assert plain == {"status": "fixed", "storedVersion": "1.0.0", "latestVersion": "1.3.0"}
+    # The project pointer's own keys keep their own values, globalCli sits beside them.
+    assert {k: v for k, v in merged.items() if k != "globalCli"} == plain
+    assert merged["globalCli"]["status"] == "fixed"
+    assert merged["globalCli"]["storedVersion"] == "1.2.3"
+
+
+def test_check_version_global_pointer_stale_project_without_fix_still_exits_1(tmp_path):
+    base = _global_spec(
+        ["--quiet"],
+        state_cli_path="/fake/velha/1.0.0/scripts/aimi-cli.sh",
+        global_cli_path=_OLD_POINTER,
+    )
+    actual = replay(base, str(tmp_path))
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 1
+    assert out["status"] == "stale" and out["storedVersion"] == "1.0.0"
+    assert out["globalCli"]["status"] == "stale"
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param({"global_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.3.0/scripts/aimi-cli.sh"}, id="current"),
+        pytest.param({}, id="missing"),
+        pytest.param({"global_cli_path": ""}, id="empty"),
+        pytest.param({"global_cli_path": "/opt/somewhere/else/aimi-cli.sh"}, id="not-a-versioned-cache-path"),
+        pytest.param({"global_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.2.3.bak/scripts/aimi-cli.sh"}, id="non-numeric-version"),
+        pytest.param({"newer_same_root": True}, id="newer-than-latest-same-root"),
+    ],
+)
+def test_check_version_global_pointer_adds_nothing_when_there_is_nothing_to_heal(tmp_path, seed):
+    """No `globalCli` key, and the bytes of stdout are the ones the verb always printed."""
+    seed = dict(seed)
+    if seed.pop("newer_same_root", False):
+        cache = _TWO_VERSIONS + [{"entry": "mk1", "version": "1.4.0"}]
+        # latest is 1.4.0, so a pointer at 1.5.0 under the same root is newer, not stale.
+        spec = {"args": ["check-version", "--quiet", "--fix"], "cache": cache,
+                "global_cli_path": "{CONFIG}/plugins/cache/mk1/aimi-engineering/1.5.0/scripts/aimi-cli.sh"}
+        baseline = {"args": spec["args"], "cache": cache}
+    else:
+        spec = _global_spec(["--quiet", "--fix"], **seed)
+        baseline = _global_spec(["--quiet", "--fix"])
+    actual = replay(spec, str(tmp_path / "with"))
+    os.makedirs(str(tmp_path / "without"))
+    plain = replay(baseline, str(tmp_path / "without"))
+
+    assert "globalCli" not in actual["stdout"]
+    assert actual["stdout"] == plain["stdout"]
+    assert actual["exit"] == 0
+    # The project pointer is absent, so no branch of the verb writes: the pointer
+    # on disk is exactly what was seeded.
+    if "global_cli_path" in spec:
+        assert actual["global_cli_path"] == spec["global_cli_path"].replace("{CONFIG}", "/TMP/claude-config") + "\n"
+    else:
+        assert actual["global_cli_path"] is None
+
+
+def test_check_version_global_pointer_legacy_file_is_never_read(tmp_path):
+    """Only the file _global_cache_path names is compared, never the legacy one."""
+    root = str(tmp_path)
+    os.makedirs(os.path.join(root, "claude-config"))
+    with open(os.path.join(root, "claude-config", "aimi-engineering-cli-path"), "w", encoding="utf-8") as handle:
+        handle.write(_expand(_OLD_POINTER, root, os.path.join(root, "claude-config")) + "\n")
+    actual = replay(_global_spec(["--quiet", "--fix"]), root)
+
+    assert "globalCli" not in actual["stdout"]
+    assert json.loads(actual["stdout"])["status"] == "missing"
+    assert actual["global_cli_path"] is None
+
+
+def test_check_version_global_pointer_is_skipped_under_a_dev_override(tmp_path):
+    root = str(tmp_path)
+    dev = os.path.join(root, "devtree")
+    os.makedirs(os.path.join(dev, "scripts"))
+    _write_stub(os.path.join(dev, "scripts", "aimi-cli.sh"), True)
+    actual = replay(
+        _global_spec(["--quiet", "--fix"], global_cli_path=_OLD_POINTER), root,
+        extra_env={"AIMI_DEV_DIR": dev},
+    )
+
+    assert json.loads(actual["stdout"])["status"] == "dev-override"
+    assert "globalCli" not in actual["stdout"]
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_global_pointer_is_skipped_under_the_converter_branch(tmp_path):
+    spec = _global_spec(
+        ["--quiet", "--fix"],
+        host="opencode",
+        plugin_dir={"script": True},
+        global_cli_path=_OLD_POINTER,
+    )
+    actual = replay(spec, str(tmp_path))
+
+    assert json.loads(actual["stdout"])["status"] == "ok"
+    assert "globalCli" not in actual["stdout"]
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_global_pointer_is_skipped_under_a_valid_pin(tmp_path):
+    root = str(tmp_path)
+    pin = os.path.join(root, "claude-config", "plugins", "cache", "mk1", "aimi-engineering", "1.2.3", "scripts", "aimi-cli.sh")
+    actual = replay(
+        _global_spec(["--quiet", "--fix"], global_cli_path=_OLD_POINTER), root,
+        extra_env={"AIMI_CLI_PINNED": pin},
+    )
+
+    assert "globalCli" not in actual["stdout"]
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_global_pointer_is_skipped_when_the_latest_is_a_directory_source_install(tmp_path):
+    """A directory-source path has no version segment to compare against."""
+    root = str(tmp_path)
+    config = os.path.join(root, "claude-config")
+    install = os.path.join(root, "devcheckout")
+    os.makedirs(os.path.join(config, "plugins"))
+    os.makedirs(os.path.join(install, ".claude-plugin"))
+    os.makedirs(os.path.join(install, "plugins", "aimi-engineering", "scripts"))
+    _write_stub(os.path.join(install, "plugins", "aimi-engineering", "scripts", "aimi-cli.sh"), True)
+    with open(os.path.join(config, "plugins", "known_marketplaces.json"), "w", encoding="utf-8") as handle:
+        json.dump({"dev": {"source": {"source": "directory"}, "installLocation": install}}, handle)
+    with open(os.path.join(install, ".claude-plugin", "marketplace.json"), "w", encoding="utf-8") as handle:
+        json.dump({"plugins": [{"name": "aimi-engineering", "version": "1.120.0", "source": "./plugins/aimi-engineering"}]}, handle)
+
+    spec = {"args": ["check-version", "--quiet", "--fix"], "cache": [], "global_cli_path": _OLD_POINTER}
+    actual = replay(spec, root)
+
+    assert json.loads(actual["stdout"])["status"] == "missing"
+    assert "globalCli" not in actual["stdout"]
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_global_pointer_fix_refuses_a_target_that_is_not_executable(tmp_path):
+    cache = [{"entry": "mk1", "version": "1.2.3"}, {"entry": "mk1", "version": "1.3.0", "exec": False}]
+    spec = {"args": ["check-version", "--quiet", "--fix"], "cache": cache, "global_cli_path": _OLD_POINTER}
+    actual = replay(spec, str(tmp_path))
+
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 0, actual
+    assert out["globalCli"]["status"] == "stale"
+    assert "not executable" in out["globalCli"]["reason"], out
+    assert out["status"] == "stale"
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+    assert not any(".bak" in p for p in actual["tree"]), actual["tree"]
+
+
+def test_check_version_global_pointer_fix_is_not_reported_fixed_when_the_write_is_declined(tmp_path):
+    """A version directory that is a symlink into a .worktrees/ tree is declined
+    by write_global_cli_cache as a no-op success; the re-read is what notices."""
+    cache = [
+        {"entry": "mk1", "version": "1.2.3"},
+        {"entry": "mk1", "version": "1.3.0", "worktree_symlink": True},
+    ]
+    spec = {"args": ["check-version", "--quiet", "--fix"], "cache": cache, "global_cli_path": _OLD_POINTER}
+    actual = replay(spec, str(tmp_path))
+
+    out = json.loads(actual["stdout"])
+    assert actual["exit"] == 0, actual
+    assert out["globalCli"]["status"] == "stale", out
+    assert out["globalCli"]["reason"], out
+    assert out["status"] == "stale"
+    assert actual["global_cli_path"] == _cli("mk1", "1.2.3") + "\n"
+
+
+def test_check_version_global_pointer_stale_without_fix_warns_on_stderr_unless_quiet(tmp_path):
+    loud = replay(_global_spec([], global_cli_path=_OLD_POINTER), str(tmp_path / "loud"))
+    os.makedirs(str(tmp_path / "quiet"))
+    quiet = replay(_global_spec(["--quiet"], global_cli_path=_OLD_POINTER), str(tmp_path / "quiet"))
+
+    assert "global cli-path is stale" in loud["stderr"], loud["stderr"]
+    assert quiet["stderr"] == ""
