@@ -6,6 +6,8 @@
 
 ### Sub-Agent Prompt Template
 
+In `files` mode (`phase-3d-context-files.md`) shared blocks become a path list.
+
 Spawn each sub-agent with:
 
 ```
@@ -154,7 +156,7 @@ Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
     'verification': {
       'strategy': 'test|visual|api',
       'status': 'pending',
-      'url': '<optional>',
+      'url': '<optional; a path or URL, never an HTTP method: /api/x, https://host/x ok; POST /api/x, GET x rejected>',
       'expect': '<optional>'
     },
     'gate': { 'type': '...', 'status': 'pending', 'prompt': '...', 'options': [...] },

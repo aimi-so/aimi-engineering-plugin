@@ -166,7 +166,7 @@ No artifact-language anchor applies to this file's body: the Spec-Passthrough Ru
    #   <complete findings body, verbatim — present only when step 4's file does not exist>
    ```
 
-   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2, h3 or h4 anchor written to the file, in document order. A heading must not contain `$`, a backtick, a double quote or a backslash: the planner passes anchors to `extract-sections` inside a double-quoted shell argument and drops any anchor that carries one, so that slice is lost. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
+   `summary` must contain **exactly 3** headline bullets (compressed per `plugins/aimi-engineering/AGENTS.md` compression rules). `sections` lists every h2, h3 or h4 anchor written to the file, in document order. A heading may contain `$`, a backtick, a double quote or a backslash: the planner strips those four characters from the anchor it sends to `extract-sections` and `extract-sections` strips them from the heading before comparing, so the slice is still found. The full on-disk file is uncapped — only this Task return is the pointer block. `unwritten_findings`'s presence is the could-not-write signal; when the file did land, omit it entirely.
 
 6. **Safety escape:** Security findings, data-privacy issues, accessibility blockers, or conflicts between spec versions auto-expand beyond caps — user safety overrides brevity.
 

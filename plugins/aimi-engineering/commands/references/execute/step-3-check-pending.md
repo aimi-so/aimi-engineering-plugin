@@ -4,18 +4,15 @@
 
 ## Step 3: Check for Pending Stories
 
-Resolve this run's own tasks file explicitly — `$PHASE_TASKS_PATH` when `PHASE_MODE=true` (already set by Step 1.7, or pre-set here for a split sub-orchestrator — see Spawn Split Sub-Orchestrators), `$AIMI_ROOT/$TASKS_PATH` otherwise — rather than letting `count-pending` fall through to its shared current-tasks fallback. Every remaining call in this step and in Step 4 below reuses the same formula, resolved fresh in each call's own isolated shell:
+Resolve this run's own tasks file explicitly — `$PHASE_TASKS_PATH` when `PHASE_MODE=true` (already set by Step 1.7, or pre-set here for a split sub-orchestrator — see Spawn Split Sub-Orchestrators), `$TASKS_PATH` otherwise (already absolute: `init-session` prints the realpath, so it is never prefixed with `$AIMI_ROOT/`) — rather than letting `count-pending` fall through to its shared current-tasks fallback. Every remaining call in this step and in Step 4 below reuses the same formula, resolved fresh in each call's own isolated shell:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AIMI_ROOT="$PWD"
-while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
-[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if [ "$PHASE_MODE" = "true" ]; then
   RUN_TASKS_FILE="$PHASE_TASKS_PATH"
 else
-  RUN_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+  RUN_TASKS_FILE="$TASKS_PATH"
 fi
 $AIMI_CLI count-pending --tasks-file "$RUN_TASKS_FILE"
 ```
@@ -68,18 +65,15 @@ STOP execution.
 
 ### Validate Dependencies
 
-Same resolution as this step's own `count-pending` above — a fresh `AIMI_ROOT` derivation feeding the identical `PHASE_MODE`-conditioned formula:
+Same resolution as this step's own `count-pending` above — the identical `PHASE_MODE`-conditioned formula:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AIMI_ROOT="$PWD"
-while [ "$AIMI_ROOT" != "/" ] && [ ! -d "$AIMI_ROOT/.aimi" ]; do AIMI_ROOT=$(dirname "$AIMI_ROOT"); done
-[ -d "$AIMI_ROOT/.aimi" ] || AIMI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 if [ "$PHASE_MODE" = "true" ]; then
   RUN_TASKS_FILE="$PHASE_TASKS_PATH"
 else
-  RUN_TASKS_FILE="$AIMI_ROOT/$TASKS_PATH"
+  RUN_TASKS_FILE="$TASKS_PATH"
 fi
 $AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE"
 ```

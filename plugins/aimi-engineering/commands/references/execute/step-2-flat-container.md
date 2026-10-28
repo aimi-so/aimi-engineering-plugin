@@ -64,7 +64,7 @@ The question it answers is whether the tree moved between planning and execution
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-PLAN_BASE_REF=$($AIMI_CLI metadata --tasks-file "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null | jq -r '.baseRef // empty')
+PLAN_BASE_REF=$($AIMI_CLI metadata --tasks-file "$TASKS_PATH" 2>/dev/null | jq -r '.baseRef // empty')
 if [ -n "$PLAN_BASE_REF" ]; then
   # git merge-base --is-ancestor <metadata.baseRef> <container base>: exit 0
   # means the recorded plan base is reachable from the base this container was

@@ -57,7 +57,7 @@ esac
 - **`BUNDLE_FINAL` non-empty (the path, symlinks resolved, already sits inside `AIMI_ROOT`):** use `$BUNDLE_ARG` as-is — no import needed.
 - **`BUNDLE_FINAL` empty (the path resolves outside `AIMI_ROOT`):** bring it into the project first with `import-design-bundle`, then point `BUNDLE_FINAL` at the imported copy. The destination (`BUNDLE_DEST`) depends on `ROADMAP_MODE` (set above, in Rolling-Wave Phase Selection):
   - `ROADMAP_MODE=true`: `$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle` — D2's fixed phase-scoped location, reusing `$featureSlug`/`$PHASE_DIR` from `#### Extract selected-phase working memory` above; this is the same `<phase-dir>/design-bundle/README.md` layout `_select_design_bundle`'s phase tier already expects.
-  - `ROADMAP_MODE=false`: `$AIMI_ROOT/.aimi/design-bundles/<slug>`, `<slug>` derived from `$FEATURE_DESCRIPTION` via the same five-step algorithm in `commands/references/topic-slug.md` (lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) that Phase 1's own `topicSlug` derivation applies below — that derivation has not run yet for a flat feature at this point in the pipeline, so this is a local, one-off derivation rather than a reuse of it.
+  - `ROADMAP_MODE=false`: `$AIMI_ROOT/.aimi/design-bundles/<slug>`, `<slug>` derived from `$FEATURE_DESCRIPTION` by `$AIMI_CLI slugify --stdin`, the deterministic form of the derivation in `commands/references/topic-slug.md` (accents folded to ASCII, lowercase, hyphenate, dedupe hyphens, truncate 50, strip trailing hyphens) that Phase 1's own `topicSlug` derivation applies below — that derivation has not run yet for a flat feature at this point in the pipeline, so this is a local, one-off derivation rather than a reuse of it.
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -65,7 +65,8 @@ esac
   if [ "$ROADMAP_MODE" = true ]; then
     BUNDLE_DEST="$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR/design-bundle"
   else
-    BUNDLE_IMPORT_SLUG=$(printf '%s' "$FEATURE_DESCRIPTION" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g' | cut -c1-50 | sed 's/-*$//')
+    BUNDLE_IMPORT_SLUG=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI slugify --stdin) || BUNDLE_IMPORT_SLUG=""
+    [ -n "$BUNDLE_IMPORT_SLUG" ] || { echo "Error: no slug can be derived from the feature description" >&2; exit 1; }
     BUNDLE_DEST="$AIMI_ROOT/.aimi/design-bundles/$BUNDLE_IMPORT_SLUG"
   fi
   IMPORT_ERR_FILE=$(mktemp)
@@ -79,6 +80,8 @@ esac
   rm -f "$IMPORT_ERR_FILE"
   ```
 
+  **When the slug is empty** (the description holds no ASCII letter or digit once accents are folded, so `slugify` refused it), the block above prints the verb's own stderr line and its own `Error: no slug can be derived` line and STOPS the entire `/aimi:plan` invocation before `import-design-bundle` runs. No fallback slug is made up.
+
   **On `IMPORT_EXIT != 0`:** report `$IMPORT_STDERR` as a single warning line — the CLI's own refusal already names both the source and the destination when a different copy already lives there, and names `--reimport` as the way to replace it — and STOP the entire `/aimi:plan` invocation before any `detect-design-bundle` call runs. **On `IMPORT_EXIT = 0`:** `BUNDLE_FINAL="$BUNDLE_DEST"`.
 
 **Build and run the `detect-design-bundle` call, capturing stdout and the exit status separately from stderr — never merged, and never swallowed into an empty default the way this call used to be:**
@@ -90,20 +93,20 @@ BUNDLE_ERR_FILE=$(mktemp)
 if [ -n "$BUNDLE_FINAL" ]; then
   BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_FINAL" 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ] && [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 else
-  BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --feature-stdin 2>"$BUNDLE_ERR_FILE")
 fi
 BUNDLE_EXIT=$?
 BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
 rm -f "$BUNDLE_ERR_FILE"
 ```
 
-`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode.
+`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode. Every arm except `--bundle` pipes `$FEATURE_DESCRIPTION` to `--feature-stdin` — on stdin, never as an argument — so a scan-tier bundle sharing no word with the description (a stray or placeholder bundle) is dropped before the election; the phase tier, `--bundle` and `--all` are never filtered, and an empty or all-stop-word description turns the filter off. When it discards bundles the verb names them on stderr, and a JSON object answer carries them in a `filtered` array of paths (`null` is still the bare literal, with the discarded names on stderr only).
 
 **Branch on `BUNDLE_EXIT`:**
 
@@ -112,7 +115,7 @@ rm -f "$BUNDLE_ERR_FILE"
 - **`3` (ambiguous):** see below.
 - **anything else:** report `$BUNDLE_STDERR` as a single warning line and STOP the entire `/aimi:plan` invocation. This is unlike the Pre-Expansion Contract Gate's and Roadmap Materialization's own "surface the CLI's stderr and continue the rest of the plan pipeline" precedent for an unhandled failure shape: every exit `detect-design-bundle` can produce by design is already one of the three cases above, so a fourth one means something this command does not understand happened, before any planning context exists for the rest of the pipeline to fall back on.
 
-**On exit 3 — ambiguous, two or more same-tier candidates and no bundle was named:** `BUNDLE_STDOUT` parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in `.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null` when that spec is absent).
+**On exit 3 — ambiguous, two or more same-tier candidates and no bundle was named:** with `--feature-stdin` in effect this now means two or more RELEVANT bundles tie, since unrelated ones were already discarded (they appear in `.filtered[]`, which is not a candidate list and is never offered). `BUNDLE_STDOUT` parses as `{"ambiguous":true,"tier":"...","candidates":[...]}`; each entry in `.candidates[]` carries `.path`, `.businessSpec` and `.designSpec` (`null` when that spec is absent).
 
 - **Interactive** (`INTERACTIVE_MODE` is not `agent`): present exactly one AskUserQuestion, naming the count and listing the first 4 entries of `.candidates[]` in its own path order:
   ```

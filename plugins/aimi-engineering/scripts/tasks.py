@@ -2354,6 +2354,38 @@ def _visual_ac_lines(docs):
     return lines
 
 
+def _story_bad_url(story):
+    """The verification.url of ONE story when it falls outside URL_CHARSET, else
+    None. A story with no verification object, or a null/empty/non-string url,
+    has nothing to refuse. The same jq_index/jq_type/jq_test calls the scan
+    always made, so the rule lives once for validate-tasks R15 and for
+    validate-staging."""
+    verification = jq_index(story, "verification", ".userStories[]")
+    if jq_type(verification) != "object":
+        return None
+    url = jq_index(verification, "url", ".userStories[].verification")
+    if jq_type(url) != "string" or url == "":
+        return None
+    if jq_test(url, URL_CHARSET, ".userStories[].verification.url", ignore_case=False):
+        return None
+    return url
+
+
+def _url_finding(url):
+    """The one sentence both validate-tasks R15 and validate-staging report."""
+    return 'verification.url "' + url + '" contains characters outside the allowed charset'
+
+
+def verification_url_findings(story):
+    """Findings for one story's verification.url; [] for a clean or absent one.
+
+    validate_tasks R15 prefixes the same sentence with `<tasks_file>: <id> `, and
+    story_merge.validate_staging reports it keyed by staged idx.
+    """
+    url = _story_bad_url(story)
+    return [] if url is None else [_url_finding(url)]
+
+
 def _bad_url_lines(docs):
     """The verification.url charset scan, whose own `@tsv` carries the same
     tab-collapse the citation scan does -- a story with a null id hands its URL
@@ -2361,13 +2393,8 @@ def _bad_url_lines(docs):
     lines = []
     for doc in docs:
         for story in _stories(doc):
-            verification = jq_index(story, "verification", ".userStories[]")
-            if jq_type(verification) != "object":
-                continue
-            url = jq_index(verification, "url", ".userStories[].verification")
-            if jq_type(url) != "string" or url == "":
-                continue
-            if jq_test(url, URL_CHARSET, ".userStories[].verification.url", ignore_case=False):
+            url = _story_bad_url(story)
+            if url is None:
                 continue
             lines.append(
                 "\t".join(
@@ -2719,10 +2746,7 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
         story_id, bad_url = _read_ifs_whitespace(line, 2)
         if not story_id:
             continue
-        errors.append(
-            tasks_file + ": " + story_id + " verification.url \"" + bad_url
-            + "\" contains characters outside the allowed charset"
-        )
+        errors.append(tasks_file + ": " + story_id + " " + _url_finding(bad_url))
 
     # R16 -- acceptanceCriteria anchored to a line number. A WARNING, never an
     # error: `errors` is what makes validate-tasks exit 1, and a line number is

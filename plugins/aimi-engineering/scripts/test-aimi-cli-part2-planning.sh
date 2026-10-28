@@ -32,7 +32,9 @@ set -uo pipefail
 #   - story-merge Tests
 #   - apply-audit-patches Tests (twelve assertions, inside the story-merge section)
 #   - outline-shift Tests (seven assertions, inside the story-merge section)
-#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58)
+#   - slugify Tests (sixteen assertions, inside the story-merge section)
+#   - path-argument resolution Tests (four assertions, inside the story-merge section)
+#   - split-detect Tests (TC36-TC46, TC50-TC54, TC57-TC58, TC60)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/aimi-cli.sh"
@@ -1500,10 +1502,13 @@ RESEOF
   assert_contains "## Testing, Linting, and CI" "$stdout" "extract-sections: comma-containing heading matches its full text as a single anchor"
   assert_contains "Comma heading body line." "$stdout" "extract-sections: comma-containing heading includes its body"
 
-  # --- Test 10: anchors with shell metacharacters are rejected; other anchors in the
-  # same run still process (FIX 1 regression) ---
+  # --- Test 10: raw anchors that a double-quoted shell argument would already have
+  # evaluated ("$(", a backtick, "$" before a letter) are rejected; other anchors in the
+  # same run still process. A raw '"' or backslash is NOT rejected: it reaches the CLI
+  # intact as argv and is compared by its key, so with no heading matching it falls
+  # through to the no-match warning instead (FIX 1 regression, narrowed) ---
   local metachar_anchors metachar_stderr_file
-  metachar_anchors=$(printf 'Open Questions\n$(evil)\nbad`tick\nbad"quote\nbad\\slash')
+  metachar_anchors=$(printf 'Open Questions\n$(evil)\nbad`tick\nbad$name\nbad"quote\nbad\\slash')
   metachar_stderr_file="$es_dir/.aimi/stderr10.out"
 
   pushd "$es_dir" >/dev/null
@@ -1515,11 +1520,91 @@ RESEOF
   assert_contains "## Open Questions" "$stdout" "extract-sections: valid anchor still processed alongside rejected ones"
   local rejected_count
   rejected_count=$(printf '%s' "$stderr_out" | grep -c "anchor rejected (shell metacharacter)")
-  assert_eq "4" "$rejected_count" "extract-sections: all four dangerous-metacharacter anchors rejected with a warning"
-  assert_contains '$(evil)' "$stderr_out" "extract-sections: rejected-anchor warning names the \$( anchor"
-  assert_contains 'bad`tick' "$stderr_out" "extract-sections: rejected-anchor warning names the backtick anchor"
-  assert_contains 'bad"quote' "$stderr_out" "extract-sections: rejected-anchor warning names the double-quote anchor"
-  assert_contains 'bad\slash' "$stderr_out" "extract-sections: rejected-anchor warning names the backslash anchor"
+  assert_eq "3" "$rejected_count" "extract-sections: the three evaluated-form anchors (\$(, backtick, \$ before a letter) rejected with a warning"
+  assert_contains 'rejected (shell metacharacter): $(evil)' "$stderr_out" "extract-sections: rejected-anchor warning names the \$( anchor"
+  assert_contains 'rejected (shell metacharacter): bad`tick' "$stderr_out" "extract-sections: rejected-anchor warning names the backtick anchor"
+  assert_contains 'rejected (shell metacharacter): bad$name' "$stderr_out" "extract-sections: rejected-anchor warning names the dollar-before-a-letter anchor"
+  assert_contains 'no section matched anchor: bad"quote' "$stderr_out" "extract-sections: a raw double-quote anchor is accepted and falls through to the no-match warning"
+  assert_contains 'no section matched anchor: bad\slash' "$stderr_out" "extract-sections: a raw backslash anchor is accepted and falls through to the no-match warning"
+
+  # --- Test 10b: headings carrying '"', backslash, '$' or a backtick are matched by the
+  # sanitized anchor (both sides keyed identically), with no bleed into a neighbour ---
+  local key_file="$es_dir/.aimi/keyed.md"
+  cat > "$key_file" << 'RESEOF'
+# Keyed Research
+
+## The "foo" flow
+quoted body
+
+## Path C:\tmp and $HOME cost
+slash body
+
+## Backtick `code` heading
+tick body
+
+## Cost is $5
+price body
+
+## "" ``
+punctuation-only body
+
+## Plain
+plain body
+RESEOF
+  local key_err="$es_dir/.aimi/stderr10b.out"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors "The foo flow" 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err")
+  assert_exit_code "0" "$exit_code" "extract-sections: sanitized anchor for a quoted heading exits 0"
+  assert_contains '## The "foo" flow' "$stdout" "extract-sections: sanitized anchor returns the heading containing a double quote"
+  assert_contains "quoted body" "$stdout" "extract-sections: sanitized anchor returns the quoted heading's body"
+  local quote_bleed="yes"
+  [[ "$stdout" == *"slash body"* ]] || quote_bleed="no"
+  assert_eq "no" "$quote_bleed" "extract-sections: quoted heading section does not bleed into the next section"
+  local quote_warned="yes"
+  [[ "$stderr_out" == *"no section matched"* ]] || quote_warned="no"
+  assert_eq "no" "$quote_warned" "extract-sections: sanitized anchor for a quoted heading raises no no-match warning"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'The "foo" flow' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "quoted body" "$stdout" "extract-sections: a raw anchor carrying a double quote is accepted and matched by its key"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Path C:tmp and HOME cost' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "slash body" "$stdout" "extract-sections: sanitized anchor returns the heading containing a backslash and a dollar sign"
+  local slash_bleed="yes"
+  [[ "$stdout" == *"tick body"* ]] || slash_bleed="no"
+  assert_eq "no" "$slash_bleed" "extract-sections: backslash/dollar heading section does not bleed into the next section"
+
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Backtick code heading' 2>/dev/null) && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  assert_contains "tick body" "$stdout" "extract-sections: sanitized anchor returns the heading containing a backtick"
+  local tick_bleed="yes"
+  [[ "$stdout" == *"price body"* ]] || tick_bleed="no"
+  assert_eq "no" "$tick_bleed" "extract-sections: backtick heading section does not bleed into the next section"
+
+  # A raw '$' that is not followed by a letter or '(' is accepted and compared by its key.
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors 'Cost is $5' 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err")
+  assert_contains "price body" "$stdout" "extract-sections: a raw anchor with a dollar sign before a digit is accepted and matched"
+  local dollar_rejected="yes"
+  [[ "$stderr_out" == *"anchor rejected"* ]] || dollar_rejected="no"
+  assert_eq "no" "$dollar_rejected" "extract-sections: a dollar sign before a digit is not rejected"
+
+  # An anchor whose key is empty matches nothing, even a heading whose key is empty too.
+  pushd "$es_dir" >/dev/null
+  stdout=$("$CLI" extract-sections "$key_file" --anchors '""' 2>"$key_err") && exit_code=0 || exit_code=$?
+  popd >/dev/null
+  stderr_out=$(cat "$key_err"); rm -f "$key_err"
+  assert_eq "" "$stdout" "extract-sections: an empty-key anchor prints nothing"
+  assert_contains 'no section matched anchor: ""' "$stderr_out" "extract-sections: an empty-key anchor is reported through the no-match warning"
 
   # --- Test 11: absolute path outside project root rejected ---
   local abs_outside_file="$parent_dir/es-abs-outside-$$.md"
@@ -5134,6 +5219,33 @@ test_validate_staging() {
   rm -rf "$bad" "$good"
 }
 
+test_invocation_relative_paths() {
+  echo ""
+  echo "=== path arguments resolve against the caller's directory, falling back to the .aimi/ root ==="
+
+  # A directory under the project with no .aimi/ of its own, the shape of a
+  # story worktree under .worktrees/: find_aimi_root walks past it to the root.
+  local wt=".worktrees/inv-$$" root_stg=".aimi/.inv-root-$$"
+  mkdir -p "$wt/.rel" "$root_stg"
+  local story='{"title":"T","description":"d","acceptanceCriteria":["x"],"status":"pending","dependsOn":[],"notes":"","implementation":{"files":["a.py"],"approach":"x","verify":"true\nfalse\n"}}'
+  printf '%s' "$story" > "$wt/.rel/01-a.json"
+  printf '%s' "$story" > "$root_stg/01-a.json"
+
+  local output exit_code
+  output=$(cd "$wt" && "$CLI" validate-staging --staging-dir .rel 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "1|01" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output" 2>/dev/null)" "path args: a relative --staging-dir that exists only in the caller's directory is found there"
+
+  output=$(cd "$wt" && "$CLI" validate-staging --staging-dir "$root_stg" 2>&1) && exit_code=0 || exit_code=$?
+  assert_eq "1|01" "$exit_code|$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])))' "$output" 2>/dev/null)" "path args: a relative .aimi/ path absent from the caller's directory still resolves against the root"
+
+  mkdir -p "$wt/esc"
+  output=$(cd "$wt/esc" && "$CLI" validate-staging --staging-dir ../../../.. 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "path args: a rebased path outside the project is still refused"
+  assert_contains "escapes project root" "$output" "path args: the refusal comes from confinement, unchanged"
+
+  rm -rf "$wt" "$root_stg"
+}
+
 test_validate_outline() {
   echo ""
   echo "=== validate-outline: contract check, waves, refusals ==="
@@ -5198,6 +5310,55 @@ test_outline_shift() {
   assert_contains "09-stray.json" "$output" "outline-shift: a staged file matching no --old entry is refused, naming the file"
 
   rm -rf "$dir"
+}
+
+test_slugify() {
+  echo ""
+  echo "=== slugify: ASCII directory slug from free text ==="
+
+  # Run from a directory with no .aimi/ so the verb is shown to need none.
+  local w; w=$(mktemp -d)
+  local output exit_code long
+
+  output=$(cd "$w" && "$CLI" slugify "Café Résumé Über" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "slugify: accented text exits 0 from a directory with no .aimi/"
+  assert_eq "cafe-resume-uber" "$output" "slugify: accents fold to their ASCII letters"
+
+  output=$(printf '  --Hello, World!  ' | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "hello-world" "$output" "slugify: --stdin collapses runs and trims both ends"
+
+  output=$(cd "$w" && "$CLI" slugify "Søren Straße Ærø" 2>/dev/null)
+  assert_eq "sren-strae-r" "$output" "slugify: characters with no NFKD form are dropped"
+
+  long=$(printf 'a%.0s' $(seq 1 49))
+  output=$(printf '%s b' "$long" | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "$long" "$output" "slugify: the cut to 50 is trimmed again"
+
+  output=$(printf '%s' '$(touch PWNED) `id`' | (cd "$w" && "$CLI" slugify --stdin 2>/dev/null))
+  assert_eq "touch-pwned-id" "$output" "slugify: shell metacharacters in the text slug to their words"
+  assert_eq "absent" "$([ -e "$w/PWNED" ] && echo present || echo absent)" "slugify: the text was not executed"
+
+  output=$(cd "$w" && "$CLI" slugify "日本語" 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: a text with no ASCII letter or digit exits 1"
+  assert_eq "" "$output" "slugify: a refusal prints nothing on stdout"
+  output=$(cd "$w" && "$CLI" slugify "日本語" 2>&1 >/dev/null) || true
+  assert_contains "no ASCII letter or digit to build a slug from" "$output" "slugify: the refusal says why on stderr"
+
+  output=$(cd "$w" && "$CLI" slugify 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: a missing text source exits 1"
+  assert_contains "slugify: a text argument or --stdin is required" "$output" "slugify: a missing text source is refused"
+
+  output=$(cd "$w" && "$CLI" slugify --bogus 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: an unknown flag exits 1"
+  assert_contains "slugify: unknown flag: --bogus" "$output" "slugify: an unknown flag is named"
+
+  output=$(cd "$w" && "$CLI" slugify --stdin extra </dev/null 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "slugify: --stdin with another argument exits 1"
+
+  output=$("$CLI" help 2>&1)
+  assert_contains "slugify (--stdin | <text>)" "$output" "slugify: help lists both forms"
+
+  rm -rf "$w"
 }
 
 # TC3: Malformed JSON in staging file → non-zero exit with filename in error
@@ -7751,8 +7912,53 @@ test_story_merge_project_split_project_keyed_warnings() {
     ((TESTS_PASSED++))
   fi
 
+  # Cross-repository order: a file whose stories lost an edge to another
+  # repository's story records the sibling path it must follow, the same string
+  # siblings[] carries; the file nobody had to wait on has no after key at all.
+  assert_eq '[".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"]' \
+    "$(jq -c '.metadata.splitGroup.after' "$web_file" 2>/dev/null)" \
+    "TC34: the web file follows the api file (splitGroup.after)"
+  assert_eq '[".aimi/tasks/sm-tc34-tasks-services-api-tasks.json"]' \
+    "$(jq -c '.metadata.splitGroup.after' "$mobile_file" 2>/dev/null)" \
+    "TC34: the mobile file follows the api file (splitGroup.after)"
+  assert_eq "false" "$(jq -c '.metadata.splitGroup | has("after")' "$api_file" 2>/dev/null)" \
+    "TC34: the api file lost no cross-file edge and carries no after key"
+
   rm -rf "$stg"
   rm -f .aimi/tasks/sm-tc34-*
+}
+
+# TC59: a file-level cycle in the cross-repository order refuses the merge. The
+# story graph stays acyclic (03 -> 02 -> 01), but repository api must follow web
+# through story 02 while web must follow api through story 03, so neither file
+# could ever run first: exit 1, the files named, nothing written, the staging
+# directory kept for retry.
+test_story_merge_project_split_order_cycle_refused() {
+  echo ""
+  echo "=== TC59: story-merge project axis — a file-level ordering cycle is refused ==="
+
+  local stg=".aimi/.tasks-staging-tc59"
+  local out_file=".aimi/tasks/sm-tc59-tasks.json"
+  rm -rf "$stg"
+  mkdir -p "$stg"
+  rm -f .aimi/tasks/sm-tc59-*
+
+  _sm_make_project_story "$stg/01-web.json"  "Web shell"       "apps/web"     "src/shell.tsx"
+  _sm_make_project_story "$stg/02-api.json"  "API endpoint"    "services/api" "app/api.rb"   '["outline:01"]'
+  _sm_make_project_story "$stg/03-web2.json" "Web data screen" "apps/web"     "src/data.tsx" '["outline:02"]'
+
+  local output exit_code
+  _sm_audit_sidecar "$stg"
+  output=$("$CLI" story-merge --staging-dir "$stg" --output "$out_file" --split full-stack 2>&1) && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "TC59: a file-level ordering cycle exits 1"
+  assert_contains "cross-repository ordering cycle" "$output" "TC59: the refusal names the cycle"
+  assert_contains "sm-tc59-tasks-apps-web-tasks.json follows" "$output" "TC59: the web file is named in the cycle"
+  assert_contains "sm-tc59-tasks-services-api-tasks.json follows" "$output" "TC59: the api file is named in the cycle"
+  assert_eq "0" "$(ls .aimi/tasks/sm-tc59-* 2>/dev/null | wc -l | tr -d ' ')" "TC59: no output file was written"
+  assert_eq "true" "$([ -f "$stg/01-web.json" ] && echo true || echo false)" "TC59: the staging directory was kept"
+
+  rm -rf "$stg"
+  rm -f .aimi/tasks/sm-tc59-*
 }
 
 # TC35: --foundation crossed with a multi-repo split, after injection became
@@ -8949,6 +9155,49 @@ test_split_detect_include_completed() {
   rm -rf "$d"
 }
 
+# TC60: split-detect exposes metadata.splitGroup.after in every member record,
+# as member paths. Each entry resolves BY BASENAME against the anchor's own
+# directory like siblings, and an entry that names a file outside the group,
+# the member itself, or a traversal-shaped path is inert. A scope that is not a
+# marked project split reports an empty after for every member.
+test_split_detect_after_lists_member_paths() {
+  echo ""
+  echo "=== TC60: split-detect — after resolves to member paths, inert otherwise ==="
+
+  local d; d=$(mktemp -d); mkdir -p "$d/.aimi/tasks"
+  local t="$d/.aimi/tasks"
+
+  _sd_write "$t/2026-07-27-ord-apps-web-tasks.json" "feat/ord-apps-web" \
+    "$(_sd_stories pending)" \
+    '{"project":"apps/web","index":1,"total":2,"siblings":[".aimi/tasks/2026-07-27-ord-services-api-tasks.json"]}'
+  _sd_write "$t/2026-07-27-ord-services-api-tasks.json" "feat/ord-services-api" \
+    "$(_sd_stories pending)" \
+    '{"project":"services/api","index":2,"total":2,"siblings":[".aimi/tasks/2026-07-27-ord-apps-web-tasks.json"],"after":[".aimi/tasks/2026-07-27-ord-apps-web-tasks.json","../../etc/2026-07-27-ord-apps-web-tasks.json","elsewhere-tasks.json","2026-07-27-ord-services-api-tasks.json"]}'
+  touch -t "$_SD_OLD_MTIME" "$t"/*.json
+  touch -t "$_SD_NEW_MTIME" "$t/2026-07-27-ord-services-api-tasks.json"
+
+  local out exit_code
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "TC60: exits 0"
+  assert_eq "project-split" "$(printf '%s' "$out" | jq -r '.mode')" "TC60: the group is a project split"
+  assert_eq "[\"$t/2026-07-27-ord-apps-web-tasks.json\"]" \
+    "$(printf '%s' "$out" | jq -c '.members[] | select(.project == "services/api") | .after')" \
+    "TC60: after resolves by basename to a member path; foreign, self and traversal entries are dropped"
+  assert_eq "[]" \
+    "$(printf '%s' "$out" | jq -c '.members[] | select(.project == "apps/web") | .after')" \
+    "TC60: a member whose marker carries no after reports an empty list"
+
+  # Not a marked project split: the same marker degraded to a single file, and a
+  # plain unmarked file, both report an empty after.
+  rm -f "$t/2026-07-27-ord-apps-web-tasks.json"
+  out=$(_sd_run "$d") && exit_code=0 || exit_code=$?
+  assert_eq "single" "$(printf '%s' "$out" | jq -r '.mode')" "TC60: a group missing a member degrades to single"
+  assert_eq "[]" "$(printf '%s' "$out" | jq -c '.members[0].after')" \
+    "TC60: a degraded scope reports an empty after"
+
+  rm -rf "$d"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -9123,8 +9372,10 @@ main() {
   test_story_merge_missing_dir
   test_apply_audit_patches
   test_validate_staging
+  test_invocation_relative_paths
   test_validate_outline
   test_outline_shift
+  test_slugify
   test_story_merge_malformed_json
   test_story_merge_duplicate_index
   test_story_merge_audit_gate
@@ -9160,6 +9411,7 @@ main() {
   test_story_merge_project_split_dot_project_slug
   test_story_merge_project_split_basename_collision
   test_story_merge_project_split_project_keyed_warnings
+  test_story_merge_project_split_order_cycle_refused
   test_story_merge_project_split_foundation_edge
   test_story_merge_project_split_foundation_qualified
   test_story_merge_project_split_phase_aware
@@ -9188,6 +9440,7 @@ main() {
   test_split_detect_empty_dir_with_decoy
   test_split_detect_stale_flat_plan_versus_planned_phase
   test_split_detect_include_completed
+  test_split_detect_after_lists_member_paths
 
   cleanup
 

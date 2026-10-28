@@ -26,7 +26,7 @@ command -v agent-browser
   if [ "$PHASE_MODE" = "true" ]; then
     VISUAL_SOURCE="$PHASE_TASKS_PATH"
   else
-    VISUAL_SOURCE="$AIMI_ROOT/$TASKS_PATH"
+    VISUAL_SOURCE="$TASKS_PATH"
   fi
   FIRST_VISUAL=$($AIMI_CLI verification-report --tasks-file "$VISUAL_SOURCE" | jq -c '.visual[0]')
   VISUAL_URL=$(printf '%s' "$FIRST_VISUAL" | jq -r '.url')

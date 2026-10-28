@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.156.0] - 2026-10-27
+
+Nine plan and execute defects fixed: heading matching, directory slugs, the global cli-path pointer, design-bundle election, Phase 2.4 auto-resolution, staged-story rewrites, expander prompts, and the order of split plan files (#178). Running that plan surfaced four more defects in `/aimi:execute`, the CLI and the story executor, fixed here as well: the tasks path, relative path arguments, the pre-change baseline and the known-gap files.
+
+### Fixed
+- `extract-sections` compared the anchor and the heading text after different treatments, so a heading carrying a quote, a backslash, `$` or a backtick never matched the sanitized anchor the planner sends. Both sides now pass through one match key (those four characters removed, whitespace collapsed, ends trimmed, lowercased). The rejection of a raw anchor is narrowed to the forms a double-quoted shell argument evaluates before the CLI runs: `$(`, a backtick, and `$` followed by a letter (#178).
+- `check-version` compared only the project pointer, so a stale global cli-path pointer survived a project pointer that was `current` or absent, and every other project kept resolving the old install. It now reports the global pointer in a `globalCli` object, exits 1 on a stale one without `--fix`, and under `--fix` repairs it only after the target exists, is executable, is named `aimi-cli.sh` and sits under an `x.y.z` version directory, reporting `fixed` only after re-reading the file (#178).
+- `validate-staging` now reports a `verification.url` outside the allowed charset by staged index, with the same sentence `validate-tasks` R15 builds. `story-merge` does not refuse it, so R15 stays the last gate (#178).
+- `detect-design-bundle` could elect a stray or placeholder bundle, or refuse on a tie with it. With `--feature-stdin` it keeps only the scan-tier bundles whose directory name or BusinessSpec title shares a word with the feature description, and names the discarded ones on stderr and in a `filtered[]` array (#178).
+- Phase 2.4 (the codebase cross-check) auto-resolved any open question a symbol grep could find, including design, behavior and policy questions. The symbol extractor now returns `{kind, symbols}` per question, and only `existence` and `location` questions are auto-resolved; every other kind, and any reply it cannot classify, goes to Phase 2.5 and is counted in the log line (#178).
+- A story expander re-spawned for a validation defect could not rewrite its own staged story, because the guard refused every overwrite. The orchestrator now writes a stamp, `NN-<slug>.json.validated`, holding the sha256 of the story file once Schema Validation passes. Until it exists a subagent may rewrite its story; once it exists, and for the main session at any time, the overwrite is denied, and a subagent can never write a stamp. `outline-shift` renames and deletes a stamp with its story (#178).
+- `/aimi:plan` split a project-split plan into files with no order between them, and `/aimi:execute` started them together. `story-merge` now records `metadata.splitGroup.after`, the sibling files a file must follow, `split-detect` returns it as `after[]`, and `/aimi:execute` runs the files in waves (#178).
+- `/aimi:execute` prefixed `$AIMI_ROOT/` to the tasks path `init-session` prints, which is already absolute, so several step blocks asked for a doubled path and, with stderr discarded, failed in silence; Step 0.7 counted no visual stories in a plan that had them. The path is now used as-is, and a test refuses the prefix anywhere in the commands.
+- A relative path argument resolved against the directory holding `.aimi/` rather than the caller's, so a story's verify run from its worktree could not find a fixture directory it had just created there. `aimi-cli.sh` now resolves such an argument against the caller's directory when it exists there and against the root otherwise, and still confines it to the project.
+- The story executor had no way to measure its pre-run and `verify-probe` once it had edited the tree, and a copy outside the repository fails because it has no `.aimi/` ancestor. The skill now runs both before any write and, when that moment has passed, takes the baseline from a detached worktree of `HEAD` inside the repository.
+- In container and phase mode `/aimi:execute` wrote known-gap files inside the container, where they were deleted with it, and its completion report printed the known gaps of every plan ever run. Gap files are now written under the project's `.aimi/known-gaps/`, and the report and the phase handoff list only the current plan's.
+
+### Changed
+- The shared blocks every story expander receives (outline, consolidated research, resolved decisions, specs, prior-phase handoff and the others) are written once per run under `RUN_DIR/context/` and passed to each spawn as paths, instead of being repeated in every spawn prompt. A run falls back to inline blocks for the whole run when a write fails, and never mixes the two forms. The guard hook denies any subagent Write or Edit under that directory (#178).
+- `story-merge` refuses a cycle between files in `metadata.splitGroup.after`, naming the files, with nothing written and the staging directory kept. `after` is written on the project axis only and is absent when no `dependsOn` edge was dropped (#178).
+- `/aimi:execute` has a new entry, `commands/references/execute/step-0-9-split-waves.md`, that computes the waves once before the first spawn and replaces the single spawn turn of both split spawn sites with one turn per wave. A split where every file lands in wave 1, including the frontend/backend pair, behaves as before. A dependent file runs even when a predecessor ended with failed or skipped stories, and one line per file reports each wave (#178).
+- The design-bundle import slug in `/aimi:plan` Phase 0 is derived with the `slugify` verb, and a description with no ASCII letter or digit stops the plan instead of producing an empty directory name (#178).
+
+### Added
+- `slugify (--stdin | <text>)`: an ASCII directory slug from free text, in `scripts/slug.py`, with tests in `scripts/tests/test_slug.py`. It needs `python3` and refuses without it (#178).
+- `scripts/bundle_relevance.py` and `scripts/tests/test_bundle_relevance.py`, the relevance filter behind `detect-design-bundle --feature-stdin`. Without the flag every output is unchanged (#178).
+- Tests: `test_expander_context_wiring.py`, `test_phase_2_4_question_kind.py`, `test_split_file_waves.py`, the stamp and context-directory cases in `hooks/tests/test_runtime_state_guards.py`, and new cases in `test_story_merge.py`, `test_outline_contract.py`, `test_version_cache.py` and `test-aimi-cli.sh` (#178).
+- Known limitations (#178):
+  - The SIDE axis (frontend and backend in one repository) has no ordering: it carries no `after` and keeps a single spawn turn.
+  - A dependent split file branches from its own base. Nothing is merged between repositories between waves, so a predecessor's unmerged code is not visible to it.
+  - `slugify` uses NFKD only, so a letter with no decomposition (o with stroke, sharp s, the ae ligature) is dropped rather than transliterated: `Søren Straße Ærø` gives `sren-strae-r`.
+  - The legacy `~/.claude/aimi-engineering-cli-path` pointer is a read fallback and is not repaired by `check-version --fix`.
+  - When the project pointer is itself stale, `check-version --fix` still writes the global pointer through the older project-fixed branch, which does not apply the four target checks above.
+  - The stamp rule is a guard rail and not a security boundary: a Bash command, an OpenCode session, `AIMI_RUNTIME_STATE_GUARD=off`, and a subagent overwriting a sibling's unstamped story all walk past it.
+
 ## [1.155.1] - 2026-10-27
 
 `/aimi:plan` stops when a story expander changes the repository or the stash.

@@ -97,6 +97,52 @@ find_aimi_root() {
   done
 }
 
+# Print, NUL-separated, the argument list of one verb with every relative path
+# argument rebased onto the directory the caller invoked the CLI from.
+#
+# find_aimi_root cds to the directory holding .aimi/, so a relative path
+# argument used to resolve against THAT directory rather than against the
+# caller's. A caller standing in a git worktree under .worktrees/ (which has no
+# .aimi/ of its own) and passing `--staging-dir .fixture` had it looked up in
+# the main checkout, where it does not exist. A path argument is now rebased
+# onto AIMI_INVOCATION_DIR when it EXISTS there; otherwise it is left as it
+# was, root-relative, so `.aimi/...` arguments from a container cwd and output
+# paths that do not exist yet behave exactly as before. Confinement is
+# unchanged: every verb still runs validate_path_in_project on the value it
+# receives, so a rebased path outside PROJECT_ROOT is refused the same way.
+#
+# Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
+# bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
+# the value of a flag); a story id, a reason or a branch name is never touched.
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path "
+_PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
+_rebase_invocation_relative_args() {
+  local verb="$1"; shift
+  local prev="" arg candidate
+  for arg in "$@"; do
+    candidate=0
+    case "$_PATH_ARG_FLAGS" in
+      *" $prev "*) candidate=1 ;;
+    esac
+    # A positional path: the verb takes one, the argument is not a flag, and
+    # it is not the value of --anchors (the only text-valued flag those verbs
+    # take).
+    if [ "$candidate" -eq 0 ] && [ "$prev" != "--anchors" ]; then
+      case "$_PATH_ARG_POSITIONAL_VERBS" in
+        *" $verb "*) case "$arg" in -*|"") ;; *) candidate=1 ;; esac ;;
+      esac
+    fi
+    if [ "$candidate" -eq 1 ] && [ -n "$arg" ] && [ "${arg#/}" = "$arg" ] \
+       && [ "$AIMI_INVOCATION_DIR" != "$PWD" ] && [ -e "$AIMI_INVOCATION_DIR/$arg" ]; then
+      prev="$arg"
+      arg="$AIMI_INVOCATION_DIR/$arg"
+    else
+      prev="$arg"
+    fi
+    printf '%s\0' "$arg"
+  done
+}
+
 # Resolve $1 to the exact form the project-confinement check compares against
 # PROJECT_ROOT: realpath when the path already exists, realpath(parent)/
 # basename when only the parent does, and the raw path when neither does --
@@ -10994,6 +11040,9 @@ _collect_design_bundle_candidates() {
 # scan_root -- so this must only ever be called from within
 # cmd_detect_design_bundle's own execution, after _build_bundle_json is
 # defined.
+# Also reads cmd_detect_design_bundle's feature_stdin/feature_desc the same way:
+# with --feature-stdin, scan-tier candidates unrelated to the description are
+# dropped before the 0/1/2+ branch (see the relevance filter below).
 # Usage: _select_design_bundle "$phase_dir" "$scan_root"
 # Exit: 0 (null, single match, or phase-tier win) or 3 (ambiguous scan tier)
 _select_design_bundle() {
@@ -11034,16 +11083,59 @@ _select_design_bundle() {
     return 0
   fi
 
+  # Relevance filter (--feature-stdin only), applied after the phase-tier
+  # return above so that tier and its pre-filter ignored-count never change.
+  # bundle_relevance.py keeps the scan-tier candidates sharing a word with the
+  # description and reports the rest; a description with no usable word turns
+  # the filter off. filter_active stays false without the flag, so every
+  # output below is then byte-identical to what it was before the flag existed.
+  local filter_active=false filtered_json="[]"
+  if [ "$feature_stdin" = true ] && [ "$scan_count" -gt 0 ]; then
+    local relevance_json
+    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" -- "${scan_candidates[@]}") || {
+      echo "Error: detect-design-bundle: the --feature-stdin relevance filter failed" >&2
+      exit 1
+    }
+    if [ "$(printf '%s' "$relevance_json" | jq -r '.active')" = "true" ]; then
+      filter_active=true
+      local -a kept_candidates=() dropped_candidates=()
+      while IFS= read -r _sdb_line; do
+        [ -n "$_sdb_line" ] && kept_candidates+=("$_sdb_line")
+      done < <(printf '%s' "$relevance_json" | jq -r '.relevant[]')
+      while IFS= read -r _sdb_line; do
+        [ -n "$_sdb_line" ] && dropped_candidates+=("$_sdb_line")
+      done < <(printf '%s' "$relevance_json" | jq -r '.filtered[]')
+      scan_candidates=("${kept_candidates[@]+"${kept_candidates[@]}"}")
+      scan_count=${#scan_candidates[@]}
+      local _sdb_dropped
+      for _sdb_dropped in "${dropped_candidates[@]+"${dropped_candidates[@]}"}"; do
+        filtered_json=$(echo "$filtered_json" | jq --arg p "$(_build_bundle_json "$_sdb_dropped" | jq -r '.path')" '. + [$p]')
+      done
+      if [ "${#dropped_candidates[@]}" -gt 0 ]; then
+        {
+          echo "detect-design-bundle: --feature-stdin discarded ${#dropped_candidates[@]} scan-tier bundle(s) unrelated to the feature description:"
+          printf '%s' "$filtered_json" | jq -r '.[]'
+        } >&2
+      fi
+    fi
+  fi
+
   if [ "$scan_count" -eq 0 ]; then
     echo "null"
     return 0
   elif [ "$scan_count" -eq 1 ]; then
-    _build_bundle_json "${scan_candidates[0]}"
+    if [ "$filter_active" = true ]; then
+      _build_bundle_json "${scan_candidates[0]}" | jq --argjson f "$filtered_json" '. + {filtered:$f}'
+    else
+      _build_bundle_json "${scan_candidates[0]}"
+    fi
     return 0
   fi
 
   # Two or more same-tier candidates with no bundle named: refuse, listing
-  # every candidate -- never silently electing one (mtime or otherwise).
+  # every candidate -- never silently electing one (mtime or otherwise). With
+  # the filter on, "candidate" means a relevant one: the refusal now says that
+  # two or more RELEVANT bundles tie.
   local candidates_json="[]"
   local subdir
   for subdir in "${scan_candidates[@]}"; do
@@ -11052,7 +11144,12 @@ _select_design_bundle() {
     candidates_json=$(echo "$candidates_json" | jq --argjson b "$bundle_json" '. + [$b]')
   done
 
-  jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+  if [ "$filter_active" = true ]; then
+    jq -n --argjson candidates "$candidates_json" --argjson filtered "$filtered_json" \
+      '{ambiguous:true,tier:"scan",candidates:$candidates,filtered:$filtered}'
+  else
+    jq -n --argjson candidates "$candidates_json" '{ambiguous:true,tier:"scan",candidates:$candidates}'
+  fi
 
   {
     echo "detect-design-bundle: $scan_count bundles match and none was named -- pass --bundle <path> to choose one"
@@ -11083,8 +11180,15 @@ _select_design_bundle() {
 # With neither flag naming a bundle, two or more scan-tier candidates tying
 # in the same tier refuse (exit 3) with every candidate listed, rather than
 # silently electing one.
+# With --feature-stdin, the feature description is read from stdin and the
+# scan tier keeps only the bundles whose directory name or BusinessSpec title
+# shares a word with it (scripts/bundle_relevance.py). The phase tier, --bundle
+# and --all are never filtered.
 cmd_detect_design_bundle() {
   local root="" all=false json=false bundle_arg="" phase_dir=""
+  # feature_stdin / feature_desc are read by _select_design_bundle through
+  # dynamic scoping, like _build_bundle_json and scan_root.
+  local feature_stdin=false feature_desc=""
 
   # Parse flags
   while [ $# -gt 0 ]; do
@@ -11094,10 +11198,20 @@ cmd_detect_design_bundle() {
       --phase-dir) shift; phase_dir="${1:-}" ;;
       --all)       all=true ;;
       --json)      json=true ;;
+      --feature-stdin) feature_stdin=true ;;
       *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
     shift
   done
+
+  # --feature-stdin is the only way this verb needs python3: bundle_relevance.py
+  # does the scoring. Refused here, before stdin is read or anything scanned, so
+  # a host without an interpreter never answers as though the filter had run.
+  # The description is read once, from stdin only -- never an argument.
+  if [ "$feature_stdin" = true ]; then
+    check_python3
+    feature_desc=$(cat)
+  fi
 
   # --phase-dir is ALWAYS confined to PROJECT_ROOT -- no --root-style
   # absolute-path exception (D5) -- checked before any scan or README read,
@@ -13105,8 +13219,138 @@ _check_version_resolve_version() {
   _extract_version_from_path "$path"
 }
 
+# Compare -- and under --fix repair -- the GLOBAL cli-path pointer.
+#
+# Usage: _check_version_global_pointer <config_dir> <latest_path> <latest_version> <fix>
+#
+# Prints ONE `globalCli` JSON object -- {status, storedVersion, latestVersion,
+# storedPath, latestPath}, plus `reason` when a requested repair did not take --
+# or nothing at all, and ALWAYS RETURNS 0: the caller reads it through `$( )`
+# under `set -euo pipefail`, so every read below is guarded `|| var=""` for the
+# reason _directory_source_installed_version spells out.
+#
+# WHY THIS EXISTS. check-version compared the PROJECT pointer (.aimi/cli-path)
+# against the newest install and treated the machine-wide pointer only as
+# something to overwrite once the project pointer was found stale. A project
+# whose own pointer was already `current` (or absent) therefore never looked at
+# the global one, so a session in any OTHER project kept resolving an older
+# install -- or an install under a second Claude config root -- for as long as
+# nothing happened to make this project stale.
+#
+# NOTHING IS REPORTED, and nothing is written, when there is nothing to say:
+# a pin (AIMI_CLI_PINNED) names this run's own answer and the global pointer is
+# not consulted under it; a latest path that is not a versioned plugin-cache
+# path (a directory-source install) has no version to compare; and a global
+# pointer that is missing, empty, not a versioned plugin-cache path, or equal
+# to the latest path has nothing to heal. Only the file _global_cache_path
+# names is read -- never the legacy ~/.claude/aimi-engineering-cli-path, which
+# is a read-fallback only and has no writer left to keep it current.
+#
+# STALE means the pointer names an OLDER version (`sort -V`), or one under a
+# Claude config root other than <config_dir> -- the same prefix test
+# _report_foreign_cache_root applies.
+#
+# --fix WRITES THROUGH write_global_cli_cache and only after the target
+# survives four checks (it exists, is executable, is named aimi-cli.sh, and has
+# an x.y.z version segment), then RE-READS the file: write_global_cli_cache
+# declines a `/.worktrees/` path as a no-op success, so "the call returned 0"
+# is not evidence the pointer moved. A repair that cannot be confirmed leaves
+# the status `stale` with a `reason`, rather than reporting a fix that did not
+# happen.
+_check_version_global_pointer() {
+  local config_dir="$1" latest_path="$2" latest_version="$3" fix="$4"
+
+  local pinned=""
+  pinned=$(_pinned_cli_path) || pinned=""
+  [ -n "$pinned" ] && return 0
+
+  case "$latest_path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  local numeric='^[0-9]+\.[0-9]+\.[0-9]+$'
+  [[ "$latest_version" =~ $numeric ]] || return 0
+
+  local cache_file=""
+  cache_file=$(_global_cache_path) || cache_file=""
+  [ -n "$cache_file" ] && [ -f "$cache_file" ] || return 0
+  local stored_path=""
+  IFS= read -r stored_path < "$cache_file" || true
+  [ -n "$stored_path" ] || return 0
+  case "$stored_path" in
+    */plugins/cache/*/aimi-engineering/*/scripts/aimi-cli.sh) ;;
+    *) return 0 ;;
+  esac
+  [ "$stored_path" = "$latest_path" ] && return 0
+
+  local stored_version=""
+  stored_version=$(_extract_version_from_path "$stored_path") || stored_version=""
+  [[ "$stored_version" =~ $numeric ]] || return 0
+
+  local stale=false
+  if [ "${stored_path%%/plugins/cache/*}" != "$config_dir" ]; then
+    stale=true
+  elif [ "$stored_version" != "$latest_version" ]; then
+    local lowest=""
+    lowest=$(printf '%s\n%s\n' "$stored_version" "$latest_version" | sort -V | sed -n 1p) || lowest=""
+    [ "$lowest" = "$stored_version" ] && stale=true
+  fi
+  [ "$stale" = true ] || return 0
+
+  local status="stale" reason=""
+  if [ "$fix" = true ]; then
+    if [ ! -e "$latest_path" ]; then
+      reason="the newest install's aimi-cli.sh does not exist"
+    elif [ ! -x "$latest_path" ]; then
+      reason="the newest install's aimi-cli.sh is not executable"
+    elif [ "${latest_path##*/}" != "aimi-cli.sh" ]; then
+      reason="the newest install's path is not named aimi-cli.sh"
+    else
+      write_global_cli_cache "$latest_path" 2>/dev/null || true
+      local reread=""
+      IFS= read -r reread < "$cache_file" || true
+      if [ "$reread" = "$latest_path" ]; then
+        status="fixed"
+      else
+        reason="the global cli-path was not updated (a /.worktrees/ path is declined, or the write failed)"
+      fi
+    fi
+  fi
+
+  jq -n --arg st "$status" --arg sv "$stored_version" --arg lv "$latest_version" \
+        --arg sp "$stored_path" --arg lp "$latest_path" --arg reason "$reason" \
+    '{status: $st, storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}
+     + (if $reason == "" then {} else {reason: $reason} end)' || true
+  return 0
+}
+
+# Print a check-version result, merging the global pointer's finding into it.
+#
+# Usage: _check_version_emit <project_json> <global_json> <override_top> <jq_flags>
+#
+# With no <global_json> this prints <project_json> and nothing else, byte for
+# byte -- which is what keeps every recorded case replaying unchanged. With one
+# it adds `globalCli`; and when <override_top> is true -- the project pointer is
+# `current` or `missing`, so its own status says nothing a caller must act on --
+# the top-level status, storedVersion and latestVersion become the global
+# pointer's, because those are the only findings left to report.
+_check_version_emit() {
+  local project_json="$1" global_json="$2" override_top="$3" flags="$4"
+  if [ -z "$global_json" ]; then
+    printf '%s\n' "$project_json"
+    return 0
+  fi
+  if [ "$override_top" = true ]; then
+    printf '%s' "$project_json" | jq "$flags" --argjson g "$global_json" \
+      '. + {status: $g.status, storedVersion: $g.storedVersion, latestVersion: $g.latestVersion, globalCli: $g}'
+  else
+    printf '%s' "$project_json" | jq "$flags" --argjson g "$global_json" '. + {globalCli: $g}'
+  fi
+}
+
 # Check CLI version staleness
-# Compares stored cli-path against the glob-resolved latest path
+# Compares stored cli-path against the glob-resolved latest path, and the
+# global cli-path pointer against the same latest path
 # Flags: --quiet (suppress stderr), --fix (auto-fix stale detection)
 cmd_check_version() {
   local quiet=false fix=false
@@ -13227,6 +13471,31 @@ cmd_check_version() {
 
   latest_version=$(_check_version_resolve_version "$config_dir" "$latest_path")
 
+  # ---- The GLOBAL pointer, compared here -- after the `unknown` return and the
+  # dev-override / converter returns above, and BEFORE the project pointer is
+  # read, because the `missing` and `current` branches below return early.
+  # Empty when there is nothing to report; see _check_version_global_pointer.
+  local global_json="" global_status=""
+  global_json=$(_check_version_global_pointer "$config_dir" "$latest_path" "$latest_version" "$fix") || global_json=""
+  if [ -n "$global_json" ]; then
+    global_status=$(printf '%s' "$global_json" | jq -r '.status') || global_status=""
+  fi
+  # 1 only for a stale global pointer that --fix was not asked to repair; a
+  # repair that was asked for and did not take is reported, not failed.
+  local global_exit=0
+  if [ "$global_status" = "stale" ] && [ "$fix" = false ]; then
+    global_exit=1
+  fi
+  if [ "$global_status" = "stale" ] && [ "$quiet" = false ]; then
+    local g_reason=""
+    g_reason=$(printf '%s' "$global_json" | jq -r '.reason // empty') || g_reason=""
+    if [ -n "$g_reason" ]; then
+      echo "Warning: global cli-path is stale and could not be repaired: $g_reason" >&2
+    else
+      echo "Warning: global cli-path is stale. Stored: $(printf '%s' "$global_json" | jq -r '.storedVersion'), Latest: $latest_version" >&2
+    fi
+  fi
+
   # Read stored path from state
   stored_path=$(read_state "cli-path")
 
@@ -13235,34 +13504,36 @@ cmd_check_version() {
     if [ "$quiet" = false ]; then
       echo "Warning: No stored cli-path found. Run init-session to persist." >&2
     fi
-    jq -n --arg ver "$latest_version" --arg path "$latest_path" \
-      '{status: "missing", latestVersion: $ver, latestPath: $path}'
-    return 0
+    _check_version_emit "$(jq -n --arg ver "$latest_version" --arg path "$latest_path" \
+      '{status: "missing", latestVersion: $ver, latestPath: $path}')" "$global_json" true "-M"
+    return "$global_exit"
   fi
 
   stored_version=$(_check_version_resolve_version "$config_dir" "$stored_path")
 
   # Case: stored path matches latest — current
   if [ "$stored_path" = "$latest_path" ]; then
-    jq -nc --arg v "$stored_version" '{status:"current",version:$v}'
-    return 0
+    _check_version_emit "$(jq -nc --arg v "$stored_version" '{status:"current",version:$v}')" \
+      "$global_json" true "-c"
+    return "$global_exit"
   fi
 
   # Case: stored path differs — stale
   if [ "$fix" = true ]; then
     write_state "cli-path" "$latest_path"
     write_global_cli_cache "$latest_path"
-    jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
-      '{status: "fixed", storedVersion: $sv, latestVersion: $lv}'
+    _check_version_emit "$(jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+      '{status: "fixed", storedVersion: $sv, latestVersion: $lv}')" "$global_json" false "-M"
     return 0
   fi
 
   if [ "$quiet" = false ]; then
     echo "Warning: CLI version is stale. Stored: $stored_version, Latest: $latest_version" >&2
   fi
-  jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
+  _check_version_emit "$(jq -n --arg sv "$stored_version" --arg lv "$latest_version" \
        --arg sp "$stored_path" --arg lp "$latest_path" \
-    '{status: "stale", storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}'
+    '{status: "stale", storedVersion: $sv, latestVersion: $lv, storedPath: $sp, latestPath: $lp}')" \
+    "$global_json" false "-M"
   return 1
 }
 
@@ -14367,6 +14638,28 @@ cmd_research_lookup() {
   fi
 }
 
+# One awk function source for the match key, held once: the section scan prepends it
+# so heading and anchor are keyed by the same text. One gsub per character with simple
+# regex literals (no bracket expression holding a backslash) so gawk, mawk and BusyBox
+# awk agree.
+_EXTRACT_SECTIONS_KEY_AWK='function mkey(s) {
+  gsub(/"/, "", s)
+  gsub(/\\/, "", s)
+  gsub(/\$/, "", s)
+  gsub(/`/, "", s)
+  gsub(/[[:space:]]+/, " ", s)
+  sub(/^ /, "", s)
+  sub(/ $/, "", s)
+  return tolower(s)
+}
+'
+
+# Usage: _extract_sections_match_key <text>
+# Prints the match key of one anchor or heading text (see extract-sections).
+_extract_sections_match_key() {
+  AIMI_ES_TEXT="$1" awk "$_EXTRACT_SECTIONS_KEY_AWK"'BEGIN { print mkey(ENVIRON["AIMI_ES_TEXT"]) }'
+}
+
 # Usage: extract-sections <file> --anchors "<heading titles, newline-separated>"
 # Print only the requested sections of a research .md file (any heading level 2 or
 # deeper: '## ', '### ', '#### ', ...), concatenated verbatim in the order the anchors
@@ -14375,13 +14668,20 @@ cmd_research_lookup() {
 # heading of the same-or-higher level, or EOF -- so an h2 anchor includes its nested
 # h3/h4 lines and stops at the next h2 (or h1); an h4 anchor stops at the next
 # h4/h3/h2 (or h1).
-# Anchor text is matched case-insensitively against the heading text (leading #s and
-# surrounding whitespace stripped). An anchor with no matching heading is skipped (not
-# a fatal error) but is named in a "no section matched anchor" warning on stderr; a run
-# whose anchors match nothing prints empty output, still exit 0.
-# Anchors containing shell metacharacters ($ ` " \) are rejected with a warning on
-# stderr and skipped -- defense in depth, since anchor text originates from untrusted
-# research-file heading content.
+# Anchor and heading are compared on one match key (_extract_sections_match_key):
+# double quote, backslash, dollar sign and backtick are removed, whitespace runs
+# collapse to one space, the ends are trimmed and the result is lowercased -- so the
+# sanitized anchor the orchestrator produces ('The foo flow') matches the heading
+# '## The "foo" flow'. An anchor whose key is empty matches nothing. An anchor with no
+# matching heading is skipped (not a fatal error) but is named in a "no section
+# matched anchor" warning on stderr; a run whose anchors match nothing prints empty
+# output, still exit 0.
+# Defense in depth for RAW anchors: one carrying "$(", a backtick, or a dollar sign
+# followed by a letter is rejected with a warning on stderr and skipped, since anchor
+# text originates from untrusted research-file heading content and a double-quoted
+# shell argument evaluates those before this CLI runs. A double quote, a backslash or
+# a dollar sign followed by anything else reaches the CLI intact as argv and is
+# compared by its key.
 # Path confinement mirrors research-lookup: resolve_path + validate_path_in_project.
 # Missing file -> error + exit 1. Missing <file>/--anchors arg -> usage + exit 1.
 cmd_extract_sections() {
@@ -14425,31 +14725,41 @@ cmd_extract_sections() {
   validate_path_in_project "$resolved_file"
 
   # Split --anchors on newlines only (comma is valid heading-text punctuation and must
-  # NOT be treated as a delimiter); trim and lowercase each entry; skip blanks.
-  # Extract each anchor's section (first matching heading only) in request order.
-  local anchor anchor_lc unmatched_anchors=""
+  # NOT be treated as a delimiter); trim each entry; skip blanks. Extract each anchor's
+  # section (first matching heading only) in request order.
+  local anchor anchor_key unmatched_anchors=""
   while IFS= read -r anchor; do
     anchor=$(printf '%s' "$anchor" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
     [ -z "$anchor" ] && continue
 
     # Defense in depth: anchors originate from untrusted research-file heading text.
     # The orchestrator sanitizes before interpolating, but this CLI must not rely on
-    # that. Reject only characters dangerous inside a double-quoted shell argument --
-    # &, comma, parens, colon, slash, hyphen, underscore, period, and single-quote are
-    # all legitimate heading punctuation and MUST keep working.
+    # that. Reject only what a double-quoted shell argument would already have
+    # evaluated before this CLI ran: "$(", a backtick, and "$" before a letter.
+    # A double quote, a backslash, and a "$" before anything else arrive intact as
+    # argv and are compared by their key; &, comma, parens, colon, slash, hyphen,
+    # underscore, period, and single-quote are legitimate heading punctuation and
+    # MUST keep working.
     case "$anchor" in
-      *'$'*|*'`'*|*'"'*|*'\'*)
+      *'$('*|*'`'*|*'$'[A-Za-z]*)
         echo "Warning: anchor rejected (shell metacharacter): $anchor" >&2
         continue ;;
     esac
 
-    anchor_lc=$(printf '%s' "$anchor" | tr '[:upper:]' '[:lower:]')
+    anchor_key=$(_extract_sections_match_key "$anchor")
+    if [ -z "$anchor_key" ]; then
+      # An empty key matches nothing; report it through the no-match warning.
+      unmatched_anchors="$unmatched_anchors
+$anchor"
+      continue
+    fi
 
     # awk streams matched section lines straight to stdout (byte-for-byte, blank
     # lines and all) and reports match status via its own exit code -- this avoids
-    # a $(...) capture, which would silently swallow trailing blank lines.
-    if awk -v target="$anchor_lc" '
-      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0 }
+    # a $(...) capture, which would silently swallow trailing blank lines. The key
+    # reaches awk through ENVIRON because -v interprets backslash escapes.
+    if AIMI_ES_TARGET="$anchor_key" awk "$_EXTRACT_SECTIONS_KEY_AWK"'
+      BEGIN { in_section = 0; match_level = 0; matched_done = 0; in_fence = 0; target = ENVIRON["AIMI_ES_TARGET"] }
       {
         if ($0 ~ /^[[:space:]]*(```|~~~)/) { in_fence = !in_fence }
         level = 0
@@ -14470,9 +14780,7 @@ cmd_extract_sections() {
         # Any heading of level 2 or deeper is a matchable anchor (h1 is not); first match wins.
         if (!in_section && !matched_done && level >= 2) {
           heading_text = substr($0, level + 1)
-          gsub(/^[[:space:]]+/, "", heading_text)
-          gsub(/[[:space:]]+$/, "", heading_text)
-          if (tolower(heading_text) == target) {
+          if (mkey(heading_text) == target) {
             in_section = 1
             matched_done = 1
             match_level = level
@@ -15519,6 +15827,22 @@ cmd_validate_staging() {
 }
 
 # ============================================================================
+# slugify: derive an ASCII directory slug from free text
+# Usage: aimi-cli.sh slugify <text> | slugify --stdin
+# ============================================================================
+#
+# Takes no tasks file, no lock and no project: it is dispatched ahead of
+# find_aimi_root, so it answers from any directory. The text is one argument or
+# the stdin bytes and goes straight to slug.py, never through a shell, so
+# metacharacters in it are inert. check_python3 refuses rather than degrading:
+# a slug built without the interpreter would be a different slug, and the
+# callers name directories after it. Every rule is slug.py's, behind one crossing.
+cmd_slugify() {
+  check_python3
+  python3 "$(_aimi_script_py slug.py)" "$@"
+}
+
+# ============================================================================
 # validate-outline: check an outline's produces/consumes contract, derive waves
 # Usage: aimi-cli.sh validate-outline --outline <path>
 # ============================================================================
@@ -15682,7 +16006,9 @@ _SPLIT_DETECT_DESCRIBE_JQ='
     hasMarker: (($sg.total | type) == "number" and ($sg.siblings | type) == "array"),
     declaredTotal: (if ($sg.total | type) == "number" then ($sg.total | tostring) else "" end),
     siblings: (if ($sg.siblings | type) == "array"
-               then [$sg.siblings[] | tostring] else [] end)
+               then [$sg.siblings[] | tostring] else [] end),
+    after: (if ($sg.after | type) == "array"
+            then [$sg.after[] | tostring] else [] end)
   }
 | . + {active: (.pendingCount > 0)}
 '
@@ -15698,7 +16024,7 @@ _split_detect_describe() {
   if [ -z "$desc" ]; then
     desc=$(jq -nc --arg path "$file" '{path: $path, project: ".", branchName: null,
       storyCount: 0, pendingCount: 0, hasMarker: false, declaredTotal: "",
-      siblings: [], active: false}')
+      siblings: [], after: [], active: false}')
   fi
   printf '%s' "$desc"
 }
@@ -15928,6 +16254,20 @@ cmd_split_detect() {
 
       group_mode="project-split"
       group_total="$anchor_total"
+
+      # Ordering only: rewrite every member's after[] to the same
+      # <anchor dir>/<basename> form the members themselves resolve to, and keep
+      # an entry only when it names ANOTHER member. A traversal-shaped entry,
+      # one naming a file outside the group, or one naming the file itself is
+      # inert, exactly as an unresolvable sibling is.
+      group=$(printf '%s' "$group" | jq -c --arg dir "$newest_dir" '
+        [.[].path] as $paths
+        | map(. as $m
+              | .after = ([ .after[]
+                            | ($dir + "/" + (split("/") | last)) as $r
+                            | select(($paths | index($r)) != null and $r != $m.path)
+                            | $r
+                          ] | unique))')
     else
       # -- No marker on the newest candidate: try the legacy
       #    -frontend-tasks.json / -backend-tasks.json pair rule over the pool.
@@ -16071,7 +16411,8 @@ cmd_split_detect() {
     '{
       mode: $mode,
       anchor: $anchor,
-      members: [.[] | {path, project, branchName, storyCount, pendingCount, active}],
+      members: [.[] | {path, project, branchName, storyCount, pendingCount, active,
+                       after: (if $mode == "project-split" then (.after // []) else [] end)}],
       activeCount: ([.[] | select(.active)] | length),
       total: $total,
       degradedReason: (if ($reason | length) > 0 then $reason else null end)
@@ -18129,6 +18470,16 @@ COMMANDS:
                               non-zero, since there is no gh subcommand or
                               REST fallback for resolving a review thread.
                               github, gitlab and gitea each have an adapter.
+    slugify (--stdin | <text>)
+                              Print an ASCII directory slug for free text: NFKD
+                              fold to ASCII, lowercase, runs of non-alphanumerics
+                              become one hyphen, ends trimmed, cut to 50 characters
+                              and trimmed again. A character with no NFKD form
+                              (o-slash, sharp s, ae) is dropped. Text with no ASCII
+                              letter or digit left is refused on stderr with exit
+                              1 and nothing on stdout; no fallback name is made up.
+                              The text is one argument or the stdin bytes (never
+                              both), works from any directory and takes no lock.
     detect-interactivity [--non-interactive]
                               Print resolved interactivity mode (picker|agent)
                               Returns picker by default; returns agent only when
@@ -18219,7 +18570,9 @@ COMMANDS:
     check-version [--quiet] [--fix]
                               Check if stored CLI version matches latest installed
                               --quiet  Suppress stderr warnings
-                              --fix    Auto-update cli-path on stale detection (exits 0)
+                              --fix    Auto-update cli-path on stale detection (exits 0);
+                                       also heals a stale or foreign-root GLOBAL cli-path
+                                       pointer, reported as globalCli in the JSON
     cleanup-versions          Remove old cached plugin versions, keep latest only
     list-archivable           List task files where all stories are completed/skipped (JSON array)
     archive-task <path>       Move completed task file (and linked brainstorm) to .aimi/archive/
@@ -18268,7 +18621,8 @@ COMMANDS:
                               anchor includes nested h3/h4 lines and stops at the next
                               h2/h1; an h4 anchor stops at the next h4/h3/h2/h1.
                               --anchors accepts comma- or newline-separated heading
-                              titles; matching is case-insensitive on heading text.
+                              titles; matching is case-insensitive and ignores quote,
+                              backslash, dollar and backtick on both sides.
                               An anchor with no matching heading is skipped (not an
                               error); anchors matching nothing -> empty output, exit 0.
                               Path confinement mirrors research-lookup (resolve_path +
@@ -18292,7 +18646,7 @@ COMMANDS:
                               active .aimi/tasks/*.json metadata.researchPaths or any
                               .aimi/brainstorms/*.md frontmatter researchPaths, AND older than
                               30 days. .aimi/archive is ignored. Silent when nothing cleaned.
-    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json]
+    detect-design-bundle [--root <path> | --bundle <path> | --phase-dir <path>] [--all] [--json] [--feature-stdin]
                               Detect a design handoff bundle -- either a Claude
                               Design export or one this plugin generated itself.
                               --root may point at a bundle directory directly,
@@ -18355,6 +18709,22 @@ COMMANDS:
                               --all        Return every scan-tier match as a JSON
                               array, path-sorted; never refuses, even when the
                               non---all path over the same tree would.
+                              --feature-stdin  Read the feature description
+                              from stdin (never an argument) and keep only
+                              the scan-tier bundles whose directory name or
+                              BusinessSpec title shares a word with it, so a
+                              stray or placeholder bundle is never elected.
+                              Zero relevant prints null; one prints that
+                              bundle; two or more relevant refuse (exit 3)
+                              listing only the relevant ones. The discarded
+                              bundles are named on stderr and, on the JSON
+                              object outputs, listed in a filtered[] array of
+                              paths. An empty, whitespace-only or all-stop-word
+                              description turns the filter off and adds no
+                              filtered key. The phase tier, --bundle and --all
+                              are never filtered. Without the flag every
+                              output is unchanged. Requires python3 and
+                              refuses with exit 1 without it.
                               --json       Alias; output is always JSON
     import-design-bundle --from <path> --to <path> [--reimport]
                               Copy a design bundle from outside the project
@@ -18591,8 +18961,13 @@ COMMANDS:
                               Output. One JSON object: {mode: "project-split"|
                               "paired-split"|"single"|"none"|"ambiguous", anchor,
                               members: [{path,project,branchName,storyCount,
-                              pendingCount,active}], activeCount, total,
-                              degradedReason}. "ambiguous" (flat scope only) means
+                              pendingCount,active,after}], activeCount, total,
+                              degradedReason}. after is the list of member
+                              paths this member must follow (metadata.splitGroup
+                              .after, resolved by basename against the anchor's
+                              directory like siblings): ordering only, empty
+                              unless the group is a marked project-split and the
+                              entry names another member. "ambiguous" (flat scope only) means
                               the flat plan has no pending story but a failed one,
                               while a roadmap phase is waiting to be claimed; it
                               adds failedCount and claimablePhases.
@@ -19128,6 +19503,7 @@ main() {
     help|--help|-h) cmd_help; return ;;
     version) cmd_version; return ;;
     detect-interactivity) shift; cmd_detect_interactivity "$@"; return ;;
+    slugify) shift; cmd_slugify "$@"; return ;;
     list-models) cmd_list_models; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
     get-current-models) cmd_get_current_models; return ;;
@@ -19170,6 +19546,18 @@ main() {
 
   find_aimi_root
   check_jq
+
+  # Relative path arguments mean what they mean in the caller's directory, not
+  # in the .aimi/ root find_aimi_root just cd'd to; see
+  # _rebase_invocation_relative_args. A caller already at the root is untouched.
+  if [ "$#" -gt 1 ] && [ "$AIMI_INVOCATION_DIR" != "$PWD" ]; then
+    local _verb="$1" _rebased_arg
+    local -a _rebased=()
+    while IFS= read -r -d '' _rebased_arg; do
+      _rebased+=("$_rebased_arg")
+    done < <(_rebase_invocation_relative_args "$@")
+    set -- "$_verb" "${_rebased[@]}"
+  fi
 
   case "${1:-help}" in
     init-session)      shift; cmd_init_session "$@" ;;

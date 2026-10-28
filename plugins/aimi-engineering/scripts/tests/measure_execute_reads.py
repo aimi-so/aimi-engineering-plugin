@@ -66,6 +66,7 @@ TABLE = {
     "step-0-7-visual-follow-prompt.md": ALL,
     "step-0-9-split-detection.md": ALL,
     "step-0-9-split-flow.md": set(),
+    "step-0-9-split-waves.md": set(),
     "step-0-9-aggregated-completion.md": set(),
     "step-1-initialize-session.md": ALL,
     "step-1-execution-mode.md": ALL,

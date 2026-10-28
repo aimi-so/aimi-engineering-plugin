@@ -49,32 +49,32 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	32198
+execute.md	32908
 references/execute/phase-completion-creates-verification.md	31594
-references/execute/phase-completion-handoff-and-mark.md	20312
+references/execute/phase-completion-handoff-and-mark.md	20352
 references/execute/phase-completion-offer-pull-request.md	26013
-references/execute/step-4-wave-execution-loop.md	59737
-references/execute/step-5-completion.md	30094
+references/execute/step-4-wave-execution-loop.md	60271
+references/execute/step-5-completion.md	30965
 references/execute/paired-split-merge-and-continue.md	21738
 references/execute/step-1-7-claim-the-phase.md	18178
-references/execute/step-0-9-split-flow.md	17039
+references/execute/step-0-9-split-flow.md	17244
 brainstorm.md	144635
 open-pr.md	84576
 references/forge-contract.md	45878
 references/container-execution.md	34557
 references/visual-variants.md	27154
 next.md	22371
-references/cli-path-resolution.md	37503
+references/cli-path-resolution.md	38829
 review.md	22577
 references/scope-contexts.md	20743
-plan.md	20561
+plan.md	20816
 deepen.md	18696
 
-skills/story-executor/SKILL.md	67432
+skills/story-executor/SKILL.md	68526
 skills/task-planner/SKILL.md	23241
 
 agents/research/aimi-foundation-architect.md	23014
-agents/workflow/aimi-story-expander.md	52283
-agents/research/aimi-learnings-researcher.md	16717
-agents/research/aimi-design-bundle-researcher.md	16837
+agents/workflow/aimi-story-expander.md	54290
+agents/research/aimi-learnings-researcher.md	16750
+agents/research/aimi-design-bundle-researcher.md	16870
 agents/review/aimi-cross-story-auditor.md	20048

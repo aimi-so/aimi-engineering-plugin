@@ -10,7 +10,7 @@ Which stories carry a visual verification strategy, and whether any `verificatio
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 TASKS_PATH="$($AIMI_CLI init-session 2>/dev/null | jq -r '.tasks // empty')"
-VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$AIMI_ROOT/$TASKS_PATH" 2>/dev/null)
+VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$TASKS_PATH" 2>/dev/null)
 VISUAL_STORIES=$(printf '%s' "$VERIF_REPORT" | jq '.visual | length' 2>/dev/null)
 REPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.repairable | length' 2>/dev/null)
 UNREPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.unrepairable | length' 2>/dev/null)

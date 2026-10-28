@@ -18,7 +18,18 @@ printf '%s' "$STAGING_REPORT" | jq -r --arg idx "<idx>" '.[$idx] // [] | .[]'
 ```
 
    A line printed for the idx just expanded is a validation failure. It feeds the retry loop in step 4 with that finding as the error string, sanitized as below. Findings reported for any other idx belong to that expansion and are ignored here. A failed run of the verb itself (no report, non-zero exit with nothing on stdout) is a failure of the check and not a pass: surface it rather than treating the story as clean.
-3. **If validation passes** (steps 2 and 2b both clean): mark this expansion as successful.
+3. **If validation passes** (steps 2 and 2b both clean): mark this expansion as successful, then stamp the story file. The stamp is the file `<RUN_DIR>/<idx>-<slug>.json.validated` holding the sha256 hex of the validated story file. Write it only now, with Bash, never before steps 2 and 2b are both clean: a `verification.url` finding from `validate-staging` is a retryable defect, so it must reach the expander while the file is still unstamped. Once the stamp exists the guard hook denies every further Write or Edit of that story file, and the expander can never write the stamp itself. The stamp name never ends in `.json`, so `story-merge` and `apply-audit-patches` do not read it as a story, and `outline-shift` moves or deletes it together with its story file.
+
+```bash
+RUN_DIR="<RUN_DIR>"
+STORY_FILE="$RUN_DIR/<idx>-<slug>.json"
+if command -v shasum >/dev/null 2>&1; then
+  STORY_SHA=$(shasum -a 256 "$STORY_FILE" | cut -d' ' -f1)
+else
+  STORY_SHA=$(sha256sum "$STORY_FILE" | cut -d' ' -f1)
+fi
+printf '%s\n' "$STORY_SHA" > "${STORY_FILE}.validated"
+```
 4. **If validation fails**: retry up to **2 times** with an enriched prompt appending the sanitized validator error string:
 
 **Sanitize the error string before retry injection:**
@@ -33,7 +44,7 @@ Previous attempt failed validation. Error: <sanitized error string>
 Please fix the JSON and write the file again at outputPath.
 ```
 
-A re-spawn is a batch of its own and runs inside the Working Tree Guard (`phase-3d-tree-guard.md`): `snapshot` before it, `check` after it. Before every re-spawn, delete the stale staging file with Bash `rm -f "$RUN_DIR/<idx>-<slug>.json"`: the guard hook denies Edit and Write over an existing staging `NN-*.json`, so the expander's rewrite would otherwise be refused. Never Edit or Write a staging file by hand. An expander that dies after the delete leaves no file, which fails validation and counts as a failed expansion under the Failure Budget.
+A re-spawn is a batch of its own and runs inside the Working Tree Guard (`phase-3d-tree-guard.md`): `snapshot` before it, `check` after it. Before every re-spawn, delete the stale staging file and its stamp together with Bash `rm -f "$RUN_DIR/<idx>-<slug>.json" "$RUN_DIR/<idx>-<slug>.json.validated"`: a story file that carries a stamp is denied to every Write and Edit, so a stamp left behind would refuse the expander's rewrite. An unstamped story file the expander may overwrite itself, which is the normal route for the retry in step 4, but the deletion keeps a re-spawn identical whichever state the file was in. A re-spawn whose shared inputs changed (an outline edit, changed resolved decisions) first rewrites the affected context files, per Rewrite before a re-spawn in `phase-3d-context-files.md`; if a rewrite fails, stop the batch naming the file. Never Edit or Write a staging file by hand, and never write a stamp except in step 3. An expander that dies after the delete leaves no file, which fails validation and counts as a failed expansion under the Failure Budget.
 
 After 2 failed retries (3 total attempts), mark this expansion as **permanently failed**. Record the story title and outline index.
 

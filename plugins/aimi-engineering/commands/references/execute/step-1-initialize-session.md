@@ -16,11 +16,13 @@ $AIMI_CLI init-session
 This returns:
 ```json
 {
-  "tasks": ".aimi/tasks/2026-02-24-feature-tasks.json",
+  "tasks": "/home/user/project/.aimi/tasks/2026-02-24-feature-tasks.json",
   "branch": "feat/feature-name",
   "pending": 7
 }
 ```
+
+`tasks` is always an absolute path (the realpath of the file, whether it came from `--file` or from auto-discovery). Use it as-is wherever a later step needs this run's tasks file; never prefix it with `$AIMI_ROOT/`, which doubles it into a path that does not exist, and a call that discards stderr then fails in silence.
 
 If no tasks file found, the script exits with error. Report:
 ```
@@ -44,7 +46,7 @@ else
 fi
 ```
 
-This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.
+This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `<root>/.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `<root>/.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `<root>/.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `<root>/.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.
 
 **When `PHASE_MODE=false` (flat v3.3 file, no `roadmap.json` sibling): execute.md runs byte-for-byte as it does today.** No further phase-mode logic applies anywhere in this document — Step 1.7 (Phase Claim) is skipped entirely; when `EXECUTION_MODE` is `inline` or absent (see Execution Mode Detection below), Step 2 checks out `branchName` directly in the main working tree exactly as before, while `EXECUTION_MODE=container` instead routes Step 2 through Flat Container Mode's own worktree creation (see Step 2); and Step 4's story worktrees are named `[PLAN_DISC]-[branchName]-[story.id]` — the plan discriminator is the one clause of this paragraph that is no longer unchanged, and it applies identically in every mode (see `### Plan Discriminator` under Multi-Repo Handling). Phase mode is a parallel path added alongside the flat path; it never changes the flat path's behavior.
 

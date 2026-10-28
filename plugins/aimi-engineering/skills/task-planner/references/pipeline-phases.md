@@ -502,7 +502,7 @@ This prose predates `aimi-cli.sh story-merge`; `/aimi:plan` Phase 3e now delegat
 5. **Recompute `wave` numbers per file**: roots (`dependsOn: []`) are wave 1 within each file, independently
 6. **Derive a separate `branchName` per file**: on the PROJECT axis, one per repo derived from that group's slugified project path (e.g. `apps/web` → `feat/merged-apps-web`); on the SIDE axis, `type/[feature]-frontend` and `type/[feature]-backend` (e.g., `feat/add-user-auth-frontend`, `feat/add-user-auth-backend`).
 7. Derive shared metadata: title, type, createdAt, `schemaVersion: "3.3"`, `planPath: null`, `brainstormPath`, `researchDepth`, `maxConcurrency`
-8. **Write the output files**: PROJECT axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json` per group, each carrying a self-describing `metadata.splitGroup` = `{project, index, total, siblings[]}`; two distinct projects that collide on the same slug hard-fail the merge before any file is written. SIDE axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`.
+8. **Write the output files**: PROJECT axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-<project-slug>-tasks.json` per group, each carrying a self-describing `metadata.splitGroup` = `{project, index, total, siblings[], after[]?}` (`after[]` optional, ordering only: the sibling paths the file must follow; the SIDE axis never carries it); two distinct projects that collide on the same slug hard-fail the merge before any file is written. SIDE axis writes `.aimi/tasks/YYYY-MM-DD-[feature-name]-frontend-tasks.json` and `.aimi/tasks/YYYY-MM-DD-[feature-name]-backend-tasks.json`.
 
 ### When `implementationScope` is `"frontend-only"`:
 
