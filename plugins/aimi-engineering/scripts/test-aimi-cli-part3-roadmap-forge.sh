@@ -7679,16 +7679,16 @@ test_detect_forge_known_hosts_ssh_and_https() {
   setup_detect_forge_fixture
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 
-  # Six fixtures covering the three known adapters in both URL forms; the
-  # gitea adapter's two forms deliberately use its two distinct known hosts
-  # (gitea.com and codeberg.org) so both are exercised.
+  # Six fixtures covering the two known adapters in both URL forms, plus the
+  # two retired Gitea-family hosts (gitea.com and codeberg.org), which now
+  # classify as unknown and are kept here so that stays pinned.
   local cases=(
     "git@github.com:owner/repo.git|github|github.com"
     "https://github.com/owner/repo.git|github|github.com"
     "git@gitlab.com:owner/repo.git|gitlab|gitlab.com"
     "https://gitlab.com/owner/repo.git|gitlab|gitlab.com"
-    "git@gitea.com:owner/repo.git|gitea|gitea.com"
-    "https://codeberg.org/owner/repo.git|gitea|codeberg.org"
+    "git@gitea.com:owner/repo.git|unknown|gitea.com"
+    "https://codeberg.org/owner/repo.git|unknown|codeberg.org"
   )
 
   local case_entry url expected_forge expected_host stdout exit_code
@@ -7874,12 +7874,25 @@ test_detect_forge_override_valid_and_invalid() {
   assert_eq "null" "$(echo "$stdout" | jq -r '.remoteUrl')" "detect-forge override: remoteUrl is null"
   assert_eq "override" "$(echo "$stdout" | jq -r '.source')" "detect-forge override: source is override"
 
+  # The retired Gitea value is read as unknown: exit 0, source stays
+  # override, and exactly one stderr line names the variable.
+  stderr_file=$(mktemp)
+  stdout=$(AIMI_FORGE_TYPE=gitea "$CLI" detect-forge 2>"$stderr_file") && exit_code=0 || exit_code=$?
+  stderr_output=$(cat "$stderr_file")
+  assert_exit_code "0" "$exit_code" "detect-forge override: retired gitea value -- exit code"
+  assert_eq "unknown" "$(echo "$stdout" | jq -r '.forge')" "detect-forge override: AIMI_FORGE_TYPE=gitea is read as unknown"
+  assert_eq "override" "$(echo "$stdout" | jq -r '.source')" "detect-forge override: retired gitea value keeps source override"
+  assert_stderr_contains "AIMI_FORGE_TYPE=gitea" "$stderr_output" "detect-forge override: retired gitea value -- stderr names the variable"
+  assert_eq "1" "$(printf '%s\n' "$stderr_output" | grep -c . || true)" "detect-forge override: retired gitea value -- exactly one stderr line"
+  rm -f "$stderr_file"
+
   stderr_file=$(mktemp)
   stdout=$(AIMI_FORGE_TYPE=bitbucket "$CLI" detect-forge 2>"$stderr_file") && exit_code=0 || exit_code=$?
   stderr_output=$(cat "$stderr_file")
   assert_exit_code "1" "$exit_code" "detect-forge override: invalid value -- exit code"
   assert_stderr_contains "Error:" "$stderr_output" "detect-forge override: invalid value -- Error-prefixed stderr"
   assert_stderr_contains "bitbucket" "$stderr_output" "detect-forge override: invalid value -- names the bad value"
+  assert_stderr_contains "expected one of: github, gitlab)" "$stderr_output" "detect-forge override: invalid value -- lists only the live adapters"
   assert_eq "" "$stdout" "detect-forge override: invalid value -- stdout empty"
   rm -f "$stderr_file"
 
@@ -7973,7 +7986,7 @@ test_detect_forge_registered_in_help_and_dispatcher() {
   local help_out
   help_out=$("$CLI" help 2>&1)
   assert_contains "detect-forge [--project <path>]" "$help_out" "help: lists detect-forge with --project"
-  assert_contains "AIMI_FORGE_TYPE=github|gitlab|gitea to override" "$help_out" "help: documents the AIMI_FORGE_TYPE override"
+  assert_contains "AIMI_FORGE_TYPE=github|gitlab to override" "$help_out" "help: documents the AIMI_FORGE_TYPE override"
 
   setup_detect_forge_fixture
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
@@ -8595,7 +8608,7 @@ FAKE_GH
 
 # Sources the account-divergence functions AND every helper they reach --
 # _forge_account_divergence calls _detect_forge, which fans out to six more
-# _detect_forge_* helpers, plus _forge_bin_check and _forge_auth_status_github.
+# _detect_forge_* helpers (and _forge_normalize_type_override), plus _forge_bin_check and _forge_auth_status_github.
 # Missing any one of them would leave the eval'd function calling an undefined
 # name, which is the rule the root CLAUDE.md states for these sourcing helpers.
 source_forge_account_functions() {
@@ -8605,6 +8618,7 @@ source_forge_account_functions() {
   eval "$(sed -n '/^_detect_forge_read_selection()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_detect_forge_select_remote()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_detect_forge_redact_userinfo()/,/^}/p' "$CLI")"
+  eval "$(sed -n '/^_forge_normalize_type_override()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_detect_forge()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_bin_check()/,/^}/p' "$CLI")"
   eval "$(sed -n '/^_forge_auth_status_github()/,/^}/p' "$CLI")"
@@ -9793,14 +9807,9 @@ test_forge_auth_status_no_adapter_is_error() {
   echo ""
   echo "=== forge-auth-status: resolved forge has no adapter (unknown) -- status=error, exits 0 ==="
 
-  # `unknown`, not gitea: phase 4 outline:02 routed gitea to `tea`, so the
-  # no_adapter branch this test pins is now reached only by an unrecognized
-  # remote host. RETARGETED, never deleted -- deleting would leave the
-  # no_adapter path untested. This is the END of the retarget line: three
-  # forge words exist (AIMI_FORGE_TYPE validates only github|gitlab|gitea,
-  # aimi-cli.sh:2130) and all three now have adapters, so `unknown` --
-  # reachable solely through a host _detect_forge_classify_host does not
-  # recognize, and `git remote add` never dials -- is the only control left.
+  # `unknown` is reached solely through a host _detect_forge_classify_host
+  # does not recognize, and `git remote add` never dials, so it is the control
+  # for the no_adapter branch this test pins.
   setup_detect_forge_fixture origin https://git.example.com/owner/repo.git
   pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
 

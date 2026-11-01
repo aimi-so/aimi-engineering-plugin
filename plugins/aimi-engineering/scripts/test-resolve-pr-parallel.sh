@@ -321,7 +321,7 @@ test_resolve_pr_thread_genuine_failure() {
 }
 
 test_resolve_pr_thread_unsupported_forge() {
-  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"forge-resolve-review-thread: no adapter for forge \"gitea\" yet -- GitHub is the only adapter in phase 1.","reason":"no_adapter"}'
+  export STUB_RESOLVE_RESULT='{"status":"error","data":null,"message":"forge-resolve-review-thread: no adapter for forge \"unknown\" yet -- GitHub and GitLab are the only adapters.","reason":"no_adapter"}'
   export STUB_RESOLVE_EXIT=1
   run_resolve_pr_thread PRRT_1
   assert_exit_code 0 "$RUN_RC" \
