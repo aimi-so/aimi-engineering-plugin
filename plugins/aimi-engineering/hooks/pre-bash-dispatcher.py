@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from hook_utils import safe_hook, effective_cwd, load_aimi_config, deny  # noqa: E402
+from hook_utils import (  # noqa: E402
+    safe_hook, effective_cwd, load_aimi_config, deny, find_aimi_dir,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level pre-compiled regexes — compiled once on import
@@ -486,6 +488,370 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Handler: raw forge write guard
+# ---------------------------------------------------------------------------
+#
+# Refuses a raw `gh` / `glab` write that the plugin has a forge verb for, and
+# names that verb. It is a guard rail against a habit, not a security
+# boundary. What it does NOT see:
+#   * `bash -c '...'`, `xargs gh ...`, a path-qualified `/usr/bin/gh` or
+#     `command gh`, and any wrapper outside `_CMD_START`'s four;
+#   * `gh api` and `curl` against a forge endpoint;
+#   * a call inside a script the AI writes and then runs;
+#   * a flag its verb cannot express (`--draft`, `--fill`, `--delete-branch`,
+#     `--label`, `--notes`), a positional past the verb's, a `--` terminator,
+#     an unterminated quote or a short flag glued to its value -- those pass,
+#     because the verb could not have done the job.
+# A verb's own gh/glab call runs inside aimi-cli.sh and the plugin's test
+# suites run inside their own scripts; neither reaches this hook, which reads
+# only the outer command. The bypass is `AIMI_FORGE_GUARD=off` exported before
+# the session starts: an inline prefix never reaches the hook's environment.
+
+# (tool, noun, action) -> entry. `flags` maps each accepted flag spelling to
+# (role, takes_value); a role is a verb flag name, or "-" for an adapter flag
+# with no verb role. `positionals` lists the roles of the positional words.
+_RAW_FORGE_VERBS: dict[tuple[str, str, str], dict] = {
+    ("gh", "pr", "create"): {
+        "verb": "forge-pr-create",
+        "usage": "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--base": ("base", True), "-B": ("base", True),
+            "--head": ("head", True), "-H": ("head", True),
+            "--body": ("body", True), "-b": ("body", True),
+        },
+        "positionals": [],
+    },
+    ("gh", "pr", "edit"): {
+        "verb": "forge-pr-edit",
+        "usage": "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--body": ("body", True), "-b": ("body", True),
+        },
+        "positionals": ["number"],
+    },
+    ("gh", "pr", "merge"): {
+        "verb": "forge-pr-merge",
+        "usage": "forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]",
+        "flags": {
+            "--merge": ("style", False), "-m": ("style", False),
+            "--squash": ("style", False), "-s": ("style", False),
+            "--rebase": ("style", False), "-r": ("style", False),
+        },
+        "positionals": ["pr"],
+    },
+    ("gh", "issue", "create"): {
+        "verb": "forge-issue-create",
+        "usage": "forge-issue-create --title <t> --body <text> [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--body": ("body", True), "-b": ("body", True),
+        },
+        "positionals": [],
+    },
+    ("gh", "release", "create"): {
+        "verb": "forge-release-create",
+        "usage": "forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--target": ("target", True),
+            "--notes-file": ("notes-file", True), "-F": ("notes-file", True),
+            "--generate-notes": ("generate-notes", False),
+            "--draft": ("draft", False), "-d": ("draft", False),
+            "--prerelease": ("prerelease", False), "-p": ("prerelease", False),
+            "--verify-tag": ("-", False),
+        },
+        "positionals": ["tag"],
+    },
+    ("glab", "mr", "create"): {
+        "verb": "forge-pr-create",
+        "usage": "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--description": ("body", True), "-d": ("body", True),
+            "--source-branch": ("head", True), "-s": ("head", True),
+            "--target-branch": ("base", True), "-b": ("base", True),
+            "--yes": ("-", False), "-y": ("-", False),
+        },
+        "positionals": [],
+    },
+    ("glab", "mr", "update"): {
+        "verb": "forge-pr-edit",
+        "usage": "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--description": ("body", True), "-d": ("body", True),
+            "--yes": ("-", False), "-y": ("-", False),
+        },
+        "positionals": ["number"],
+    },
+    ("glab", "mr", "merge"): {
+        "verb": "forge-pr-merge",
+        "usage": "forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]",
+        "flags": {
+            "--squash": ("style", False), "-s": ("style", False),
+            "--rebase": ("style", False), "-r": ("style", False),
+            "--yes": ("-", False), "-y": ("-", False),
+        },
+        "positionals": ["pr"],
+    },
+    ("glab", "issue", "create"): {
+        "verb": "forge-issue-create",
+        "usage": "forge-issue-create --title <t> --body <text> [--project <path>]",
+        "flags": {
+            "--title": ("title", True), "-t": ("title", True),
+            "--description": ("body", True), "-d": ("body", True),
+            "--yes": ("-", False), "-y": ("-", False),
+        },
+        "positionals": [],
+    },
+    ("glab", "release", "create"): {
+        "verb": "forge-release-create",
+        "usage": "forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]",
+        "flags": {
+            "--name": ("title", True), "-n": ("title", True),
+            "--notes-file": ("notes-file", True), "-F": ("notes-file", True),
+            "--ref": ("target", True), "-r": ("target", True),
+            "--no-update": ("-", False),
+        },
+        "positionals": ["tag"],
+    },
+}
+
+_RAW_FORGE_RE = re.compile(
+    _CMD_START
+    + r"\b(gh|glab)[^\S\n]+(pr|mr|issue|release)[^\S\n]+(create|merge|edit|update)(?![\w-])"
+)
+
+_RAW_FORGE_CUTS = ";&|\n<>"
+
+
+def _inside_open_quote(text: str, end: int) -> bool:
+    """True when position *end* of *text* sits inside an unclosed quote."""
+    in_s = in_d = False
+    i = 0
+    while i < end:
+        ch = text[i]
+        if in_s:
+            if ch == "'":
+                in_s = False
+        elif in_d:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_d = False
+        elif ch == "\\":
+            i += 1
+        elif ch == "'":
+            in_s = True
+        elif ch == '"':
+            in_d = True
+        i += 1
+    return in_s or in_d
+
+
+def _split_statement_args(text: str, start: int) -> list[str] | None:
+    """Cut the statement at *start* at its first unquoted separator and split it
+    into words, honouring quotes and backslashes. None on an unterminated quote.
+    """
+    words: list[str] = []
+    cur: list[str] = []
+    has_word = False
+    bare_digits = True  # current word has only unquoted digits so far
+    n = len(text)
+    i = start
+
+    def flush() -> None:
+        nonlocal cur, has_word, bare_digits
+        if has_word:
+            words.append("".join(cur))
+        cur, has_word, bare_digits = [], False, True
+
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                return None
+            cur.append(text[i + 1:j])
+            has_word, bare_digits = True, False
+            i = j + 1
+            continue
+        if ch == '"':
+            j = i + 1
+            buf: list[str] = []
+            while j < n and text[j] != '"':
+                if text[j] == "\\" and j + 1 < n:
+                    nxt = text[j + 1]
+                    if nxt in '"\\$`':
+                        buf.append(nxt)
+                    elif nxt != "\n":
+                        buf.append("\\" + nxt)
+                    j += 2
+                    continue
+                buf.append(text[j])
+                j += 1
+            if j >= n:
+                return None
+            cur.append("".join(buf))
+            has_word, bare_digits = True, False
+            i = j + 1
+            continue
+        if ch == "\\":
+            if i + 1 >= n:
+                return None
+            if text[i + 1] != "\n":
+                cur.append(text[i + 1])
+                has_word, bare_digits = True, False
+            i += 2
+            continue
+        if ch in _RAW_FORGE_CUTS:
+            if ch in "<>" and has_word and bare_digits:
+                cur, has_word = [], False  # `2>` : the fd number is not an argument
+            break
+        if ch == "#" and not has_word:
+            break
+        if ch.isspace():
+            flush()
+            i += 1
+            continue
+        cur.append(ch)
+        has_word = True
+        if not ch.isdigit():
+            bare_digits = False
+        i += 1
+    flush()
+    return words
+
+
+def _raw_forge_expressible(entry: dict, words: list[str] | None) -> bool:
+    """True when every word is a flag or positional the verb can express."""
+    if words is None:
+        return False
+    flags = entry["flags"]
+    positionals = entry["positionals"]
+    seen_pos = 0
+    i = 0
+    while i < len(words):
+        tok = words[i]
+        i += 1
+        if tok == "--" or tok == "-":
+            return False
+        if tok.startswith("--"):
+            name, eq, _val = tok.partition("=")
+            spec = flags.get(name)
+            if spec is None:
+                return False
+            if spec[1]:
+                if not eq:
+                    if i >= len(words):
+                        return False
+                    i += 1
+            elif eq:
+                return False
+            continue
+        if tok.startswith("-"):
+            spec = flags.get(tok)
+            if spec is None:
+                return False
+            if spec[1]:
+                if i >= len(words):
+                    return False
+                i += 1
+            continue
+        seen_pos += 1
+        if seen_pos > len(positionals):
+            return False
+    return True
+
+
+def _remote_host(url: str) -> str:
+    """Host of a git remote URL (https, ssh:// or scp-like), or ''."""
+    url = url.strip()
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]*@)?([^/:]+)", url)
+    if m:
+        return m.group(1).lower()
+    m = re.match(r"^(?:[^@/\s]+@)?([^:/\s]+):", url)
+    if m:
+        return m.group(1).lower()
+    return ""
+
+
+def _classify_forge_host(host: str) -> str:
+    if host == "github.com" or host.endswith(".github.com"):
+        return "github"
+    if host == "gitlab.com" or host.endswith(".gitlab.com"):
+        return "gitlab"
+    return "unknown"
+
+
+def _resolve_forge(cwd: str) -> str:
+    """github, gitlab or unknown; AIMI_FORGE_TYPE overrides the origin remote."""
+    forced = os.environ.get("AIMI_FORGE_TYPE")
+    if forced:
+        return forced if forced in ("github", "gitlab") else "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return "unknown"
+        return _classify_forge_host(_remote_host(result.stdout))
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def handle_raw_forge_write(command: str, tool_input: dict) -> None:
+    """Deny a raw gh/glab write that one of the forge verbs can express.
+
+    Same contract as handle_default_branch: returns to allow, prints the
+    structured deny and exits 0 to refuse. Fails open on any error.
+    """
+    detect = _strip_heredocs(command)
+    entry = None
+    for m in _RAW_FORGE_RE.finditer(detect):
+        candidate = _RAW_FORGE_VERBS.get((m.group(1), m.group(2), m.group(3)))
+        if candidate is None:
+            continue
+        if _inside_open_quote(detect, m.start()):
+            continue
+        words = _split_statement_args(detect, m.end())
+        if _raw_forge_expressible(candidate, words):
+            entry = candidate
+            tool = m.group(1)
+            break
+    if entry is None:
+        return
+
+    if os.environ.get("AIMI_FORGE_GUARD") == "off":
+        return
+
+    cwd = effective_cwd(command, tool_input)
+    if find_aimi_dir(Path(cwd)) is None:
+        return
+
+    forge = _resolve_forge(cwd)
+    if (tool, forge) not in (("gh", "github"), ("glab", "gitlab")):
+        return
+
+    cli = Path(__file__).parent.parent / "scripts" / "aimi-cli.sh"
+    print(deny(
+        f"Raw `{tool}` write refused: this plugin has a verb for it, `{entry['verb']}`, "
+        "which validates its input and reports a write status.\n"
+        f"Usage: {cli} {entry['usage']}\n"
+        "If a verb degrades and prints a manual step, that step is for the user to run; "
+        "do not run it yourself.\n"
+        "To bypass deliberately, export AIMI_FORGE_GUARD=off before the session starts "
+        "(an inline prefix never reaches the hook)."
+    ))
+    sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
 # Main dispatcher
 # ---------------------------------------------------------------------------
 
@@ -493,13 +859,20 @@ def handle_worktree_budget(command: str, tool_input: dict) -> None:
 def main(tool_input: dict) -> None:
     command = tool_input.get("tool_input", {}).get("command", "")
 
-    # Literal prefilter. Every detection regex below requires the literal
-    # "git", and _strip_heredocs only ever removes whole lines, so a command
-    # without it cannot match and needs no further work. Anchoring the regexes
-    # cost them their leading literal, which is what CPython's re uses to skip
-    # ahead; without this the 6-branch alternation is evaluated at every offset
-    # of every command the hook ever sees.
-    if "git" not in command:
+    # Literal prefilter. The git regexes below require the literal "git" and
+    # the forge guard requires "gh" or "glab"; _strip_heredocs only ever
+    # removes whole lines, so a command with none of them cannot match and
+    # needs no further work. Anchoring the regexes cost them their leading
+    # literal, which is what CPython's re uses to skip ahead; without this the
+    # alternations are evaluated at every offset of every command the hook sees.
+    has_git = "git" in command
+    has_forge = "gh" in command or "glab" in command
+    if not has_git and not has_forge:
+        sys.exit(0)
+
+    if has_forge:
+        handle_raw_forge_write(command, tool_input.get("tool_input", {}))
+    if not has_git:
         sys.exit(0)
 
     # Heredoc bodies are stripped from the detection copy only; the raw
