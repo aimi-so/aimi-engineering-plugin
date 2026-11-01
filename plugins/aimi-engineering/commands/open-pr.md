@@ -323,7 +323,7 @@ A bare HEAD read is not reliable here: after a container-mode `/aimi:execute` ru
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch 2>/dev/null)
+DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
 CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
 ```
 

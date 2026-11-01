@@ -3344,6 +3344,48 @@ _require_git_repo() {
   fi
 }
 
+# The directory the caller was standing in, for the branch verbs' default
+# repository. find_aimi_root cds to the .aimi/ root and records the caller's
+# own directory first (AIMI_INVOCATION_DIR); in a multi-repo layout that root
+# is a plain folder holding one repository per subfolder, so "the repository"
+# is the caller's, not the root's. Prints the directory when it still exists
+# and nothing otherwise; an empty answer keeps _require_git_repo's
+# current-directory behaviour. Defined once and read by detect-default-branch,
+# detect-parent-branch, resolve-base-branch and setup-branch.
+#
+# Usage: project_dir=$(_caller_project_dir)
+_caller_project_dir() {
+  if [ -n "${AIMI_INVOCATION_DIR:-}" ] && [ -d "$AIMI_INVOCATION_DIR" ]; then
+    printf '%s\n' "$AIMI_INVOCATION_DIR"
+  fi
+}
+
+# Absolute --git-common-dir of the repository containing <dir>, empty when
+# <dir> is in no repository. A linked worktree shares its main checkout's
+# common dir, so two directories of one repository compare equal. Same
+# two-step resolution _forge_account_store_path uses: the absolute form from
+# git first, then the bare answer joined to <dir> and normalised for git < 2.31.
+#
+# Usage: common=$(_git_common_dir_of "$dir")
+_git_common_dir_of() {
+  local dir="$1" common_dir=""
+  common_dir=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+    if [ -n "$common_dir" ]; then
+      case "$common_dir" in
+        /*) ;;
+        *) common_dir="$dir/$common_dir" ;;
+      esac
+      common_dir=$(resolve_path "$common_dir" 2>/dev/null) || common_dir=""
+    fi
+  fi
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    return 1
+  fi
+  printf '%s\n' "$common_dir"
+}
+
 # Derive a filesystem-safe cache-key suffix for a repository toplevel path,
 # so _resolve_default_branch's cache is scoped per repository instead of a
 # single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
@@ -3430,6 +3472,7 @@ cmd_detect_default_branch() {
     shift
   done
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   _resolve_default_branch
@@ -3941,6 +3984,7 @@ _verify_parent_candidate() {
 # verification.
 #
 # Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
+# (--project defaults to the caller's own repository, see _caller_project_dir)
 # Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":<source>,"candidates":<candidates>}
 #
 # `source` takes one of three values, following detect-forge's own
@@ -3999,6 +4043,7 @@ cmd_detect_parent_branch() {
     exit 1
   fi
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   # Validate branch name (security) — before any git command uses it
@@ -12663,6 +12708,7 @@ cmd_models_prompt_dismiss() {
 
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
+# (--project defaults to the caller's own repository, see _caller_project_dir)
 cmd_setup_branch() {
   local branch_name="" default_branch="" project_dir="" base_override=""
 
@@ -12703,6 +12749,31 @@ cmd_setup_branch() {
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
     echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
     exit 1
+  fi
+
+  # This verb mutates the tree, so it decides which repository before touching
+  # anything. Without --project: an .aimi root outside any repository (the
+  # multi-repo layout) acts on the caller's repository; a root inside one acts
+  # on its own checkout when the caller is in the same repository (same
+  # --git-common-dir, a linked worktree included) or in no repository, and
+  # refuses when the caller is in a different one.
+  if [ -z "$project_dir" ]; then
+    local caller_dir root_dir
+    caller_dir=$(_caller_project_dir)
+    root_dir=$(pwd)
+    if [ -n "$caller_dir" ]; then
+      if ! git -C "$root_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        project_dir="$caller_dir"
+      else
+        local root_common caller_common
+        root_common=$(_git_common_dir_of "$root_dir") || root_common=""
+        caller_common=$(_git_common_dir_of "$caller_dir") || caller_common=""
+        if [ -n "$caller_common" ] && [ "$caller_common" != "$root_common" ]; then
+          echo "Error: setup-branch: the .aimi root $root_dir is a different repository than the caller directory $caller_dir; no branch was created. Pass --project <path> to name the repository." >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
 
   _require_git_repo "$project_dir"
@@ -13052,6 +13123,7 @@ cmd_resolve_base_branch() {
     exit 1
   fi
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   # Validate branch name (security)
@@ -18209,7 +18281,8 @@ COMMANDS:
                               naming it.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
-                              Detect and cache the repository's default branch
+                              Detect and cache the repository's default branch.
+                              Without --project, answers for the caller's own repository
     detect-parent-branch <branch> [--project <path>]
                               Detect branch's parent (base) branch by token-aware
                               git log decoration parsing + git merge-base verification.
@@ -18549,7 +18622,9 @@ COMMANDS:
                               still re-triggers the prompt — the marker only suppresses
                               when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
-                              Create or checkout branch with deterministic logic
+                              Create or checkout branch with deterministic logic.
+                              Without --project, acts on the caller's repository; refuses
+                              when a git .aimi root is a different repository
     resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
                               Decide what branch a new branch or container should be cut
                               from -- no checkout is performed. Prints a single JSON object:
