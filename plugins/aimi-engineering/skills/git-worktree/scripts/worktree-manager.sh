@@ -805,7 +805,14 @@ remove_worktree() {
 # single place this detection order is defined, instead of two drifted copies.
 _detect_package_manager() {
   local worktree_path="$1"
-  if [[ -f "$worktree_path/bun.lockb" ]]; then
+  # The dependency installer detector below is asked first; its `manager` is
+  # empty whenever it could not decide, and the order that follows stays the
+  # answer then.
+  local detected_pm
+  detected_pm=$(_detect_dependency_installer "$worktree_path" 2>/dev/null | jq -r '.manager // ""' 2>/dev/null) || detected_pm=""
+  if [[ -n "$detected_pm" ]]; then
+    printf '%s' "$detected_pm"
+  elif [[ -f "$worktree_path/bun.lockb" || -f "$worktree_path/bun.lock" ]]; then
     printf 'bun'
   elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
     printf 'pnpm'
@@ -814,6 +821,202 @@ _detect_package_manager() {
   else
     printf 'npm'
   fi
+}
+
+# Print one compact JSON line describing how <dir> installs its dependencies.
+# Fields: status (ready|nothing-to-install|needs-recipe), manager, command,
+# lockfile, source (repository|config), reason. Always exits 0, installs
+# nothing and writes nothing. Reasons are fixed phrases; text read out of
+# package.json or the config never reaches them.
+_dep_emit() {
+  jq -nc --arg status "$1" --arg manager "$2" --arg command "$3" \
+    --arg lockfile "$4" --arg source "$5" --arg reason "$6" \
+    '{status:$status, manager:$manager, command:$command, lockfile:$lockfile, source:$source, reason:$reason}'
+}
+
+# Is <aimi-root>/.aimi/config.json tracked by git? A probe that could not ask
+# answers "tracked". A root that is not a git repository is trusted.
+_dep_config_tracked() {
+  local aimi_dir="$1/.aimi" rc=0
+  git -C "$aimi_dir" ls-files --error-unmatch -- config.json >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  elif [[ "$rc" -eq 1 ]]; then
+    return 1
+  fi
+  local gd_err
+  gd_err=$(git -C "$aimi_dir" rev-parse --git-dir 2>&1 >/dev/null) || true
+  if [[ "$gd_err" == *"not a git repository"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Frozen install command for a manager; yarn needs a generation (1 or 2).
+_dep_frozen_command() {
+  case "$1" in
+    bun) printf 'bun install --frozen-lockfile' ;;
+    pnpm) printf 'pnpm install --frozen-lockfile' ;;
+    npm) printf 'npm ci' ;;
+    yarn)
+      if [[ "$2" == "classic" ]]; then printf 'yarn install --frozen-lockfile'; else printf 'yarn install --immutable'; fi
+      ;;
+  esac
+}
+
+# Prints classic|berry, or nothing when it cannot be decided.
+# $1 dir, $2 packageManager major (may be empty).
+_dep_yarn_generation() {
+  local dir="$1" major="$2"
+  if [[ "$major" =~ ^[0-9]+$ ]]; then
+    if [[ "$major" -eq 1 ]]; then printf 'classic'; return 0; fi
+    if [[ "$major" -ge 2 ]]; then printf 'berry'; return 0; fi
+  fi
+  if [[ -f "$dir/yarn.lock" ]]; then
+    if grep -q '^# yarn lockfile v1' "$dir/yarn.lock" 2>/dev/null; then printf 'classic'; return 0; fi
+    if grep -q '^__metadata:' "$dir/yarn.lock" 2>/dev/null; then printf 'berry'; return 0; fi
+  fi
+  if [[ -f "$dir/.yarnrc.yml" ]]; then printf 'berry'; return 0; fi
+  return 0
+}
+
+_detect_dependency_installer() {
+  local dir="${1:-}" key="${2:-.}"
+  local aimi_root="" cfg=""
+
+  # 1. A recipe in .aimi/config.json beats everything the repository declares.
+  if aimi_root=$(find_aimi_root 2>/dev/null) && [[ -f "$aimi_root/.aimi/config.json" ]]; then
+    cfg="$aimi_root/.aimi/config.json"
+    local raw="" verdict=""
+    raw=$(jq -c --arg k "$key" '
+      if (type == "object") and ((.dependencies | type) == "object") and ((.dependencies.install | type) == "object") and (.dependencies.install | has($k))
+      then .dependencies.install[$k] else empty end' "$cfg" 2>/dev/null) || raw=""
+    if [[ -n "$raw" ]]; then
+      verdict=$(printf '%s' "$raw" | jq -r '
+        if type != "string" or test("^\\s*$") then "invalid"
+        elif test("[;|&$<>`\n\r]") then "invalid"
+        else "ok" end' 2>/dev/null) || verdict="invalid"
+      if [[ "$verdict" != "ok" ]]; then
+        _dep_emit needs-recipe "" "" "" config "the configured recipe is not a plain command"
+        return 0
+      fi
+      if _dep_config_tracked "$aimi_root"; then
+        _dep_emit needs-recipe "" "" "" config "the config file is tracked by git, so its recipe is not trusted"
+        return 0
+      fi
+      local recipe
+      recipe=$(printf '%s' "$raw" | jq -r 'gsub("^\\s+|\\s+$"; "")')
+      _dep_emit ready "" "$recipe" "" config ""
+      return 0
+    fi
+  fi
+
+  # 2. package.json
+  if [[ -n "$dir" && -f "$dir/package.json" ]]; then
+    local info=""
+    if ! info=$(jq -c '
+      def nm: if type == "string" then (split("@")[0]) else null end;
+      def canon: . as $n | if $n == null then null
+                 elif (["bun","pnpm","yarn","npm"] | index($n)) != null then $n
+                 else "?" end;
+      if type != "object" then error("not an object") else . end
+      | .packageManager as $pm
+      | (try .devEngines.packageManager catch null) as $d
+      | { pm: (if ($pm | type) == "string" and ($pm | length) > 0 then ($pm | nm | canon) else null end),
+          major: (if ($pm | type) == "string" then ((((($pm | split("@"))[1]) // "") | capture("^(?<m>[0-9]+)") | .m) // "") else "" end),
+          dev: ((if $d == null then []
+                 elif ($d | type) == "object" then [$d.name]
+                 elif ($d | type) == "array" then [$d[] | select(type == "object") | .name]
+                 else [] end)
+                | map(select(type == "string") | nm | canon) | unique) }
+      ' "$dir/package.json" 2>/dev/null); then
+      _dep_emit needs-recipe "" "" "" repository "package.json cannot be parsed"
+      return 0
+    fi
+    local pm major devn dev0
+    pm=$(printf '%s' "$info" | jq -r '.pm // ""')
+    major=$(printf '%s' "$info" | jq -r '.major')
+    devn=$(printf '%s' "$info" | jq -r '.dev | length')
+    dev0=$(printf '%s' "$info" | jq -r '.dev[0] // ""')
+
+    if [[ "$devn" -gt 1 ]]; then
+      _dep_emit needs-recipe "" "" "" repository "devEngines names more than one package manager"
+      return 0
+    fi
+    if [[ -n "$pm" && -n "$dev0" && "$pm" != "$dev0" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "packageManager and devEngines name different managers"
+      return 0
+    fi
+    local declared="${pm:-$dev0}"
+    if [[ "$declared" == "?" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "the declared manager is not one of bun, pnpm, yarn, npm"
+      return 0
+    fi
+
+    # Lockfile per manager (first existing wins), and which managers have one.
+    local lf_bun="" lf_pnpm="" lf_yarn="" lf_npm="" present=0
+    if [[ -f "$dir/bun.lock" ]]; then lf_bun="bun.lock"; elif [[ -f "$dir/bun.lockb" ]]; then lf_bun="bun.lockb"; fi
+    [[ -f "$dir/pnpm-lock.yaml" ]] && lf_pnpm="pnpm-lock.yaml"
+    [[ -f "$dir/yarn.lock" ]] && lf_yarn="yarn.lock"
+    if [[ -f "$dir/npm-shrinkwrap.json" ]]; then lf_npm="npm-shrinkwrap.json"; elif [[ -f "$dir/package-lock.json" ]]; then lf_npm="package-lock.json"; fi
+    [[ -n "$lf_bun" ]] && present=$((present + 1))
+    [[ -n "$lf_pnpm" ]] && present=$((present + 1))
+    [[ -n "$lf_yarn" ]] && present=$((present + 1))
+    [[ -n "$lf_npm" ]] && present=$((present + 1))
+
+    local mgr="" lockfile=""
+    if [[ -n "$declared" ]]; then
+      mgr="$declared"
+      case "$mgr" in
+        bun) lockfile="$lf_bun" ;;
+        pnpm) lockfile="$lf_pnpm" ;;
+        yarn) lockfile="$lf_yarn" ;;
+        npm) lockfile="$lf_npm" ;;
+      esac
+      if [[ -z "$lockfile" && "$present" -gt 0 ]]; then
+        _dep_emit needs-recipe "" "" "" repository "the declared manager has no lockfile while another manager's lockfile is present"
+        return 0
+      fi
+    elif [[ "$present" -gt 1 ]]; then
+      _dep_emit needs-recipe "" "" "" repository "lockfiles of more than one manager are present"
+      return 0
+    elif [[ "$present" -eq 1 ]]; then
+      if [[ -n "$lf_bun" ]]; then mgr=bun; lockfile="$lf_bun"
+      elif [[ -n "$lf_pnpm" ]]; then mgr=pnpm; lockfile="$lf_pnpm"
+      elif [[ -n "$lf_yarn" ]]; then mgr=yarn; lockfile="$lf_yarn"
+      else mgr=npm; lockfile="$lf_npm"; fi
+    else
+      mgr=npm
+    fi
+
+    if [[ -z "$lockfile" ]]; then
+      _dep_emit ready "$mgr" "$mgr install" "" repository "no lockfile: versions are not pinned"
+      return 0
+    fi
+    local gen=""
+    if [[ "$mgr" == "yarn" ]]; then
+      local yarn_major=""
+      [[ "$pm" == "yarn" ]] && yarn_major="$major"
+      gen=$(_dep_yarn_generation "$dir" "$yarn_major")
+      if [[ -z "$gen" ]]; then
+        _dep_emit needs-recipe "" "" "" repository "the yarn generation cannot be determined"
+        return 0
+      fi
+    fi
+    _dep_emit ready "$mgr" "$(_dep_frozen_command "$mgr" "$gen")" "$lockfile" repository ""
+    return 0
+  fi
+
+  # 3. Other ecosystems' manifests
+  local m
+  for m in pyproject.toml requirements.txt Pipfile Gemfile composer.json mix.exs pom.xml build.gradle; do
+    if [[ -n "$dir" && -f "$dir/$m" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "no recipe for $m: set dependencies.install in .aimi/config.json"
+      return 0
+    fi
+  done
+  _dep_emit nothing-to-install "" "" "" repository ""
+  return 0
 }
 
 # Install dependencies inside a worktree by detecting the package manager from its lockfile.
@@ -2330,4 +2533,6 @@ EOF
 }
 
 # Run
-main "$@"
+# Run only when executed; sourcing (a test shell) just defines the functions.
+# `:-$0` keeps piped execution (empty BASH_SOURCE) running main.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi

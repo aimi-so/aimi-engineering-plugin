@@ -779,6 +779,226 @@ test_install_deps_skips_without_package_json() {
 }
 
 # ============================================================================
+# Dependency Installer Detection Tests
+# ============================================================================
+
+# Run _detect_dependency_installer in a fresh shell that sources the manager.
+# $1 dir under test, $2 project key (optional), $3 cwd (default: fixture repo),
+# $4 PATH shim dir (optional, put ahead of PATH after sourcing).
+dd_detect() {
+  local dir="$1" key="${2:-.}" cwd="${3:-$WTM_FIXTURE_REPO}" shim="${4:-}"
+  ( cd "$WTM_FIXTURE_REPO" && bash -c '
+      source "$1" || exit 99
+      cd "$4" || exit 98
+      if [ -n "$5" ]; then PATH="$5:$PATH"; fi
+      _detect_dependency_installer "$2" "$3"
+      echo "rc=$?" >&2
+    ' _ "$WTM" "$dir" "$key" "$cwd" "$shim" 2>/dev/null )
+}
+
+dd_field() { printf '%s' "$1" | jq -r ".$2"; }
+
+dd_check() {
+  # $1 label, $2 json, $3 status, $4 manager, $5 command, $6 lockfile
+  assert_eq "$3|$4|$5|$6" \
+    "$(dd_field "$2" status)|$(dd_field "$2" manager)|$(dd_field "$2" command)|$(dd_field "$2" lockfile)" \
+    "detect deps: $1"
+}
+
+test_detect_deps_lockfiles() {
+  echo ""
+  echo "=== Testing dependency installer detection — lockfiles ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  out=$(dd_detect "$d")
+  assert_eq "{\"status\":\"ready\",\"manager\":\"bun\",\"command\":\"bun install --frozen-lockfile\",\"lockfile\":\"bun.lock\",\"source\":\"repository\",\"reason\":\"\"}" "$out" \
+    "detect deps: bun.lock only gives the exact one-line answer"
+  assert_eq "1" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "detect deps: answer is a single line"
+  assert_eq "bun.lock package.json" "$(ls -A "$d" | tr '\n' ' ' | sed 's/ $//')" "detect deps: detector writes no file"
+  rm -rf "$d"
+
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lockb"
+  dd_check "bun.lockb" "$(dd_detect "$d")" ready bun "bun install --frozen-lockfile" bun.lockb
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/pnpm-lock.yaml"
+  dd_check "pnpm-lock.yaml" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/package-lock.json"
+  dd_check "package-lock.json" "$(dd_detect "$d")" ready npm "npm ci" package-lock.json
+  touch "$d/npm-shrinkwrap.json"
+  dd_check "shrinkwrap reported beside package-lock" "$(dd_detect "$d")" ready npm "npm ci" npm-shrinkwrap.json
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock" "$d/bun.lockb"
+  dd_check "bun.lock beside bun.lockb is one manager" "$(dd_detect "$d")" ready bun "bun install --frozen-lockfile" bun.lock
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_yarn_generation() {
+  echo ""
+  echo "=== Testing dependency installer detection — yarn generation ==="
+  setup_wtm_fixture
+  local d
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; printf '# yarn lockfile v1\n' > "$d/yarn.lock"
+  dd_check "yarn classic by header" "$(dd_detect "$d")" ready yarn "yarn install --frozen-lockfile" yarn.lock
+  printf '__metadata:\n  version: 6\n' > "$d/yarn.lock"
+  dd_check "yarn berry by __metadata" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  printf '# yarn lockfile v1\n' > "$d/yarn.lock"; echo '{"packageManager":"yarn@4.1.0"}' > "$d/package.json"
+  dd_check "packageManager major beats the header" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  echo '{"packageManager":"yarn@1.22.19"}' > "$d/package.json"; printf '__metadata:\n' > "$d/yarn.lock"
+  dd_check "packageManager major 1 is classic" "$(dd_detect "$d")" ready yarn "yarn install --frozen-lockfile" yarn.lock
+  echo '{}' > "$d/package.json"; : > "$d/yarn.lock"
+  dd_check "yarn undecided needs a recipe" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo 'nodeLinker: node-modules' > "$d/.yarnrc.yml"
+  dd_check "yarn berry by .yarnrc.yml" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_declared_manager() {
+  echo ""
+  echo "=== Testing dependency installer detection — declared manager ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{"packageManager":"pnpm@9.1.0"}' > "$d/package.json"; touch "$d/pnpm-lock.yaml" "$d/yarn.lock"
+  dd_check "declared pnpm wins over a yarn.lock beside it" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"; d=$(mktemp -d); echo '{"packageManager":"bun@1.1.0"}' > "$d/package.json"
+  out=$(dd_detect "$d")
+  dd_check "declared bun with no lockfile is plain install" "$out" ready bun "bun install" ""
+  assert_eq "no lockfile: versions are not pinned" "$(dd_field "$out" reason)" "detect deps: unpinned reason is the fixed phrase"
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"
+  dd_check "undeclared package.json without lockfile is npm install" "$(dd_detect "$d")" ready npm "npm install" ""
+  echo '{"devEngines":{"packageManager":{"name":"pnpm"}}}' > "$d/package.json"; touch "$d/pnpm-lock.yaml"
+  dd_check "devEngines object" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  echo '{"devEngines":{"packageManager":[{"name":"pnpm"}]}}' > "$d/package.json"
+  dd_check "devEngines array of one" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_needs_recipe() {
+  echo ""
+  echo "=== Testing dependency installer detection — refusals to guess ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{"packageManager":"bun@1.1.0"}' > "$d/package.json"; touch "$d/package-lock.json"
+  dd_check "declared manager without its lockfile, another present" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock" "$d/pnpm-lock.yaml"
+  dd_check "two managers' lockfiles, nothing declared" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"; d=$(mktemp -d); echo '{"packageManager":"pnpm@9.0.0","devEngines":{"packageManager":{"name":"bun"}}}' > "$d/package.json"
+  dd_check "packageManager and devEngines disagree" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo '{"devEngines":{"packageManager":[{"name":"bun"},{"name":"npm"}]}}' > "$d/package.json"
+  dd_check "devEngines array naming two managers" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo '{"packageManager":"evil$(touch x)@1.0.0"}' > "$d/package.json"
+  out=$(dd_detect "$d")
+  dd_check "unknown declared manager" "$out" needs-recipe "" "" ""
+  assert_not_contains "evil" "$out" "detect deps: reason never echoes package.json text"
+  echo '{not json' > "$d/package.json"
+  dd_check "unparseable package.json" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_config_recipe() {
+  echo ""
+  echo "=== Testing dependency installer detection — config recipe ==="
+  setup_wtm_fixture
+  local d out cfg="$WTM_FIXTURE_REPO/.aimi/config.json"
+  d=$(mktemp -d)
+  printf '{"dependencies":{"install":{".":"  make deps  ","web":"npm ci --prefix web"}}}' > "$cfg"
+  out=$(dd_detect "$d")
+  assert_eq "ready|config||make deps|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" manager)|$(dd_field "$out" command)|$(dd_field "$out" lockfile)" \
+    "detect deps: recipe beats everything, even with no manifest, and is trimmed"
+  assert_eq "npm ci --prefix web" "$(dd_field "$(dd_detect "$d" web)" command)" "detect deps: recipe is keyed by project"
+  echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  assert_eq "config" "$(dd_field "$(dd_detect "$d")" source)" "detect deps: recipe beats a bun.lock repository"
+  local bad bad_n=0
+  for bad in 'a;b' 'a|b' 'a&b' 'a$b' 'a<b' 'a>b' 'a`b`' 'a\nb'; do
+    printf '{"dependencies":{"install":{".":"%s"}}}' "$bad" > "$cfg"
+    bad_n=$((bad_n + 1))
+    out=$(dd_detect "$d")
+    assert_eq "needs-recipe|config|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" command)" \
+      "detect deps: recipe refused for forbidden character #$bad_n of 8"
+  done
+  printf '{"dependencies":{"install":{".":"   "}}}' > "$cfg"
+  assert_eq "needs-recipe" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: blank recipe refused"
+  printf '{"dependencies":{"install":{".":5}}}' > "$cfg"
+  assert_eq "needs-recipe" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: non-string recipe refused"
+  printf 'not json' > "$cfg"
+  assert_eq "bun" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: invalid config JSON behaves as {}"
+  printf '{"dependencies":{"install":{"other":"x"}}}' > "$cfg"
+  assert_eq "bun" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: config without the key behaves as {}"
+
+  printf '{"dependencies":{"install":{".":"make deps"}}}' > "$cfg"
+  git -C "$WTM_FIXTURE_REPO" add -f .aimi/config.json >/dev/null 2>&1
+  out=$(dd_detect "$d")
+  assert_eq "needs-recipe|config|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" command)" \
+    "detect deps: recipe in a git-tracked config refused"
+  git -C "$WTM_FIXTURE_REPO" rm -q --cached .aimi/config.json >/dev/null 2>&1
+
+  local shim
+  shim=$(mktemp -d)
+  printf '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n' > "$shim/git"
+  chmod +x "$shim/git"
+  out=$(dd_detect "$d" "." "$WTM_FIXTURE_REPO" "$shim")
+  assert_eq "needs-recipe" "$(dd_field "$out" status)" "detect deps: a git that cannot answer reads as tracked"
+  rm -rf "$shim"
+
+  local multi
+  multi=$(mktemp -d); mkdir -p "$multi/.aimi"
+  printf '{"dependencies":{"install":{".":"make deps"}}}' > "$multi/.aimi/config.json"
+  out=$(dd_detect "$d" "." "$multi")
+  assert_eq "ready|make deps" "$(dd_field "$out" status)|$(dd_field "$out" command)" \
+    "detect deps: config under a non-git root is trusted"
+  rm -rf "$multi" "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_other_manifests() {
+  echo ""
+  echo "=== Testing dependency installer detection — other manifests ==="
+  setup_wtm_fixture
+  local d m out
+  for m in pyproject.toml requirements.txt Gemfile build.gradle; do
+    d=$(mktemp -d); touch "$d/$m"
+    out=$(dd_detect "$d")
+    assert_eq "needs-recipe" "$(dd_field "$out" status)" "detect deps: $m needs a recipe"
+    assert_contains "$m" "$out" "detect deps: reason for $m names it"
+    rm -rf "$d"
+  done
+  d=$(mktemp -d); touch "$d/Gemfile" "$d/pyproject.toml"
+  assert_contains "pyproject.toml" "$(dd_detect "$d")" "detect deps: first manifest in the fixed order is named"
+  rm -rf "$d"; d=$(mktemp -d); touch "$d/go.mod" "$d/Cargo.toml"
+  assert_eq "nothing-to-install" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: go.mod and Cargo.toml need nothing"
+  rm -rf "$d"; d=$(mktemp -d)
+  assert_eq "nothing-to-install" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: empty directory needs nothing"
+  echo '{}' > "$d/package.json"; touch "$d/pyproject.toml"
+  assert_eq "npm" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: package.json beside another manifest wins"
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_package_manager_follows() {
+  echo ""
+  echo "=== Testing _detect_package_manager follows the detector ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"; echo END' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "bunEND" "$out" "detect deps: bun.lock-only worktree gives bun with no trailing newline"
+  rm -f "$d/bun.lock"; touch "$d/yarn.lock" "$d/package-lock.json"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "yarn" "$out" "detect deps: ambiguous lockfiles keep the old order"
+  rm -f "$d/yarn.lock" "$d/package-lock.json"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "npm" "$out" "detect deps: nothing at all is npm"
+  rm -rf "$d"
+  out=$(bash -c 'source "$1"; echo sourced' _ "$WTM" 2>&1)
+  assert_eq "sourced" "$out" "detect deps: sourcing defines functions and does not run main"
+  out=$(bash -s -- help < "$WTM" 2>&1 | head -3)
+  assert_contains "Git Worktree Manager" "$out" "detect deps: piped execution still runs main"
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Branch Name Validation Tests
 # ============================================================================
 
@@ -1464,6 +1684,16 @@ main() {
   echo ""
   echo "--- Install Deps Tests ---"
   test_install_deps_skips_without_package_json
+
+  echo ""
+  echo "--- Dependency Installer Detection Tests ---"
+  test_detect_deps_lockfiles
+  test_detect_deps_yarn_generation
+  test_detect_deps_declared_manager
+  test_detect_deps_needs_recipe
+  test_detect_deps_config_recipe
+  test_detect_deps_other_manifests
+  test_detect_deps_package_manager_follows
 
   echo ""
   echo "--- Branch Name Validation Tests ---"
