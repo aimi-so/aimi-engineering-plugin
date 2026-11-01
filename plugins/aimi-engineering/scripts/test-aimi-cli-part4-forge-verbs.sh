@@ -2010,7 +2010,10 @@ test_forge_writes_active_account_answer_needs_no_branch() {
   # in-operation read) and its own `gh pr merge` write (a seventh write) --
   # both resolved from the identical two-local pattern every other routed
   # site in this file already uses.
-  assert_eq "12" "$routed_sites" "identical shape: exactly 12 prefix-assignment sites -- 7 writes (gh pr edit branching three ways, gh pr merge), 4 in-operation reads, 1 in-write failure classifier"
+  # 16 rather than 12 since US-010: forge-tag-create's github adapter added
+  # four routed gh api calls (the ref probe, the existing tag object read, the
+  # tag object write and the ref write).
+  assert_eq "16" "$routed_sites" "identical shape: exactly 16 prefix-assignment sites -- 9 writes (gh pr edit branching three ways, gh pr merge, the tag object and the tag ref), 6 in-operation reads, 1 in-write failure classifier"
 
   # And no process-wide export of either variable anywhere in the file, not
   # merely inside the override helper.
@@ -9030,6 +9033,407 @@ test_retired_forge_type_override_is_an_unknown_forge() {
 }
 
 # ============================================================================
+# forge-tag-create Tests (US-010)
+# ============================================================================
+# Every scenario is offline: the routing environment's throwaway repository and
+# sandbox PATH, with the sandbox gh (or glab) replaced by a tag-aware stub whose
+# state lives in files beside it. Nothing here can reach a real forge, and no
+# tag is ever created, pushed or deleted anywhere real.
+
+# A tag-aware fake gh. State files beside it: ref-<tag> ("<type> <sha>"),
+# tagobj-<sha> (the commit that tag object points at), probe-fail, tag-fail and
+# ref-fail switches. Every call is logged as "<GH_TOKEN> gh <argv>".
+ftc_write_fake_gh() {
+  cat > "$FORGE_ROUTING_SANDBOX/gh" << 'FTC_FAKE_GH'
+#!/usr/bin/env bash
+HERE="$(dirname "$0")"
+printf '%s gh %s\n' "${GH_TOKEN:-<unset>}" "$*" >> "$FORGE_ROUTING_LOG"
+if [ "$1 $2" = "auth token" ]; then printf '%s\n' "gho_routingfake000000000000000000000000"; exit 0; fi
+[ "$1" = "api" ] || { echo "ftc fake gh: unhandled: $*" >&2; exit 99; }
+endpoint="$2"
+shift 2
+tagname="" object="" ref="" sha="" message=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-f" ]; then
+    shift
+    case "$1" in
+      tag=*) tagname="${1#tag=}" ;;
+      object=*) object="${1#object=}" ;;
+      ref=*) ref="${1#ref=}" ;;
+      sha=*) sha="${1#sha=}" ;;
+      message=*) message="${1#message=}" ;;
+    esac
+  fi
+  shift
+done
+case "$endpoint" in
+  repos/\{owner\}/\{repo\}/git/ref/tags/*)
+    if [ -f "$HERE/probe-fail" ]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
+    name="${endpoint#repos/\{owner\}/\{repo\}/git/ref/tags/}"
+    if [ -f "$HERE/ref-$name" ]; then
+      read -r otype osha < "$HERE/ref-$name"
+      printf '{"ref":"refs/tags/%s","object":{"type":"%s","sha":"%s"}}\n' "$name" "$otype" "$osha"
+      exit 0
+    fi
+    echo '{"message":"Not Found","status":"404"}'
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+  repos/\{owner\}/\{repo\}/git/tags/*)
+    tsha="${endpoint#repos/\{owner\}/\{repo\}/git/tags/}"
+    if [ -f "$HERE/tagobj-$tsha" ]; then
+      printf '{"sha":"%s","object":{"type":"commit","sha":"%s"}}\n' "$tsha" "$(cat "$HERE/tagobj-$tsha")"
+      exit 0
+    fi
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+  repos/\{owner\}/\{repo\}/git/tags)
+    if [ -f "$HERE/tag-fail" ]; then echo "gh: Validation Failed (HTTP 422)" >&2; exit 1; fi
+    newsha="7a9e0000000000000000000000000000000000aa"
+    printf '%s' "$object" > "$HERE/tagobj-$newsha"
+    printf '%s' "$message" > "$HERE/last-tag-message"
+    printf '{"sha":"%s"}\n' "$newsha"
+    exit 0
+    ;;
+  repos/\{owner\}/\{repo\}/git/refs)
+    if [ -f "$HERE/ref-fail" ]; then echo "gh: Validation Failed (HTTP 422)" >&2; exit 1; fi
+    printf 'tag %s' "$sha" > "$HERE/ref-${ref#refs/tags/}"
+    printf '{"ref":"%s"}\n' "$ref"
+    exit 0
+    ;;
+esac
+echo "ftc fake gh: unhandled endpoint: $endpoint" >&2
+exit 99
+FTC_FAKE_GH
+  chmod +x "$FORGE_ROUTING_SANDBOX/gh"
+}
+
+# A tag-aware fake glab. State: tag-<name> (the commit), create-fail,
+# probe-fail. Logs "GITLAB_TOKEN=<..> glab <argv>".
+ftc_write_fake_glab() {
+  cat > "$FORGE_ROUTING_SANDBOX/glab" << 'FTC_FAKE_GLAB'
+#!/usr/bin/env bash
+HERE="$(dirname "$0")"
+printf 'GITLAB_TOKEN=%s glab %s\n' "${GITLAB_TOKEN:-<unset>}" "$*" >> "$FORGE_ROUTING_LOG"
+[ "$1" = "api" ] || { echo "ftc fake glab: unhandled: $*" >&2; exit 99; }
+endpoint="$2"
+shift 2
+tagname="" ref="" message=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-f" ]; then
+    shift
+    case "$1" in
+      tag_name=*) tagname="${1#tag_name=}" ;;
+      ref=*) ref="${1#ref=}" ;;
+      message=*) message="${1#message=}" ;;
+    esac
+  fi
+  shift
+done
+case "$endpoint" in
+  projects/:id/repository/tags/*)
+    if [ -f "$HERE/probe-fail" ]; then echo "glab: 503 Service Unavailable" >&2; exit 1; fi
+    name="${endpoint#projects/:id/repository/tags/}"
+    if [ -f "$HERE/tag-$name" ]; then
+      printf '{"name":"%s","commit":{"id":"%s"}}\n' "$name" "$(cat "$HERE/tag-$name")"
+      exit 0
+    fi
+    echo '{"message":"404 Tag Not Found"}'
+    echo "glab: 404 Tag Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+  projects/:id/repository/tags)
+    if [ -f "$HERE/create-fail" ]; then echo "glab: 400 Target is invalid" >&2; exit 1; fi
+    printf '%s' "$ref" > "$HERE/tag-$tagname"
+    printf '%s' "$message" > "$HERE/last-tag-message"
+    printf '{"name":"%s"}\n' "$tagname"
+    exit 0
+    ;;
+esac
+echo "ftc fake glab: unhandled endpoint: $endpoint" >&2
+exit 99
+FTC_FAKE_GLAB
+  chmod +x "$FORGE_ROUTING_SANDBOX/glab"
+}
+
+# Makes one empty commit in the scenario repository and prints its sha.
+ftc_commit() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$FORGE_ROUTING_REPO" \
+    -c user.name=t -c user.email=t@t commit --allow-empty -q -m "${1:-c}" >/dev/null 2>&1
+  git -C "$FORGE_ROUTING_REPO" rev-parse HEAD
+}
+
+# Runs forge-tag-create, leaving stdout in FTC_OUT, stderr in FTC_ERR, status in FTC_RC.
+# Usage: ftc_run [VAR=value]... -- <forge-tag-create args>...
+ftc_run() {
+  local errfile="$FORGE_ROUTING_TMPDIR/ftc.err"
+  FTC_OUT=$(run_forge_routing_cli "$@" 2>"$errfile") && FTC_RC=0 || FTC_RC=$?
+  FTC_ERR=$(cat "$errfile")
+}
+
+ftc_gh_calls() { grep -c "gh api repos/{owner}/{repo}/git/$1" "$FORGE_ROUTING_LOG" || true; }
+
+ftc_test_bad_input_is_refused_before_any_forge_call() {
+  echo ""
+  echo "=== forge-tag-create: bad input is refused by flag name, before any forge call ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local sha
+  sha=$(ftc_commit one)
+  : > "$FORGE_ROUTING_LOG"
+
+  local t
+  for t in -bad a..b v1.lock "v 1" "-"; do
+    ftc_run -- forge-tag-create --tag "$t" --target HEAD --message m
+    assert_exit_code "1" "$FTC_RC" "--tag '$t' exits 1"
+    assert_contains "invalid --tag value" "$FTC_ERR" "--tag '$t' reads invalid --tag value"
+    assert_eq "" "$FTC_OUT" "--tag '$t' prints nothing on stdout"
+  done
+
+  ftc_run -- forge-tag-create --tag v1 --target -x --message m
+  assert_exit_code "1" "$FTC_RC" "--target -x exits 1"
+  assert_contains "invalid --target value" "$FTC_ERR" "--target -x reads invalid --target value"
+
+  ftc_run -- forge-tag-create --tag v1 --target no-such-ref --message m
+  assert_exit_code "1" "$FTC_RC" "an unresolvable --target exits 1"
+  assert_contains "--target does not resolve to a commit" "$FTC_ERR" "an unresolvable --target is refused by name"
+
+  ftc_run -- forge-tag-create --tag v1 --target HEAD
+  assert_contains "exactly one of --message or --message-file" "$FTC_ERR" "neither message flag is refused"
+  printf 'body' > "$FORGE_ROUTING_TMPDIR/msg.txt"
+  ftc_run -- forge-tag-create --tag v1 --target HEAD --message m --message-file "$FORGE_ROUTING_TMPDIR/msg.txt"
+  assert_contains "exactly one of --message or --message-file" "$FTC_ERR" "both message flags are refused"
+  ftc_run -- forge-tag-create --tag v1 --target HEAD --message ""
+  assert_contains "--message must not be empty" "$FTC_ERR" "an empty --message is refused by flag name"
+  : > "$FORGE_ROUTING_TMPDIR/empty.txt"
+  ftc_run -- forge-tag-create --tag v1 --target HEAD --message-file "$FORGE_ROUTING_TMPDIR/empty.txt"
+  assert_contains "--message-file is empty" "$FTC_ERR" "an empty --message-file is refused by flag name"
+  ftc_run -- forge-tag-create --tag v1 --target HEAD --message-file "$FORGE_ROUTING_TMPDIR/missing.txt"
+  assert_contains "--message-file is not a readable file" "$FTC_ERR" "an unreadable --message-file is refused by flag name"
+  assert_eq "0" "$(grep -c . "$FORGE_ROUTING_LOG" || true)" "no refusal reached gh"
+  teardown_forge_routing_env
+}
+
+ftc_test_github_creates_an_annotated_tag_as_the_remembered_account() {
+  echo ""
+  echo "=== forge-tag-create: github creates a tag object, then a ref at that object's sha ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  record_forge_routing_account --record monalisa
+  local sha
+  sha=$(ftc_commit one)
+  : > "$FORGE_ROUTING_LOG"
+
+  ftc_run -- forge-tag-create --tag v1.0.0 --target HEAD --message "@release notes"
+  assert_exit_code "0" "$FTC_RC" "create exits 0"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is created"
+  assert_eq "$sha" "$(printf '%s' "$FTC_OUT" | jq -r '.data.commit')" "data.commit is the resolved commit"
+  assert_eq "v1.0.0" "$(printf '%s' "$FTC_OUT" | jq -r '.data.tag')" "data.tag is the tag"
+  assert_eq "null" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message is null"
+  assert_eq "1" "$(printf '%s\n' "$FTC_OUT" | grep -c .)" "stdout is the one JSON envelope"
+  assert_eq "7a9e0000000000000000000000000000000000aa" "$(cat "$FORGE_ROUTING_SANDBOX/ref-v1.0.0" | sed 's/^tag //')" "the ref points at the tag object's sha, never the commit's"
+  assert_eq "$sha" "$(cat "$FORGE_ROUTING_SANDBOX/tagobj-7a9e0000000000000000000000000000000000aa")" "the tag object points at the commit"
+  assert_eq "@release notes" "$(cat "$FORGE_ROUTING_SANDBOX/last-tag-message")" "the message reached the forge verbatim"
+  assert_eq "0" "$(grep -c -- ' -F ' "$FORGE_ROUTING_LOG" || true)" "no field was sent with -F (a leading @ would be read as a file)"
+  assert_eq "1" "$(grep -c -- '-f message=@release notes' "$FORGE_ROUTING_LOG" || true)" "the message went as a -f field"
+  assert_eq "0" "$(grep -c '^<unset> gh api' "$FORGE_ROUTING_LOG" || true)" "every api call carried the remembered account's token"
+  assert_eq "3" "$(grep -c "^$FORGE_ROUTING_TOKEN gh api" "$FORGE_ROUTING_LOG" || true)" "the probe, the tag object and the ref all ran as the remembered account"
+  teardown_forge_routing_env
+}
+
+ftc_test_github_rerun_is_unchanged_and_writes_nothing() {
+  echo ""
+  echo "=== forge-tag-create: a re-run reports unchanged and writes nothing ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local sha
+  sha=$(ftc_commit one)
+  ftc_run -- forge-tag-create --tag v2 --target HEAD --message m
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "first run creates"
+
+  : > "$FORGE_ROUTING_LOG"
+  ftc_run -- forge-tag-create --tag v2 --target HEAD --message m
+  assert_exit_code "0" "$FTC_RC" "second run exits 0"
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "second run reports unchanged"
+  assert_eq "$sha" "$(printf '%s' "$FTC_OUT" | jq -r '.data.commit')" "unchanged still carries data.commit"
+  assert_eq "0" "$(ftc_gh_calls 'tags $')" "no tag object was written"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "no ref was written"
+  assert_eq "" "$FTC_ERR" "unchanged prints nothing on stderr"
+
+  # A commit-typed ref (a lightweight tag) at the target is also unchanged.
+  printf 'commit %s' "$sha" > "$FORGE_ROUTING_SANDBOX/ref-light"
+  : > "$FORGE_ROUTING_LOG"
+  ftc_run -- forge-tag-create --tag light --target HEAD --message m
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a lightweight tag at the target is unchanged"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "and nothing is written for it"
+  teardown_forge_routing_env
+}
+
+ftc_test_github_never_moves_an_existing_tag() {
+  echo ""
+  echo "=== forge-tag-create: a tag at another commit is degraded and never moved ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local first second
+  first=$(ftc_commit one)
+  ftc_run -- forge-tag-create --tag v3 --target HEAD --message m
+  second=$(ftc_commit two)
+
+  : > "$FORGE_ROUTING_LOG"
+  ftc_run -- forge-tag-create --tag v3 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is degraded"
+  assert_contains "$first" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the commit the tag sits at"
+  assert_contains "$second" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the target commit"
+  assert_eq "null" "$(printf '%s' "$FTC_OUT" | jq -r '.data')" "data is null"
+  assert_eq "0" "$(printf '%s' "$FTC_ERR" | grep -c 'git tag -a' || true)" "no manual step is printed"
+  assert_eq "0" "$(ftc_gh_calls 'tags $')" "no tag object was written"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "no ref was written"
+  assert_eq "$first" "$(cat "$FORGE_ROUTING_SANDBOX/tagobj-7a9e0000000000000000000000000000000000aa")" "the tag still points at its first commit"
+  assert_eq "0" "$(grep -c -E -- '--method|-X|DELETE|PATCH|--force' "$FORGE_ROUTING_LOG" || true)" "no delete, patch or force call was made"
+  teardown_forge_routing_env
+}
+
+ftc_test_github_unanswered_probe_is_never_read_as_absent() {
+  echo ""
+  echo "=== forge-tag-create: a probe that could not answer is degraded, not absent ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_SANDBOX/probe-fail"
+  : > "$FORGE_ROUTING_LOG"
+  ftc_run -- forge-tag-create --tag v4 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is degraded"
+  assert_contains "could not tell whether tag v4 exists" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message says the probe could not answer"
+  assert_eq "0" "$(ftc_gh_calls 'tags $')" "nothing was written after an unanswered probe"
+  assert_contains "git push origin v4" "$FTC_ERR" "manual steps are printed"
+  teardown_forge_routing_env
+}
+
+ftc_test_github_failed_writes_degrade_with_the_reason() {
+  echo ""
+  echo "=== forge-tag-create: a failed write is degraded; a failed ref names the orphan tag object ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+
+  : > "$FORGE_ROUTING_SANDBOX/tag-fail"
+  ftc_run -- forge-tag-create --tag v5 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "a refused tag object exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a refused tag object is degraded"
+  assert_contains "creating the tag object failed" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "the reason is in message"
+  assert_contains "git tag -a v5" "$FTC_ERR" "git tag -a is printed on stderr"
+  assert_contains "git push origin v5" "$FTC_ERR" "git push origin <tag> is printed on stderr"
+  rm -f "$FORGE_ROUTING_SANDBOX/tag-fail"
+
+  : > "$FORGE_ROUTING_SANDBOX/ref-fail"
+  ftc_run -- forge-tag-create --tag v5 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "a failed ref exits non-zero"
+  assert_contains "7a9e0000000000000000000000000000000000aa" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the orphan tag object's sha"
+  assert_contains "git push origin v5" "$FTC_ERR" "manual steps are printed after a failed ref"
+  teardown_forge_routing_env
+}
+
+ftc_test_unknown_forge_and_missing_cli_degrade_with_manual_steps() {
+  echo ""
+  echo "=== forge-tag-create: an unknown forge or a missing CLI is degraded with manual steps ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_LOG"
+
+  ftc_run AIMI_FORGE_TYPE=gitea -- forge-tag-create --tag v6 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "an unknown forge exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "an unknown forge is degraded"
+  assert_contains "git tag -a v6" "$FTC_ERR" "git tag -a is printed"
+  assert_contains "git push origin v6" "$FTC_ERR" "git push origin <tag> is printed"
+  assert_eq "1" "$(printf '%s\n' "$FTC_OUT" | grep -c .)" "stdout carries only the envelope"
+  assert_eq "0" "$(grep -c . "$FORGE_ROUTING_LOG" || true)" "no forge CLI was started"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/gh"
+  ftc_run -- forge-tag-create --tag v6 --target HEAD --message m
+  assert_exit_code "1" "$FTC_RC" "a missing gh exits non-zero"
+  assert_contains "gh not found" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "a missing gh is named in message"
+  assert_contains "git push origin v6" "$FTC_ERR" "a missing gh prints the manual steps"
+  teardown_forge_routing_env
+}
+
+ftc_test_gitlab_creates_reports_unchanged_and_names_a_remembered_account() {
+  echo ""
+  echo "=== forge-tag-create: gitlab creates through repository/tags, as the glab session ==="
+  setup_forge_routing_env "https://gitlab.com/owner/repo.git"
+  ftc_write_fake_glab
+  local first second
+  first=$(ftc_commit one)
+
+  ftc_run -- forge-tag-create --tag v7 --target HEAD --message "notes"
+  assert_exit_code "0" "$FTC_RC" "gitlab create exits 0"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "gitlab status is created"
+  assert_eq "$first" "$(printf '%s' "$FTC_OUT" | jq -r '.data.commit')" "gitlab data.commit is the resolved commit"
+  assert_eq "notes" "$(cat "$FORGE_ROUTING_SANDBOX/last-tag-message")" "the message went with the tag"
+  assert_eq "0" "$(grep -c 'GITLAB_TOKEN=[^<]' "$FORGE_ROUTING_LOG" || true)" "no token variable was set for glab"
+  assert_eq "" "$FTC_ERR" "no remembered account: no stderr line"
+
+  : > "$FORGE_ROUTING_LOG"
+  ftc_run -- forge-tag-create --tag v7 --target HEAD --message "notes"
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a gitlab re-run is unchanged"
+  assert_eq "0" "$(grep -c -- '--method POST' "$FORGE_ROUTING_LOG" || true)" "and nothing is written"
+
+  second=$(ftc_commit two)
+  ftc_run -- forge-tag-create --tag v7 --target HEAD --message "notes"
+  assert_exit_code "1" "$FTC_RC" "a gitlab tag at another commit exits non-zero"
+  assert_contains "$first" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the existing commit"
+  assert_contains "$second" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the target commit"
+
+  ftc_run AIMI_FORGE_IDENTITY=alice -- forge-tag-create --tag v7 --target HEAD --message "notes"
+  assert_eq "1" "$(printf '%s\n' "$FTC_ERR" | grep -c 'alice')" "a remembered account that cannot apply is named on exactly one stderr line"
+
+  : > "$FORGE_ROUTING_SANDBOX/create-fail"
+  ftc_run -- forge-tag-create --tag v8 --target HEAD --message "notes"
+  assert_exit_code "1" "$FTC_RC" "a failed gitlab create exits non-zero"
+  assert_contains "git push origin v8" "$FTC_ERR" "a failed gitlab create prints the manual steps"
+  teardown_forge_routing_env
+}
+
+ftc_test_message_file_is_read_before_the_project_cd() {
+  echo ""
+  echo "=== forge-tag-create: --message-file resolves against the caller's directory, not --project ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  mkdir -p "$FORGE_ROUTING_TMPDIR/caller"
+  printf 'from a file' > "$FORGE_ROUTING_TMPDIR/caller/msg.txt"
+  local errfile="$FORGE_ROUTING_TMPDIR/ftc.err"
+  FTC_OUT=$(
+    cd "$FORGE_ROUTING_TMPDIR/caller" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG" FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX"
+    "$CLI" forge-tag-create --tag v9 --target HEAD --message-file msg.txt --project "$FORGE_ROUTING_REPO" 2>"$errfile"
+  ) && FTC_RC=0 || FTC_RC=$?
+  assert_exit_code "0" "$FTC_RC" "a relative --message-file with --project exits 0"
+  assert_eq "from a file" "$(cat "$FORGE_ROUTING_SANDBOX/last-tag-message")" "the file's text became the tag message"
+  teardown_forge_routing_env
+}
+
+ftc_test_help_dispatch_and_structure() {
+  echo ""
+  echo "=== forge-tag-create: help entry, dispatch and the shared helper ==="
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]" "$help_out" "help lists the verb"
+  assert_eq "1" "$(grep -c '^_forge_tag_ensure()' "$CLI" || true)" "_forge_tag_ensure is defined once"
+  assert_eq "1" "$(grep -c 'forge-tag-create) shift; cmd_forge_tag_create' "$CLI" || true)" "the verb is in the early dispatch block"
+  local tag_adapter
+  tag_adapter=$(sed -n '/^_forge_tag_ensure_github() {/,/^_forge_tag_ensure_gitlab() {/p' "$CLI" | grep -v '^[[:space:]]*#')
+  assert_eq "0" "$(printf '%s\n' "$tag_adapter" | grep -c -- ' -F ' || true)" "the tag adapters never send a field with -F"
+  assert_contains "-f \"message=" "$tag_adapter" "the tag adapters send the message with -f"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -9337,6 +9741,21 @@ main() {
   gtd_test_help_pr_view_block_matches_the_code
   gtd_test_help_repo_info_block_matches_the_code
   gtd_test_help_auth_status_block_matches_the_code
+
+  # forge-tag-create Tests (US-010) -- the annotated-tag write verb, against
+  # tag-aware gh and glab stubs; no scenario can reach a real forge.
+  echo ""
+  echo "--- forge-tag-create Tests (US-010) ---"
+  ftc_test_bad_input_is_refused_before_any_forge_call
+  ftc_test_github_creates_an_annotated_tag_as_the_remembered_account
+  ftc_test_github_rerun_is_unchanged_and_writes_nothing
+  ftc_test_github_never_moves_an_existing_tag
+  ftc_test_github_unanswered_probe_is_never_read_as_absent
+  ftc_test_github_failed_writes_degrade_with_the_reason
+  ftc_test_unknown_forge_and_missing_cli_degrade_with_manual_steps
+  ftc_test_gitlab_creates_reports_unchanged_and_names_a_remembered_account
+  ftc_test_message_file_is_read_before_the_project_cd
+  ftc_test_help_dispatch_and_structure
 
   cleanup
 

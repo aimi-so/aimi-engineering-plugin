@@ -4840,7 +4840,7 @@ _forge_account_override_slots() {
 # and would leave the very before/after check that proves the machine account
 # was left alone structurally unable to detect a violation.
 #
-# NINE SITES, AND NO OTHERS (US-006's forge-pr-merge added the last two).
+# THIRTEEN SITES, AND NO OTHERS (US-006's forge-pr-merge added two; forge-tag-create four).
 # Each write function resolves BOTH slots ONCE into two locals immediately
 # after its own _forge_bin_check gate -- at most one is ever non-empty, and
 # only the matching one costs a `gh auth token` process -- then names both
@@ -4855,6 +4855,10 @@ _forge_account_override_slots() {
 #                                 cmd_forge_pr_view preflight read
 #   _forge_issue_create           gh issue create   the write
 #   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
+#   _forge_tag_ensure_github      gh api            git/ref/tags/<tag> probe
+#                                 gh api            git/tags/<sha> read of an existing tag object
+#                                 gh api            POST git/tags, the tag object
+#                                 gh api            POST git/refs, the ref at that tag object
 #
 # Resolved ONCE per invocation, not once per site: a single forge-pr-create run
 # reaches gh three or four times and must not re-derive the host and re-mint the
@@ -8102,6 +8106,340 @@ cmd_forge_pr_merge() {
   _require_git_repo "$project_dir"
 
   _forge_pr_merge "$pr_ref" "$style"
+}
+
+# ============================================================================
+# forge-tag-create
+# ============================================================================
+# Creates an ANNOTATED tag on the forge at an explicit commit, from explicit
+# inputs, and never moves one that exists. The shape is forge-pr-merge's: a
+# public wrapper (cmd_forge_tag_create) parses and validates, and one private
+# function (_forge_tag_ensure) owns every tag decision and routes on the
+# forge. US-011 reuses _forge_tag_ensure, which is why it emits no JSON.
+#
+# ENVELOPE: the write-verb envelope of forge-contract.md, `data` being
+# {tag, commit}. `created` -- the tag did not exist and now does. `unchanged`
+# -- it already sits at the target commit and nothing was written.
+# `degraded` -- anything else, exit 1, reason in `message`.
+#
+# AN EXISTING TAG IS NEVER MOVED. There is no delete, force or re-point call
+# anywhere below. The probe decides whether a tag exists: neither forge
+# documents which status code a duplicate create answers with, so a status
+# code is never used to detect one. The probe reports "absent" only on a 404;
+# a probe that could not answer is degraded, never read as absent.
+#
+# GITHUB: a tag object is created first (POST git/tags, no tagger so the
+# acting account is credited), then a ref at THAT TAG OBJECT'S sha -- a ref at
+# the commit's sha would be a lightweight tag. Fields go through `-f`, never
+# `-F`, which reads a leading `@` as a file name and would let a message
+# exfiltrate one. The remembered account (or AIMI_FORGE_IDENTITY) acts, by the
+# same prefix assignment as every routed write; see ROUTING RULE above.
+#
+# GITLAB: one POST to repository/tags with the message creates an annotated
+# tag. The active glab session acts and no token variable is set. glab api's
+# --method, -f/--raw-field and :id placeholder are documented at
+# https://docs.gitlab.com/cli/api/ ("glab api | GitLab Docs").
+
+# Prints the manual steps for a tag that could not be created automatically.
+# Always stderr. Not printed for a tag that exists at another commit: there
+# nothing is owed to a human but the report, and a re-point is a decision.
+# Usage: _forge_tag_print_manual <tag> <commit>
+_forge_tag_print_manual() {
+  local tag="$1" commit="$2"
+  {
+    echo "Warning: could not create tag $tag automatically -- create it yourself with:"
+    echo "  git tag -a $tag $commit"
+    echo "  git push origin $tag"
+  } >&2
+}
+
+# True when a failed call's stdout or stderr carries an HTTP 404.
+# Usage: _forge_tag_is_404 <stdout> <stderr>
+_forge_tag_is_404() {
+  printf '%s\n%s\n' "${1:-}" "${2:-}" | grep -Eq '(^|[^0-9])404([^0-9]|$)'
+}
+
+# Prints the one stderr line GitLab owes when a remembered account exists but
+# cannot apply (glab acts as its active session). Nothing otherwise.
+_forge_tag_gitlab_account_notice() {
+  local host="" login="" store="" entry=""
+  _forge_account_host_cached host
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    login="$AIMI_FORGE_IDENTITY"
+  elif [ -n "$host" ]; then
+    store=$(_forge_account_store_path) || store=""
+    if [ -n "$store" ]; then
+      entry=$(_forge_account_stored_entry "$store" "$host")
+      if [ "$entry" != "null" ]; then
+        login=$(printf '%s' "$entry" | jq -r 'if .mode == "account" then (.account // empty) else empty end')
+      fi
+    fi
+  fi
+  [ -n "$login" ] || return 0
+  echo "Note: account \"$login\" is remembered for this repository, but glab acts as its own active session; the tag is created by that session." >&2
+}
+
+# github adapter. Returns 0 (created/unchanged), 1 (degraded) or 2 (degraded,
+# tag exists at another commit: no manual steps). Sets the caller's two named
+# variables.
+# Usage: _forge_tag_ensure_github <outcome_var> <detail_var> <tag> <commit> <message>
+_forge_tag_ensure_github() {
+  local -n _ftg_out="$1" _ftg_detail="$2"
+  local tag="$3" commit="$4" message="$5"
+  _ftg_out="degraded"
+  _ftg_detail=""
+
+  if ! _forge_bin_check gh mandatory github; then
+    _ftg_detail="gh not found -- this tag was not created automatically."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local host="" host_args=()
+  _forge_account_host_cached host
+  case "$host" in
+    ""|github.com) ;;
+    *) host_args=(--hostname "$host") ;;
+  esac
+
+  local out="" err="" rc=0 existing="" otype="" osha=""
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/ref/tags/$tag" ${host_args[@]+"${host_args[@]}"} || true
+
+  if [ "$rc" -eq 0 ]; then
+    otype=$(printf '%s' "$out" | jq -r '.object.type // empty' 2>/dev/null) || otype=""
+    osha=$(printf '%s' "$out" | jq -r '.object.sha // empty' 2>/dev/null) || osha=""
+    case "$otype" in
+      commit) existing="$osha" ;;
+      tag)
+        if [ -n "$osha" ]; then
+          GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+            _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/tags/$osha" ${host_args[@]+"${host_args[@]}"} || true
+          if [ "$rc" -eq 0 ]; then
+            existing=$(printf '%s' "$out" | jq -r '.object.sha // empty' 2>/dev/null) || existing=""
+          fi
+        fi
+        ;;
+    esac
+    if [ -z "$existing" ]; then
+      _ftg_detail="tag $tag exists but the commit it points at could not be read: ${err:-unknown error}"
+      return 1
+    fi
+    if [ "$existing" = "$commit" ]; then
+      _ftg_out="unchanged"
+      return 0
+    fi
+    _ftg_detail="tag $tag already exists at commit $existing, not at $commit; it was left where it is."
+    return 2
+  fi
+
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _ftg_detail="could not tell whether tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/tags" \
+      -f "tag=$tag" -f "message=$message" -f "object=$commit" -f "type=commit" \
+      ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ]; then
+    _ftg_detail="creating the tag object failed (gh api exited $rc; the target commit may not be pushed yet, or a ruleset refused the tag): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+  local tag_sha=""
+  tag_sha=$(printf '%s' "$out" | jq -r '.sha // empty' 2>/dev/null) || tag_sha=""
+  if [ -z "$tag_sha" ]; then
+    _ftg_detail="creating the tag object returned no sha."
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/refs" \
+      -f "ref=refs/tags/$tag" -f "sha=$tag_sha" \
+      ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ]; then
+    _ftg_detail="creating the ref failed after tag object $tag_sha was created (gh api exited $rc); that tag object is orphaned: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _ftg_out="created"
+  return 0
+}
+
+# gitlab adapter; same contract as the github one.
+# Usage: _forge_tag_ensure_gitlab <outcome_var> <detail_var> <tag> <commit> <message>
+_forge_tag_ensure_gitlab() {
+  local -n _ftl_out="$1" _ftl_detail="$2"
+  local tag="$3" commit="$4" message="$5"
+  _ftl_out="degraded"
+  _ftl_detail=""
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _ftl_detail="glab not found -- this tag was not created automatically."
+    return 1
+  fi
+
+  _forge_tag_gitlab_account_notice
+
+  local enc="" out="" err="" rc=0 existing=""
+  enc=$(jq -rn --arg t "$tag" '$t | @uri')
+  _forge_capture out err rc -- glab api "projects/:id/repository/tags/$enc" || true
+
+  if [ "$rc" -eq 0 ]; then
+    existing=$(printf '%s' "$out" | jq -r '.commit.id // empty' 2>/dev/null) || existing=""
+    if [ -z "$existing" ]; then
+      _ftl_detail="tag $tag exists but the commit it points at could not be read."
+      return 1
+    fi
+    if [ "$existing" = "$commit" ]; then
+      _ftl_out="unchanged"
+      return 0
+    fi
+    _ftl_detail="tag $tag already exists at commit $existing, not at $commit; it was left where it is."
+    return 2
+  fi
+
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _ftl_detail="could not tell whether tag $tag exists (glab api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab api projects/:id/repository/tags --method POST \
+    -f "tag_name=$tag" -f "ref=$commit" -f "message=$message" || true
+  if [ "$rc" -ne 0 ]; then
+    _ftl_detail="creating the tag failed (glab api exited $rc; the target commit may not be pushed yet, or a ruleset refused the tag): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _ftl_out="created"
+  return 0
+}
+
+# Owns every tag decision. Sets <outcome_var> to created, unchanged or
+# degraded and, when degraded, <detail_var> to the reason; returns 0 for the
+# first two and 1 for degraded. Emits no JSON. Prints the manual steps itself
+# on every degraded outcome except a tag that exists at another commit.
+# The _fte_ prefix keeps the name-reference targets clear of a caller's own
+# locals, as _forge_account_override_slots does.
+# Usage: _forge_tag_ensure <outcome_var> <detail_var> <forge> <tag> <commit> <message>
+_forge_tag_ensure() {
+  local -n _fte_out="$1" _fte_detail="$2"
+  local _fte_outname="$1" _fte_detailname="$2"
+  local _fte_forge="$3" _fte_tag="$4" _fte_commit="$5" _fte_message="$6"
+  local _fte_rc=0
+  _fte_out="degraded"
+  _fte_detail=""
+
+  case "$_fte_forge" in
+    github) _forge_tag_ensure_github "$_fte_outname" "$_fte_detailname" "$_fte_tag" "$_fte_commit" "$_fte_message" || _fte_rc=$? ;;
+    gitlab) _forge_tag_ensure_gitlab "$_fte_outname" "$_fte_detailname" "$_fte_tag" "$_fte_commit" "$_fte_message" || _fte_rc=$? ;;
+    *)
+      _fte_detail="forge-tag-create: no adapter for forge \"$_fte_forge\" -- GitHub and GitLab are the only adapters."
+      _fte_rc=1
+      ;;
+  esac
+
+  case "$_fte_rc" in
+    0) return 0 ;;
+    2) _fte_out="degraded"; return 1 ;;
+    *)
+      _fte_out="degraded"
+      _forge_tag_print_manual "$_fte_tag" "$_fte_commit"
+      return 1
+      ;;
+  esac
+}
+
+# Public wrapper: parses --tag/--target/--message|--message-file/--project
+# (deliberately no token flag), refuses bad input by flag name before any forge
+# call, reads --message-file BEFORE the cd that --project performs, resolves
+# --target to a commit, then delegates to _forge_tag_ensure and emits the
+# envelope. degraded exits 1: a tag has no fallback and a release must not
+# follow a failed tag.
+cmd_forge_tag_create() {
+  check_jq
+
+  local tag="" target="" message="" message_file="" project_dir=""
+  local message_set=0 file_set=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag)          shift; tag="${1:-}" ;;
+      --target)       shift; target="${1:-}" ;;
+      --message)      shift; message="${1:-}"; message_set=1 ;;
+      --message-file) shift; message_file="${1:-}"; file_set=1 ;;
+      --project)      shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-tag-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ -z "$tag" ] || [ -z "$target" ]; then
+    echo "Usage: aimi-cli.sh forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]" >&2
+    exit 1
+  fi
+
+  if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._/+-]*$ ]] || ! git check-ref-format "refs/tags/$tag" >/dev/null 2>&1; then
+    echo "Error: forge-tag-create: invalid --tag value: $tag" >&2
+    exit 1
+  fi
+
+  case "$target" in
+    -*)
+      echo "Error: forge-tag-create: invalid --target value: $target" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ $((message_set + file_set)) -ne 1 ]; then
+    echo "Error: forge-tag-create: exactly one of --message or --message-file is required." >&2
+    exit 1
+  fi
+
+  if [ "$file_set" -eq 1 ]; then
+    if [ -z "$message_file" ] || [ ! -f "$message_file" ] || [ ! -r "$message_file" ]; then
+      echo "Error: forge-tag-create: --message-file is not a readable file: $message_file" >&2
+      exit 1
+    fi
+    message=$(cat "$message_file") || {
+      echo "Error: forge-tag-create: --message-file could not be read: $message_file" >&2
+      exit 1
+    }
+    if [ -z "${message//[[:space:]]/}" ]; then
+      echo "Error: forge-tag-create: --message-file is empty: $message_file" >&2
+      exit 1
+    fi
+  elif [ -z "${message//[[:space:]]/}" ]; then
+    echo "Error: forge-tag-create: --message must not be empty." >&2
+    exit 1
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local commit=""
+  commit=$(git rev-parse --verify "${target}^{commit}" 2>/dev/null) || commit=""
+  if [ -z "$commit" ]; then
+    echo "Error: forge-tag-create: --target does not resolve to a commit in this repository: $target" >&2
+    exit 1
+  fi
+
+  local forge=""
+  _detect_forge_type forge
+
+  local outcome="" detail="" rc=0
+  _forge_tag_ensure outcome detail "$forge" "$tag" "$commit" "$message" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$outcome" = "degraded" ]; then
+    echo "Error: forge-tag-create: ${detail:-the tag was not created.}" >&2
+    _forge_emit_write_status degraded "" "${detail:-the tag was not created.}"
+    return 1
+  fi
+
+  _forge_emit_write_status "$outcome" "$(jq -nc --arg tag "$tag" --arg commit "$commit" '{tag: $tag, commit: $commit}')"
 }
 
 # ============================================================================
@@ -17088,6 +17426,20 @@ COMMANDS:
                               non-zero, since there is no gh subcommand or
                               REST fallback for resolving a review thread.
                               github and gitlab each have an adapter.
+    forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]
+                              Write verb -- creates an ANNOTATED tag on the
+                              forge at the commit --target resolves to.
+                              Output: {status, data: {tag, commit}, message}.
+                              "created" at exit 0; re-running it prints
+                              "unchanged" and writes nothing. An existing tag
+                              is never moved: one at another commit is
+                              "degraded" (exit 1) naming both commits. Bad
+                              --tag, --target or message input is refused at
+                              exit 1 before any forge call. Any other failure
+                              is "degraded" at exit 1 with the reason in
+                              message, and manual `git tag -a` / `git push
+                              origin <tag>` steps on stderr.
+                              github and gitlab each have an adapter.
     slugify (--stdin | <text>)
                               Print an ASCII directory slug for free text: NFKD
                               fold to ASCII, lowercase, runs of non-alphanumerics
@@ -18166,6 +18518,7 @@ main() {
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
     forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
+    forge-tag-create) shift; cmd_forge_tag_create "$@"; return ;;
   esac
 
   # Universal --help/-h: any subcommand with --help or -h anywhere in its args

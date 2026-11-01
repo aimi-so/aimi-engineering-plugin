@@ -356,6 +356,10 @@ ADVERSARIAL = [
     ),
     pytest.param("$AIMI_CLI forge-pr-merge --pr 1 --style squash", id="subcommand-off-whitelist"),
     pytest.param(
+        '$AIMI_CLI forge-tag-create --tag v1.0.0 --target HEAD --message "release"',
+        id="forge-tag-create-is-off-the-whitelist",
+    ),
+    pytest.param(
         "$AIMI_CLI deps-recipe-record --project . --command 'make setup'",
         id="deps-recipe-record-is-a-human-decision-verb",
     ),
