@@ -1019,9 +1019,162 @@ _detect_dependency_installer() {
   return 0
 }
 
-# Install dependencies inside a worktree by detecting the package manager from its lockfile.
-# Advisory/non-fatal contract: a missing package.json is not an error (exit 0), and an install
-# failure is reported clearly but never left in a state that trips the script's `set -e`.
+# Absolute path of the marker install-deps records for <worktree-path>: the
+# worktree's own git directory, so `git status` never lists it.
+_deps_marker_path() {
+  local worktree_path="$1" gd
+  gd=$(git -C "$worktree_path" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  printf '%s/aimi-deps.json' "$gd"
+}
+
+# sha256 of a file, empty when no hashing tool is available.
+_deps_sha256() {
+  local out=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1) || out=""
+  elif command -v shasum >/dev/null 2>&1; then
+    out=$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1) || out=""
+  fi
+  printf '%s' "$out"
+}
+
+# Main checkout of the repository that owns <worktree-path>; prints nothing
+# when it cannot be told.
+_deps_main_checkout() {
+  local common
+  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 0
+  [[ "$common" == /* ]] || common="$1/$common"
+  (cd "$common/.." 2>/dev/null && pwd -P) || true
+}
+
+# Project key of the repository whose main checkout is <main>: its path
+# relative to the directory holding .aimi/, or . when the two coincide or the
+# checkout lies outside that directory.
+_deps_project_key() {
+  local main="$1" root=""
+  if [[ -z "$main" ]]; then printf '.'; return 0; fi
+  root=$(cd "$main" 2>/dev/null && find_aimi_root 2>/dev/null) || root=""
+  if [[ -n "$root" && "$main" == "$root"/* ]]; then
+    printf '%s' "${main#"$root"/}"
+  else
+    printf '.'
+  fi
+}
+
+# Write the {status, directories} marker atomically. A failure warns and
+# changes neither the status nor the exit code.
+_deps_write_marker() {
+  local worktree_path="$1" status="$2" dirs_json="$3" path tmp doc
+  if ! path=$(_deps_marker_path "$worktree_path"); then
+    echo -e "${YELLOW}⚠️  Could not locate the git directory, dependency marker not written${NC}" >&2
+    return 0
+  fi
+  if doc=$(jq -nc --arg s "$status" --argjson d "$dirs_json" '{status:$s, directories:$d}') \
+     && tmp=$(mktemp "${path}.XXXXXX") \
+     && printf '%s\n' "$doc" > "$tmp" \
+     && mv "$tmp" "$path"; then
+    return 0
+  fi
+  echo -e "${YELLOW}⚠️  Could not write the dependency marker: $path${NC}" >&2
+  return 0
+}
+
+# Run <command> as argv inside <dir>. Refuses shell metacharacters and a first
+# word that is not on PATH. No other command is ever tried.
+_deps_run_command() {
+  local dir="$1" cmd="$2"
+  case "$cmd" in
+    *[\;\|\&\$\<\>\`]*|*$'\n'*|*$'\r'*)
+      echo -e "${RED}Error: install command contains a shell metacharacter, nothing was run${NC}" >&2
+      return 1
+      ;;
+  esac
+  local -a argv=()
+  read -r -a argv <<< "$cmd" || true
+  if [[ ${#argv[@]} -eq 0 ]]; then
+    echo -e "${RED}Error: install command is empty, nothing was run${NC}" >&2
+    return 1
+  fi
+  if ! command -v "${argv[0]}" >/dev/null 2>&1; then
+    echo -e "${RED}Error: install command not found on PATH: ${argv[0]}${NC}" >&2
+    return 1
+  fi
+  if ! ( cd "$dir" && "${argv[@]}" </dev/null ); then
+    return 1
+  fi
+  return 0
+}
+
+# Install one directory from a detector answer and append its entry to
+# _DEPS_ENTRIES. $1 dir, $2 label (. for the root), $3 detector JSON, $4 marker
+# path of an earlier run (may not exist).
+_deps_process_dir() {
+  local dir="$1" label="$2" det="$3" prior="$4"
+  local status command lockfile manager reason
+  status=$(printf '%s' "$det" | jq -r '.status // ""')
+  command=$(printf '%s' "$det" | jq -r '.command // ""')
+  lockfile=$(printf '%s' "$det" | jq -r '.lockfile // ""')
+  manager=$(printf '%s' "$det" | jq -r '.manager // ""')
+  reason=$(printf '%s' "$det" | jq -r '.reason // ""')
+
+  case "$status" in
+    ready) ;;
+    needs-recipe)
+      echo -e "${YELLOW}⚠️  No install recipe for '$label': $reason${NC}"
+      _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" '{dir:$d, status:"needs-recipe", command:"", lockfileHash:""}')")
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  local hash=""
+  if [[ -n "$lockfile" && -f "$dir/$lockfile" ]]; then
+    hash=$(_deps_sha256 "$dir/$lockfile")
+  fi
+
+  if [[ -n "$hash" && -d "$dir/node_modules" && -f "$prior" ]] \
+     && jq -e --arg d "$label" --arg c "$command" --arg h "$hash" \
+          '.directories[]? | select(.dir == $d and .status == "ok" and .command == $c and .lockfileHash == $h)' \
+          "$prior" >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ Dependencies already installed in '$label' (same command, same lockfile), skipping install${NC}"
+    _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" --arg c "$command" --arg h "$hash" '{dir:$d, status:"ok", command:$c, lockfileHash:$h}')")
+    return 0
+  fi
+
+  local -a known_locks=(bun.lock bun.lockb package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock)
+  local -a had=()
+  local lf
+  if [[ -n "$manager" && -z "$lockfile" ]]; then
+    for lf in "${known_locks[@]}"; do
+      if [[ -e "$dir/$lf" ]]; then had+=("$lf"); fi
+    done
+    echo -e "${YELLOW}⚠️  No lockfile in '$label': dependency versions are not pinned${NC}"
+  fi
+
+  echo -e "${BLUE}Installing dependencies in '$label' with: $command${NC}"
+  local rc=0
+  _deps_run_command "$dir" "$command" || rc=$?
+
+  if [[ -n "$manager" && -z "$lockfile" && ${#had[@]} -eq 0 ]]; then
+    for lf in "${known_locks[@]}"; do
+      if [[ -e "$dir/$lf" ]]; then rm -f "$dir/$lf"; fi
+    done
+  fi
+
+  local st="ok"
+  if [[ "$rc" -ne 0 ]]; then
+    st="failed"
+    echo -e "${RED}Error: Dependency install failed in '$label'${NC}" >&2
+    hash=""
+  fi
+  _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" --arg s "$st" --arg c "$command" --arg h "$hash" '{dir:$d, status:$s, command:$c, lockfileHash:$h}')")
+  return 0
+}
+
+# Install dependencies inside a worktree with the repository's frozen install
+# command, run as argv with no fallback, in the root or else in each
+# first-level subfolder. Records {status, directories} in the marker and ends
+# stdout with one DEPS_STATUS=<status> line; exits 1 only for failed.
 install_deps() {
   local worktree_name="$1"
 
@@ -1051,74 +1204,58 @@ install_deps() {
     exit 1
   fi
 
-  if [[ ! -f "$worktree_path/package.json" ]]; then
+  local main_checkout key det prior=""
+  main_checkout=$(_deps_main_checkout "$worktree_path")
+  key=$(_deps_project_key "$main_checkout")
+  prior=$(_deps_marker_path "$worktree_path" 2>/dev/null) || prior=""
+
+  local -a _DEPS_ENTRIES=()
+  local detect_cwd="${main_checkout:-$PWD}"
+
+  det=$(cd "$detect_cwd" && _detect_dependency_installer "$worktree_path" "$key") || det=""
+  if [[ -z "$det" ]]; then
+    det=$(_dep_emit needs-recipe "" "" "" repository "the dependency detector returned no answer")
+  fi
+  local root_status
+  root_status=$(printf '%s' "$det" | jq -r '.status // ""')
+
+  if [[ "$root_status" != "nothing-to-install" ]]; then
+    _deps_process_dir "$worktree_path" "." "$det" "$prior"
+  else
+    local -a subdirs=()
+    local d base
+    while IFS= read -r d; do
+      base=$(basename "$d")
+      case "$base" in .*|node_modules|vendor|dist|build) continue ;; esac
+      subdirs+=("$d")
+    done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+    for d in "${subdirs[@]+"${subdirs[@]}"}"; do
+      base=$(basename "$d")
+      det=$(cd "$detect_cwd" && _detect_dependency_installer "$d" "$key") || det=""
+      if [[ -z "$det" ]]; then continue; fi
+      _deps_process_dir "$d" "$base" "$det" "$prior"
+    done
+  fi
+
+  local dirs_json="[]" agg="nothing-to-install"
+  if [[ ${#_DEPS_ENTRIES[@]} -gt 0 ]]; then
+    dirs_json=$(printf '%s\n' "${_DEPS_ENTRIES[@]}" | jq -sc '.')
+    agg=$(printf '%s' "$dirs_json" | jq -r '
+      map(.status) as $s
+      | if ($s | index("failed")) != null then "failed"
+        elif ($s | index("needs-recipe")) != null then "needs-recipe"
+        else "ok" end')
+  fi
+
+  if [[ "$agg" == "nothing-to-install" ]]; then
     echo -e "${YELLOW}ℹ️  No package.json in worktree, skipping dependency install: $worktree_name${NC}"
-    return 0
   fi
 
-  # Package manager name comes from the shared detector; the install-specific
-  # command and lockfile path (used below for the idempotency mtime check)
-  # are layered on top here since serve_start never needs either.
-  local pm_name pm_cmd lockfile_path=""
-  pm_name=$(_detect_package_manager "$worktree_path")
-  case "$pm_name" in
-    bun)
-      pm_cmd="bun install"
-      lockfile_path="$worktree_path/bun.lockb"
-      ;;
-    pnpm)
-      pm_cmd="pnpm install"
-      lockfile_path="$worktree_path/pnpm-lock.yaml"
-      ;;
-    yarn)
-      pm_cmd="yarn install"
-      lockfile_path="$worktree_path/yarn.lock"
-      ;;
-    npm)
-      if [[ -f "$worktree_path/package-lock.json" ]]; then
-        pm_cmd="npm ci"
-        lockfile_path="$worktree_path/package-lock.json"
-      else
-        pm_cmd="npm install"
-      fi
-      ;;
-  esac
-
-  # Idempotency short-circuit: when a recognized lockfile exists and node_modules/
-  # is already at least as fresh as it, skip the install entirely — a resumed
-  # container that already had correct dependencies never pays a cold reinstall,
-  # and npm ci never deletes a node_modules/ that was already correct. Only
-  # applies when a lockfile was detected above; the no-lockfile (npm install)
-  # branch and a missing node_modules/ always fall through to a real install.
-  if [[ -n "$lockfile_path" ]] && [[ -d "$worktree_path/node_modules" ]]; then
-    local lockfile_mtime node_modules_mtime
-    lockfile_mtime=$(stat -c '%Y' "$lockfile_path" 2>/dev/null || stat -f '%m' "$lockfile_path" 2>/dev/null)
-    node_modules_mtime=$(stat -c '%Y' "$worktree_path/node_modules" 2>/dev/null || stat -f '%m' "$worktree_path/node_modules" 2>/dev/null)
-    if [[ -n "$lockfile_mtime" ]] && [[ -n "$node_modules_mtime" ]] && [[ "$node_modules_mtime" -ge "$lockfile_mtime" ]]; then
-      echo -e "${GREEN}✓ Dependencies already up to date in worktree '$worktree_name' (node_modules/ is not older than the lockfile), skipping install${NC}"
-      return 0
-    fi
-  fi
-
-  echo -e "${BLUE}Installing dependencies in worktree '$worktree_name' with $pm_name...${NC}"
-
-  # Guarded subshell: an install failure must never trip the script's top-level `set -e`.
-  if ! ( cd "$worktree_path" && eval "$pm_cmd" ); then
-    if [[ "$pm_cmd" == "npm ci" ]]; then
-      echo -e "${YELLOW}⚠️  npm ci failed, falling back to npm install...${NC}"
-      if ! ( cd "$worktree_path" && npm install ); then
-        echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' (npm, after npm ci and npm install fallback)${NC}" >&2
-        return 1
-      fi
-      echo -e "${GREEN}✓ Dependencies installed successfully with npm (install fallback) in worktree: $worktree_name${NC}"
-      return 0
-    fi
-
-    echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' using $pm_name${NC}" >&2
+  _deps_write_marker "$worktree_path" "$agg" "$dirs_json"
+  echo "DEPS_STATUS=$agg"
+  if [[ "$agg" == "failed" ]]; then
     return 1
   fi
-
-  echo -e "${GREEN}✓ Dependencies installed successfully with $pm_name in worktree: $worktree_name${NC}"
   return 0
 }
 
@@ -2356,8 +2493,9 @@ Commands:
   merge-all <b1> <b2> ... [--into <b>] [--subject-for <name> <s>]...  Merge multiple branches sequentially
                                          (stops on first conflict)
   cleanup | clean                     Clean up inactive worktrees
-  install-deps <worktree-name>        Install dependencies inside a worktree
-                                      (detects package manager by lockfile)
+  install-deps <worktree-name>        Install dependencies inside a worktree with the
+                                      frozen command, no fallback; last line is
+                                      DEPS_STATUS=<status>
   serve start <worktree-name>         Start a dev server for a worktree, verify its
                                       listener is actually loopback-only, print its
                                       raw URL to stdout only — pid and all narration
@@ -2387,16 +2525,30 @@ Merge:
   - --subject / --subject-for set the merge commit subject (sanitized; US-NNN tokens removed)
 
 Install Deps:
-  - Detection order (first lockfile match wins): bun.lockb -> bun install;
-    pnpm-lock.yaml -> pnpm install; yarn.lock -> yarn install;
-    package-lock.json -> npm ci (falls back to npm install on failure);
-    no recognized lockfile but package.json present -> npm install
-  - Idempotency short-circuit: when a recognized lockfile exists and
-    node_modules/ is already at least as fresh as it (mtime comparison),
-    the install is skipped entirely and this exits 0 with an informational
-    line — a resumed container that already had correct dependencies never
-    pays a cold reinstall. Does not apply when there's no recognized
-    lockfile, or node_modules/ doesn't exist yet, or the lockfile is newer
+  - Frozen commands, run as argv inside the target directory (never eval):
+    bun install --frozen-lockfile; pnpm install --frozen-lockfile; npm ci;
+    yarn install --frozen-lockfile (classic) or --immutable (berry). There is
+    no fallback: a failed command is final and no other manager is tried.
+    A command holding ; | & $ < > a backtick or a newline is refused and runs
+    nothing; a first word absent from PATH fails naming that word.
+  - package.json without a lockfile installs with the detector's command,
+    warns that versions are not pinned, and deletes any lockfile that install
+    created (a lockfile that existed before is never deleted)
+  - Directories: the root alone when the detector finds something to install
+    there; otherwise each first-level subfolder with a manifest, in sorted
+    order, skipping hidden directories, node_modules, vendor, dist and build.
+    A failing subfolder is recorded failed and the exit status is 1, but the
+    others are still installed
+  - Marker: <git dir of the worktree>/aimi-deps.json holds
+    {status, directories:[{dir, status, command, lockfileHash}]}; status is
+    failed over needs-recipe over ok over nothing-to-install. It never shows
+    in git status
+  - Output: the last stdout line is DEPS_STATUS=<status>; exit 1 for failed,
+    0 for ok, nothing-to-install and needs-recipe (the last two run nothing)
+  - Re-run: no installer runs and DEPS_STATUS=ok is printed when the marker
+    records ok for the directory with the same command and lockfile hash and
+    node_modules/ still exists. A changed lockfile, a missing node_modules/,
+    a recorded failure or a directory with no lockfile installs again
   - No package.json: prints an informational line and exits 0 (not an error)
   - Install failure: prints a clear error naming the package manager and
     worktree, and exits non-zero

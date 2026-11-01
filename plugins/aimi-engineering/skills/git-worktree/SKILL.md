@@ -75,7 +75,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh copy-
 # Clean up completed worktrees
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh cleanup
 
-# Install dependencies inside a worktree (detects package manager by lockfile)
+# Install dependencies inside a worktree (frozen command, no fallback, ends with DEPS_STATUS=<status>)
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
 
 # Start a dev server for a worktree, verified loopback-only after readiness (prints http://127.0.0.1:<port> and pid)
@@ -170,23 +170,19 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh clean
 
 ### `install-deps <worktree-name>`
 
-Installs dependencies inside an existing worktree by detecting the package manager from its lockfile. Used by the container execution mode of `/aimi:execute` to prepare a worktree before starting its dev server.
+Installs dependencies in an existing worktree with the frozen install command, run as argv, never eval. Used by the container mode of `/aimi:execute` before it starts a dev server.
 
-**Example:**
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
 ```
 
-**Package manager detection order (first match wins):**
-1. `bun.lockb` → `bun install`
-2. `pnpm-lock.yaml` → `pnpm install`
-3. `yarn.lock` → `yarn install`
-4. `package-lock.json` → `npm ci` (falls back to `npm install` if `npm ci` fails)
-5. No recognized lockfile but `package.json` present → `npm install`
+**Commands:** `bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --frozen-lockfile` (classic) or `--immutable` (berry). **No fallback:** a failed command is final. A command with `; | & $ < >`, a backtick or a newline runs nothing; a first word missing from PATH fails naming it. `package.json` with no lockfile installs with the detector's command, warns that versions are not pinned and deletes any lockfile it created.
 
-**No `package.json`:** prints a single informational line and exits `0`. This is never treated as an error — plenty of worktrees are not Node projects.
+**Directories:** the root alone when it has something to install; otherwise each first-level subfolder with a manifest, sorted (hidden directories, `node_modules`, `vendor`, `dist`, `build` skipped). A failing subfolder is recorded `failed` and exits `1`, the rest are still installed.
 
-**Install failure is advisory, not fatal:** if the package manager's install command fails, `install-deps` prints a clear error naming the package manager and worktree, and exits non-zero — but it never leaves partial state or trips the script's own `set -e`. **Callers must treat a non-zero exit as a degradation, not a hard failure.** In particular, the container mode of `/aimi:execute` must fall visual verification back to `skipped`/`failed` and must never abort its wave loop because `install-deps` failed.
+**Marker and status line:** `<git dir of the worktree>/aimi-deps.json` holds `{status, directories:[{dir, status, command, lockfileHash}]}`. Stdout ends with `DEPS_STATUS=<status>`: `failed` exits `1`; `ok`, `nothing-to-install` and `needs-recipe` exit `0` (the last two run no installer). A re-run installs nothing when the marker records `ok` for the same command and lockfile hash and `node_modules` exists. No `package.json` prints one informational line.
+
+**Treat exit `1` as a degradation:** container mode falls visual verification back to `skipped`/`failed` and never aborts its wave loop because of it.
 
 ### `serve start|stop|status <worktree-name>`
 

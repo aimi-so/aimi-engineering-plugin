@@ -774,8 +774,232 @@ test_install_deps_skips_without_package_json() {
     "install-deps: no package.json — informational message"
   assert_eq "false" "$([[ -d "$worktree_path/node_modules" ]] && echo true || echo false)" \
     "install-deps: no package.json — no node_modules created"
+  assert_eq "DEPS_STATUS=nothing-to-install" "$(printf '%s\n' "$out" | tail -n 1)" \
+    "install-deps: no package.json — status line"
+  local marker
+  marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$worktree_path")
+  assert_eq "nothing-to-install" "$(jq -r .status "$marker")" \
+    "install-deps: no package.json — marker status"
+  assert_eq "0" "$(jq -r '.directories | length' "$marker")" \
+    "install-deps: no package.json — marker directories empty"
 
   teardown_wtm_fixture
+}
+
+# ----------------------------------------------------------------------------
+# Install engine tests. Stubs for bun, npm, pnpm and yarn log
+# "<tool>|<cwd>|<args>" to $DE_LOG, create node_modules/ (and, for `npm
+# install`, a package-lock.json), and fail in any directory holding a
+# .stub-fail file. No real package manager and no network run.
+# ----------------------------------------------------------------------------
+
+de_setup() {
+  setup_wtm_fixture
+  DE_STUB_DIR=$(mktemp -d)
+  DE_LOG="$DE_STUB_DIR/log"
+  : > "$DE_LOG"
+  local t
+  for t in bun npm pnpm yarn mytool; do
+    cat > "$DE_STUB_DIR/$t" << 'STUB'
+#!/bin/bash
+printf '%s|%s|%s\n' "$(basename "$0")" "$PWD" "$*" >> "$DE_LOG"
+if [[ -e "$PWD/.stub-fail" ]]; then exit 1; fi
+mkdir -p node_modules
+if [[ "$(basename "$0")" == "npm" && "${1:-}" == "install" ]]; then echo '{}' > package-lock.json; fi
+exit 0
+STUB
+    chmod +x "$DE_STUB_DIR/$t"
+  done
+  DE_OLD_PATH="$PATH"
+  export PATH="$DE_STUB_DIR:$PATH"
+  export DE_LOG
+}
+
+de_teardown() {
+  export PATH="$DE_OLD_PATH"
+  rm -rf "$DE_STUB_DIR"
+  unset DE_STUB_DIR DE_OLD_PATH DE_LOG
+  teardown_wtm_fixture
+}
+
+# $1 branch: create the worktree, set DE_WT; then run install-deps -> DE_OUT/DE_RC
+de_make_wt() {
+  bash "$WTM" create "$1" >/dev/null 2>&1
+  DE_WT="$WTM_FIXTURE_REPO/.worktrees/$1"
+}
+
+de_run() {
+  DE_OUT=$(bash "$WTM" install-deps "$1" 2>&1)
+  DE_RC=$?
+}
+
+de_last_line() { printf '%s\n' "$DE_OUT" | tail -n 1; }
+
+test_deps_engine_frozen_bun_only() {
+  echo ""
+  echo "=== Testing install-deps engine — bun.lock runs the frozen command only ==="
+  de_setup
+  de_make_wt eng-bun
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo 'lock' > "$DE_WT/bun.lock"
+  de_run eng-bun
+  assert_exit_code "0" "$DE_RC" "engine bun: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine bun: last line"
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine bun: one command ran"
+  assert_contains "bun|" "$(cat "$DE_LOG")" "engine bun: bun ran"
+  assert_contains "|install --frozen-lockfile" "$(cat "$DE_LOG")" "engine bun: frozen argv"
+  assert_eq "false" "$([[ -e "$DE_WT/package-lock.json" ]] && echo true || echo false)" "engine bun: no package-lock.json"
+  assert_eq "true" "$([[ -f "$DE_WT/bun.lock" ]] && echo true || echo false)" "engine bun: existing lockfile kept"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$DE_WT")
+  assert_eq "ok" "$(jq -r .status "$marker")" "engine bun: marker status"
+  assert_eq "." "$(jq -r '.directories[0].dir' "$marker")" "engine bun: marker dir"
+  assert_eq "bun install --frozen-lockfile" "$(jq -r '.directories[0].command' "$marker")" "engine bun: marker command"
+  assert_not_contains "aimi-deps" "$(git -C "$DE_WT" status --porcelain)" "engine bun: marker not in git status"
+  de_teardown
+}
+
+test_deps_engine_failure_has_no_fallback() {
+  echo ""
+  echo "=== Testing install-deps engine — failed npm ci runs nothing afterwards ==="
+  de_setup
+  de_make_wt eng-fail
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo '{}' > "$DE_WT/package-lock.json"
+  touch "$DE_WT/.stub-fail"
+  de_run eng-fail
+  assert_exit_code "1" "$DE_RC" "engine fail: exit code"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine fail: last line"
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine fail: only one command ran"
+  assert_contains "npm|" "$(cat "$DE_LOG")" "engine fail: it was npm"
+  assert_contains "|ci" "$(cat "$DE_LOG")" "engine fail: npm ci"
+  de_teardown
+}
+
+test_deps_engine_refuses_metacharacters_and_missing_word() {
+  echo ""
+  echo "=== Testing install-deps engine — argv guard ==="
+  de_setup
+  local rc out
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'mytool install; mytool again' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: metacharacter command fails"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine guard: metacharacter command ran nothing"
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'mytool install $(id)' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: substitution refused"
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'no-such-tool-xyz install' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: missing first word fails"
+  assert_contains "no-such-tool-xyz" "$out" "engine guard: missing first word is named"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine guard: nothing ran"
+
+  # A configured recipe with a metacharacter never reaches the guard: the
+  # detector answers needs-recipe and nothing is installed.
+  de_make_wt eng-recipe
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  mkdir -p "$WTM_FIXTURE_REPO/.aimi"
+  echo '{"dependencies":{"install":{".":"mytool install; mytool again"}}}' > "$WTM_FIXTURE_REPO/.aimi/config.json"
+  de_run eng-recipe
+  assert_exit_code "0" "$DE_RC" "engine recipe: needs-recipe exits 0"
+  assert_eq "DEPS_STATUS=needs-recipe" "$(de_last_line)" "engine recipe: status line"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine recipe: no installer ran"
+  de_teardown
+}
+
+test_deps_engine_unpinned_install_cleans_lockfile() {
+  echo ""
+  echo "=== Testing install-deps engine — no lockfile ==="
+  de_setup
+  de_make_wt eng-nolock
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  de_run eng-nolock
+  assert_exit_code "0" "$DE_RC" "engine nolock: exit code"
+  assert_contains "not pinned" "$DE_OUT" "engine nolock: warns versions are not pinned"
+  assert_contains "|install" "$(cat "$DE_LOG")" "engine nolock: npm install ran"
+  assert_eq "false" "$([[ -e "$DE_WT/package-lock.json" ]] && echo true || echo false)" "engine nolock: created lockfile deleted"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine nolock: status"
+  de_teardown
+}
+
+test_deps_engine_subfolders() {
+  echo ""
+  echo "=== Testing install-deps engine — first-level subfolders ==="
+  de_setup
+  de_make_wt eng-sub
+  local d
+  for d in b-api a-web c-lib .hidden node_modules vendor dist build; do
+    mkdir -p "$DE_WT/$d"
+    echo '{"name":"x"}' > "$DE_WT/$d/package.json"
+    echo 'l' > "$DE_WT/$d/pnpm-lock.yaml"
+  done
+  touch "$DE_WT/b-api/.stub-fail"
+  de_run eng-sub
+  assert_exit_code "1" "$DE_RC" "engine sub: a failing subfolder exits 1"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine sub: status line"
+  assert_eq "3" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine sub: every eligible subfolder attempted"
+  assert_eq "a-web b-api c-lib" "$(cut -d'|' -f2 "$DE_LOG" | xargs -n1 basename | tr '\n' ' ' | sed 's/ $//')" "engine sub: sorted order"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$DE_WT")
+  assert_eq "ok failed ok" "$(jq -r '[.directories[].status] | join(" ")' "$marker")" "engine sub: per-directory status"
+  assert_eq "a-web b-api c-lib" "$(jq -r '[.directories[].dir] | join(" ")' "$marker")" "engine sub: per-directory name"
+  de_teardown
+}
+
+test_deps_engine_rerun_uses_marker() {
+  echo ""
+  echo "=== Testing install-deps engine — marker re-run ==="
+  de_setup
+  de_make_wt eng-rerun
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo 'one' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: first run installs"
+  de_run eng-rerun
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: same lockfile installs nothing"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine rerun: status ok"
+  echo 'two' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "2" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: changed lockfile installs again"
+  rm -rf "$DE_WT/node_modules"
+  de_run eng-rerun
+  assert_eq "3" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: missing node_modules installs again"
+  touch "$DE_WT/.stub-fail"
+  echo 'three' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine rerun: failure recorded"
+  rm -f "$DE_WT/.stub-fail"
+  de_run eng-rerun
+  assert_eq "5" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: recorded failure installs again"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine rerun: recovers"
+  de_teardown
+}
+
+test_deps_engine_project_key_of_child_repository() {
+  echo ""
+  echo "=== Testing install-deps engine — child repository of a non-git .aimi parent ==="
+  local parent child old_pwd="$PWD"
+  parent=$(mktemp -d)
+  child="$parent/svc-api"
+  mkdir -p "$parent/.aimi" "$child"
+  echo '{"dependencies":{"install":{"svc-api":"mytool run setup"}}}' > "$parent/.aimi/config.json"
+  DE_STUB_DIR=$(mktemp -d); DE_LOG="$DE_STUB_DIR/log"; : > "$DE_LOG"; export DE_LOG
+  cat > "$DE_STUB_DIR/mytool" << 'STUB'
+#!/bin/bash
+printf '%s|%s|%s\n' "$(basename "$0")" "$PWD" "$*" >> "$DE_LOG"
+STUB
+  chmod +x "$DE_STUB_DIR/mytool"
+  DE_OLD_PATH="$PATH"; export PATH="$DE_STUB_DIR:$PATH"
+  ( cd "$child" && git init -q && git config user.email t@example.com && git config user.name T \
+    && git checkout -q -b main && echo i > README.md && git add README.md && git commit -q -m init )
+  cd "$child"
+  bash "$WTM" create eng-key >/dev/null 2>&1
+  echo '{"name":"x"}' > "$child/.worktrees/eng-key/package.json"
+  local out rc
+  out=$(bash "$WTM" install-deps eng-key 2>&1); rc=$?
+  cd "$old_pwd"
+  assert_exit_code "0" "$rc" "engine key: exit code"
+  assert_contains "mytool|" "$(cat "$DE_LOG")" "engine key: recipe under the child's own key ran"
+  assert_contains "|run setup" "$(cat "$DE_LOG")" "engine key: recipe argv"
+  assert_eq "DEPS_STATUS=ok" "$(printf '%s\n' "$out" | tail -n 1)" "engine key: status"
+  export PATH="$DE_OLD_PATH"
+  rm -rf "$parent" "$DE_STUB_DIR"
+  unset DE_STUB_DIR DE_OLD_PATH DE_LOG
 }
 
 # ============================================================================
@@ -1684,6 +1908,13 @@ main() {
   echo ""
   echo "--- Install Deps Tests ---"
   test_install_deps_skips_without_package_json
+  test_deps_engine_frozen_bun_only
+  test_deps_engine_failure_has_no_fallback
+  test_deps_engine_refuses_metacharacters_and_missing_word
+  test_deps_engine_unpinned_install_cleans_lockfile
+  test_deps_engine_subfolders
+  test_deps_engine_rerun_uses_marker
+  test_deps_engine_project_key_of_child_repository
 
   echo ""
   echo "--- Dependency Installer Detection Tests ---"
