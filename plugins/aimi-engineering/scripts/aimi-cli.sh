@@ -4840,7 +4840,7 @@ _forge_account_override_slots() {
 # and would leave the very before/after check that proves the machine account
 # was left alone structurally unable to detect a violation.
 #
-# THIRTEEN SITES, AND NO OTHERS (US-006's forge-pr-merge added two; forge-tag-create four).
+# SIXTEEN SITES, AND NO OTHERS (US-006's forge-pr-merge added two; forge-tag-create four; forge-release-create three).
 # Each write function resolves BOTH slots ONCE into two locals immediately
 # after its own _forge_bin_check gate -- at most one is ever non-empty, and
 # only the matching one costs a `gh auth token` process -- then names both
@@ -4859,6 +4859,11 @@ _forge_account_override_slots() {
 #                                 gh api            git/tags/<sha> read of an existing tag object
 #                                 gh api            POST git/tags, the tag object
 #                                 gh api            POST git/refs, the ref at that tag object
+#   _forge_release_github         gh api            releases/tags/<tag> probe
+#                                 gh api            releases?per_page=100 draft listing
+#                                 gh release create the write
+#                                 (it calls _forge_account_override_slots itself, after its own gh gate;
+#                                 the tag step it follows resolves its own slots too)
 #
 # Resolved ONCE per invocation, not once per site: a single forge-pr-create run
 # reaches gh three or four times and must not re-derive the host and re-mint the
@@ -8352,6 +8357,38 @@ _forge_tag_ensure() {
   esac
 }
 
+# The --tag and --target refusals, written once for forge-tag-create and
+# forge-release-create so each wording exists in one place. Prints the error
+# for <verb> and returns 1; the caller exits.
+# Usage: _forge_tag_check_ref_args <verb> <tag> <target>
+_forge_tag_check_ref_args() {
+  local verb="$1" tag="$2" target="$3"
+  if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._/+-]*$ ]] || ! git check-ref-format "refs/tags/$tag" >/dev/null 2>&1; then
+    echo "Error: $verb: invalid --tag value: $tag" >&2
+    return 1
+  fi
+  case "$target" in
+    -*)
+      echo "Error: $verb: invalid --target value: $target" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Resolves --target to a commit in the current repository, into the caller's
+# named variable. Prints the error for <verb> and returns 1 when it cannot.
+# Usage: _forge_tag_resolve_target <verb> <target> <commit_var>
+_forge_tag_resolve_target() {
+  local -n _ftrt_commit="$3"
+  _ftrt_commit=$(git rev-parse --verify "${2}^{commit}" 2>/dev/null) || _ftrt_commit=""
+  if [ -z "$_ftrt_commit" ]; then
+    echo "Error: $1: --target does not resolve to a commit in this repository: $2" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Public wrapper: parses --tag/--target/--message|--message-file/--project
 # (deliberately no token flag), refuses bad input by flag name before any forge
 # call, reads --message-file BEFORE the cd that --project performs, resolves
@@ -8384,17 +8421,7 @@ cmd_forge_tag_create() {
     exit 1
   fi
 
-  if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._/+-]*$ ]] || ! git check-ref-format "refs/tags/$tag" >/dev/null 2>&1; then
-    echo "Error: forge-tag-create: invalid --tag value: $tag" >&2
-    exit 1
-  fi
-
-  case "$target" in
-    -*)
-      echo "Error: forge-tag-create: invalid --target value: $target" >&2
-      exit 1
-      ;;
-  esac
+  _forge_tag_check_ref_args forge-tag-create "$tag" "$target" || exit 1
 
   if [ $((message_set + file_set)) -ne 1 ]; then
     echo "Error: forge-tag-create: exactly one of --message or --message-file is required." >&2
@@ -8422,11 +8449,7 @@ cmd_forge_tag_create() {
   _require_git_repo "$project_dir"
 
   local commit=""
-  commit=$(git rev-parse --verify "${target}^{commit}" 2>/dev/null) || commit=""
-  if [ -z "$commit" ]; then
-    echo "Error: forge-tag-create: --target does not resolve to a commit in this repository: $target" >&2
-    exit 1
-  fi
+  _forge_tag_resolve_target forge-tag-create "$target" commit || exit 1
 
   local forge=""
   _detect_forge_type forge
@@ -8440,6 +8463,305 @@ cmd_forge_tag_create() {
   fi
 
   _forge_emit_write_status "$outcome" "$(jq -nc --arg tag "$tag" --arg commit "$commit" '{tag: $tag, commit: $commit}')"
+}
+
+# ============================================================================
+# forge-release-create
+# ============================================================================
+# Publishes a release for a tag from explicit inputs: makes sure the ANNOTATED
+# tag exists at the commit --target resolves to (_forge_tag_ensure, with the
+# title as the tag message), then creates the release. Same shape as
+# forge-pr-merge: cmd_forge_release_create parses and validates, one private
+# function (_forge_release_create) owns every decision and routes on the forge.
+#
+# ENVELOPE: write-verb envelope, `data` being {tag, url}. `created` -- the
+# release was published now. `unchanged` -- a release for the tag already
+# exists (published or draft) and nothing was written. `degraded` -- anything
+# else, exit 1, reason in `message`.
+#
+# A RUN THAT STOPPED HALFWAY RESUMES: a tag already at the target commit still
+# leads to the release, a tag with no release continues to the release, and an
+# existing release is `unchanged`. A tag at ANOTHER commit is degraded with
+# both commits named and no release; no tag is ever moved (_forge_tag_ensure
+# has no delete, force or re-point call). A failed tag step prints its own
+# manual steps (once) and no release is attempted. A release has no fallback,
+# so every degraded outcome exits non-zero.
+#
+# PROBES NEVER READ AS ABSENT. GitHub: `releases/tags/<tag>` answers published
+# releases only, so a release reads absent only when that lookup returns 404
+# AND `releases?per_page=100` then answers without a draft carrying the tag.
+# The newest 100 releases are the bound: a draft older than that is not seen.
+# GitLab has no drafts: absent means the lookup returned 404.
+#
+# GITHUB: `gh release create <tag> --verify-tag --title=<title>` plus
+# `--notes-file=<absolute path>` or `--generate-notes`; --draft and
+# --prerelease only when given; never --target, because the tag already
+# exists. The URL is the last stdout line that starts with https; if none
+# does, the release is reported `created` with a null url and a Warning,
+# since degrading would send the caller back to publish twice. Every gh call
+# of this path (the probes and the create) acts as the remembered account.
+#
+# GITLAB: `glab release create <tag> --name=<title> --notes-file=<path>
+# --no-update`; --name, --notes-file and --no-update are documented at
+# https://docs.gitlab.com/cli/release/create/ ("glab release create | GitLab
+# Docs"). The release's own link is read back from `_links.self`. No token
+# variable is set; the active glab session acts. --draft, --prerelease and
+# --generate-notes have no glab equivalent here and degrade BEFORE any write,
+# so no tag is created either. The remembered-account line is printed once by
+# the tag step (_forge_tag_gitlab_account_notice), so this path never prints
+# a second one.
+
+# Prints the manual release step. Always stderr.
+# Usage: _forge_release_print_manual <forge> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_print_manual() {
+  local forge="$1" tag="$2" commit="$3" title="$4" notes_mode="$5" notes_file="$6" draft="$7" prerelease="$8"
+  {
+    echo "Warning: the tag $tag exists at commit $commit, but its release was not published -- publish it yourself with:"
+    if [ "$forge" = "gitlab" ]; then
+      echo "  glab release create $tag --name=\"$title\" --notes-file=\"$notes_file\" --no-update"
+    else
+      local extra=""
+      [ "$notes_mode" = "file" ] && extra=" --notes-file=\"$notes_file\"" || extra=" --generate-notes"
+      [ "$draft" = "1" ] && extra="$extra --draft"
+      [ "$prerelease" = "1" ] && extra="$extra --prerelease"
+      echo "  gh release create $tag --verify-tag --title=\"$title\"$extra"
+    fi
+    echo "Re-running the same forge-release-create command also resumes: the tag is kept and only the release is published."
+  } >&2
+}
+
+# github adapter. Sets <outcome_var>/<detail_var>/<url_var>; returns 0 for
+# created/unchanged and 1 for degraded.
+# Usage: _forge_release_github <outcome_var> <detail_var> <url_var> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_github() {
+  local -n _frg_out="$1" _frg_detail="$2" _frg_url="$3"
+  local tag="$4" commit="$5" title="$6" notes_mode="$7" notes_file="$8" draft="$9" prerelease="${10}"
+  _frg_out="degraded"; _frg_detail=""; _frg_url=""
+
+  if ! _forge_bin_check gh mandatory github; then
+    _frg_detail="gh not found -- the tag $tag exists at $commit but its release was not published."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local host="" host_args=()
+  _forge_account_host_cached host
+  case "$host" in
+    ""|github.com) ;;
+    *) host_args=(--hostname "$host") ;;
+  esac
+
+  local out="" err="" rc=0
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/releases/tags/$tag" ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -eq 0 ]; then
+    _frg_url=$(printf '%s' "$out" | jq -r '.html_url // empty' 2>/dev/null) || _frg_url=""
+    _frg_out="unchanged"
+    return 0
+  fi
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _frg_detail="could not tell whether a release for tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/releases?per_page=100" ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _frg_detail="could not tell whether a draft release for tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+  local draft_url=""
+  draft_url=$(printf '%s' "$out" | jq -r --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | first | .html_url // empty' 2>/dev/null) || draft_url=""
+  if printf '%s' "$out" | jq -e --arg tag "$tag" 'any(.[]; .tag_name == $tag)' >/dev/null 2>&1; then
+    _frg_url="$draft_url"
+    _frg_out="unchanged"
+    return 0
+  fi
+
+  local create_args=(release create "$tag" --verify-tag "--title=$title")
+  if [ "$notes_mode" = "file" ]; then
+    create_args+=("--notes-file=$notes_file")
+  else
+    create_args+=(--generate-notes)
+  fi
+  [ "$draft" = "1" ] && create_args+=(--draft)
+  [ "$prerelease" = "1" ] && create_args+=(--prerelease)
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh "${create_args[@]}" || true
+  if [ "$rc" -ne 0 ]; then
+    _frg_detail="gh release create exited $rc: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+  _frg_url=$(printf '%s' "$out" | jq -Rrs 'split("\n") | map(select(startswith("https://"))) | last // empty' 2>/dev/null) || _frg_url=""
+  if [ -z "$_frg_url" ]; then
+    echo "Warning: forge-release-create: the release for $tag was published but gh printed no url; data.url is null." >&2
+  fi
+  _frg_out="created"
+  return 0
+}
+
+# gitlab adapter; same contract as the github one.
+# Usage: _forge_release_gitlab <outcome_var> <detail_var> <url_var> <tag> <commit> <title> <notes_file>
+_forge_release_gitlab() {
+  local -n _frl_out="$1" _frl_detail="$2" _frl_url="$3"
+  local tag="$4" commit="$5" title="$6" notes_file="$7"
+  _frl_out="degraded"; _frl_detail=""; _frl_url=""
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _frl_detail="glab not found -- the tag $tag exists at $commit but its release was not published."
+    return 1
+  fi
+
+  local enc="" out="" err="" rc=0
+  enc=$(jq -rn --arg t "$tag" '$t | @uri')
+  _forge_capture out err rc -- glab api "projects/:id/releases/$enc" || true
+  if [ "$rc" -eq 0 ]; then
+    _frl_url=$(printf '%s' "$out" | jq -r '._links.self // empty' 2>/dev/null) || _frl_url=""
+    _frl_out="unchanged"
+    return 0
+  fi
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _frl_detail="could not tell whether a release for tag $tag exists (glab api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab release create "$tag" "--name=$title" "--notes-file=$notes_file" --no-update || true
+  if [ "$rc" -ne 0 ]; then
+    _frl_detail="glab release create exited $rc: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab api "projects/:id/releases/$enc" || true
+  if [ "$rc" -eq 0 ]; then
+    _frl_url=$(printf '%s' "$out" | jq -r '._links.self // empty' 2>/dev/null) || _frl_url=""
+  fi
+  if [ -z "$_frl_url" ]; then
+    echo "Warning: forge-release-create: the release for $tag was published but its link could not be read back; data.url is null." >&2
+  fi
+  _frl_out="created"
+  return 0
+}
+
+# Owns every release decision and emits the envelope. Returns 0 for
+# created/unchanged and 1 for degraded.
+# Usage: _forge_release_create <forge> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_create() {
+  local forge="$1" tag="$2" commit="$3" title="$4" notes_mode="$5" notes_file="$6" draft="$7" prerelease="$8"
+  local outcome="" detail="" url="" rc=0
+
+  if [ "$forge" = "gitlab" ]; then
+    local gaps=()
+    [ "$draft" = "1" ] && gaps+=(--draft)
+    [ "$prerelease" = "1" ] && gaps+=(--prerelease)
+    [ "$notes_mode" = "generate" ] && gaps+=(--generate-notes)
+    if [ "${#gaps[@]}" -gt 0 ]; then
+      detail="forge-release-create: GitLab does not support ${gaps[*]} here; nothing was written, no tag was created."
+      echo "Error: $detail" >&2
+      _forge_emit_write_status degraded "" "$detail"
+      return 1
+    fi
+  fi
+
+  _forge_tag_ensure outcome detail "$forge" "$tag" "$commit" "$title" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$outcome" = "degraded" ]; then
+    detail="${detail:-the tag was not created.}"
+    echo "Error: forge-release-create: $detail No release was attempted." >&2
+    _forge_emit_write_status degraded "" "$detail No release was attempted."
+    return 1
+  fi
+
+  case "$forge" in
+    github) _forge_release_github outcome detail url "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease" || true ;;
+    *)      _forge_release_gitlab outcome detail url "$tag" "$commit" "$title" "$notes_file" || true ;;
+  esac
+  if [ "$outcome" = "degraded" ]; then
+    echo "Error: forge-release-create: $detail" >&2
+    case "$detail" in
+      "gh release create exited"*|"glab release create exited"*)
+        _forge_release_print_manual "$forge" "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease"
+        ;;
+    esac
+    _forge_emit_write_status degraded "" "$detail"
+    return 1
+  fi
+
+  _forge_emit_write_status "$outcome" "$(jq -nc --arg tag "$tag" --arg url "$url" '{tag: $tag, url: (if $url == "" then null else $url end)}')"
+}
+
+# Public wrapper: parses and validates, resolves everything that depends on
+# the caller's directory BEFORE the cd that --project performs (the notes file
+# is made absolute), then delegates. Refusals name the flag, exit 1 and happen
+# before any forge call. The notes mode is checked before the notes file.
+# The notes file is tested with grep on the file itself, never read into a
+# variable.
+cmd_forge_release_create() {
+  check_jq
+
+  local tag="" target="" title="" notes_file="" project_dir=""
+  local generate=0 draft=0 prerelease=0 file_set=0 title_set=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag)            shift; tag="${1:-}" ;;
+      --target)         shift; target="${1:-}" ;;
+      --title)          shift; title="${1:-}"; title_set=1 ;;
+      --notes-file)     shift; notes_file="${1:-}"; file_set=1 ;;
+      --generate-notes) generate=1 ;;
+      --draft)          draft=1 ;;
+      --prerelease)     prerelease=1 ;;
+      --project)        shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-release-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ -z "$tag" ] || [ -z "$target" ]; then
+    echo "Usage: aimi-cli.sh forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]" >&2
+    exit 1
+  fi
+
+  _forge_tag_check_ref_args forge-release-create "$tag" "$target" || exit 1
+
+  if [ $((generate + file_set)) -ne 1 ]; then
+    echo "Error: forge-release-create: exactly one of --notes-file or --generate-notes is required." >&2
+    exit 1
+  fi
+
+  local title_nl=""
+  title_nl=$(printf '%s' "$title" | tr '\n\r' '  ')
+  if [ "$title_set" -ne 1 ] || [ "$title_nl" != "$title" ] || [ -z "${title//[[:space:]]/}" ]; then
+    echo "Error: forge-release-create: invalid --title value: must be one non-empty line." >&2
+    exit 1
+  fi
+
+  local notes_mode="generate"
+  if [ "$file_set" -eq 1 ]; then
+    notes_mode="file"
+    if [ -z "$notes_file" ] || [ ! -f "$notes_file" ] || [ ! -r "$notes_file" ] || ! grep -q '[^[:space:]]' "$notes_file" 2>/dev/null; then
+      echo "Error: forge-release-create: invalid --notes-file value: not a readable, non-empty file: $notes_file" >&2
+      exit 1
+    fi
+    case "$notes_file" in
+      /*) ;;
+      *) notes_file="$PWD/$notes_file" ;;
+    esac
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local commit=""
+  _forge_tag_resolve_target forge-release-create "$target" commit || exit 1
+
+  local forge=""
+  _detect_forge_type forge
+
+  _forge_release_create "$forge" "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease"
 }
 
 # ============================================================================
@@ -17430,6 +17752,13 @@ COMMANDS:
                               Write verb -- creates an ANNOTATED tag on the
                               forge at the commit --target resolves to.
                               Output: {status, data: {tag, commit}, message}.
+    forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]
+                              Write verb -- makes sure the annotated tag
+                              exists at the commit --target resolves to, then
+                              publishes the release for it; a re-run resumes
+                              and never moves a tag. GitLab supports
+                              --notes-file only.
+                              Output: {status, data: {tag, url}, message}.
                               "created" at exit 0; re-running it prints
                               "unchanged" and writes nothing. An existing tag
                               is never moved: one at another commit is
@@ -18519,6 +18848,7 @@ main() {
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
     forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
     forge-tag-create) shift; cmd_forge_tag_create "$@"; return ;;
+    forge-release-create) shift; cmd_forge_release_create "$@"; return ;;
   esac
 
   # Universal --help/-h: any subcommand with --help or -h anywhere in its args

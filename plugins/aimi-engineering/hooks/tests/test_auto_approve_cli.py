@@ -360,6 +360,10 @@ ADVERSARIAL = [
         id="forge-tag-create-is-off-the-whitelist",
     ),
     pytest.param(
+        '$AIMI_CLI forge-release-create --tag v1.0.0 --target HEAD --title "Release" --generate-notes',
+        id="forge-release-create-is-off-the-whitelist",
+    ),
+    pytest.param(
         "$AIMI_CLI deps-recipe-record --project . --command 'make setup'",
         id="deps-recipe-record-is-a-human-decision-verb",
     ),

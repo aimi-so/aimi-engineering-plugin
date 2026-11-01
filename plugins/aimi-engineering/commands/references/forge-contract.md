@@ -4,7 +4,7 @@ Shared reference for the normalized forge PR/issue field contract and the
 degradation convention every `forge-*` verb in `aimi-cli.sh` builds on. This
 is the **single arbiter** of the vocabulary below — every later forge verb
 (`forge-auth-status`, `forge-repo-info`, `forge-pr-view`, `forge-pr-create`,
-`forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-issue-view`,
+`forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-view`,
 `forge-issue-create`, the review-thread verbs) consumes the field names, the envelope shapes, and
 the three-way
 status convention exactly as documented here. **No sibling verb may
@@ -41,7 +41,7 @@ verb picks one of these four rather than inventing a fifth.
 |---|---|---|---|---|
 | 1 | **Read three-way** — `{status, data, message, reason}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
 | 2 | **`forge-pr-view`'s own** — `{status, pr, unsupported_fields, message}` | `found` / `not_found` / `error` | `_forge_pr_view_emit` | `forge-pr-view` only |
-| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-issue-create` |
+| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-create` |
 | 4 | **Review/Approval** — `{approved, changes_requested, approvals_count, unsupported_fields, raw}` | *(no `status` field)* | *(no builder yet)* | *(no verb yet — spec only)* |
 
 Envelopes 1 and 3 share the three field names `status`, `data` and `message`
@@ -268,7 +268,7 @@ shape.
 ## Write-Verb Status Convention
 
 Every forge **write** verb (`forge-pr-create`, `forge-pr-edit`,
-`forge-pr-merge`, `forge-tag-create`, `forge-issue-create`) reports one of exactly three
+`forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-create`) reports one of exactly three
 outcomes, through the same `{status, data, message}` field names and the
 same null-forcing discipline the read side uses. A write is never "not
 found" — nothing was looked up — so the read trio would be a bad fit; three
@@ -313,6 +313,13 @@ has neither. `created` means the annotated tag did not exist and now does;
 An existing tag is never moved, so a tag at another commit is `degraded` with
 both commits named in `message`.
 
+**`forge-release-create` carries `data` of `{tag, url}`:** `created` means the
+annotated tag was ensured at the `--target` commit and the release was published
+now; `unchanged` means a release for the tag already exists, published or draft,
+and nothing was written. A run that stopped halfway resumes: a tag already at the
+target still leads to the release. `url` is null with a stderr Warning when the
+forge's reply or read-back carried none, at `created`.
+
 **The exit-code contract is unchanged by this envelope, and is not replaced
 by it.** The hard-fail versus soft-fail split stated in `aimi-cli.sh`'s own
 `EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE` comment survives
@@ -324,6 +331,7 @@ completely intact:
 | `forge-pr-edit` | **non-zero** | Same contract as `forge-pr-create`. |
 | `forge-pr-merge` | **non-zero** | Same contract as `forge-pr-create`/`forge-pr-edit`. Merging a PR/MR has no fallback either, so a caller's own per-repository failure isolation needs the identical real non-zero exit. |
 | `forge-tag-create` | **non-zero** | A tag has no fallback, and a release must not follow a failed tag. Every degraded outcome exits 1 with the reason in `message`; all but a tag that already exists at another commit also print `git tag -a` and `git push origin <tag>` on stderr. |
+| `forge-release-create` | **non-zero** | A release has no fallback and must not follow a failed tag. Every degraded outcome exits 1 with the reason in `message`; a failed tag step prints its own `git tag -a` and `git push origin <tag>` steps once and attempts no release, and a failed release call after the tag exists prints the manual release step. |
 | `forge-issue-create` | **always `0`** | A failed backend issue must never block PR creation (`open-pr.md`'s documented soft-fail behavior). A caller branches on `status`, never on this verb's exit code. |
 
 What the envelope adds is an **in-band** signal: stdout is no longer silent
@@ -524,11 +532,11 @@ inheritance this file's **Credential/Identity Model** promises stays intact. A
 recorded account still outranks an ambient token, because a non-empty override
 never reaches that default.
 
-**Which calls are routed.** The six write paths — create PR, edit PR, merge
-PR, create issue, resolve review thread, create tag — plus the reads a write makes as
+**Which calls are routed.** The seven write paths — create PR, edit PR, merge
+PR, create issue, resolve review thread, create tag, create release — plus the reads a write makes as
 part of the same logical operation: `forge-pr-create`'s idempotency check and
 post-create re-read, `forge-pr-edit`'s post-edit re-read, and
-`forge-tag-create`'s probe and write calls (github only: gitlab's active glab
+`forge-tag-create`'s and `forge-release-create`'s probe and write calls (github only: gitlab's active glab
 session acts, and one stderr line says so when a remembered account exists but
 cannot apply), and `forge-pr-merge`'s preflight read (github only — gitlab applies no
 account override on this verb either, exactly as their existing create/edit

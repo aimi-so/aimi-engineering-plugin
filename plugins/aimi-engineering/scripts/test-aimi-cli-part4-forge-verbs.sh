@@ -2013,7 +2013,9 @@ test_forge_writes_active_account_answer_needs_no_branch() {
   # 16 rather than 12 since US-010: forge-tag-create's github adapter added
   # four routed gh api calls (the ref probe, the existing tag object read, the
   # tag object write and the ref write).
-  assert_eq "16" "$routed_sites" "identical shape: exactly 16 prefix-assignment sites -- 9 writes (gh pr edit branching three ways, gh pr merge, the tag object and the tag ref), 6 in-operation reads, 1 in-write failure classifier"
+  # 19 rather than 16 since US-011: forge-release-create's github adapter added
+  # three routed gh calls (the release lookup, the draft listing and the create).
+  assert_eq "19" "$routed_sites" "identical shape: exactly 19 prefix-assignment sites -- 10 writes (gh pr edit branching three ways, gh pr merge, the tag object and the tag ref, gh release create), 8 in-operation reads, 1 in-write failure classifier"
 
   # And no process-wide export of either variable anywhere in the file, not
   # merely inside the override helper.
@@ -9049,6 +9051,19 @@ ftc_write_fake_gh() {
 HERE="$(dirname "$0")"
 printf '%s gh %s\n' "${GH_TOKEN:-<unset>}" "$*" >> "$FORGE_ROUTING_LOG"
 if [ "$1 $2" = "auth token" ]; then printf '%s\n' "gho_routingfake000000000000000000000000"; exit 0; fi
+if [ "$1 $2" = "release create" ]; then
+  # US-011: the release write. State: release-fail and release-nourl switches;
+  # rel-<tag> (published) or draft-<tag> once created; last-release-args.
+  if [ -f "$HERE/release-fail" ]; then echo "gh: HTTP 422: Validation Failed" >&2; exit 1; fi
+  rtag="$3"
+  printf '%s' "$*" > "$HERE/last-release-args"
+  case " $* " in
+    *" --draft "*) : > "$HERE/draft-$rtag" ;;
+    *) : > "$HERE/rel-$rtag" ;;
+  esac
+  if [ ! -f "$HERE/release-nourl" ]; then printf 'https://github.com/owner/repo/releases/tag/%s\n' "$rtag"; fi
+  exit 0
+fi
 [ "$1" = "api" ] || { echo "ftc fake gh: unhandled: $*" >&2; exit 99; }
 endpoint="$2"
 shift 2
@@ -9067,6 +9082,31 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$endpoint" in
+  repos/\{owner\}/\{repo\}/releases/tags/*)
+    if [ -f "$HERE/rel-probe-fail" ]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
+    name="${endpoint#repos/\{owner\}/\{repo\}/releases/tags/}"
+    if [ -f "$HERE/rel-$name" ]; then
+      printf '{"tag_name":"%s","draft":false,"html_url":"https://github.com/owner/repo/releases/tag/%s"}\n' "$name" "$name"
+      exit 0
+    fi
+    echo '{"message":"Not Found","status":"404"}'
+    echo "gh: Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
+  "repos/{owner}/{repo}/releases?per_page=100")
+    if [ -f "$HERE/list-fail" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
+    if [ -f "$HERE/list-garbage" ]; then echo "not json"; exit 0; fi
+    printf '['
+    sep=""
+    for f in "$HERE"/draft-*; do
+      [ -e "$f" ] || continue
+      dn="${f##*/draft-}"
+      printf '%s{"tag_name":"%s","draft":true,"html_url":"https://github.com/owner/repo/releases/tag/untagged-%s"}' "$sep" "$dn" "$dn"
+      sep=","
+    done
+    printf ']\n'
+    exit 0
+    ;;
   repos/\{owner\}/\{repo\}/git/ref/tags/*)
     if [ -f "$HERE/probe-fail" ]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     name="${endpoint#repos/\{owner\}/\{repo\}/git/ref/tags/}"
@@ -9116,6 +9156,13 @@ ftc_write_fake_glab() {
 #!/usr/bin/env bash
 HERE="$(dirname "$0")"
 printf 'GITLAB_TOKEN=%s glab %s\n' "${GITLAB_TOKEN:-<unset>}" "$*" >> "$FORGE_ROUTING_LOG"
+if [ "$1 $2" = "release create" ]; then
+  # US-011: state release-fail; rel-<tag> once created; last-release-args.
+  if [ -f "$HERE/release-fail" ]; then echo "glab: 403 Forbidden" >&2; exit 1; fi
+  printf '%s' "$*" > "$HERE/last-release-args"
+  : > "$HERE/rel-$3"
+  exit 0
+fi
 [ "$1" = "api" ] || { echo "ftc fake glab: unhandled: $*" >&2; exit 99; }
 endpoint="$2"
 shift 2
@@ -9132,6 +9179,18 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$endpoint" in
+  projects/:id/releases/*)
+    if [ -f "$HERE/rel-probe-fail" ]; then echo "glab: 503 Service Unavailable" >&2; exit 1; fi
+    name="${endpoint#projects/:id/releases/}"
+    if [ -f "$HERE/rel-$name" ]; then
+      if [ -f "$HERE/readback-fail" ]; then echo "glab: 500 Internal Server Error" >&2; exit 1; fi
+      printf '{"tag_name":"%s","_links":{"self":"https://gitlab.com/owner/repo/-/releases/%s"}}\n' "$name" "$name"
+      exit 0
+    fi
+    echo '{"message":"404 Not found"}'
+    echo "glab: 404 Not Found (HTTP 404)" >&2
+    exit 1
+    ;;
   projects/:id/repository/tags/*)
     if [ -f "$HERE/probe-fail" ]; then echo "glab: 503 Service Unavailable" >&2; exit 1; fi
     name="${endpoint#projects/:id/repository/tags/}"
@@ -9431,6 +9490,392 @@ ftc_test_help_dispatch_and_structure() {
   tag_adapter=$(sed -n '/^_forge_tag_ensure_github() {/,/^_forge_tag_ensure_gitlab() {/p' "$CLI" | grep -v '^[[:space:]]*#')
   assert_eq "0" "$(printf '%s\n' "$tag_adapter" | grep -c -- ' -F ' || true)" "the tag adapters never send a field with -F"
   assert_contains "-f \"message=" "$tag_adapter" "the tag adapters send the message with -f"
+}
+
+# ============================================================================
+# forge-release-create Tests (US-011)
+# ============================================================================
+# Offline like the forge-tag-create block above, on the same tag-aware gh and
+# glab stubs extended with the release endpoints. No release or tag is ever
+# created anywhere real.
+
+# Runs forge-release-create into FTC_OUT / FTC_ERR / FTC_RC.
+# Usage: frc_run [VAR=value]... -- <forge-release-create args>...
+frc_run() { ftc_run "$@"; }
+
+# Counts logged calls whose argv contains the fixed string $1.
+frc_calls() { grep -c -F -- "$1" "$FORGE_ROUTING_LOG" || true; }
+
+frc_test_bad_input_is_refused_before_any_forge_call() {
+  echo ""
+  echo "=== forge-release-create: bad input is refused by flag name, before any forge call ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  printf 'notes body' > "$FORGE_ROUTING_TMPDIR/notes.md"
+  printf '  \n\t\n' > "$FORGE_ROUTING_TMPDIR/blank.md"
+  mkdir -p "$FORGE_ROUTING_TMPDIR/adir"
+  : > "$FORGE_ROUTING_LOG"
+
+  local t
+  for t in -bad a..b v1.lock "v 1"; do
+    frc_run -- forge-release-create --tag "$t" --target HEAD --title T --generate-notes
+    assert_exit_code "1" "$FTC_RC" "--tag '$t' exits 1"
+    assert_contains "invalid --tag value" "$FTC_ERR" "--tag '$t' reads invalid --tag value"
+    assert_eq "" "$FTC_OUT" "--tag '$t' prints nothing on stdout"
+  done
+
+  frc_run -- forge-release-create --tag v1 --target -x --title T --generate-notes
+  assert_contains "invalid --target value" "$FTC_ERR" "--target -x reads invalid --target value"
+  frc_run -- forge-release-create --tag v1 --target no-such-ref --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "an unresolvable --target exits 1"
+  assert_contains "--target does not resolve to a commit" "$FTC_ERR" "an unresolvable --target is refused by name"
+
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T
+  assert_contains "exactly one of --notes-file or --generate-notes" "$FTC_ERR" "neither notes flag is refused"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T --generate-notes --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_contains "exactly one of --notes-file or --generate-notes" "$FTC_ERR" "both notes flags are refused"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/missing.md" --generate-notes
+  assert_contains "exactly one of --notes-file or --generate-notes" "$FTC_ERR" "the notes mode is judged before the notes file"
+
+  frc_run -- forge-release-create --tag v1 --target HEAD --generate-notes
+  assert_contains "invalid --title value" "$FTC_ERR" "a missing --title is refused by flag name"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title "" --generate-notes
+  assert_contains "invalid --title value" "$FTC_ERR" "an empty --title is refused"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title "$(printf 'one\ntwo')" --generate-notes
+  assert_contains "invalid --title value" "$FTC_ERR" "a multi-line --title is refused"
+
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/missing.md"
+  assert_contains "invalid --notes-file value" "$FTC_ERR" "a missing --notes-file is refused by flag name"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/adir"
+  assert_contains "invalid --notes-file value" "$FTC_ERR" "a --notes-file that is not a regular file is refused"
+  frc_run -- forge-release-create --tag v1 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/blank.md"
+  assert_contains "invalid --notes-file value" "$FTC_ERR" "a whitespace-only --notes-file is refused"
+  assert_eq "" "$FTC_OUT" "no refusal printed anything on stdout"
+  assert_eq "0" "$(grep -c . "$FORGE_ROUTING_LOG" || true)" "no refusal reached gh"
+  teardown_forge_routing_env
+}
+
+frc_test_github_publishes_from_a_notes_file_as_the_remembered_account() {
+  echo ""
+  echo "=== forge-release-create: github ensures the tag, then publishes as the remembered account ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  record_forge_routing_account --record monalisa
+  local sha
+  sha=$(ftc_commit one)
+  printf 'the notes' > "$FORGE_ROUTING_TMPDIR/notes.md"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v1.0.0 --target HEAD --title "Release 1.0.0" --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_exit_code "0" "$FTC_RC" "publish exits 0"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is created"
+  assert_eq "v1.0.0" "$(printf '%s' "$FTC_OUT" | jq -r '.data.tag')" "data.tag is the tag"
+  assert_eq "https://github.com/owner/repo/releases/tag/v1.0.0" "$(printf '%s' "$FTC_OUT" | jq -r '.data.url')" "data.url is the url gh printed"
+  assert_eq "null" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message is null"
+  assert_eq "1" "$(printf '%s\n' "$FTC_OUT" | grep -c .)" "stdout is the one JSON envelope"
+  assert_eq "Release 1.0.0" "$(cat "$FORGE_ROUTING_SANDBOX/last-tag-message")" "the title became the tag message"
+  assert_eq "$sha" "$(cat "$FORGE_ROUTING_SANDBOX/tagobj-7a9e0000000000000000000000000000000000aa")" "the annotated tag points at the target commit"
+  assert_eq "release create v1.0.0 --verify-tag --title=Release 1.0.0 --notes-file=$FORGE_ROUTING_TMPDIR/notes.md" "$(cat "$FORGE_ROUTING_SANDBOX/last-release-args")" "gh release create got the tag, --verify-tag, the title and the notes file"
+  assert_eq "0" "$(frc_calls '--target')" "--target never reached gh"
+  assert_eq "0" "$(frc_calls '--draft')" "--draft was not sent unless given"
+  assert_eq "0" "$(frc_calls '--prerelease')" "--prerelease was not sent unless given"
+  assert_eq "0" "$(grep -c '^<unset> gh \(api\|release\)' "$FORGE_ROUTING_LOG" || true)" "every gh call of the release path carried the remembered account's token"
+  assert_eq "$FORGE_ROUTING_TOKEN" "$(grep ' gh release create' "$FORGE_ROUTING_LOG" | sed 's/ gh .*//')" "gh release create ran as the remembered account"
+  teardown_forge_routing_env
+}
+
+frc_test_github_generate_notes_draft_and_prerelease_are_sent_when_given() {
+  echo ""
+  echo "=== forge-release-create: github --generate-notes, --draft and --prerelease ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v2.0.0-rc1 --target HEAD --title "RC 1" --generate-notes --draft --prerelease
+  assert_exit_code "0" "$FTC_RC" "a generated-notes draft prerelease exits 0"
+  assert_eq "release create v2.0.0-rc1 --verify-tag --title=RC 1 --generate-notes --draft --prerelease" "$(cat "$FORGE_ROUTING_SANDBOX/last-release-args")" "the three flags reached gh"
+  assert_eq "0" "$(frc_calls '--notes-file')" "no notes file was sent with --generate-notes"
+  teardown_forge_routing_env
+}
+
+frc_test_github_rerun_is_unchanged_and_writes_nothing() {
+  echo ""
+  echo "=== forge-release-create: a re-run reports unchanged; a draft counts as existing ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  printf 'n' > "$FORGE_ROUTING_TMPDIR/notes.md"
+  frc_run -- forge-release-create --tag v3 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v3 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_exit_code "0" "$FTC_RC" "a re-run exits 0"
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a re-run is unchanged"
+  assert_eq "v3" "$(printf '%s' "$FTC_OUT" | jq -r '.data.tag')" "unchanged carries the tag"
+  assert_eq "https://github.com/owner/repo/releases/tag/v3" "$(printf '%s' "$FTC_OUT" | jq -r '.data.url')" "unchanged carries the existing release's url"
+  assert_eq "0" "$(frc_calls 'release create')" "nothing was published again"
+  assert_eq "0" "$(ftc_gh_calls 'tags $')" "no tag object was written"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "no ref was written"
+
+  frc_run -- forge-release-create --tag v3d --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/notes.md" --draft
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a draft is created"
+  : > "$FORGE_ROUTING_LOG"
+  frc_run -- forge-release-create --tag v3d --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/notes.md" --draft
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "an existing draft reports unchanged"
+  assert_eq "1" "$(frc_calls 'releases?per_page=100')" "the draft listing was read after the tag lookup answered 404"
+  assert_eq "0" "$(frc_calls 'release create')" "no second draft was created"
+  teardown_forge_routing_env
+}
+
+frc_test_github_resumes_from_a_tag_without_a_release() {
+  echo ""
+  echo "=== forge-release-create: a tag already at the target still leads to the release ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local sha
+  sha=$(ftc_commit one)
+  printf 'commit %s' "$sha" > "$FORGE_ROUTING_SANDBOX/ref-v4"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v4 --target HEAD --title T --generate-notes
+  assert_exit_code "0" "$FTC_RC" "resuming exits 0"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "the release is created"
+  assert_eq "0" "$(ftc_gh_calls 'tags $')" "no tag object was written for the existing tag"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "no ref was written for the existing tag"
+  assert_eq "1" "$(frc_calls 'release create v4')" "the release was published once"
+  teardown_forge_routing_env
+}
+
+frc_test_github_tag_at_another_commit_degrades_without_a_release() {
+  echo ""
+  echo "=== forge-release-create: a tag at another commit is degraded, no release, no manual step ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local first second
+  first=$(ftc_commit one)
+  frc_run -- forge-release-create --tag v5 --target HEAD --title T --generate-notes
+  second=$(ftc_commit two)
+  rm -f "$FORGE_ROUTING_SANDBOX/rel-v5"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v5 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is degraded"
+  assert_contains "$first" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the existing commit"
+  assert_contains "$second" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message names the target commit"
+  assert_eq "0" "$(frc_calls 'release create')" "no release was created"
+  assert_eq "0" "$(frc_calls 'releases')" "no release endpoint was read"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "no tag was moved or written"
+  assert_eq "0" "$(printf '%s\n' "$FTC_ERR" | grep -c 'git tag -a' || true)" "no manual step is printed"
+  assert_eq "$first" "$(cat "$FORGE_ROUTING_SANDBOX/tagobj-7a9e0000000000000000000000000000000000aa")" "the tag still points at its first commit"
+  teardown_forge_routing_env
+}
+
+frc_test_github_unanswered_probes_are_never_read_as_absent() {
+  echo ""
+  echo "=== forge-release-create: a probe that could not answer is degraded, never absent ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_SANDBOX/rel-probe-fail"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v6 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "an unanswered release lookup exits non-zero"
+  assert_contains "could not tell whether a release" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "the message says the lookup could not answer"
+  assert_eq "0" "$(frc_calls 'release create')" "nothing was published after it"
+  assert_eq "0" "$(frc_calls 'releases?per_page=100')" "a failed lookup does not fall through to the listing"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/rel-probe-fail"
+  : > "$FORGE_ROUTING_SANDBOX/list-fail"
+  frc_run -- forge-release-create --tag v6 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "an unanswered draft listing exits non-zero"
+  assert_contains "draft release" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "the message names the draft listing"
+  assert_eq "0" "$(frc_calls 'release create')" "still nothing published"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/list-fail"
+  : > "$FORGE_ROUTING_SANDBOX/list-garbage"
+  frc_run -- forge-release-create --tag v6 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "a listing that is not a JSON array exits non-zero"
+  assert_eq "0" "$(frc_calls 'release create')" "an unreadable listing never reads as no draft"
+  teardown_forge_routing_env
+}
+
+frc_test_github_failed_release_prints_the_manual_step_and_resumes() {
+  echo ""
+  echo "=== forge-release-create: a failed release call after the tag exists, then a resume ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  local sha
+  sha=$(ftc_commit one)
+  : > "$FORGE_ROUTING_SANDBOX/release-fail"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v7 --target HEAD --title "T 7" --generate-notes
+  assert_exit_code "1" "$FTC_RC" "a failed release call exits non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is degraded"
+  assert_eq "1" "$(printf '%s\n' "$FTC_OUT" | grep -c .)" "stdout carries only the envelope"
+  assert_contains "gh release create v7 --verify-tag" "$FTC_ERR" "the manual release step is printed"
+  assert_contains "exists at commit $sha" "$FTC_ERR" "stderr says the tag exists at the commit"
+  assert_contains "re-running the same" "$FTC_ERR" "stderr says re-running resumes"
+  assert_eq "0" "$(printf '%s\n' "$FTC_ERR" | grep -c 'git tag -a' || true)" "no manual tag step is printed for a tag that exists"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/release-fail"
+  : > "$FORGE_ROUTING_LOG"
+  frc_run -- forge-release-create --tag v7 --target HEAD --title "T 7" --generate-notes
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "the same command resumes and creates the release"
+  assert_eq "0" "$(ftc_gh_calls 'refs')" "the resume wrote no tag"
+
+  : > "$FORGE_ROUTING_SANDBOX/release-nourl"
+  frc_run -- forge-release-create --tag v7b --target HEAD --title "T" --generate-notes
+  assert_exit_code "0" "$FTC_RC" "a release with no url on stdout is still created"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is created, not degraded"
+  assert_eq "null" "$(printf '%s' "$FTC_OUT" | jq -r '.data.url')" "data.url is null"
+  assert_contains "Warning" "$FTC_ERR" "a Warning is printed on stderr"
+  teardown_forge_routing_env
+}
+
+frc_test_failed_tag_step_attempts_no_release() {
+  echo ""
+  echo "=== forge-release-create: a failed tag step reports as the tag step words it and attempts no release ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_SANDBOX/tag-fail"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v8 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "a refused tag exits non-zero"
+  assert_contains "creating the tag object failed" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "message carries the tag step's wording"
+  assert_eq "1" "$(printf '%s\n' "$FTC_ERR" | grep -c 'git push origin v8' || true)" "the manual tag steps print exactly once"
+  assert_eq "0" "$(frc_calls 'releases')" "no release was probed"
+  assert_eq "0" "$(frc_calls 'release create')" "no release was attempted"
+
+  : > "$FORGE_ROUTING_LOG"
+  frc_run AIMI_FORGE_TYPE=gitea -- forge-release-create --tag v8 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "an unknown forge exits non-zero"
+  assert_contains "no adapter for forge" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "an unknown forge is named"
+  assert_eq "0" "$(grep -c . "$FORGE_ROUTING_LOG" || true)" "no forge CLI was started"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/gh"
+  frc_run -- forge-release-create --tag v8 --target HEAD --title T --generate-notes
+  assert_exit_code "1" "$FTC_RC" "a missing gh exits non-zero"
+  assert_contains "gh not found" "$(printf '%s' "$FTC_OUT" | jq -r '.message')" "a missing gh is named"
+  teardown_forge_routing_env
+}
+
+frc_test_gitlab_publishes_and_reads_the_link_back() {
+  echo ""
+  echo "=== forge-release-create: gitlab creates the tag, publishes with glab release create and reads the link ==="
+  setup_forge_routing_env "https://gitlab.com/owner/repo.git"
+  ftc_write_fake_glab
+  local sha
+  sha=$(ftc_commit one)
+  printf 'gl notes' > "$FORGE_ROUTING_TMPDIR/notes.md"
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v9 --target HEAD --title "GL 9" --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_exit_code "0" "$FTC_RC" "gitlab publish exits 0"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is created"
+  assert_eq "https://gitlab.com/owner/repo/-/releases/v9" "$(printf '%s' "$FTC_OUT" | jq -r '.data.url')" "data.url is the release's own link"
+  assert_eq "$sha" "$(cat "$FORGE_ROUTING_SANDBOX/tag-v9")" "the tag was made at the target commit"
+  assert_eq "GL 9" "$(cat "$FORGE_ROUTING_SANDBOX/last-tag-message")" "the title became the tag message"
+  assert_eq "release create v9 --name=GL 9 --notes-file=$FORGE_ROUTING_TMPDIR/notes.md --no-update" "$(cat "$FORGE_ROUTING_SANDBOX/last-release-args")" "glab release create got --name, --notes-file and --no-update"
+  assert_eq "0" "$(grep -c 'GITLAB_TOKEN=[^<]' "$FORGE_ROUTING_LOG" || true)" "no token variable was set for glab"
+  assert_eq "" "$FTC_ERR" "no remembered account: no stderr line"
+
+  : > "$FORGE_ROUTING_LOG"
+  frc_run -- forge-release-create --tag v9 --target HEAD --title "GL 9" --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_eq "unchanged" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a gitlab re-run is unchanged"
+  assert_eq "0" "$(frc_calls 'release create')" "and publishes nothing"
+
+  : > "$FORGE_ROUTING_SANDBOX/readback-fail"
+  rm -f "$FORGE_ROUTING_SANDBOX/rel-v9"
+  frc_run -- forge-release-create --tag v9b --target HEAD --title "GL" --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "a failed link read-back still reports created"
+  assert_eq "null" "$(printf '%s' "$FTC_OUT" | jq -r '.data.url')" "with a null url"
+  assert_contains "Warning" "$FTC_ERR" "and a stderr warning"
+
+  rm -f "$FORGE_ROUTING_SANDBOX/readback-fail"
+  : > "$FORGE_ROUTING_SANDBOX/release-fail"
+  frc_run -- forge-release-create --tag v9c --target HEAD --title "GL" --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_exit_code "1" "$FTC_RC" "a failed glab release call exits non-zero"
+  assert_contains "glab release create v9c" "$FTC_ERR" "the manual release step is printed"
+  teardown_forge_routing_env
+}
+
+frc_test_gitlab_unsupported_flags_degrade_before_any_write() {
+  echo ""
+  echo "=== forge-release-create: gitlab --draft, --prerelease and --generate-notes degrade before any write ==="
+  setup_forge_routing_env "https://gitlab.com/owner/repo.git"
+  ftc_write_fake_glab
+  ftc_commit one >/dev/null
+  : > "$FORGE_ROUTING_LOG"
+
+  frc_run -- forge-release-create --tag v10 --target HEAD --title T --generate-notes --draft --prerelease
+  assert_exit_code "1" "$FTC_RC" "unsupported flags exit non-zero"
+  assert_eq "degraded" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "status is degraded"
+  local msg
+  msg=$(printf '%s' "$FTC_OUT" | jq -r '.message')
+  assert_contains "--draft" "$msg" "message names --draft"
+  assert_contains "--prerelease" "$msg" "message names --prerelease"
+  assert_contains "--generate-notes" "$msg" "message names --generate-notes"
+  assert_eq "0" "$(grep -c . "$FORGE_ROUTING_LOG" || true)" "glab was never called"
+  assert_eq "0" "$(ls "$FORGE_ROUTING_SANDBOX" | grep -c '^tag-' || true)" "no tag was created"
+  teardown_forge_routing_env
+}
+
+frc_test_gitlab_remembered_account_is_named_once() {
+  echo ""
+  echo "=== forge-release-create: gitlab names a remembered account on exactly one stderr line ==="
+  setup_forge_routing_env "https://gitlab.com/owner/repo.git"
+  ftc_write_fake_glab
+  ftc_commit one >/dev/null
+  printf 'n' > "$FORGE_ROUTING_TMPDIR/notes.md"
+
+  frc_run AIMI_FORGE_IDENTITY=alice -- forge-release-create --tag v11 --target HEAD --title T --notes-file "$FORGE_ROUTING_TMPDIR/notes.md"
+  assert_eq "created" "$(printf '%s' "$FTC_OUT" | jq -r '.status')" "the release is published"
+  assert_eq "1" "$(printf '%s\n' "$FTC_ERR" | grep -c 'alice' || true)" "tag step and release step together print one line"
+  teardown_forge_routing_env
+}
+
+frc_test_notes_file_is_made_absolute_before_the_project_cd() {
+  echo ""
+  echo "=== forge-release-create: a relative --notes-file resolves against the caller's directory, not --project ==="
+  setup_forge_routing_env
+  ftc_write_fake_gh
+  ftc_commit one >/dev/null
+  mkdir -p "$FORGE_ROUTING_TMPDIR/caller"
+  printf 'from a file' > "$FORGE_ROUTING_TMPDIR/caller/notes.md"
+  local errfile="$FORGE_ROUTING_TMPDIR/frc.err"
+  FTC_OUT=$(
+    cd "$FORGE_ROUTING_TMPDIR/caller" || exit 1
+    unset GH_TOKEN GH_ENTERPRISE_TOKEN AIMI_FORGE_IDENTITY AIMI_FORGE_TYPE
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    export AIMI_CONFIG_DIR="$FORGE_ROUTING_CONFIG" FORGE_ROUTING_LOG="$FORGE_ROUTING_LOG"
+    export PATH="$FORGE_ROUTING_SANDBOX"
+    "$CLI" forge-release-create --tag v12 --target HEAD --title T --notes-file notes.md --project "$FORGE_ROUTING_REPO" 2>"$errfile"
+  ) && FTC_RC=0 || FTC_RC=$?
+  assert_exit_code "0" "$FTC_RC" "a relative --notes-file with --project exits 0"
+  assert_contains "--notes-file=$FORGE_ROUTING_TMPDIR/caller/notes.md" "$(cat "$FORGE_ROUTING_SANDBOX/last-release-args")" "gh got the absolute path of the caller's file"
+  teardown_forge_routing_env
+}
+
+frc_test_help_dispatch_and_structure() {
+  echo ""
+  echo "=== forge-release-create: help entry, dispatch and the shared helpers ==="
+  local help_out
+  help_out=$("$CLI" help 2>&1)
+  assert_contains "forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]" "$help_out" "help lists the verb"
+  assert_eq "1" "$(grep -c '^_forge_release_create()' "$CLI" || true)" "_forge_release_create is defined once"
+  assert_eq "1" "$(grep -c 'forge-release-create) shift; cmd_forge_release_create' "$CLI" || true)" "the verb is in the early dispatch block"
+  assert_eq "1" "$(grep -c '^_forge_tag_check_ref_args()' "$CLI" || true)" "the tag and target refusals are written once"
+  local release_body
+  release_body=$(sed -n '/^_forge_release_github() {/,/^cmd_forge_release_create() {/p' "$CLI" | grep -v '^[[:space:]]*#')
+  assert_eq "0" "$(printf '%s\n' "$release_body" | grep -c -E '(^|[^[:alnum:]_])(wc|head|cut)([^[:alnum:]_]|$)' || true)" "the release path uses none of wc, head or cut"
+  assert_eq "0" "$(printf '%s\n' "$release_body" | grep -c -- '--target' || true)" "the release path never passes --target to a forge CLI"
 }
 
 # ============================================================================
@@ -9756,6 +10201,24 @@ main() {
   ftc_test_gitlab_creates_reports_unchanged_and_names_a_remembered_account
   ftc_test_message_file_is_read_before_the_project_cd
   ftc_test_help_dispatch_and_structure
+
+  # forge-release-create (US-011) -- tag ensured first, then the release
+  echo ""
+  echo "--- Forge Release Create Tests (US-011) ---"
+  frc_test_bad_input_is_refused_before_any_forge_call
+  frc_test_github_publishes_from_a_notes_file_as_the_remembered_account
+  frc_test_github_generate_notes_draft_and_prerelease_are_sent_when_given
+  frc_test_github_rerun_is_unchanged_and_writes_nothing
+  frc_test_github_resumes_from_a_tag_without_a_release
+  frc_test_github_tag_at_another_commit_degrades_without_a_release
+  frc_test_github_unanswered_probes_are_never_read_as_absent
+  frc_test_github_failed_release_prints_the_manual_step_and_resumes
+  frc_test_failed_tag_step_attempts_no_release
+  frc_test_gitlab_publishes_and_reads_the_link_back
+  frc_test_gitlab_unsupported_flags_degrade_before_any_write
+  frc_test_gitlab_remembered_account_is_named_once
+  frc_test_notes_file_is_made_absolute_before_the_project_cd
+  frc_test_help_dispatch_and_structure
 
   cleanup
 
