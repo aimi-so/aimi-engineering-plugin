@@ -34,6 +34,7 @@ HOOKS_DIR = Path(__file__).parent.parent
 HOOK = HOOKS_DIR / "auto-approve-cli.sh"
 COMMANDS_DIR = HOOKS_DIR.parent / "commands"
 STORY_EXECUTOR_SKILL = HOOKS_DIR.parent / "skills" / "story-executor" / "SKILL.md"
+FORGE_SKILL = HOOKS_DIR.parent / "skills" / "forge" / "SKILL.md"
 
 # A line is a "resolution line" when it assigns, guards, validates or persists
 # $AIMI_CLI / $WORKTREE_MGR. These are the shapes commands/ emits; the hook is
@@ -146,30 +147,42 @@ def test_the_allow_payload_names_the_event_the_hook_is_registered_on():
     )
 
 
+def _bash_fence_lines(path: Path) -> list[str]:
+    """Resolution-shaped single-line commands inside ```bash fences of one file."""
+    found: list[str] = []
+    in_bash_fence = False
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            in_bash_fence = stripped.startswith("```bash") and not in_bash_fence
+            continue
+        if not in_bash_fence:
+            continue
+        line = raw.rstrip()
+        if RESOLUTION_LINE_RE.match(line) and _is_complete_single_line_command(line):
+            found.append(line)
+    return found
+
+
 def collect_resolution_lines() -> list[tuple[str, str]]:
-    """Every distinct resolution line in commands/, with the file it came from.
+    """Every distinct resolution line in commands/ and the forge skill, with its origin.
 
     Only lines inside ```bash fences count -- those are what an agent actually
-    executes, and therefore what the hook actually sees.
+    executes, and therefore what the hook actually sees. The commands scan
+    dedups by line text, so a skill quoting a command's literal line would be
+    swallowed and never attributed to it: the forge skill's lines are keyed by
+    origin (line, file) and kept even when a command carries the same text.
     """
     seen: dict[str, str] = {}
     for path in sorted(COMMANDS_DIR.rglob("*.md")):
-        in_bash_fence = False
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            stripped = raw.strip()
-            if stripped.startswith("```"):
-                in_bash_fence = stripped.startswith("```bash") and not in_bash_fence
-                continue
-            if not in_bash_fence:
-                continue
-            line = raw.rstrip()
-            if (
-                RESOLUTION_LINE_RE.match(line)
-                and _is_complete_single_line_command(line)
-                and line not in seen
-            ):
+        for line in _bash_fence_lines(path):
+            if line not in seen:
                 seen[line] = str(path.relative_to(COMMANDS_DIR.parent))
-    return sorted(seen.items())
+    pairs = list(seen.items())
+    skill_origin = str(FORGE_SKILL.relative_to(COMMANDS_DIR.parent))
+    for line in dict.fromkeys(_bash_fence_lines(FORGE_SKILL)):
+        pairs.append((line, skill_origin))
+    return sorted(pairs)
 
 
 RESOLUTION_LINES = collect_resolution_lines()
@@ -180,6 +193,14 @@ def test_the_corpus_is_not_empty():
     assert len(RESOLUTION_LINES) >= 10, (
         "scanned commands/ and found almost no resolution lines -- the scanner "
         "is broken, not the tree. Every assertion below would pass vacuously."
+    )
+
+
+def test_the_forge_skill_contributes_a_resolution_line():
+    """Guard the guard: the scan must reach a line whose origin is the forge skill."""
+    assert any(origin.endswith("skills/forge/SKILL.md") for _, origin in RESOLUTION_LINES), (
+        "the resolution scan no longer reaches skills/forge/SKILL.md -- its "
+        "resolution lines would go unchecked against the hook"
     )
 
 

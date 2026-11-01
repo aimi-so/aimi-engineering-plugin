@@ -151,7 +151,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remov
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remove feature-login --keep-branch
 ```
 
-Use `--keep-branch` when the worktree's branch is the actual deliverable — e.g. a feature or split branch a report just pointed the user at for review or `gh pr create` — and must survive worktree teardown.
+Use `--keep-branch` when the worktree's branch is the actual deliverable — e.g. a feature or split branch a report just pointed the user at for review or `/aimi:open-pr` — and must survive worktree teardown.
 
 ### `cleanup` or `clean`
 

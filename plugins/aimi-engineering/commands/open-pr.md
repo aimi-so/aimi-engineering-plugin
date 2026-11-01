@@ -356,7 +356,7 @@ if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-
         ;;
       delivered)
         echo "Notice: the active tasks file's plan already ran to completion — its branch (\"$CANDIDATE_BRANCH\") is gone because the run finished and was cleaned up, not because it never started." >&2
-        echo "This tasks file is spent; run \`$AIMI_CLI archive-task\` to retire it. To find how it landed, run \`gh pr list --head \"$CANDIDATE_BRANCH\" --state all\` (not --state merged: a delivered plan's branch can be gone with no merged PR to find)." >&2
+        echo "This tasks file is spent; run \`$AIMI_CLI archive-task\` to retire it. To find how it landed, run \`$AIMI_CLI forge-pr-view --pr \"$CANDIDATE_BRANCH\" --include url,number,state\` (it reads closed and merged PRs too; a delivered plan's branch can be gone with no merged PR to find)." >&2
         ;;
       interrupted)
         echo "Error: the active tasks file names branch \"$CANDIDATE_BRANCH\", which no longer exists, and a story in it is still in_progress or failed — the run is stuck mid-flight, neither finished nor never started." >&2
