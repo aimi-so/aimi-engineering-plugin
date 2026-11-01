@@ -8,7 +8,7 @@ An **agent** is a worker with its own fresh context. Commands spawn agents to re
 
 ---
 
-## Skills (24)
+## Skills (25)
 
 ### Core — used internally
 
@@ -19,6 +19,7 @@ These are invoked by commands, not by you.
 | `brainstorm` | The brainstorming process — batched questions, adaptive exit, design capture |
 | `task-planner` | The pipeline that produces a tasks file: research, spec analysis, story decomposition |
 | `story-executor` | The canonical prompt every story-executing agent receives |
+| `aimi-design-handoff` | Interviews the operator and authors a BusinessSpec and DesignSpec bundle when no design handoff exists |
 
 ### Development and code style
 
@@ -47,6 +48,7 @@ These are invoked by commands, not by you.
 | `create-agent-skills` | How to author Claude Code skills and slash commands |
 | `git-worktree` | Managing git worktrees for isolated parallel work |
 | `rclone` | Uploading and syncing to S3, R2, B2, Google Drive, Dropbox |
+| `forge` | Every GitHub or GitLab action through the CLI's forge verbs, confirmed with you before each write |
 
 ### Disabled — kept for reference
 
