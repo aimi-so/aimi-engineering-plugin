@@ -573,7 +573,13 @@ while true:
             # branch out onto the main working tree, violating the Main Working
             # Tree Untouched Invariant.
             cd [merge_cwd]
-            merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] --into [merge_target]
+            # One `--subject-for <worktree_name> "Merge story: <title>"` per story, each
+            # value handed over as data in ONE argv element (never interpolated into
+            # a shell string); the title is the story's own, and the helper strips any
+            # id token it carries. Worktree and branch names keep their ids.
+            merge_result = $WORKTREE_MGR merge-all [succeeded_worktree_names...] \
+                [for s in stories: --subject-for [all_worktrees[s.id].worktree_name] "Merge story: [s.title]"] \
+                --into [merge_target]
 
             if merge conflict (non-zero exit):
                 Report:

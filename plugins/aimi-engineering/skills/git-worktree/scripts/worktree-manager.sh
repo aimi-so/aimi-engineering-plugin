@@ -919,16 +919,55 @@ install_deps() {
   return 0
 }
 
+# Compose the subject of a merge commit. Prints nothing when the merge should
+# keep git's own default message. Args: <branch> <explicit-subject> <target>.
+# The explicit subject wins; otherwise a branch named `...-US-NNN` gets a
+# generic subject; any other name prints nothing. Whatever is composed is
+# sanitized once: `[..]` groups holding a US-NNN token, bare US-NNN tokens and
+# CR/LF are removed, whitespace collapses, and the result is cut to 200
+# characters. A subject empty after sanitizing counts as not supplied.
+_merge_subject_for() {
+  local branch="$1" explicit="$2" target="$3"
+  local subject=""
+  if [[ -n "$explicit" ]]; then
+    subject=$(_merge_subject_sanitize "$explicit")
+  fi
+  if [[ -z "$subject" && "$branch" =~ -US-[0-9]+$ ]]; then
+    subject=$(_merge_subject_sanitize "Merge story into $target")
+  fi
+  if [[ -n "$subject" ]]; then
+    printf '%s' "$subject"
+  fi
+  return 0
+}
+
+_merge_subject_sanitize() {
+  local subject
+  subject=$(printf '%s' "$1" | tr '\r\n' '  ' \
+    | sed -E 's/\[[^]]*US-[0-9]+[^]]*\]//g; s/US-[0-9]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  subject="${subject:0:200}"
+  printf '%s' "${subject% }"
+}
+
 # Merge a worktree branch into a target branch
 merge_worktree() {
   local worktree_name=""
   local target_branch=""
+  local explicit_subject=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --into)
         target_branch="$2"
+        shift 2
+        ;;
+      --subject)
+        if [[ $# -lt 2 ]]; then
+          echo -e "${RED}Error: --subject requires a value${NC}"
+          exit 1
+        fi
+        explicit_subject="$2"
         shift 2
         ;;
       *)
@@ -942,7 +981,7 @@ merge_worktree() {
 
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}"
-    echo "Usage: worktree-manager.sh merge <worktree-name> [--into <branch>]"
+    echo "Usage: worktree-manager.sh merge <worktree-name> [--into <branch>] [--subject <subject>]"
     exit 1
   fi
 
@@ -992,8 +1031,18 @@ merge_worktree() {
   local merge_stderr
   merge_stderr=$(mktemp)
 
+  # A subject travels as one argv element, never through eval. --no-log keeps a
+  # configured merge.log from appending the merged commits' subjects; --no-edit
+  # keeps -m from opening an editor.
+  local subject
+  subject=$(_merge_subject_for "$worktree_branch" "$explicit_subject" "$target_branch")
+  local merge_args=()
+  if [[ -n "$subject" ]]; then
+    merge_args=(--no-log --no-edit -m "$subject")
+  fi
+
   # Attempt the merge
-  if git merge -- "$worktree_branch" 2>"$merge_stderr"; then
+  if git merge ${merge_args[@]+"${merge_args[@]}"} -- "$worktree_branch" 2>"$merge_stderr"; then
     local merge_hash
     merge_hash=$(git rev-parse HEAD)
     if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
@@ -1021,13 +1070,25 @@ merge_worktree() {
 merge_all_worktrees() {
   local branches=()
   local target_branch=""
+  # --subject-for pairs, kept in parallel arrays (no `declare -A` on bash 3.2)
+  local subject_names=()
+  local subject_values=()
 
-  # Parse arguments: collect branches and optional --into flag
+  # Parse arguments: collect branches and optional --into / --subject-for flags
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --into)
         target_branch="$2"
         shift 2
+        ;;
+      --subject-for)
+        if [[ $# -lt 3 ]]; then
+          echo -e "${RED}Error: --subject-for requires a name and a subject${NC}"
+          exit 1
+        fi
+        subject_names+=("$2")
+        subject_values+=("$3")
+        shift 3
         ;;
       *)
         branches+=("$1")
@@ -1038,7 +1099,7 @@ merge_all_worktrees() {
 
   if [[ ${#branches[@]} -eq 0 ]]; then
     echo -e "${RED}Error: At least one branch name required${NC}"
-    echo "Usage: worktree-manager.sh merge-all <branch1> <branch2> ... [--into <branch>]"
+    echo "Usage: worktree-manager.sh merge-all <branch1> <branch2> ... [--into <branch>] [--subject-for <name> <subject>]..."
     exit 1
   fi
 
@@ -1050,6 +1111,20 @@ merge_all_worktrees() {
       exit 1
     fi
   fi
+
+  # Every --subject-for name must be one of the listed branches; refuse before
+  # any git operation.
+  local sn sb sfound
+  for sn in ${subject_names[@]+"${subject_names[@]}"}; do
+    sfound=0
+    for sb in "${branches[@]}"; do
+      if [[ "$sb" == "$sn" ]]; then sfound=1; break; fi
+    done
+    if [[ $sfound -eq 0 ]]; then
+      echo -e "${RED}Error: --subject-for name is not among the listed branches: $sn${NC}"
+      exit 1
+    fi
+  done
 
   echo -e "${BLUE}Merging ${#branches[@]} branch(es) into '$target_branch'...${NC}"
   echo ""
@@ -1082,8 +1157,22 @@ merge_all_worktrees() {
     local merge_stderr
     merge_stderr=$(mktemp)
 
+    # Look the subject up by the argument as given, not the resolved branch
+    local explicit_subject="" si
+    for ((si = 0; si < ${#subject_names[@]}; si++)); do
+      if [[ "${subject_names[$si]}" == "$branch" ]]; then
+        explicit_subject="${subject_values[$si]}"
+      fi
+    done
+    local subject
+    subject=$(_merge_subject_for "$resolved_branch" "$explicit_subject" "$target_branch")
+    local merge_args=()
+    if [[ -n "$subject" ]]; then
+      merge_args=(--no-log --no-edit -m "$subject")
+    fi
+
     # Attempt merge
-    if git merge "$resolved_branch" 2>"$merge_stderr"; then
+    if git merge ${merge_args[@]+"${merge_args[@]}"} "$resolved_branch" 2>"$merge_stderr"; then
       local merge_hash
       merge_hash=$(git rev-parse HEAD)
       if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
@@ -2059,9 +2148,9 @@ Commands:
   switch | go <name>                  Switch to worktree
   copy-env | env [name]               Copy .env files from main repo to worktree
                                       (if name omitted, uses current worktree)
-  merge <worktree-name> [--into <b>]  Merge worktree branch into target branch
+  merge <worktree-name> [--into <b>] [--subject <s>]  Merge worktree branch into target branch
                                       (defaults --into to current branch)
-  merge-all <b1> <b2> ... [--into <b>]  Merge multiple branches sequentially
+  merge-all <b1> <b2> ... [--into <b>] [--subject-for <name> <s>]...  Merge multiple branches sequentially
                                          (stops on first conflict)
   cleanup | clean                     Clean up inactive worktrees
   install-deps <worktree-name>        Install dependencies inside a worktree
@@ -2092,6 +2181,7 @@ Merge:
   - On success: prints the merge commit hash
   - On conflict: prints conflicting files and exits with code 1
   - merge-all stops on first conflict and reports which branch failed
+  - --subject / --subject-for set the merge commit subject (sanitized; US-NNN tokens removed)
 
 Install Deps:
   - Detection order (first lockfile match wins): bun.lockb -> bun install;

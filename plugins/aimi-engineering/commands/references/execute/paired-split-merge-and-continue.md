@@ -57,7 +57,12 @@ while IFS= read -r REPO_TOPLEVEL; do
     [ -n "$member" ] || continue
     MEMBER_TOPLEVEL=$(printf '%s' "$member" | jq -r '.toplevel')
     [ "$MEMBER_TOPLEVEL" = "$REPO_TOPLEVEL" ] || continue
-    set -- "$@" "$(printf '%s' "$member" | jq -r '.branch')"
+    MEMBER_BRANCH=$(printf '%s' "$member" | jq -r '.branch')
+    MEMBER_LABEL=$(printf '%s' "$member" | jq -r '.project')
+    if [ "$MEMBER_LABEL" = "." ]; then
+      MEMBER_LABEL="${MEMBER_BRANCH#"$PHASE_BRANCH"-}"
+    fi
+    set -- "$@" "$MEMBER_BRANCH" --subject-for "$MEMBER_BRANCH" "Merge $MEMBER_LABEL into $PHASE_BRANCH"
     REPO_PROJECTS="${REPO_PROJECTS}$(printf '%s' "$member" | jq -r '.project')"$'\n'
   done <<< "$SPLIT_PLAN"
   REPO_LABEL=$(printf '%s' "$REPO_PROJECTS" | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//')
@@ -89,6 +94,8 @@ if [ -n "$MERGE_CONFLICT_TOPLEVEL" ]; then
 fi
 echo "Every repository's active split branches are merged onto its own \$PHASE_BRANCH."
 ```
+
+Each member contributes its branch plus one `--subject-for <branch> "Merge <label> into <phase branch>"` pair to the same argv, the label being the member's `.project` or, for `.`, the branch suffix after `$PHASE_BRANCH-` (root, frontend or backend); the subject is one argv element, so it is data, never shell text.
 
 Both loops are built exclusively with positional parameters (`set --`, `set -- "$@" "$x"`) and the `while IFS= read -r ... done <<<` pattern — **never bash 4's read-into-array builtin (`mapfile`/`readarray`), and never an associative array (`declare -A`)**, in either the outer per-repository grouping loop or the inner per-repository branch-list build. Neither exists in zsh, nor in the bash 3.2 that ships as `/bin/bash` on macOS; where either is missing, the read silently fails and produces an empty result. This story multiplies the number of argv builds from one to N, which multiplies this hazard by exactly as much — which is why the arity guard above treats `$# -eq 0` as a hard failure (stderr message, `exit 1`) rather than a silent `continue` to the next repository: `REPO_TOPLEVEL` on every iteration is drawn from `MERGE_REPO_TOPLEVELS`, itself derived only from toplevels that actually appear in `SPLIT_PLAN`, so a repository reached by the outer loop can never legitimately have zero members. An empty `$@` there is proof the inner read failed, never proof there was nothing to merge for that repository — verified under zsh: substituting either forbidden construct here makes the read fail silently, and without this hard-failure guard the block would exit 0 having merged nothing while every split branch stayed unmerged and the phase went on to report success.
 

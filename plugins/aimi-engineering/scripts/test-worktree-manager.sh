@@ -1160,6 +1160,121 @@ test_merge_all_replays_stderr_on_successful_merge() {
 }
 
 # ============================================================================
+# Merge Subject Tests
+# ============================================================================
+#
+# A merge commit needs diverged history, so every case first puts a commit on
+# main touching a second file, then a commit on the branch being merged.
+# Assertion names start with "merge subject (".
+
+# diverge <branch> <file>: branch off main with a commit on <file>, then add a
+# commit to main so the merge cannot fast-forward.
+_subject_diverge() {
+  local branch="$1" file="$2"
+  git -C "$WTM_FIXTURE_REPO" checkout -q -b "$branch" main
+  echo "$branch" > "$WTM_FIXTURE_REPO/$file"
+  git -C "$WTM_FIXTURE_REPO" add "$file"
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Work on $branch [US-009]"
+  git -C "$WTM_FIXTURE_REPO" checkout -q main
+  echo "$branch main side" > "$WTM_FIXTURE_REPO/main-$file"
+  git -C "$WTM_FIXTURE_REPO" add "main-$file"
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Main side for $branch"
+}
+
+_subject_head() { git -C "$WTM_FIXTURE_REPO" log -1 --format=%s main; }
+_subject_head_full() { git -C "$WTM_FIXTURE_REPO" log -1 --format=%B main; }
+
+test_merge_subject() {
+  echo ""
+  echo "=== Testing merge subjects ==="
+
+  setup_wtm_fixture
+  local rc out
+
+  # merge --subject
+  _subject_diverge feat-one-US-001 one.txt
+  bash "$WTM" merge feat-one-US-001 --into main --subject 'Merge story: Add login' >/dev/null 2>&1
+  assert_eq "Merge story: Add login" "$(_subject_head)" "merge subject (merge): explicit subject becomes the commit subject"
+  assert_not_contains "US-001" "$(_subject_head_full)" "merge subject (merge): body carries no story id"
+  assert_not_contains "feat-one" "$(_subject_head_full)" "merge subject (merge): body carries no branch name"
+
+  # merge-all --subject-for, with a sanitizing case
+  _subject_diverge feat-two-US-002 two.txt
+  bash "$WTM" merge-all feat-two-US-002 --into main --subject-for feat-two-US-002 'Merge story: [US-002] Fix US-002 thing' >/dev/null 2>&1
+  assert_eq "Merge story: Fix thing" "$(_subject_head)" "merge subject (merge-all): US-NNN tokens and bracket groups are removed"
+
+  # literal storage of shell syntax
+  _subject_diverge feat-three-US-003 three.txt
+  local nasty='Merge "x" $(touch /tmp/wtm-subject-pwn) `id`'
+  rm -f /tmp/wtm-subject-pwn
+  bash "$WTM" merge-all feat-three-US-003 --into main --subject-for feat-three-US-003 "$nasty" >/dev/null 2>&1
+  assert_eq "$nasty" "$(_subject_head)" "merge subject (literal): quotes and command substitution stored literally"
+  assert_eq "no" "$([ -e /tmp/wtm-subject-pwn ] && echo yes || echo no)" "merge subject (literal): nothing was executed"
+
+  # leading dash
+  _subject_diverge feat-four-US-004 four.txt
+  bash "$WTM" merge-all feat-four-US-004 --into main --subject-for feat-four-US-004 '-n dash first' >/dev/null 2>&1
+  assert_eq "-n dash first" "$(_subject_head)" "merge subject (dash): leading dash stored literally"
+
+  # default for a -US-NNN branch, with no subject supplied
+  _subject_diverge feat-five-US-005 five.txt
+  bash "$WTM" merge-all feat-five-US-005 --into main >/dev/null 2>&1
+  assert_eq "Merge story into main" "$(_subject_head)" "merge subject (default): -US-NNN branch gets the generic subject"
+
+  # any other name keeps git's own default
+  _subject_diverge plain-branch six.txt
+  bash "$WTM" merge-all plain-branch --into main >/dev/null 2>&1
+  assert_contains "Merge branch 'plain-branch'" "$(_subject_head)" "merge subject (default): other names keep git's message"
+
+  # subject empty after sanitizing counts as not supplied
+  _subject_diverge feat-seven-US-007 seven.txt
+  bash "$WTM" merge-all feat-seven-US-007 --into main --subject-for feat-seven-US-007 '[US-007] US-007' >/dev/null 2>&1
+  assert_eq "Merge story into main" "$(_subject_head)" "merge subject (empty): empty after sanitizing falls back to the default"
+
+  # length cap and CR/LF
+  _subject_diverge feat-eight-US-008 eight.txt
+  local long
+  long=$(printf 'a%.0s' $(seq 1 300))
+  bash "$WTM" merge-all feat-eight-US-008 --into main --subject-for feat-eight-US-008 "$long" >/dev/null 2>&1
+  assert_eq "200" "$(_subject_head | tr -d '\n' | wc -c | tr -d ' ')" "merge subject (cap): cut to 200 characters"
+  _subject_diverge feat-nine-US-010 nine.txt
+  bash "$WTM" merge-all feat-nine-US-010 --into main --subject-for feat-nine-US-010 $'Line one\r\nLine two' >/dev/null 2>&1
+  assert_eq "Line one Line two" "$(_subject_head)" "merge subject (newline): CR and LF removed"
+
+  # --no-log beats a configured merge.log
+  git -C "$WTM_FIXTURE_REPO" config merge.log true
+  _subject_diverge feat-ten-US-011 ten.txt
+  bash "$WTM" merge-all feat-ten-US-011 --into main --subject-for feat-ten-US-011 'Merge story: Ten' >/dev/null 2>&1
+  assert_not_contains "US-009" "$(_subject_head_full)" "merge subject (no-log): merge.log shortlog is not appended"
+  git -C "$WTM_FIXTURE_REPO" config --unset merge.log
+
+  # fast-forward unchanged: no commit, target at the branch tip
+  git -C "$WTM_FIXTURE_REPO" checkout -q -b feat-ff-US-012 main
+  echo ff > "$WTM_FIXTURE_REPO/ff.txt"
+  git -C "$WTM_FIXTURE_REPO" add ff.txt
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "ff work"
+  local tip
+  tip=$(git -C "$WTM_FIXTURE_REPO" rev-parse HEAD)
+  git -C "$WTM_FIXTURE_REPO" checkout -q main
+  bash "$WTM" merge-all feat-ff-US-012 --into main --subject-for feat-ff-US-012 'Merge story: ff' >/dev/null 2>&1
+  assert_eq "$tip" "$(git -C "$WTM_FIXTURE_REPO" rev-parse main)" "merge subject (fast-forward): target stays at the branch tip"
+
+  # refusals before any git operation
+  local before
+  before=$(git -C "$WTM_FIXTURE_REPO" rev-parse main)
+  out=$(bash "$WTM" merge-all plain-branch --into main --subject-for not-listed 'x' 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (unknown name): exit code"
+  assert_contains "not-listed" "$out" "merge subject (unknown name): names the offender"
+  out=$(bash "$WTM" merge-all plain-branch --subject-for plain-branch 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (missing value): merge-all exit code"
+  out=$(bash "$WTM" merge plain-branch --subject 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (missing value): merge exit code"
+  assert_eq "$before" "$(git -C "$WTM_FIXTURE_REPO" rev-parse main)" "merge subject (refusal): target untouched"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Create Sentinel / Base Derivation Tests
 # ============================================================================
 #
@@ -1367,6 +1482,7 @@ main() {
   test_merge_all_succeeds_with_container_and_story_worktree_gitignores
   test_merge_all_reports_stderr_on_empty_conflict_list
   test_merge_all_replays_stderr_on_successful_merge
+  test_merge_subject
 
   echo ""
   echo "================================================"
