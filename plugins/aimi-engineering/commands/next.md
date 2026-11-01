@@ -224,10 +224,15 @@ This line is emitted here, by the caller, on every call — fresh-create and reu
 ```bash
 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
-$WORKTREE_MGR install-deps "$BRANCH_NAME" || true
+cd "$CONTAINER_ROOT"
+DEPS_OUT=$($WORKTREE_MGR install-deps "$BRANCH_NAME" </dev/null)
+printf '%s\n' "$DEPS_OUT"
+DEPS_LINE=$(printf '%s\n' "$DEPS_OUT" | sed -n 's/^DEPS_STATUS=//p' | tail -n 1)
+DEPS_STATUS_VALUE="${DEPS_LINE:-failed}"
+echo "DEPS_STATUS[$CONTAINER_ROOT/.worktrees/$BRANCH_NAME]=$DEPS_STATUS_VALUE"
 ```
 
-`install-deps` is advisory (see `skills/git-worktree/scripts/worktree-manager.sh`) — never let a non-zero exit block story execution; log a warning and continue regardless of outcome. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever just because the directory already exists.
+The status is the last `DEPS_STATUS=` line, a missing line reads as `failed`, and it is carried as `DEPS_STATUS[CONTAINER_ROOT]` into Step 5. `needs-recipe` is reported and the run continues; `failed` is reported with the warning that verify results may have resolved another checkout's packages, and the run continues too. A non-zero exit never blocks story execution. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever. Inline mode installs nothing: it runs in the user's own checkout.
 
 ## Step 2: Load Project Guidelines
 
@@ -312,6 +317,8 @@ Mark the story as complete:
 ```bash
 $AIMI_CLI mark-complete [STORY_ID]
 ```
+
+When `CONTAINER_MODE` is true, a visual story whose `DEPS_STATUS[CONTAINER_ROOT]` is `failed` is recorded skipped now that `mark-complete` has run: `$AIMI_CLI set-verification [STORY_ID] skipped --reason "dependency install failed for project group [CONTAINER_ROOT]"`.
 
 **When `CONTAINER_MODE` is false** (inline mode, unchanged): report success exactly as before:
 ```

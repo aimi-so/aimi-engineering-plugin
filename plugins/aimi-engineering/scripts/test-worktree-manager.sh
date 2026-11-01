@@ -1308,6 +1308,67 @@ STUB
   unset DE_STUB_DIR DE_OLD_PATH DE_LOG
 }
 
+# $1: run install-deps --root from the fixture checkout -> DE_OUT/DE_RC
+de_run_root() {
+  DE_OUT=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps --root 2>/dev/null)
+  DE_RC=$?
+}
+
+test_deps_root_installs_checkout() {
+  echo ""
+  echo "=== Testing install-deps --root — installs the checkout it runs from ==="
+  de_setup
+  echo '{"name":"x"}' > "$WTM_FIXTURE_REPO/package.json"
+  echo 'lock' > "$WTM_FIXTURE_REPO/bun.lock"
+  de_run_root
+  assert_exit_code "0" "$DE_RC" "root install: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "root install: last line"
+  assert_contains "bun|$WTM_FIXTURE_REPO|install --frozen-lockfile" "$(cat "$DE_LOG")" "root install: frozen command ran in the checkout"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$WTM_FIXTURE_REPO")
+  assert_eq "ok" "$(jq -r .status "$marker")" "root install: marker status"
+  de_run_root
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root install: marker re-run installs nothing"
+  touch "$WTM_FIXTURE_REPO/.stub-fail"
+  echo 'two' > "$WTM_FIXTURE_REPO/bun.lock"
+  de_run_root
+  assert_exit_code "1" "$DE_RC" "root install: failure exits 1"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "root install: failure status"
+  rm -f "$WTM_FIXTURE_REPO/.stub-fail"
+  de_teardown
+}
+
+test_deps_root_leaves_user_managed_install_alone() {
+  echo ""
+  echo "=== Testing install-deps --root — a user-managed install is left alone ==="
+  de_setup
+  echo '{"name":"x"}' > "$WTM_FIXTURE_REPO/package.json"
+  echo 'lock' > "$WTM_FIXTURE_REPO/bun.lock"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+  de_run_root
+  assert_exit_code "0" "$DE_RC" "root user-managed: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "root user-managed: status ok"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root user-managed: no installer ran"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$WTM_FIXTURE_REPO")
+  assert_eq "false" "$([[ -e "$marker" ]] && echo true || echo false)" "root user-managed: no marker written"
+  rm -rf "$WTM_FIXTURE_REPO/node_modules"
+  de_teardown
+}
+
+test_deps_root_with_a_name_is_a_usage_error() {
+  echo ""
+  echo "=== Testing install-deps --root — a name beside it is refused ==="
+  de_setup
+  local out rc
+  out=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps --root some-name 2>/dev/null); rc=$?
+  assert_exit_code "1" "$rc" "root usage: exit code"
+  assert_eq "" "$out" "root usage: nothing on stdout"
+  out=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps some-name --root 2>/dev/null); rc=$?
+  assert_exit_code "1" "$rc" "root usage: name first, exit code"
+  assert_eq "" "$out" "root usage: name first, nothing on stdout"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root usage: no installer ran"
+  de_teardown
+}
+
 # ============================================================================
 # Dependency Installer Detection Tests
 # ============================================================================
@@ -2231,6 +2292,9 @@ main() {
   test_deps_engine_subfolders
   test_deps_engine_rerun_uses_marker
   test_deps_engine_project_key_of_child_repository
+  test_deps_root_installs_checkout
+  test_deps_root_leaves_user_managed_install_alone
+  test_deps_root_with_a_name_is_a_usage_error
 
   echo ""
   echo "--- Dependency Installer Detection Tests ---"

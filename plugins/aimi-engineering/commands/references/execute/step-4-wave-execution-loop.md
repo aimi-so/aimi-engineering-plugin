@@ -707,7 +707,14 @@ while true:
                     # rewrite against), true for both phase and container mode, which
                     # keep their own distinct port-acquisition mechanisms below.
                     SKIP_VISUAL=false
-                    if not EXEC_OWNS_ROOT:
+                    if DEPS_STATUS[group_key] == "failed":
+                        # The group's install failed (a split member's status is its pre-set
+                        # DEPS_STATUS line): skip before any URL is resolved. mark-complete
+                        # already ran and is not blocked.
+                        $AIMI_CLI set-verification [full_story.id] skipped --reason "dependency install failed for project group [group_key]" --tasks-file [WAVE_TASKS_FILE]
+                        Report: "[full_story.id] visual verification skipped — dependency install failed for project group [group_key]."
+                        SKIP_VISUAL=true
+                    elif not EXEC_OWNS_ROOT:
                         # Inline mode — identical to today's inline branch: the
                         # story's own verification.url, no rewrite, no gate.
                         # verification-report already normalizes a non-string

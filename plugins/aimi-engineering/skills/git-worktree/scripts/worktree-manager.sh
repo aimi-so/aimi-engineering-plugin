@@ -1176,38 +1176,78 @@ _deps_process_dir() {
 # first-level subfolder. Records {status, directories} in the marker and ends
 # stdout with one DEPS_STATUS=<status> line; exits 1 only for failed.
 install_deps() {
-  local worktree_name="$1"
+  local worktree_name="" root_mode=false arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--root" ]]; then
+      root_mode=true
+    elif [[ -z "$worktree_name" ]]; then
+      worktree_name="$arg"
+    else
+      echo -e "${RED}Error: install-deps takes one worktree name or --root${NC}" >&2
+      exit 1
+    fi
+  done
 
-  if [[ -z "$worktree_name" ]]; then
-    echo -e "${RED}Error: Worktree name required${NC}"
-    echo "Usage: worktree-manager.sh install-deps <worktree-name>"
+  if [[ "$root_mode" == true && -n "$worktree_name" ]]; then
+    echo -e "${RED}Error: --root installs the current checkout and takes no worktree name${NC}" >&2
+    echo "Usage: worktree-manager.sh install-deps --root" >&2
     exit 1
   fi
 
-  # Validate worktree name before any filesystem access
-  validate_branch_name "$worktree_name"
+  local worktree_path
+  if [[ "$root_mode" == true ]]; then
+    # The checkout the command runs from: no name, so no .worktrees/ check.
+    worktree_path="$GIT_ROOT"
+  else
+    if [[ -z "$worktree_name" ]]; then
+      echo -e "${RED}Error: Worktree name required${NC}"
+      echo "Usage: worktree-manager.sh install-deps <worktree-name> | --root"
+      exit 1
+    fi
 
-  local worktree_path="$WORKTREE_DIR/$worktree_name"
+    # Validate worktree name before any filesystem access
+    validate_branch_name "$worktree_name"
 
-  # Path containment check — prevent directory traversal
-  local resolved_path
-  resolved_path=$(realpath -m "$worktree_path")
-  local resolved_dir
-  resolved_dir=$(realpath -m "$WORKTREE_DIR")
-  if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
-    echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
-    exit 1
-  fi
+    worktree_path="$WORKTREE_DIR/$worktree_name"
 
-  if [[ ! -d "$worktree_path" ]]; then
-    echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
-    exit 1
+    # Path containment check — prevent directory traversal
+    local resolved_path
+    resolved_path=$(realpath -m "$worktree_path")
+    local resolved_dir
+    resolved_dir=$(realpath -m "$WORKTREE_DIR")
+    if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+      echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
+      exit 1
+    fi
+
+    if [[ ! -d "$worktree_path" ]]; then
+      echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
+      exit 1
+    fi
   fi
 
   local main_checkout key det prior=""
   main_checkout=$(_deps_main_checkout "$worktree_path")
   key=$(_deps_project_key "$main_checkout")
   prior=$(_deps_marker_path "$worktree_path" 2>/dev/null) || prior=""
+
+  # A checkout installed by the user, not by us: a dependency directory is
+  # present and no marker records an install of ours. Leave it alone.
+  if [[ "$root_mode" == true && ( -z "$prior" || ! -f "$prior" ) ]]; then
+    local ud user_managed=false
+    if _serve_has_dependency_dir "$worktree_path"; then
+      user_managed=true
+    else
+      while IFS= read -r ud; do
+        case "$(basename "$ud")" in .*|node_modules|vendor|dist|build) continue ;; esac
+        if _serve_has_dependency_dir "$ud"; then user_managed=true; break; fi
+      done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+    fi
+    if [[ "$user_managed" == true ]]; then
+      echo "DEPS_STATUS=ok"
+      return 0
+    fi
+  fi
 
   local -a _DEPS_ENTRIES=()
   local detect_cwd="${main_checkout:-$PWD}"
@@ -2603,7 +2643,8 @@ main() {
       cleanup_worktrees
       ;;
     install-deps)
-      install_deps "$2"
+      shift
+      install_deps "$@"
       ;;
     serve)
       shift
@@ -2644,7 +2685,12 @@ Commands:
   cleanup | clean                     Clean up inactive worktrees
   install-deps <worktree-name>        Install dependencies inside a worktree with the
                                       frozen command, no fallback; last line is
-                                      DEPS_STATUS=<status>
+                                      DEPS_STATUS=<status>. Callers install every
+                                      container, whether or not it serves
+  install-deps --root                 The same for the checkout the command runs
+                                      from; a dependency directory with no marker
+                                      of ours is user-managed: no installer,
+                                      DEPS_STATUS=ok
   serve start <worktree-name> [--dir <subfolder>]
                                       Start a dev server for a worktree, verify its
                                       listener is actually loopback-only, print its
@@ -2712,6 +2758,13 @@ Install Deps:
     treated as a degradation, not a fatal error. Callers such as the
     container mode of /aimi:execute should fall visual verification back to
     skipped/failed and never abort the wave loop because install-deps failed
+  - Every container is installed whether or not a story in it is visual; the
+    install is never tied to a visual gate, only serve start is
+  - --root (no name, exit 1 if combined with one): installs the checkout the
+    command runs from, with the same engine, marker and closing DEPS_STATUS=
+    line, and no .worktrees/ containment check. When a dependency directory is
+    already present and no marker records an install of ours, it runs no
+    installer, writes no marker, prints DEPS_STATUS=ok and exits 0
 
 Serve (Dev Server):
   - Attempt-then-verify loopback bind: serve start reads scripts.dev from the

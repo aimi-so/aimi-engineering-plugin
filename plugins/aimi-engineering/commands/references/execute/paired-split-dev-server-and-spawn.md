@@ -5,7 +5,7 @@
 
 ### Split Container Dev Server Bootstrap
 
-Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — gate on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap's gate above exactly, scoped one level deeper. Each member computes its own gate; no member's count ever gates another's:
+Independently for each active split — never against `PHASE_CONTAINER_PATH` itself, since no story ever lands directly on the un-merged phase branch — install every member, then gate the server on that split's **own** tasks file having at least one visual story, mirroring Phase Container Dev Server Bootstrap above exactly, scoped one level deeper. The install is never gated; each member computes its own server gate, and no member's count ever gates another's:
 
 This block **computes** the gates; it starts no server. It re-assigns `SPLIT_PLAN` from **Derive and Validate Split Branch Names**' own printed stdout (pasted back verbatim, same isolated-shell rule as above) and emits one plan line per active member — `<SPLIT_TOPLEVEL>\t<SPLIT_BRANCH>\t<true|false>` — because the delegation that consumes the gate happens after the loop, and a bare `HAS_VISUAL_STORY` (or `SPLIT_TOPLEVEL`) would by then hold only the *last* member's value:
 
@@ -45,16 +45,19 @@ WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/w
 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
 while IFS=$'\t' read -r EXEC_ROOT EXEC_BRANCH GROUP_HAS_VISUAL; do
   [ -n "$EXEC_ROOT" ] || continue
-  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
   cd "$EXEC_ROOT"
-  $WORKTREE_MGR install-deps "$EXEC_BRANCH"
+  DEPS_OUT=$($WORKTREE_MGR install-deps "$EXEC_BRANCH" </dev/null)
+  printf '%s\n' "$DEPS_OUT"
+  DEPS_LINE=$(printf '%s\n' "$DEPS_OUT" | sed -n 's/^DEPS_STATUS=//p' | tail -n 1)
+  echo "DEPS_STATUS[$EXEC_ROOT/.worktrees/$EXEC_BRANCH]=${DEPS_LINE:-failed}"
+  [ "$GROUP_HAS_VISUAL" = "true" ] || continue
   $WORKTREE_MGR serve start "$EXEC_BRANCH" >/dev/null
 done <<< "$SPLIT_SERVER_PLAN"
 ```
 
 Each delegation to **Bootstrap a Container Dev Server** reads `EXEC_ROOT` from that line's first field (that member's own `SPLIT_TOPLEVEL` — `$PHASE_CONTAINER_PATH` in today's single-repo case, a sibling repository's own toplevel in the multi-repo case, and the same CWD Create Split Worktrees above already used to create that member's own worktree), `EXEC_BRANCH` from its second field, and `HAS_VISUAL_STORY` from its third. Read `HAS_VISUAL_STORY` (and `EXEC_ROOT`) only from the plan line being processed; their value after the loop above belongs to whichever member happened to be last and is meaningless for every other member. Getting this wrong fails in both directions: a pure-API split inherits a visual sibling's `true` and gets a server it must never get, or a visual split inherits an API sibling's `false`, gets no server, and cannot run the visual verification its stories require.
 
-A split with no visual story (e.g. a pure-API service) never gets nor blocks on a server — its gate simply fails, exactly like the single-file bootstrap above. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
+A split with no visual story (e.g. a pure-API service) is installed but never gets nor blocks on a server — its server gate simply fails. The install status rules of **Bootstrap a Container Dev Server** apply to each echoed line; keep each member's status for its spawn prompt below. Every port is discarded here too — re-resolved fresh via `serve url` at the point each split sub-orchestrator's own Step 3.3 / Step 4 call sites need it. A split sub-orchestrator's spawn prompt pre-sets `PHASE_MODE=true`, `PHASE_BRANCH=[its own split branch]`, and `PHASE_CONTAINER_PATH=[its own split worktree path]` (see Spawn Split Sub-Orchestrators below), so its own copies of Open Visual Follow Session and Step 4's post-merge visual verification apply unmodified — no split-specific code path is needed at either call site. Two members never collide on a `dev-server.json` entry either: `serve start` keys state by the container's absolute resolved path, which is unique per split branch.
 
 **Documented limitation — no proxy between split servers:** when a story's page depends on an API served by a sibling split's container, its visual verification runs only against its own split's server; there is no proxy between them, for any N. A broken API call or failed visual check caused solely by this is expected, not a bug — it must never block the wave and never trigger a retry.
 
@@ -94,6 +97,7 @@ Task(
         - AGENT_MODELS = [the value Resolve Agent Models echoed]
         - BASE_BRANCH = [the value Parse --base Override echoed, or empty when --base was absent]
         - PHASE_MODE = true
+        - DEPS_STATUS = [that member's status from its echoed DEPS_STATUS[...] line; failed when none]
         - PHASE_BRANCH = [that member's SPLIT_PLAN record: .branch]
         - PHASE_CONTAINER_PATH = [that member's SPLIT_PLAN record: .worktree — that member's
           own SPLIT_WORKTREE_PATH, landing inside that member's own repository when it
