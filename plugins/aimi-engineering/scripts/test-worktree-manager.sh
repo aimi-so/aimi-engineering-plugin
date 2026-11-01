@@ -752,6 +752,312 @@ test_serve_status_stale_after_external_kill() {
 }
 
 # ============================================================================
+# Serve Deps Tests
+# ============================================================================
+# serve start's pre-launch path: the install marker, the borrowed-dependency
+# walk, the subfolder pick and --dir. The dev script appends $PWD to a witness
+# file outside the worktree, so "launched nothing" is an absent line rather
+# than an inference. The gate is also called directly by sourcing the script.
+
+sd_setup() {
+  setup_wtm_fixture
+  setup_npm_stub
+  SD_NAME="${1:-sd-branch}"
+  SD_WT="$WTM_FIXTURE_REPO/.worktrees/$SD_NAME"
+  SD_WITNESS=$(mktemp)
+  rm -f "$SD_WITNESS"
+  export SD_WITNESS
+  export DEV_SERVER_READY_TIMEOUT=10
+  bash "$WTM" create "$SD_NAME" >/dev/null 2>&1
+}
+
+sd_teardown() {
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1 || true
+  rm -f "$SD_WITNESS"
+  unset SD_WITNESS
+  teardown_npm_stub
+  teardown_wtm_fixture
+}
+
+# $1 target directory: writes a package.json whose dev script records $PWD.
+sd_package() {
+  mkdir -p "$1"
+  cat > "$1/package.json" << 'PKG'
+{
+  "name": "wtm-serve-deps",
+  "scripts": {
+    "dev": "echo \"$PWD\" >> \"$SD_WITNESS\"; exec python3 -m http.server \"$PORT\" --bind 127.0.0.1"
+  }
+}
+PKG
+}
+
+sd_marker() {
+  local m
+  m=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$SD_WT")
+  printf '%s\n' "$1" > "$m"
+}
+
+# Sets SD_OUT (stdout), SD_ERR (stderr) and SD_RC of `serve start`.
+sd_start() {
+  local errf
+  errf=$(mktemp)
+  SD_OUT=$(bash "$WTM" serve start "$SD_NAME" "$@" 2>"$errf")
+  SD_RC=$?
+  SD_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+# Prints "<rc>|<reason>" of _serve_deps_gate <SD_WT> <dir>.
+sd_gate() {
+  bash -c 'source "$1"; set +e; out=$(_serve_deps_gate "$2" "$3"); rc=$?; printf "%s|%s" "$rc" "$out"' _ "$WTM" "$SD_WT" "$1"
+}
+
+sd_launched() {
+  if [[ -s "$SD_WITNESS" ]]; then echo true; else echo false; fi
+}
+
+test_serve_deps_marker_refuses() {
+  echo ""
+  echo "=== Testing serve deps — marker failed / needs-recipe ==="
+  sd_setup sd-marker
+  sd_package "$SD_WT"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: failed marker — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: failed marker — nothing on stdout"
+  assert_stderr_contains "install failed" "$SD_ERR" "serve deps: failed marker — names the failed install"
+  assert_eq "false" "$(sd_launched)" "serve deps: failed marker — no dev server launched"
+
+  sd_marker '{"status":"needs-recipe","directories":[{"dir":".","status":"needs-recipe","command":"","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: needs-recipe marker — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: needs-recipe marker — nothing on stdout"
+  assert_stderr_contains "no install command is known" "$SD_ERR" "serve deps: needs-recipe marker — says no command is known"
+  assert_eq "false" "$(sd_launched)" "serve deps: needs-recipe marker — no dev server launched"
+
+  sd_marker '{"status":"ok","directories":[{"dir":".","status":"ok","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: ok marker — starts although an ancestor holds node_modules"
+  assert_eq "true" "$(sd_launched)" "serve deps: ok marker — dev server launched"
+
+  sd_teardown
+}
+
+test_serve_deps_registered_server_kept() {
+  echo ""
+  echo "=== Testing serve deps — registered server is neither reused nor stopped ==="
+  sd_setup sd-kept
+  sd_package "$SD_WT"
+
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: registered — first start serves"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: registered — refusal exit code"
+  assert_eq "" "$SD_OUT" "serve deps: registered — refusal prints no URL (no reuse)"
+  assert_stderr_contains "install failed" "$SD_ERR" "serve deps: registered — refusal names the failed install"
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: registered — server still running"
+
+  sd_teardown
+}
+
+test_serve_deps_gate_contract() {
+  echo ""
+  echo "=== Testing serve deps — _serve_deps_gate return contract ==="
+  sd_setup sd-gate
+  mkdir -p "$SD_WT/web" "$SD_WT/api"
+
+  assert_eq "0|" "$(sd_gate .)" "serve deps: gate — no marker, no dependencies anywhere allows"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed"},{"dir":"web","status":"ok"},{"dir":"api","status":"needs-recipe"}]}'
+  local g
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — failed entry returns 1"
+  assert_eq "1" "$(printf '%s' "${g#*|}" | wc -l | tr -d ' ' | awk '{print ($1<=1)?1:0}')" "serve deps: gate — one reason line"
+  assert_contains "failed" "${g#*|}" "serve deps: gate — failed reason says failed"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — ok sibling is not blocked by a failed directory"
+  g=$(sd_gate api)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — needs-recipe entry returns 1"
+  assert_contains "no install command" "${g#*|}" "serve deps: gate — needs-recipe reason"
+
+  sd_marker 'not json {'
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — unparseable marker falls through to the dependency rule"
+  assert_contains "$WTM_FIXTURE_REPO" "${g#*|}" "serve deps: gate — the ancestor is named"
+
+  sd_marker '{"status":"ok","directories":[{"dir":"web","status":"ok"}]}'
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — entry-less marker falls through to the dependency rule"
+
+  sd_marker '{"status":"ok","directories":[{"dir":"./web","status":"ok"}]}'
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — a ./-prefixed marker dir matches"
+
+  rm -f "$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$SD_WT")"
+  mkdir -p "$SD_WT/web/node_modules"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — node_modules in the served directory allows"
+  assert_eq "1" "$(sd_gate api | cut -d'|' -f1)" "serve deps: gate — a sibling's node_modules does not cover the served directory"
+
+  rm -rf "$SD_WT/web/node_modules"
+  mkdir -p "$SD_WT/node_modules"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — node_modules hoisted at the worktree root allows"
+  rm -rf "$SD_WT/node_modules"
+  : > "$SD_WT/.pnp.cjs"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — .pnp.cjs at the worktree root allows (yarn berry)"
+  rm -f "$SD_WT/.pnp.cjs"
+  assert_eq "1" "$(sd_gate web | cut -d'|' -f1)" "serve deps: gate — only an ancestor's node_modules refuses"
+
+  sd_teardown
+}
+
+test_serve_deps_borrowed() {
+  echo ""
+  echo "=== Testing serve deps — borrowed dependencies ==="
+  sd_setup sd-borrow
+  sd_package "$SD_WT"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: borrowed — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: borrowed — no URL"
+  assert_stderr_contains "$WTM_FIXTURE_REPO" "$SD_ERR" "serve deps: borrowed — stderr names the ancestor"
+  assert_eq "false" "$(sd_launched)" "serve deps: borrowed — nothing launched"
+
+  mkdir -p "$SD_WT/node_modules"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: own node_modules — starts"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+  rm -rf "$SD_WT/node_modules" "$SD_WITNESS"
+
+  : > "$SD_WT/.pnp.cjs"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: yarn berry .pnp.cjs without node_modules — starts"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+
+  sd_teardown
+
+  sd_setup sd-clean
+  sd_package "$SD_WT"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: no dependency directory anywhere — starts as before"
+  sd_teardown
+}
+
+test_serve_deps_subfolder_pick() {
+  echo ""
+  echo "=== Testing serve deps — subfolder pick ==="
+  sd_setup sd-pick
+  sd_package "$SD_WT/web"
+  mkdir -p "$SD_WT/docs" "$SD_WT/.hidden" "$SD_WT/vendor" "$SD_WT/dist" "$SD_WT/build" "$SD_WT/node_modules/pkg"
+  printf '{"name":"docs"}\n' > "$SD_WT/docs/package.json"
+  for d in .hidden vendor dist build node_modules/pkg; do sd_package "$SD_WT/$d"; done
+
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: pick — exit code"
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: pick — serves the only candidate"
+  assert_stderr_contains "web" "$SD_ERR" "serve deps: pick — names the subfolder on stderr"
+  assert_eq "$(cd "$SD_WT/web" && pwd -P)" "$(head -n 1 "$SD_WITNESS" | xargs -I{} sh -c 'cd "{}" && pwd -P')" \
+    "serve deps: pick — the dev command ran from inside the subfolder"
+  assert_eq "web" "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: pick — registry entry records dir"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+  rm -f "$SD_WITNESS"
+
+  sd_package "$SD_WT/admin"
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: several candidates — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: several candidates — no URL"
+  assert_stderr_contains "admin, web" "$SD_ERR" "serve deps: several candidates — names them"
+  assert_stderr_contains "--dir" "$SD_ERR" "serve deps: several candidates — names --dir"
+  assert_eq "false" "$(sd_launched)" "serve deps: several candidates — nothing launched"
+  sd_teardown
+
+  sd_setup sd-none
+  mkdir -p "$SD_WT/docs"
+  printf '{"name":"docs"}\n' > "$SD_WT/docs/package.json"
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: no candidate — clean skip exit code"
+  assert_eq "" "$SD_OUT" "serve deps: no candidate — clean skip prints nothing"
+  sd_teardown
+}
+
+test_serve_deps_dir_option() {
+  echo ""
+  echo "=== Testing serve deps — --dir ==="
+  sd_setup sd-dir
+  sd_package "$SD_WT/web"
+  sd_package "$SD_WT/api"
+  mkdir -p "$SD_WT/empty" "$SD_WT/.hid" "$SD_WT/node_modules" "$WTM_FIXTURE_REPO/outside"
+  ln -s "$WTM_FIXTURE_REPO/outside" "$SD_WT/escape"
+
+  local bad
+  for bad in "" "web/x" ".." ".hid" "node_modules" "nope" "escape"; do
+    sd_start --dir "$bad"
+    assert_eq "1::true" "$SD_RC:$SD_OUT:$([[ "$SD_ERR" == *"--dir"* ]] && echo true || echo false)" \
+      "serve deps: --dir '${bad}' is a usage error naming --dir"
+  done
+  sd_start --bogus
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: unknown option is a usage error"
+  sd_start web
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: a second positional argument is a usage error"
+  sd_start --dir
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: --dir with no value is a usage error"
+
+  sd_start --dir empty
+  assert_eq "0:" "$SD_RC:$SD_OUT" "serve deps: --dir on a folder without package.json is a clean skip"
+
+  sd_start --dir web
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: --dir web serves web"
+  local url_web="$SD_OUT"
+  assert_eq "web" "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: registry entry carries dir=web"
+
+  sd_start --dir api
+  assert_exit_code "0" "$SD_RC" "serve deps: other directory — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: other directory — no URL"
+  assert_stderr_contains "web" "$SD_ERR" "serve deps: other directory — names the registered directory"
+  assert_stderr_contains "serve stop" "$SD_ERR" "serve deps: other directory — names serve stop"
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: other directory — registered server left running"
+
+  sd_start --dir web
+  assert_eq "$url_web" "$SD_OUT" "serve deps: same directory — reused"
+  sd_teardown
+
+  sd_setup sd-dir-root
+  sd_package "$SD_WT"
+  sd_package "$SD_WT/web"
+  sd_start --dir web
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: --dir with a root package.json is a usage error"
+  sd_start
+  assert_eq "." "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: root server registers dir=."
+  local root_url="$SD_OUT"
+  local state="$WTM_FIXTURE_REPO/.aimi/state/dev-server.json"
+  jq 'map_values(del(.dir))' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  sd_start
+  assert_eq "$root_url" "$SD_OUT" "serve deps: an entry without dir counts as ."
+  jq 'map_values(.dir = "web")' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  sd_start
+  assert_eq "" "$SD_OUT" "serve deps: a server registered for web is not reused for ."
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: status keyed by worktree, still running"
+  sd_teardown
+}
+
+test_serve_deps_docs() {
+  echo ""
+  echo "=== Testing serve deps — usage text ==="
+  assert_contains "[--dir <subfolder>]" "$(bash "$WTM" help 2>&1)" "serve deps: help documents serve start --dir"
+  assert_contains "borrowed" "$(bash "$WTM" help 2>&1)" "serve deps: help documents the borrowed-dependency refusal"
+}
+
+# ============================================================================
 # Install Deps Tests
 # ============================================================================
 
@@ -1904,6 +2210,16 @@ main() {
   test_serve_status_never_started
   test_serve_status_running
   test_serve_status_stale_after_external_kill
+
+  echo ""
+  echo "--- Serve Deps Tests ---"
+  test_serve_deps_marker_refuses
+  test_serve_deps_registered_server_kept
+  test_serve_deps_gate_contract
+  test_serve_deps_borrowed
+  test_serve_deps_subfolder_pick
+  test_serve_deps_dir_option
+  test_serve_deps_docs
 
   echo ""
   echo "--- Install Deps Tests ---"

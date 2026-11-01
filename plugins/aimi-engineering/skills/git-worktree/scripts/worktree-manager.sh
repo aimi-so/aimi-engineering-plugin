@@ -1959,13 +1959,105 @@ _classify_dev_command() {
   esac
 }
 
+# True when <dir> carries its own dependencies: a node_modules directory or a
+# Yarn Plug'n'Play map.
+_serve_has_dependency_dir() {
+  [[ -d "$1/node_modules" || -f "$1/.pnp.cjs" ]]
+}
+
+# First-level directory names serve never looks into or accepts as --dir.
+_serve_skipped_dir_name() {
+  case "$1" in
+    .*|node_modules|vendor|dist|build) return 0 ;;
+  esac
+  return 1
+}
+
+# Print, one per line and sorted, the first-level subfolders of <worktree-path>
+# whose package.json declares a non-empty scripts.dev.
+_serve_dev_candidates() {
+  local worktree_path="$1" d name dev
+  while IFS= read -r d; do
+    name="${d##*/}"
+    if _serve_skipped_dir_name "$name"; then continue; fi
+    if [[ ! -f "$d/package.json" ]]; then continue; fi
+    dev=$(jq -r '.scripts.dev // empty | select(type == "string")' "$d/package.json" 2>/dev/null) || dev=""
+    if [[ -n "$dev" ]]; then printf '%s\n' "$name"; fi
+  done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+  return 0
+}
+
+# May a dev server start in <dir> (. or a first-level subfolder name) of
+# <worktree-path>? Prints nothing and returns 0 when it may; prints one reason
+# line and returns 1 when it may not. Never aborts a `set -e` caller.
+# The install marker's entry for exactly this directory decides first (a
+# sibling's failure never blocks it); with no entry, the walk from the served
+# directory up to the worktree root comes before looking above the worktree:
+# what is hoisted inside the worktree is its own, what is only above it is
+# another checkout's, which is how Node resolves a bare specifier.
+_serve_deps_gate() {
+  local worktree_path="$1" dir="$2" marker st="" served cur up
+  if marker=$(_deps_marker_path "$worktree_path" 2>/dev/null) && [[ -f "$marker" ]]; then
+    st=$(jq -r --arg d "$dir" '[.directories | arrays | .[] | objects | select(((.dir // "") | tostring | ltrimstr("./")) == $d)] | .[0] | .status // empty' "$marker" 2>/dev/null) || st=""
+  fi
+  case "$st" in
+    failed)
+      printf '%s\n' "the dependency install failed for '$dir' (see install-deps); not starting a dev server against missing packages"
+      return 1 ;;
+    needs-recipe)
+      printf '%s\n' "no install command is known for '$dir' (install-deps recorded needs-recipe); not starting a dev server without its dependencies"
+      return 1 ;;
+    ok)
+      return 0 ;;
+  esac
+
+  served="$worktree_path"
+  if [[ "$dir" != "." ]]; then served="$worktree_path/$dir"; fi
+  cur="$served"
+  while :; do
+    if _serve_has_dependency_dir "$cur"; then return 0; fi
+    if [[ "$cur" == "$worktree_path" || "$cur" == "/" || "$cur" == "." ]]; then break; fi
+    cur=$(dirname "$cur")
+  done
+  up=$(dirname "$worktree_path")
+  while :; do
+    if _serve_has_dependency_dir "$up"; then
+      printf '%s\n' "'$dir' has no dependencies of its own and would borrow the ones in $up, outside this worktree; install them in the worktree first"
+      return 1
+    fi
+    if [[ "$up" == "/" || "$up" == "." ]]; then break; fi
+    up=$(dirname "$up")
+  done
+  return 0
+}
+
 # Start (or reuse) a loopback dev server for a container worktree.
 serve_start() {
-  local worktree_name="$1"
+  local worktree_name="${1:-}"
+  shift || true
+  local dir_arg="" dir_given=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir)
+        dir_given=true
+        if [[ $# -ge 2 ]]; then dir_arg="$2"; shift 2; else dir_arg=""; shift; fi
+        ;;
+      --dir=*)
+        dir_given=true
+        dir_arg="${1#--dir=}"
+        shift
+        ;;
+      *)
+        echo -e "${RED}Error: serve start: unexpected argument or option: $1${NC}" >&2
+        echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
+        exit 1
+        ;;
+    esac
+  done
 
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}" >&2
-    echo "Usage: worktree-manager.sh serve start <worktree-name>" >&2
+    echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
     exit 1
   fi
 
@@ -1998,15 +2090,65 @@ serve_start() {
     exit 1
   fi
 
-  if [[ ! -f "$worktree_path/package.json" ]]; then
+  # Directory served: the root, a validated --dir, or the one first-level
+  # subfolder with a dev script when the root has no package.json.
+  local serve_dir="." serve_path="$worktree_path"
+  if [[ "$dir_given" == true ]]; then
+    local dir_problem=""
+    if [[ -z "$dir_arg" ]]; then
+      dir_problem="a first-level subfolder name is required"
+    elif [[ "$dir_arg" == */* || "$dir_arg" == *\\* ]] || _serve_skipped_dir_name "$dir_arg"; then
+      dir_problem="'$dir_arg' is not an accepted first-level subfolder name"
+    elif [[ ! -d "$worktree_path/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' is not a directory inside the worktree"
+    elif [[ "$(realpath "$worktree_path/$dir_arg" 2>/dev/null)" != "$(realpath "$worktree_path")/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' resolves outside its place in the worktree"
+    elif [[ -f "$worktree_path/package.json" ]]; then
+      dir_problem="the worktree root has its own package.json, so there is nothing to select"
+    fi
+    if [[ -n "$dir_problem" ]]; then
+      printf '%b%s%b\n' "$RED" "Error: serve start --dir: $dir_problem" "$NC" >&2
+      echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
+      exit 1
+    fi
+    serve_dir="$dir_arg"
+    serve_path="$worktree_path/$dir_arg"
+  elif [[ ! -f "$worktree_path/package.json" ]]; then
+    local cands cand_count=0 cand_line cand_list=""
+    cands=$(_serve_dev_candidates "$worktree_path")
+    while IFS= read -r cand_line; do
+      if [[ -n "$cand_line" ]]; then
+        cand_count=$((cand_count + 1))
+        cand_list="${cand_list:+$cand_list, }$cand_line"
+      fi
+    done <<< "$cands"
+    if [[ "$cand_count" -gt 1 ]]; then
+      printf '%b%s%b\n' "$YELLOW" "ℹ️  No package.json at the worktree root and several subfolders have a dev script ($cand_list); pass --dir <subfolder> to choose one: $worktree_name" "$NC" >&2
+      return 0
+    elif [[ "$cand_count" -eq 1 ]]; then
+      serve_dir="$cands"
+      serve_path="$worktree_path/$serve_dir"
+      printf '%b%s%b\n' "$BLUE" "Serving subfolder '$serve_dir' (the only one with a dev script): $worktree_name" "$NC" >&2
+    fi
+  fi
+
+  if [[ ! -f "$serve_path/package.json" ]]; then
     echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}" >&2
     return 0
   fi
 
   local dev_script
-  dev_script=$(jq -r '.scripts.dev // empty' "$worktree_path/package.json" 2>/dev/null || echo "")
+  dev_script=$(jq -r '.scripts.dev // empty' "$serve_path/package.json" 2>/dev/null || echo "")
   if [[ -z "$dev_script" ]]; then
     echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}" >&2
+    return 0
+  fi
+
+  # Refuse before anything is registered, reused or stopped: a failed or
+  # borrowed install means the dev server would run the wrong packages.
+  local gate_reason
+  if ! gate_reason=$(_serve_deps_gate "$worktree_path" "$serve_dir"); then
+    printf '%b%s%b\n' "$YELLOW" "⚠️  Not starting a dev server for '$worktree_name': $gate_reason" "$NC" >&2
     return 0
   fi
 
@@ -2058,6 +2200,9 @@ serve_start() {
     existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
     existing_identity=$(printf '%s' "$existing_entry" | jq -r '.identity // empty')
 
+    local existing_dir
+    existing_dir=$(printf '%s' "$existing_entry" | jq -r '.dir // "."')
+
     local reused=false
     if [[ -n "$existing_pid" ]] && dev_server_entry_is_ours "$existing_pid" "$existing_identity"; then
       # Identity match alone isn't enough to reuse: re-resolve who currently
@@ -2078,6 +2223,10 @@ serve_start() {
     fi
 
     if [[ "$reused" == true ]]; then
+      if [[ "$existing_dir" != "$serve_dir" ]]; then
+        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running for directory '$existing_dir', not '$serve_dir'; leaving it running. Run 'serve stop $worktree_name' first to serve another directory" "$NC" >&2
+        return 0
+      fi
       # Cap the log on reuse: a server kept alive across phase-mode waves
       # otherwise keeps the same log file growing for the life of the
       # container. Truncate to the final half in place (reopen the existing
@@ -2105,7 +2254,7 @@ serve_start() {
   # above); only the run-dev command array is specific to serve_start.
   local pm_name
   local -a pm_cmd
-  pm_name=$(_detect_package_manager "$worktree_path")
+  pm_name=$(_detect_package_manager "$serve_path")
   case "$pm_name" in
     bun) pm_cmd=(bun run dev) ;;
     pnpm) pm_cmd=(pnpm run dev) ;;
@@ -2135,9 +2284,9 @@ serve_start() {
 
   local leader_pid=""
   if [[ ${#attempt1_extra[@]} -gt 0 ]]; then
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt1_extra[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt1_extra[@]}")
   else
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
   fi
 
   # Capture _wait_ready's distinguishing return code (0 ready, 1 nothing ever
@@ -2172,7 +2321,7 @@ serve_start() {
     # would be redundant with that truncation (see _launch_dev_server above).
 
     echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}" >&2
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
 
     if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
       ready=true
@@ -2235,8 +2384,8 @@ serve_start() {
   fi
 
   local entry
-  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" \
-    '{port: $port, pid: $pid, startedAt: $started, identity: $identity}')
+  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" --arg dir "$serve_dir" \
+    '{port: $port, pid: $pid, startedAt: $started, identity: $identity, dir: $dir}')
   _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
 
   echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}" >&2
@@ -2401,7 +2550,7 @@ serve_dispatch() {
   shift || true
   case "$subcmd" in
     start)
-      serve_start "$1"
+      serve_start "$@"
       ;;
     stop)
       serve_stop "$1"
@@ -2414,7 +2563,7 @@ serve_dispatch() {
       ;;
     *)
       echo -e "${RED}Error: Unknown serve subcommand: ${subcmd:-<none>}${NC}" >&2
-      echo "Usage: worktree-manager.sh serve start|stop|status|url <worktree-name> [<raw-url>]" >&2
+      echo "Usage: worktree-manager.sh serve start|stop|status|url <worktree-name> [<raw-url>]  (start also takes --dir <subfolder>)" >&2
       exit 1
       ;;
   esac
@@ -2496,10 +2645,17 @@ Commands:
   install-deps <worktree-name>        Install dependencies inside a worktree with the
                                       frozen command, no fallback; last line is
                                       DEPS_STATUS=<status>
-  serve start <worktree-name>         Start a dev server for a worktree, verify its
+  serve start <worktree-name> [--dir <subfolder>]
+                                      Start a dev server for a worktree, verify its
                                       listener is actually loopback-only, print its
                                       raw URL to stdout only — pid and all narration
-                                      go to stderr (refuses and kills a wildcard bind)
+                                      go to stderr (refuses and kills a wildcard bind).
+                                      Declines (exit 0, no URL) when install-deps
+                                      recorded failed/needs-recipe for the served
+                                      directory, or its dependencies would be borrowed
+                                      from a checkout above the worktree. With no root
+                                      package.json it serves the only first-level
+                                      subfolder with a dev script; --dir picks one
   serve stop <worktree-name>          Stop a worktree's dev server (kills the
                                       whole process group)
   serve status <worktree-name>        Report a worktree's dev server status as
@@ -2655,7 +2811,10 @@ Serve (Dev Server):
     serve start/stop/status/url never exit non-zero for these conditions. A
     missing or invalid worktree-name argument (see validate_branch_name) is
     a usage error in all four verbs — non-zero exit, stderr message, no
-    stdout line at all. serve start adds two more usage errors in the same
+    stdout line at all. serve start --dir takes exactly one first-level
+    subfolder (a bad value, or a root with its own package.json, is a usage
+    error naming --dir), and a registered server for another directory is
+    neither reused nor stopped. serve start adds two more usage errors in the same
     category, because both mean the caller passed a name that never
     corresponded to a real worktree, not a runtime degradation: a worktree
     directory that doesn't exist, and a resolved path that escapes
