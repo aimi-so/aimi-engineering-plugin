@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.157.0] - 2026-11-01
+
+Gitea and Forgejo support is removed, leaving GitHub and GitLab as the only forge adapters. Two forge verbs are added for annotated tags and releases, behind a new `forge` skill and a hook that refuses the raw `gh` and `glab` writes those verbs cover. Dependency installation now covers every execution root, and several verbs answer for the repository the caller stands in.
+
+### Removed
+- The Gitea and Forgejo (`tea`) adapter. A remote on `gitea.com`, `codeberg.org` or any of their subdomains is no longer recognized: host classification knows `github.com` and `gitlab.com` (and subdomains of each) and answers `unknown` for every other host. On a repository of that kind every forge verb answers `unknown` and prints the manual steps instead of acting, the same behavior any unrecognized host already had.
+- `AIMI_FORGE_TYPE=gitea` is still accepted so an existing shell profile does not start failing, but it is read as `unknown` and one stderr line says so. Any other value besides `github` and `gitlab` still exits 1. To act on a Gitea or Forgejo repository, do the pull request, issue and review-thread steps yourself.
+- The `forge-contract.md`, `docs/commands.md` and command text no longer describe a Gitea adapter, and the Gitea state mapping and `tea` field notes are gone from the contract.
+
+### Added
+- `forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]` creates an annotated tag through the forge. A tag that already exists is reported as `unchanged`.
+- `forge-release-create` publishes a release with notes through the forge, on GitHub and GitLab.
+- A model-invocable `forge` skill (`skills/forge/SKILL.md`) that routes pull request, issue, tag, release and review-thread actions through the forge verbs, as the remembered account and only after the user says yes.
+- A hook guard that refuses a raw `gh` or `glab` write when a forge verb can express it. `AIMI_FORGE_GUARD=off`, exported before the session starts, turns it off. OpenCode does not run hooks, so the guard does not apply there; `docs/opencode.md` explains the consequence.
+- `deps-recipe-record`, a verb that records a confirmed install command for an execution root with no recognized installer as `dependencies.install[<project key>]` in `.aimi/config.json`, written inside the CLI lock with an atomic rename. It refuses an unsafe command or key, a malformed config and a git-tracked config. `commands/references/dependency-setup.md` is the procedure the orchestrator follows for a root whose status is `needs-recipe`, and it is added to the OpenCode reference allowlist.
+- Dependency detection in `worktree-manager.sh` that reports how a repository installs its dependencies (`ready`, `nothing-to-install` or `needs-recipe`) without installing or writing anything.
+- `metadata --with-deliverable-branch` adds `.deliverableBranch`: the phase's branch for a phase-scoped split member and `metadata.branchName` for every other plan.
+- `serve start <name> [--dir <subfolder>]` serves a chosen first-level subfolder, and the dev-server state records the served `dir`.
+
+### Changed
+- `detect-default-branch`, `detect-parent-branch`, `resolve-base-branch` and `setup-branch` act on the repository the caller stands in when `--project` is not given. `setup-branch` refuses when a git `.aimi` root is a different repository than the caller.
+- `/aimi:open-pr` reads the plan's deliverable branch, so a phase pull request keeps its title after its split branches are gone. It counts plans rather than tasks files, falls back to the first plan delivering on the PR branch when the active file belongs to another plan, and renders no `Closes` line for a plan split across repositories.
+- `install-deps` runs the frozen install command for the detected manager (`bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --frozen-lockfile` or `--immutable`) with no fallback to a looser command, and a failed command is final. It records the outcome in `aimi-deps.json` in the worktree's git directory, ends stdout with `DEPS_STATUS=<status>`, and installs each first-level subfolder with a manifest when the root has none. A re-run installs nothing when the recorded command and lockfile hash match.
+- `/aimi:execute` and `/aimi:next` install dependencies for every container, split worktree and inline checkout before its first wave, not only for visual stories. Each call site echoes `DEPS_STATUS` for its root, and a failed install records that group's visual stories as skipped.
+- `serve start` refuses, with no URL and a stderr reason, when the install marker records `failed` or `needs-recipe` for the served directory, or when the only `node_modules` or `.pnp.cjs` found lies above the worktree, so a dev server no longer runs another checkout's packages.
+- `/aimi:execute` merge commits get readable subjects: an explicit subject wins, a branch named `...-US-NNN` gets a generic one, and any other branch keeps git's default message. Story identifiers are stripped from whatever is composed.
+- The story executor's default rules no longer teach raw `gh` commands. `CLAUDE.md`, `README.md`, `docs/agents-and-skills.md` and `docs/opencode.md` record the caller-repository rule, the forge verbs and the dependency recipes.
+
 ## [1.156.0] - 2026-10-27
 
 Nine plan and execute defects fixed: heading matching, directory slugs, the global cli-path pointer, design-bundle election, Phase 2.4 auto-resolution, staged-story rewrites, expander prompts, and the order of split plan files (#178). Running that plan surfaced four more defects in `/aimi:execute`, the CLI and the story executor, fixed here as well: the tasks path, relative path arguments, the pre-change baseline and the known-gap files.
