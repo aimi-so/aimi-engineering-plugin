@@ -5337,7 +5337,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # names, never a write. No new root, and no leaf this module chose: the
     # operand is a literal word of the verify, joined onto the story's base by
     # confined_spec_path and refused when it escapes.
-    assert code.count("os.path.") == 56
+    #
+    # The last five are deliverable_branch's: a basename of the tasks path to
+    # recognise a SIDE-axis member, a basename and a dirname of
+    # metadata.roadmapPath for the feature name, and a join and a dirname that
+    # build the phase's tasks path. They compose strings and touch nothing: both
+    # document-sourced paths reach the disk only through confined_spec_path, and
+    # the reads go through load_docs, so no open() arrived with them.
+    assert code.count("os.path.") == 61
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -11651,6 +11658,19 @@ def test_deliverable_branch_derives_the_phase_branch_for_a_project_axis_member(t
 def test_deliverable_branch_defaults_the_type_to_feat_without_a_phase_tasks_file(tmp_path):
     root, phase_dir = _deliverable_layout(tmp_path)
     path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core"
+
+
+def test_deliverable_branch_never_reads_a_phase_file_outside_the_project(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "feat-x-phase-5.5-tasks.json").write_text(
+        json.dumps({"metadata": {"type": "leaked"}})
+    )
+    phase_dir.rmdir()
+    phase_dir.symlink_to(outside)
+    path = str(root / ".aimi" / "tasks" / "feat-x" / "feat-x-phase-5.5-api-tasks.json")
     assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core"
 
 

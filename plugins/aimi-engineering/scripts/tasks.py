@@ -846,11 +846,10 @@ PHASE_DIR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 def _read_json_object(path):
     """A JSON object off disk, or None. Never raises: the caller degrades."""
     try:
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle)
+        docs = load_docs(path)
     except (OSError, ValueError):
         return None
-    return value if isinstance(value, dict) else None
+    return docs[0] if len(docs) == 1 and isinstance(docs[0], dict) else None
 
 
 def deliverable_branch(doc, tasks_path, project_root):
@@ -919,12 +918,15 @@ def deliverable_branch(doc, tasks_path, project_root):
                 and PHASE_DIR_NAME.fullmatch(phase_dir)
                 and ".." not in phase_dir
             ):
-                phase_file = os.path.join(
-                    os.path.dirname(roadmap_path),
-                    phase_dir,
-                    feature + "-phase-" + id_text + "-tasks.json",
+                phase_file, phase_inside = confined_spec_path(
+                    project_root,
+                    os.path.join(
+                        os.path.dirname(roadmap_rel.rstrip("/")),
+                        phase_dir,
+                        feature + "-phase-" + id_text + "-tasks.json",
+                    ),
                 )
-                phase_doc = _read_json_object(phase_file)
+                phase_doc = _read_json_object(phase_file) if phase_inside else None
                 found = (phase_doc or {}).get("metadata")
                 found = found.get("type") if isinstance(found, dict) else None
                 if isinstance(found, str) and found:
