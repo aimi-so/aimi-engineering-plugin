@@ -64,6 +64,8 @@ while IFS=$'\t' read -r GROUP_TOPLEVEL GROUP_HAS_VISUAL; do
 done <<< "$PHASE_SERVER_PLAN"
 ```
 
+A root whose status is `needs-recipe` follows `${CLAUDE_PLUGIN_ROOT}/commands/references/dependency-setup.md` before the loop's status is carried on (orchestrator only; skipped in agent mode and in a spawned task).
+
 Its captured URL is discarded here — every later consumer (Step 3.3's Open Visual Follow Session, and Step 4's post-merge visual verification) re-queries the server fresh via `serve url` at the point it needs it. With exactly one group (today's unchanged case), `GROUP_TOPLEVEL` resolves to `$AIMI_ROOT` and this reduces to exactly one `install-deps` against `$AIMI_ROOT`, `$PHASE_BRANCH`, followed by `serve start` when that group is visual. Carry each echoed status as `DEPS_STATUS[group_key]` for the wave loop's visual verification.
 
 ### Path and State Notes

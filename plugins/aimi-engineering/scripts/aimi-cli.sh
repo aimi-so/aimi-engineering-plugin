@@ -12640,6 +12640,61 @@ anthropic/claude-opus-4-7"
   printf '%s\n' "$_models_json"
 }
 
+# deps-recipe-record --project <key> --command <cmd>
+#
+# Records the install command a person confirmed for one project key at
+# dependencies.install[<key>] of <AIMI_ROOT>/.aimi/config.json, which
+# _detect_dependency_installer reads back as source "config". Bash owns the
+# flags, check_python3 and the lock; scripts/deps_recipe.py owns the document
+# rules and makes the read-merge-write in ONE crossing made inside the lock, so
+# invocations for different keys racing each other all survive. A writer with no
+# honest degrade, like detect-models, so a missing python3 refuses at exit 1
+# before anything is read or written. --project and --command are values, not
+# paths, and stay out of _PATH_ARG_FLAGS.
+cmd_deps_recipe_record() {
+  local project="" command_text="" have_project=0 have_command=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: deps-recipe-record: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+          exit 1
+        fi
+        project="$2"; have_project=1; shift 2 ;;
+      --command)
+        if [ $# -lt 2 ]; then
+          echo "Error: deps-recipe-record: --command requires a value" >&2
+          echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+          exit 1
+        fi
+        command_text="$2"; have_command=1; shift 2 ;;
+      *)
+        echo "Error: deps-recipe-record: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ "$have_project" -eq 0 ] || [ -z "$project" ] || [ "$have_command" -eq 0 ] || [ -z "$command_text" ]; then
+    echo "Error: deps-recipe-record: --project and --command are both required and must not be empty" >&2
+    echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+    exit 1
+  fi
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  local rc=0
+  (
+    _lock "${config}.lock"
+    python3 "$(_aimi_script_py deps_recipe.py)" record \
+      --config "$config" --project "$project" --command "$command_text"
+  ) 200>"${config}.lock" || rc=$?
+  return "$rc"
+}
+
 # Check whether the first-run model-selection prompt should be shown.
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
@@ -18617,6 +18672,14 @@ COMMANDS:
                               (research=fast/haiku, review=powerful/opus,
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
+    deps-recipe-record --project <key> --command <cmd>
+                              Record the install command a person confirmed for one
+                              project key at dependencies.install[<key>] of
+                              .aimi/config.json (key "." on a one-repository plan).
+                              Prints {status, project, command, config}; status is
+                              "recorded" or "unchanged". Refuses an unsafe command
+                              or key, an unreadable config and a config tracked by
+                              git; needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always
@@ -19723,6 +19786,7 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;

@@ -232,7 +232,7 @@ DEPS_STATUS_VALUE="${DEPS_LINE:-failed}"
 echo "DEPS_STATUS[$CONTAINER_ROOT/.worktrees/$BRANCH_NAME]=$DEPS_STATUS_VALUE"
 ```
 
-The status is the last `DEPS_STATUS=` line, a missing line reads as `failed`, and it is carried as `DEPS_STATUS[CONTAINER_ROOT]` into Step 5. `needs-recipe` is reported and the run continues; `failed` is reported with the warning that verify results may have resolved another checkout's packages, and the run continues too. A non-zero exit never blocks story execution. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever. Inline mode installs nothing: it runs in the user's own checkout.
+The status is the last `DEPS_STATUS=` line, a missing line reads as `failed`, and it is carried as `DEPS_STATUS[CONTAINER_ROOT]` into Step 5. `needs-recipe` is reported and the run continues, after `${CLAUDE_PLUGIN_ROOT}/commands/references/dependency-setup.md` has had its one chance to record a recipe for that root; `failed` is reported with the warning that verify results may have resolved another checkout's packages, and the run continues too. A non-zero exit never blocks story execution. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever. Inline mode installs nothing: it runs in the user's own checkout.
 
 ## Step 2: Load Project Guidelines
 

@@ -355,6 +355,10 @@ ADVERSARIAL = [
         id="cache-write-redirected-outside-the-aimi-dir",
     ),
     pytest.param("$AIMI_CLI forge-pr-merge --pr 1 --style squash", id="subcommand-off-whitelist"),
+    pytest.param(
+        "$AIMI_CLI deps-recipe-record --project . --command 'make setup'",
+        id="deps-recipe-record-is-a-human-decision-verb",
+    ),
     pytest.param("mkdir -p /etc/aimi", id="mkdir-outside-the-aimi-dir"),
     pytest.param("$AIMI_CLI status; cat /etc/shadow", id="whitelisted-subcommand-then-chain"),
     pytest.param(

@@ -13,8 +13,8 @@ set -uo pipefail
 #
 #   real tree
 #     - the install exits 0
-#     - the three doc references (cli-path-resolution.md, container-execution.md,
-#       user-communication.md) carry no AskUserQuestion literal and no
+#     - the four doc references (cli-path-resolution.md, container-execution.md,
+#       user-communication.md, dependency-setup.md) carry no AskUserQuestion literal and no
 #       `Task subagent_type="aimi-engineering:` literal
 #     - cli-path-resolution.md still documents the Claude Code cache path
 #     - interactivity.md is byte-identical to the source (it documents the
@@ -106,12 +106,16 @@ run_install "$INSTALL_SH" "$REAL"
 assert_eq "0" "$RC" "real tree: install exits 0"
 
 REFS="$REAL/xdg/opencode/plugins/aimi-engineering/commands/references"
-for doc in cli-path-resolution.md container-execution.md user-communication.md; do
+for doc in cli-path-resolution.md container-execution.md user-communication.md dependency-setup.md; do
   assert_file_lacks "$REFS/$doc" "AskUserQuestion" "real tree: $doc has no AskUserQuestion literal"
   assert_file_lacks "$REFS/$doc" 'Task subagent_type="aimi-engineering:' "real tree: $doc has no Task subagent_type literal"
 done
 assert_file_has "$REFS/cli-path-resolution.md" '${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/' \
   "real tree: cli-path-resolution.md keeps the Claude Code cache path"
+assert_file_has "$SRC_PLUGIN/commands/references/dependency-setup.md" "AskUserQuestion" \
+  "real tree: dependency-setup.md source names the picker"
+assert_file_has "$REFS/dependency-setup.md" "deps-recipe-record" \
+  "real tree: dependency-setup.md is installed"
 assert_same_file "$SRC_PLUGIN/commands/references/interactivity.md" "$REFS/interactivity.md" \
   "real tree: interactivity.md is byte-identical to the source"
 assert_file_has "$REFS/interactivity.md" "AskUserQuestion" \

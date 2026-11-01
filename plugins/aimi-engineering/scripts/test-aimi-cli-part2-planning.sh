@@ -29,6 +29,7 @@ set -uo pipefail
 #   - get-current-models Tests
 #   - list-models Tests
 #   - detect-models Tests
+#   - deps-recipe-record Tests (seventeen assertions)
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
@@ -9355,6 +9356,70 @@ test_split_detect_after_lists_member_paths() {
 # Main
 # ============================================================================
 
+# ============================================================================
+# deps-recipe-record Tests
+# ============================================================================
+
+test_deps_recipe_record() {
+  echo ""
+  echo "=== Testing deps-recipe-record: records, refuses, keeps the rest, needs python3 ==="
+
+  local root out rc cfg
+  root=$(mktemp -d)
+  mkdir -p "$root/.aimi" "$root/sub/dir"
+  cfg="$root/.aimi/config.json"
+
+  out=$(cd "$root/sub/dir" && "$CLI" deps-recipe-record --project . --command ' make setup ' 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "deps-recipe-record: exit code from a subdirectory"
+  assert_eq "recorded" "$(printf '%s' "$out" | jq -r '.status')" "deps-recipe-record: status recorded"
+  assert_eq "make setup" "$(jq -r '.dependencies.install["."]' "$cfg")" "deps-recipe-record: command trimmed and stored"
+
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make setup' 2>/dev/null)
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "deps-recipe-record: same command is unchanged"
+
+  printf '{"other":1,"dependencies":{"install":{"a":"x"},"keep":true}}\n' > "$cfg"
+  (cd "$root" && "$CLI" deps-recipe-record --project api --command 'just deps' >/dev/null 2>&1)
+  assert_eq "x just deps" "$(jq -r '[.dependencies.install.a, .dependencies.install.api] | join(" ")' "$cfg")" "deps-recipe-record: other recipes survive"
+  assert_eq "other,dependencies" "$(jq -r 'keys_unsorted | join(",")' "$cfg")" "deps-recipe-record: key order survives"
+
+  local before
+  before=$(cat "$cfg")
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project api --command 'a; b' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: unsafe command exit code"
+  assert_contains "Error: deps-recipe-record:" "$out" "deps-recipe-record: unsafe command message"
+  assert_eq "$before" "$(cat "$cfg")" "deps-recipe-record: refusal leaves the config byte-identical"
+
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project ../up --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: key with .. refused"
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project api 2>&1) && rc=0 || rc=$?
+  assert_contains "Usage: aimi-cli.sh deps-recipe-record" "$out" "deps-recipe-record: missing flag prints usage"
+
+  printf '[1]\n' > "$cfg"
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: non-object config refused"
+
+  rm -f "$cfg"
+  (cd "$root" && git init -q . && printf '{}\n' > .aimi/config.json && git add -f .aimi/config.json) >/dev/null 2>&1
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: git-tracked config refused"
+  assert_contains "tracked by git" "$out" "deps-recipe-record: tracked config message names the cause"
+
+  local nopy f
+  nopy=$(mktemp -d)
+  for f in /usr/bin/* /bin/*; do
+    case "$(basename "$f")" in python3*|python) continue ;; esac
+    [ -e "$nopy/$(basename "$f")" ] || ln -s "$f" "$nopy/$(basename "$f")" 2>/dev/null
+  done
+  local root2
+  root2=$(mktemp -d); mkdir -p "$root2/.aimi"
+  out=$(cd "$root2" && PATH="$nopy" "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record without python3: exit code"
+  assert_contains "python3 is required" "$out" "deps-recipe-record without python3: names python3"
+  assert_eq "no" "$([ -e "$root2/.aimi/config.json" ] && echo yes || echo no)" "deps-recipe-record without python3: nothing written"
+
+  rm -rf "$root" "$root2" "$nopy"
+}
+
 main() {
   if [ -z "${AIMI_TEST_PART_RESULT_FILE:-}" ]; then
     echo "================================================"
@@ -9495,6 +9560,7 @@ main() {
   test_detect_models_default_mode_preserves_other_host
   test_detect_models_flag_mode_rejections
   test_detect_models_flag_mode_normalizes_and_warns
+  test_deps_recipe_record
 
   # model-validity predicate comparison
   echo ""
