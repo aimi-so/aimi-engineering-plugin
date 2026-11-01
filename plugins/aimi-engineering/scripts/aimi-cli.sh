@@ -1643,17 +1643,24 @@ cmd_status() {
 
 # Get metadata only
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --with-deliverable-branch (optional; adds .deliverableBranch, the
+#        branch the plan's work is delivered on -- the phase branch for a
+#        phase-scoped split member, metadata.branchName otherwise)
 cmd_metadata() {
   local tasks_file=""
+  local with_branch=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --tasks-file)
         shift
         tasks_file="${1:-}"
         ;;
+      --with-deliverable-branch)
+        with_branch=true
+        ;;
       *)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>]" >&2
+        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>] [--with-deliverable-branch]" >&2
         exit 1
         ;;
     esac
@@ -1666,8 +1673,14 @@ cmd_metadata() {
   else
     tasks_file=$(get_tasks_file)
   fi
+
+  # One flag on the one crossing; the project root rides along only with it so
+  # the unflagged call line is byte-identical to what it always was.
+  local branch_args=()
+  [ "$with_branch" = true ] && branch_args=(--with-deliverable-branch --project-root "$PROJECT_ROOT")
+
   check_python3
-  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
+  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file" "${branch_args[@]}"
 }
 
 # Which stories carry a visual verification strategy (each with its own
@@ -18014,8 +18027,10 @@ COMMANDS:
     status [--counts-only] [--tasks-file <path>]
                               Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
-    metadata [--tasks-file <path>]
+    metadata [--tasks-file <path>] [--with-deliverable-branch]
                               Get metadata only
+                              --with-deliverable-branch  Add .deliverableBranch (the phase branch for a
+                                                         phase-scoped split member, branchName otherwise)
     verification-report [--tasks-file <path>]
                               Visual stories (id/project/url) plus the malformed-verification
                               partition (repairable/unrepairable). Defaults to get_tasks_file.

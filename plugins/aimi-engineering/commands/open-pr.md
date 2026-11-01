@@ -12,7 +12,7 @@ Automatically detect the parent branch, build the PR title and description from 
 
 ## Project Conventions
 
-This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4), with the internal `US-NNN` story tags stripped from every commit subject it renders (see Step 4b's story-tag strip). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available *and that tasks file's `branchName` is this PR's branch*, falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice, without letting an unrelated active session title it after some other feature. Whichever source wins says so on stderr. Both title and body strip the internal `US-NNN` story tags `/aimi:execute` writes per commit.
+This command does not read the working project's `CLAUDE.md` or `AGENTS.md`. The PR **body** is derived purely from git commits and the diff against the base branch (see Steps 2–4), with the internal `US-NNN` story tags stripped from every commit subject it renders (see Step 4b's story-tag strip). The PR **title** prefers the tasks file's feature-level `metadata.title` when one is available *and that tasks file's deliverable branch is this PR's branch* (`metadata --with-deliverable-branch`: `metadata.branchName`, except for a phase-scoped split member, whose deliverable branch is its phase's branch), falling back to the git-derived first-commit subject (see Step 4a) — this keeps the title describing the whole feature rather than the first story's slice, without letting an unrelated active session title it after some other feature. Whichever source wins says so on stderr. Both title and body strip the internal `US-NNN` story tags `/aimi:execute` writes per commit.
 
 For project-specific PR structure (e.g., required Test Plan section, issue-link footer, checklists), use GitHub's standard mechanism:
 
@@ -324,24 +324,24 @@ CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 DEFAULT_BRANCH=$($AIMI_CLI detect-default-branch)
-CANDIDATE_BRANCH=$($AIMI_CLI metadata 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+CANDIDATE_BRANCH=$($AIMI_CLI metadata --with-deliverable-branch 2>/dev/null | jq -r '.deliverableBranch // empty' 2>/dev/null)
 ```
 
 `$DEFAULT_BRANCH` is kept here even though the discriminator below no longer reads it — Step 2c's own independent `detect-default-branch` call still needs the concept documented, and the cross-reference paragraph at the end of this step depends on it being computed in this preamble.
 
-This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
+This reuses the single guarded `$AIMI_CLI metadata` call already established at Step 4a for `.title`, rather than `commands/review.md`'s two-step `find-tasks` + separate `jq -r '.metadata.branchName'`. It asks for `.deliverableBranch` and not `.branchName`: for a file of a phase split across repositories, `branchName` names that repository's split branch, which is deleted once it is merged, while the PR is opened from the phase's branch, which is the branch that stays. For every other file the two are the same string. Because the phase branch still exists, the adoption below confirms it with `git show-ref` and never reaches `run-verdict`. That is safe for the same reason `find-tasks` is safe: `cmd_metadata`'s `get_tasks_file` (`aimi-cli.sh:507`) never calls `init-session`, so it satisfies `commands/review.md:63`'s concurrent-session-safety rationale — it never repoints a live `/aimi:execute` session's tracked tasks file. Its only state write is the narrow self-heal path (`aimi-cli.sh:511-521`) that fires only when the recorded state pointer already points to a deleted file, correcting a broken pointer rather than clobbering a valid one.
 
-**Case A — nothing to correct.** Either the active tasks file's `branchName` is unusable (no tasks file discoverable, or `branchName` empty or invalid), or it is usable but already equals `$CURRENT_BRANCH` — HEAD is already on the branch the tasks file names, whether or not that happens to be `$DEFAULT_BRANCH`:
+**Case A — nothing to correct.** Either the active tasks file's deliverable branch is unusable (no tasks file discoverable, or its deliverable branch empty or invalid), or it is usable but already equals `$CURRENT_BRANCH` — HEAD is already on the branch the tasks file names, whether or not that happens to be `$DEFAULT_BRANCH`:
 
 ```bash
 if [ -z "$CANDIDATE_BRANCH" ] || ! echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$'; then
-  echo "Warning: No active tasks file found (or its branchName is missing/invalid) — proceeding with the checked-out branch ($CURRENT_BRANCH), which may not be the feature branch." >&2
+  echo "Warning: No active tasks file found (or its deliverable branch is missing/invalid) — proceeding with the checked-out branch ($CURRENT_BRANCH), which may not be the feature branch." >&2
 fi
 ```
 
 No message is printed for the "already correct" half of Case A — `$CURRENT_BRANCH` needs no announcement to keep using itself.
 
-**Case B — HEAD is not the branch the tasks file names.** Fires whenever a valid `$CANDIDATE_BRANCH` differs from `$CURRENT_BRANCH`. This covers both the pre-existing scenario (HEAD parked on `$DEFAULT_BRANCH`, the ordinary container-mode end state) and the stacked-base scenario the widened trigger fixes (HEAD parked on a *different* feature branch because the run was stacked on top of it) — one rule for both, since neither case is special beyond "HEAD is not the tasks file's branch":
+**Case B — HEAD is not the branch the tasks file delivers on.** Fires whenever a valid `$CANDIDATE_BRANCH` differs from `$CURRENT_BRANCH`. This covers both the pre-existing scenario (HEAD parked on `$DEFAULT_BRANCH`, the ordinary container-mode end state) and the stacked-base scenario the widened trigger fixes (HEAD parked on a *different* feature branch because the run was stacked on top of it) — one rule for both, since neither case is special beyond "HEAD is not the tasks file's branch":
 
 ```bash
 if [ -n "$CANDIDATE_BRANCH" ] && echo "$CANDIDATE_BRANCH" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9/_-]*$' && [ "$CANDIDATE_BRANCH" != "$CURRENT_BRANCH" ]; then
@@ -526,48 +526,65 @@ Store as `$DIFF_STAT` and `$FILES_CHANGED`.
 
 Derive a **feature-level** PR title — one that describes the whole change, not just the first story's slice, and that never leaks an internal `US-NNN` story tag from the per-story commits `/aimi:execute` produces. Three sources, in order of preference:
 
-1. **Tasks metadata title — only when that tasks file is this branch's.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2. It is adopted **only when the same metadata's `branchName` equals `$CURRENT_BRANCH`**: "a tasks file is discoverable" and "this PR is that tasks file's feature" are different claims, and `metadata` answers the session's active tasks file, not this branch's. Opening a PR for one feature while another is the active session — the ordinary state after switching work — otherwise titles this PR after a feature it shares no commit with, and the title is the one part of a PR nobody re-reads against the diff. A mismatch falls through to source 2, which is derived from this branch's own commits and so cannot describe anything else.
+1. **Tasks metadata title — only when that tasks file is this branch's.** When a tasks file exists for this session, `metadata.title` is the human-authored feature title (e.g. `feat: brownfield foundation gate + architecture-foundation skill (issue #56 phase 3)`) — the best PR title, since it summarizes the entire feature rather than whichever story happened to commit first. Read it with the same guarded `$AIMI_CLI metadata` call Step 4c uses; any failure (no tasks file, CLI error) falls through to source 2. It is adopted **only when the same metadata's deliverable branch equals `$CURRENT_BRANCH`** (`.deliverableBranch`, which is `branchName` except for a phase-scoped split member, where it is the phase's branch): "a tasks file is discoverable" and "this PR is that tasks file's feature" are different claims, and `metadata` answers the session's active tasks file, not this branch's. When the active file is not this branch's but another plan on the scan below is, that plan supplies the title and the issues instead. Opening a PR for one feature while another is the active session — the ordinary state after switching work — otherwise titles this PR after a feature it shares no commit with, and the title is the one part of a PR nobody re-reads against the diff. A mismatch falls through to source 2, which is derived from this branch's own commits and so cannot describe anything else.
 2. **First commit subject, story-tag stripped.** Fall back to the first commit subject on the branch (preserving conventional-commit form), then strip any trailing aimi story tag the execute flow appends per story (e.g. a trailing `[US-001]` — the form the execute flow emits most often — or ` — US-001` / ` - Story US-012a`, or a leading `US-001 `), so the internal id never reaches the public title.
 3. **Branch name.** When the branch has zero commits ahead of base, fall back to `$CURRENT_BRANCH`.
 
 ```bash
-# How many plans declare this branch? `metadata` answers the session's ACTIVE
+# How many plans deliver on this branch? `metadata` answers the session's ACTIVE
 # tasks file, so it can say "this document is not this branch's" but never "how
 # many others said they were". `find-tasks-all` enumerates every live plan and
-# `metadata --tasks-file` reads each one's own branchName, so the number below
-# is measured from the documents themselves. Never counted from merge-commit
-# subjects: the plugin emits no such string, so counting by one would be
-# counting whichever wording a person happened to type.
-BRANCH_PLAN_COUNT=0
+# `metadata --with-deliverable-branch --tasks-file` reads each one's own
+# deliverable branch, so the number below is measured from the documents
+# themselves. It counts PLANS, not tasks files: the members of one split plan
+# share a title and count once, two plans with different titles count twice.
+# The first matching plan's metadata is kept, for when the active file is not
+# this branch's. Never counted from merge-commit subjects: the plugin emits no
+# such string, so counting by one would be counting whichever wording a person
+# happened to type.
+BRANCH_PLAN_JSON=""
+BRANCH_PLAN_TITLES=""
 ALL_PLAN_FILES=$($AIMI_CLI find-tasks-all 2>/dev/null)
 if [ -n "$ALL_PLAN_FILES" ]; then
   while IFS= read -r plan_file; do
     [ -n "$plan_file" ] || continue
-    plan_branch=$($AIMI_CLI metadata --tasks-file "$plan_file" 2>/dev/null | jq -r '.branchName // empty' 2>/dev/null)
+    plan_json=$($AIMI_CLI metadata --with-deliverable-branch --tasks-file "$plan_file" 2>/dev/null)
+    plan_branch=$(printf '%s' "$plan_json" | jq -r '.deliverableBranch // empty' 2>/dev/null)
     if [ "$plan_branch" = "$CURRENT_BRANCH" ]; then
-      BRANCH_PLAN_COUNT=$((BRANCH_PLAN_COUNT + 1))
+      [ -n "$BRANCH_PLAN_JSON" ] || BRANCH_PLAN_JSON="$plan_json"
+      plan_title=$(printf '%s' "$plan_json" | jq -r '.title // "(untitled)"' 2>/dev/null | tr '\n' ' ')
+      BRANCH_PLAN_TITLES="${BRANCH_PLAN_TITLES}${plan_title}
+"
     fi
   done <<PLAN_BRANCH_SCAN
 $ALL_PLAN_FILES
 PLAN_BRANCH_SCAN
 fi
+BRANCH_PLAN_COUNT=$(printf '%s' "$BRANCH_PLAN_TITLES" | sort -u | grep -c .)
 # One clause, appended to whichever `PR title from …` line wins below — the same
 # announcing machine, not a second one. Three cases, not two: 0 is as ordinary
 # as 2, and far more common.
 case "$BRANCH_PLAN_COUNT" in
-  0) PLAN_COUNT_NOTE="0 plans declare $CURRENT_BRANCH as their branchName, so no metadata could pass the branchName gate: this title comes from the branch's own commits, and metadata.issues fell to the same gate — no Closes line is rendered either." ;;
-  1) PLAN_COUNT_NOTE="1 plan declares $CURRENT_BRANCH as its branchName." ;;
-  *) PLAN_COUNT_NOTE="$BRANCH_PLAN_COUNT plans declare $CURRENT_BRANCH as their branchName, so this title names at most one of them and the rest of the branch goes unnamed." ;;
+  0) PLAN_COUNT_NOTE="0 plans deliver on $CURRENT_BRANCH, so no metadata could pass the deliverable-branch gate: this title comes from the branch's own commits, and metadata.issues fell to the same gate — no Closes line is rendered either." ;;
+  1) PLAN_COUNT_NOTE="1 plan delivers on $CURRENT_BRANCH." ;;
+  *) PLAN_COUNT_NOTE="$BRANCH_PLAN_COUNT plans deliver on $CURRENT_BRANCH, so this title names at most one of them and the rest of the branch goes unnamed." ;;
 esac
 
 # Source 1: feature-level metadata title (guarded, like Step 4c). The
 # `metadata` subcommand emits the metadata object itself, so the title, the
-# branch and the issue list are at the top level (`.title`, `.branchName`,
+# branch and the issue list are at the top level (`.title`, `.deliverableBranch`,
 # `.issues`), not nested under `.metadata`. One call, read three times — the
 # three fields must describe one document.
-METADATA_JSON=$($AIMI_CLI metadata 2>/dev/null)
+METADATA_JSON=$($AIMI_CLI metadata --with-deliverable-branch 2>/dev/null)
+METADATA_BRANCH=$(printf '%s' "$METADATA_JSON" | jq -r '.deliverableBranch // empty' 2>/dev/null)
+# The active file is not this branch's, but a plan on the scan above is: the
+# first such plan supplies the title, the issues and the split check below.
+if [ "$METADATA_BRANCH" != "$CURRENT_BRANCH" ] && [ -n "$BRANCH_PLAN_JSON" ]; then
+  echo "Note: the active tasks file delivers on \"$METADATA_BRANCH\", not $CURRENT_BRANCH; the title and issues come from the first plan that delivers on $CURRENT_BRANCH." >&2
+  METADATA_JSON="$BRANCH_PLAN_JSON"
+  METADATA_BRANCH="$CURRENT_BRANCH"
+fi
 METADATA_TITLE=$(printf '%s' "$METADATA_JSON" | jq -r '.title // empty' 2>/dev/null)
-METADATA_BRANCH=$(printf '%s' "$METADATA_JSON" | jq -r '.branchName // empty' 2>/dev/null)
 # `.issues` is optional and omitted entirely when nothing was confirmed — never
 # `[]`, never `null` — so `.issues[]?` yields nothing at all in that case and
 # one line per number otherwise. Step 4b renders those lines; see below.
@@ -577,21 +594,33 @@ if [ "$METADATA_TITLE" = "feat: merged tasks" ]; then
   METADATA_TITLE=""
 fi
 
-# The issue list falls under the same branchName gate the title does, but as its
+# The issue list falls under the same deliverable-branch gate the title does, but as its
 # own statement: `.issues` can be present on a document whose `.title` is absent
 # or was emptied by the placeholder case above, and the title's mismatch branch
 # below never runs for such a document.
 if [ -n "$METADATA_ISSUES" ] && [ "$METADATA_BRANCH" != "$CURRENT_BRANCH" ]; then
-  echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.issues names another feature's issues and no Closes line is rendered." >&2
+  echo "Note: the active tasks file's deliverable branch (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.issues names another feature's issues and no Closes line is rendered." >&2
+  METADATA_ISSUES=""
+fi
+
+# A plan split across repositories (PROJECT axis, splitGroup.total of 2 or more)
+# has one issue list for the whole plan, and this PR belongs to one of its
+# repositories: a Closes line here would close the issue while the other
+# repositories' work is still unmerged. The title is the plan's and stays. A
+# SIDE-axis pair carries no splitGroup and a one-repository plan has total 1.
+SPLIT_TOTAL=$(printf '%s' "$METADATA_JSON" | jq -r 'if (.splitGroup | type) == "object" and (.splitGroup.total | type) == "number" then .splitGroup.total else 0 end' 2>/dev/null)
+case "$SPLIT_TOTAL" in ''|*[!0-9]*) SPLIT_TOTAL=0 ;; esac
+if [ -n "$METADATA_ISSUES" ] && [ "$SPLIT_TOTAL" -ge 2 ]; then
+  echo "Note: this plan is split across $SPLIT_TOTAL repositories, so a Closes line here could close an issue another repository's PR still leaves open: none is rendered." >&2
   METADATA_ISSUES=""
 fi
 
 if [ -n "$METADATA_TITLE" ] && [ "$METADATA_BRANCH" = "$CURRENT_BRANCH" ]; then
   PR_TITLE="$METADATA_TITLE"
-  echo "PR title from the tasks file's metadata.title (its branchName is $CURRENT_BRANCH). $PLAN_COUNT_NOTE" >&2
+  echo "PR title from the tasks file's metadata.title (it delivers on $CURRENT_BRANCH). $PLAN_COUNT_NOTE" >&2
 else
   if [ -n "$METADATA_TITLE" ]; then
-    echo "Note: the active tasks file's branchName (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
+    echo "Note: the active tasks file's deliverable branch (\"$METADATA_BRANCH\") is not $CURRENT_BRANCH, so its metadata.title describes a different feature and is not used." >&2
     METADATA_TITLE=""
   fi
   # Source 2: first commit subject, with any internal story tag stripped.
@@ -616,13 +645,13 @@ Store as `$PR_TITLE`.
 
 **How many plans declare this branch is part of that same announcement, and the answer has THREE cases, not two.** The `PR title from …` line says which source won; `$PLAN_COUNT_NOTE`, appended to whichever one fires, says how many plans claimed this branch, which is what turns "the guard rejected source 1" into a reason. No second announcing machine is introduced for it — the count is computed once at the top of the block above and the existing three lines carry it.
 
-- **`N == 0` — no plan declares this branch.** This is the common case, not the exotic one, and it is what phase mode produces: each phase's tasks file declares its own phase branch (`fix/<feature>-phase-3-…`), so the long-lived integration branch those phases merge into is the `branchName` of no plan at all. Both gates above then reject: the title falls to source 2 — the subject of the branch's *first* commit, one story out of however many the branch carries — and `metadata.issues` is suppressed by the same comparison, so **no `Closes` line is rendered either**. Those two consequences already have notes of their own above; the count is what explains why nothing matched, and it is the reason the `N == 0` clause names the lost `Closes` line rather than leaving it to be discovered from a second note.
+- **`N == 0` — no plan delivers on this branch.** A phase PR no longer lands here: each phase's tasks file, split or not, answers the phase's own branch as its deliverable branch, so the PR for a phase matches its plan whether or not the per-repository split branches still exist. Zero now means the long-lived integration branch those phases merge into, or a branch some other work owns, and no plan is its deliverable branch. Both gates above then reject: the title falls to source 2 — the subject of the branch's *first* commit, one story out of however many the branch carries — and `metadata.issues` is suppressed by the same comparison, so **no `Closes` line is rendered either**. The count is what explains why nothing matched, and it is the reason the `N == 0` clause names the lost `Closes` line rather than leaving it to be discovered from a second note.
 - **`N == 1` — the case the `==` guard was written for.** One plan owns the branch. Note the count still answers a question the guard does not: a `1` beside a *rejected* source 1 means the plan that declares this branch is not the session's active tasks file.
-- **`N >= 2` — several plans on one long-lived branch, every one of them satisfying `==`.** Whichever is active wins, and its `metadata.title` names its own feature while the other N−1 go unnamed in a title nobody re-reads against the diff.
+- **`N >= 2` — several plans on one branch, every one of them delivering there.** Whichever is active wins, and its `metadata.title` names its own feature while the other N−1 go unnamed in a title nobody re-reads against the diff.
 
-**A warning conditioned only on `>= 2` would never fire in the case that actually happens.** That is measured rather than assumed: on the integration branch these phases merge into, `grep -rl '"branchName": *"<that branch>"' .aimi/tasks .aimi/archive` returns **0** — every live plan names a phase branch instead. Treating `0` as a fourth, silent state is exactly the gap this count closes.
+**A warning conditioned only on `>= 2` would never fire in the case that actually happens.** On the integration branch these phases merge into, no live plan has it as its deliverable branch — every one answers its phase branch. Treating `0` as a fourth, silent state is exactly the gap this count closes. The count walks `find-tasks-all`, which lists only under `.aimi/tasks`, so `.aimi/archive` stays out of it.
 
-**The count is not built on merge-commit subjects, and that exclusion is measured too.** grepping `plugins/` for the merge-commit subject these integration branches carry — the one naming a phase number — returns **0**: the plugin emits no such string anywhere, and every one of those subjects was typed by hand. A count derived from them would be counting one person's habit; `find-tasks-all` plus each file's own `metadata.branchName` counts what the documents declare.
+**The count is not built on merge-commit subjects, and that exclusion is measured too.** grepping `plugins/` for the merge-commit subject these integration branches carry — the one naming a phase number — returns **0**: the plugin emits no such string anywhere, and every one of those subjects was typed by hand. A count derived from them would be counting one person's habit; `find-tasks-all` plus each file's own deliverable branch counts what the documents declare.
 
 **Say the number; never auto-title from the union.** The decision recorded here is that the machine ANNOUNCES how many plans it found, not that it composes a title out of several of them. A title synthesized from two features is less readable than a partial title that says it is partial, and a reader who is told "3 plans declare this branch" can pick the right title by hand — which is more than a merged one would let them do.
 
@@ -637,7 +666,7 @@ Build the description from git state with three core sections, plus one conditio
 - **Summary**: Aggregated commit bodies from `$COMMIT_LOG`. Split records by the ASCII record separator (`%x1e`), then split each record's fields by the unit separator (`%x1f`) into `hash`, `subject`, `body`. Concatenate the non-empty `body` fields into a single prose block. A commit with an empty body contributes nothing — there is deliberately no fallback to its subject, because **Changes** below already renders every subject, and a fallback Summary would restate that section verbatim on exactly the branches whose body is under the most pressure.
 - **Changes**: Each commit **subject** (the second field from every record) rendered as a bullet, one per line — apply the **story-tag strip** below to each subject before rendering.
 - **Files Changed**: The `$DIFF_STAT` output rendered inside a fenced code block.
-- **Closes lines** (conditional): one `Closes #<N>` line per entry of `$METADATA_ISSUES`, the issue list Step 4a already read and already gated on `branchName`. Rendered last, after every section above, so a merged PR retires the issues the plan named. Nothing is emitted at all — no heading, no blank section — when the list is empty, which covers all three of its causes at once: a plan that named no issue, a `metadata.issues` key that is absent (it is omitted entirely rather than written as `[]` or `null`), and a list Step 4a's branchName gate discarded as another feature's.
+- **Closes lines** (conditional): one `Closes #<N>` line per entry of `$METADATA_ISSUES`, the issue list Step 4a already read and already gated on the deliverable branch and, for a plan split across repositories, emptied by Step 4a's split check. Rendered last, after every section above, so a merged PR retires the issues the plan named. Nothing is emitted at all — no heading, no blank section — when the list is empty, which covers all three of its causes at once: a plan that named no issue, a `metadata.issues` key that is absent (it is omitted entirely rather than written as `[]` or `null`), and a list Step 4a's deliverable-branch gate discarded as another feature's.
 
 **Story-tag strip (applies to every commit subject used in the body).** The per-story commits `/aimi:execute` produces carry an internal `US-NNN` tag in their subject (e.g. a trailing `[US-001]`, ` — US-001`, ` - Story US-012a`, or a leading `US-003 `). Strip that tag from each subject before it appears in the **Changes** bullets, so the internal id never leaks into the public PR body — the identical rule Step 4a already applies to the title. The commit **bodies** (the Summary's primary source) are used verbatim; the tag lives only in subjects, so only subjects are stripped. Per subject `$s`:
 
@@ -684,7 +713,7 @@ Capture the JSON output (if any). Parse it directly from the result:
 - If the CLI exits non-zero or emits no output, set `INCLUDE_BACKEND_SPEC=0` and skip this section entirely.
 - Otherwise read `metadata.frontendOnly` and `metadata.backendSpec` from the JSON.
 - Set `INCLUDE_BACKEND_SPEC=1` only when `frontendOnly` is exactly `true` AND `backendSpec` is a non-null object.
-- Step 5c's backend issue title reads `$METADATA_TITLE` as already computed by Step 4a — this section takes no second copy of `metadata.title`. When Step 4a's branchName gate discarded it (mismatch or placeholder), it is already empty here too, and Step 5c falls back to `$PR_TITLE` for the same reason Step 4a itself did.
+- Step 5c's backend issue title reads `$METADATA_TITLE` as already computed by Step 4a — this section takes no second copy of `metadata.title`. When Step 4a's deliverable-branch gate discarded it (mismatch or placeholder), it is already empty here too, and Step 5c falls back to `$PR_TITLE` for the same reason Step 4a itself did.
 
 When `$INCLUDE_BACKEND_SPEC=1`, render the spec deterministically from `metadata.backendSpec` (no LLM generation). Contains four subsections:
 
@@ -1014,7 +1043,7 @@ EOF
     ISSUE_TITLE_SOURCE="$METADATA_TITLE"
   else
     ISSUE_TITLE_SOURCE="$PR_TITLE"
-    echo "Backend issue title from \$PR_TITLE (this branch's own derivation) — metadata.title was empty or discarded by Step 4a's branchName gate." >&2
+    echo "Backend issue title from \$PR_TITLE (this branch's own derivation) — metadata.title was empty or discarded by Step 4a's deliverable-branch gate." >&2
   fi
   ISSUE_CREATE_JSON=$($AIMI_CLI forge-issue-create --title "Backend: $ISSUE_TITLE_SOURCE" --body "$ISSUE_BODY")
   ISSUE_STATUS=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.status')
@@ -1039,7 +1068,7 @@ EOF
 fi
 ```
 
-Where `$ISSUE_TITLE_SOURCE` is `$METADATA_TITLE` from Step 4a when Step 4a's branchName gate kept it, or `$PR_TITLE` when that gate discarded it (mismatch or placeholder) — the issue title always says which source it came from on stderr, the same guarantee Step 4a already gives the PR title. `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
+Where `$ISSUE_TITLE_SOURCE` is `$METADATA_TITLE` from Step 4a when Step 4a's deliverable-branch gate kept it, or `$PR_TITLE` when that gate discarded it (mismatch or placeholder) — the issue title always says which source it came from on stderr, the same guarantee Step 4a already gives the PR title. `$PR_NUMBER` is the digits-only value retyped and validated in the block above from Step 5b's printed output, and `$PR_BODY` is the body that same block re-read fresh through `forge-pr-view` — never a transcript pasted back in. An empty `$PR_BODY` means that re-read did not succeed, which is exactly what the `[ -n "$PR_BODY" ]` guard branches on: the issue is still created, only the `forge-pr-edit` link back into the PR body is skipped.
 
 **Important**: `forge-issue-create` is a soft-fail verb — it always exits `0` and reports `created` or `degraded` in the `status` field of `forge-contract.md`'s shared write-verb envelope (`commands/references/forge-contract.md`, Write-Verb Status Convention), so the `if`/`else` above branches on that field, never on a bare exit code. A `degraded` result (permissions denied, issues disabled, rate limit, missing forge CLI, or an unsupported forge) means the issue was not created automatically — a warning is logged but PR creation is NOT affected, since the backend spec still lives in the PR body (guaranteed by Step 4d, which holds that section whole against the cap). `forge-issue-create` itself already prints the manual "create this yourself" instructions to stderr on a `degraded` result (mandatory-print degradation), so no separate STOP is needed here. `forge-pr-edit` emits that same envelope and shares `forge-pr-create`'s own mandatory-print/non-zero-exit contract — the shared shape deliberately does NOT mean a shared exit-code contract, and this verb's always-`0` exit is exactly what keeps a failed backend issue from blocking the PR. If `forge-pr-edit` fails, its own manual fallback instructions are already on stderr (alongside its `degraded` envelope on stdout); the issue is still created and linked in every other respect.
 

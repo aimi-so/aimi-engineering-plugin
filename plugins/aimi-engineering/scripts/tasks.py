@@ -161,6 +161,7 @@ from roadmap import (
     _completed_gate_has_marker,
     _completed_story_ids,
     _json_type,
+    _num,
     ground_truth,
     jq_numbers,
     jq_sort_key,
@@ -836,6 +837,106 @@ def metadata_view(doc):
     view = dict(metadata)
     view["maxConcurrency"] = clamped
     return view
+
+
+SPLIT_SIDE_SUFFIXES = ("-frontend-tasks.json", "-backend-tasks.json")
+PHASE_DIR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _read_json_object(path):
+    """A JSON object off disk, or None. Never raises: the caller degrades."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def deliverable_branch(doc, tasks_path, project_root):
+    """The branch a plan's finished work is delivered on.
+
+    `metadata.branchName` for every file except a phase-scoped SPLIT member.
+    A member's own branchName names its per-repository split branch, which is
+    deleted once merged; the PR is opened from the phase's branch, so that is
+    what is answered for it. The phase's branch is derived here, from the
+    roadmap, the way execute's Claim the Phase step derives it: the roadmap
+    phase's `.branch` when set, else `<type>/<feature>-phase-<id>[-<slug>]`
+    with the dot of a decimal id turned into a hyphen and `<type>` read from
+    the phase's own `<feature>-phase-<id>-tasks.json` (`feat` when absent).
+    Derived and never written back, because metadata.branchName has many
+    readers. A roadmap that cannot supply the branch answers branchName, and
+    no malformed document makes this raise.
+    """
+    metadata = doc.get("metadata") if isinstance(doc, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    fallback = metadata.get("branchName")
+    phase_meta = metadata.get("phase")
+    if not isinstance(phase_meta, dict):
+        return fallback
+    is_member = isinstance(metadata.get("splitGroup"), dict) or os.path.basename(
+        tasks_path
+    ).endswith(SPLIT_SIDE_SUFFIXES)
+    if not is_member:
+        return fallback
+    try:
+        roadmap_rel = metadata.get("roadmapPath")
+        phase_id = phase_meta.get("id")
+        if not isinstance(roadmap_rel, str) or not roadmap_rel:
+            return fallback
+        if isinstance(phase_id, bool) or not isinstance(phase_id, (int, float)):
+            return fallback
+        roadmap_path, inside = confined_spec_path(project_root, roadmap_rel)
+        if not inside:
+            return fallback
+        roadmap = _read_json_object(roadmap_path)
+        phases = roadmap.get("phases") if roadmap else None
+        if not isinstance(phases, list):
+            return fallback
+        phase = next(
+            (
+                p
+                for p in phases
+                if isinstance(p, dict) and jq_equal(p.get("id"), phase_id)
+            ),
+            None,
+        )
+        if phase is None:
+            return fallback
+        branch = phase.get("branch")
+        if not (isinstance(branch, str) and branch):
+            id_text = _num(phase_id)
+            slug = phase.get("slug")
+            feature = os.path.basename(os.path.dirname(roadmap_rel.rstrip("/")))
+            phase_type = "feat"
+            phase_dir = phase.get("dir")
+            if not (isinstance(phase_dir, str) and phase_dir):
+                phase_dir = phase_meta.get("dir")
+            if (
+                feature
+                and isinstance(phase_dir, str)
+                and PHASE_DIR_NAME.fullmatch(phase_dir)
+                and ".." not in phase_dir
+            ):
+                phase_file = os.path.join(
+                    os.path.dirname(roadmap_path),
+                    phase_dir,
+                    feature + "-phase-" + id_text + "-tasks.json",
+                )
+                phase_doc = _read_json_object(phase_file)
+                found = (phase_doc or {}).get("metadata")
+                found = found.get("type") if isinstance(found, dict) else None
+                if isinstance(found, str) and found:
+                    phase_type = found
+            branch = phase_type + "/" + feature + "-phase-" + id_text.replace(".", "-")
+            if isinstance(slug, str) and slug:
+                branch += "-" + slug
+        if isinstance(branch, str) and BRANCH_NAME.fullmatch(branch):
+            return branch
+    except (OSError, ValueError, TypeError, AttributeError, MalformedTasks):
+        pass
+    return fallback
 
 
 def stories_with_id(doc, story_id):
@@ -4853,9 +4954,17 @@ def op_status(argv):
 def op_metadata(argv):
     path = _flag(argv, "--tasks-file")
     if not path:
-        die("Usage: tasks.py metadata --tasks-file <path>")
+        die("Usage: tasks.py metadata --tasks-file <path> [--with-deliverable-branch --project-root <path>]")
+    with_branch = "--with-deliverable-branch" in argv
+    project_root = _flag(argv, "--project-root")
+    if with_branch and not project_root:
+        die("Usage: tasks.py metadata --tasks-file <path> --with-deliverable-branch --project-root <path> (--project-root is required)")
     for doc in read_docs(path, "metadata"):
-        _emit(metadata_view(doc))
+        view = metadata_view(doc)
+        if with_branch:
+            view = dict(view)
+            view["deliverableBranch"] = deliverable_branch(doc, path, project_root)
+        _emit(view)
     return 0
 
 
