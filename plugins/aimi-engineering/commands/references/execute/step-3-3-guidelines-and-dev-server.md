@@ -22,9 +22,9 @@ When stories target different projects (via the `project` field), each project m
 
 ### Container Dev Server Bootstrap
 
-**Skip this subsection entirely unless `CONTAINER_MODE` is true** (see Execution Mode Detection in Step 1). When it applies, it MUST complete before Open Visual Follow Session below computes `VISUAL_URL` — the dev server's port is not known until `serve start` succeeds, and this ordering (install-deps → serve start → compute VISUAL_URL → open the visual-follow session → wave loop) is a hard requirement. Starting a container's dev server after the visual-follow session has already opened leaves the browser pointed at a stale or nonexistent port and is treated as a defect, never a valid alternative ordering.
+**Skip this subsection entirely unless `CONTAINER_MODE` is true** (see Execution Mode Detection in Step 1). When it applies, it MUST complete before Open Visual Follow Session below computes `VISUAL_URL` — the dev server's port is not known until `serve start` succeeds, and this ordering (install-deps for every group → serve start for visual groups → compute VISUAL_URL → open the visual-follow session → wave loop) is a hard requirement. Starting a container's dev server after the visual-follow session has already opened leaves the browser pointed at a stale or nonexistent port and is treated as a defect, never a valid alternative ordering.
 
-Scan ALL pending stories (not just this wave's ready set — the dev server is started once, before the wave loop, and kept alive across every wave rather than restarted per wave) for the set of project groups that have at least one visual story:
+Install every project group (visual or not), then start a server for the groups that have a visual story. Scan ALL pending stories (not just this wave's ready set — the install and the dev server happen once, before the wave loop, and the server is kept alive across every wave rather than restarted per wave). `project-groups` gives the install set, `.` becoming `DEFAULT`; `verification-report` gives the visual subset:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -33,10 +33,11 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 # (tasks.py) -- any non-string shape collapsed to null there -- so `// "DEFAULT"`
 # below fires on exactly the cases it always did, and `unique` never sees an
 # array pretty-printed across several lines masquerading as several group keys.
+INSTALL_GROUP_KEYS=$($AIMI_CLI project-groups --tasks-file "$TASKS_PATH" | jq -r '.groups[] | if . == "." then "DEFAULT" else . end')
 VISUAL_GROUP_KEYS=$($AIMI_CLI verification-report --tasks-file "$TASKS_PATH" | jq -r '[.visual[] | (.project // "DEFAULT")] | unique | .[]')
 ```
 
-For each `group_key` in `VISUAL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):
+For each `group_key` in `INSTALL_GROUP_KEYS`, resolve its project root exactly as Multi-Repo Handling's grouping pattern does (`CWD`/`$AIMI_ROOT` for `"DEFAULT"`, otherwise `$AIMI_ROOT/[group_key]`):
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -52,10 +53,11 @@ else
   EXEC_ROOT="$AIMI_ROOT/[group_key]"
 fi
 EXEC_BRANCH="$BRANCH_NAME"
-HAS_VISUAL_STORY=true
+HAS_VISUAL_STORY=false
+printf '%s\n' "$VISUAL_GROUP_KEYS" | grep -qxF "[group_key]" && HAS_VISUAL_STORY=true
 ```
 
-Delegate to **Bootstrap a Container Dev Server** with these values — targeting `CONTAINER_PATHS[group_key]`, already created by Step 2. Adopt its captured URL into this group's own entry:
+Delegate to **Bootstrap a Container Dev Server** with these values — targeting `CONTAINER_PATHS[group_key]`, already created by Step 2. Its install block runs for this group whatever `HAS_VISUAL_STORY` says; carry the echoed `DEPS_STATUS[...]` as `DEPS_STATUS[group_key]`. Its serve block runs only when `HAS_VISUAL_STORY` is true; adopt the captured URL into this group's own entry:
 
 ```bash
 if [ -n "$SERVE_URL" ]; then

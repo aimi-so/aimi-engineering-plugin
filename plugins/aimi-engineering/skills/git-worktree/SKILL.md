@@ -75,7 +75,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh copy-
 # Clean up completed worktrees
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh cleanup
 
-# Install dependencies inside a worktree (detects package manager by lockfile)
+# Install dependencies inside a worktree (frozen command, no fallback, ends with DEPS_STATUS=<status>)
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
 
 # Start a dev server for a worktree, verified loopback-only after readiness (prints http://127.0.0.1:<port> and pid)
@@ -151,7 +151,7 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remov
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh remove feature-login --keep-branch
 ```
 
-Use `--keep-branch` when the worktree's branch is the actual deliverable — e.g. a feature or split branch a report just pointed the user at for review or `gh pr create` — and must survive worktree teardown.
+Use `--keep-branch` when the worktree's branch is the actual deliverable — e.g. a feature or split branch a report just pointed the user at for review or `/aimi:open-pr` — and must survive worktree teardown.
 
 ### `cleanup` or `clean`
 
@@ -168,51 +168,54 @@ bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh clean
 3. Removes selected worktrees
 4. Cleans up empty directories
 
-### `install-deps <worktree-name>`
+### `install-deps <worktree-name> | --root`
 
-Installs dependencies inside an existing worktree by detecting the package manager from its lockfile. Used by the container execution mode of `/aimi:execute` to prepare a worktree before starting its dev server.
+Installs dependencies with the frozen install command, run as argv, never eval. Callers install every container whether or not it serves a dev server; only `serve start` is gated on a visual story.
 
-**Example:**
 ```bash
 bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps feature-login
+bash ${CLAUDE_PLUGIN_ROOT}/skills/git-worktree/scripts/worktree-manager.sh install-deps --root
 ```
 
-**Package manager detection order (first match wins):**
-1. `bun.lockb` → `bun install`
-2. `pnpm-lock.yaml` → `pnpm install`
-3. `yarn.lock` → `yarn install`
-4. `package-lock.json` → `npm ci` (falls back to `npm install` if `npm ci` fails)
-5. No recognized lockfile but `package.json` present → `npm install`
+**`--root`:** installs the checkout the command runs from (an inline run), same engine, marker and status line, no `.worktrees/` check. A name beside it is a usage error (exit `1`, no stdout). A dependency directory with no marker of ours is user-managed: no installer, no marker, `DEPS_STATUS=ok`.
 
-**No `package.json`:** prints a single informational line and exits `0`. This is never treated as an error — plenty of worktrees are not Node projects.
+**Commands:** `bun install --frozen-lockfile`, `pnpm install --frozen-lockfile`, `npm ci`, `yarn install --frozen-lockfile` (classic) or `--immutable` (berry). **No fallback:** a failed command is final. A command with `; | & $ < >`, a backtick or a newline runs nothing; a first word missing from PATH fails naming it. `package.json` with no lockfile installs with the detector's command, warns that versions are not pinned and deletes any lockfile it created.
 
-**Install failure is advisory, not fatal:** if the package manager's install command fails, `install-deps` prints a clear error naming the package manager and worktree, and exits non-zero — but it never leaves partial state or trips the script's own `set -e`. **Callers must treat a non-zero exit as a degradation, not a hard failure.** In particular, the container mode of `/aimi:execute` must fall visual verification back to `skipped`/`failed` and must never abort its wave loop because `install-deps` failed.
+**Directories:** the root alone when it has something to install; otherwise each first-level subfolder with a manifest, sorted (hidden directories, `node_modules`, `vendor`, `dist`, `build` skipped). A failing subfolder is recorded `failed` and exits `1`, the rest are still installed.
+
+**Marker and status line:** `<git dir>/aimi-deps.json` holds `{status, directories:[{dir, status, command, lockfileHash}]}`. Stdout ends with `DEPS_STATUS=<status>`: `failed` exits `1`; `ok`, `nothing-to-install` and `needs-recipe` exit `0` (the last two run no installer). A re-run installs nothing when the marker records `ok` for the same command and lockfile hash and `node_modules` exists.
+
+**Treat exit `1` as a degradation:** container mode falls visual verification back to `skipped`/`failed` and never aborts its wave loop because of it.
 
 ### `serve start|stop|status <worktree-name>`
 
-Manages a dev server for a container worktree, so `/aimi:execute`'s container mode (and its visual verification step) can bring one up before a wave and tear it down afterward. `serve start` never reports a server "ready" unless it has verified the listener is actually loopback-only — see **Attempt-then-verify loopback bind** below.
+Manages a dev server for a container worktree, so `/aimi:execute`'s container mode (and visual verification) can bring one up before a wave and tear it down after. `serve start` never reports a server "ready" unless it has verified the listener is actually loopback-only — see **Attempt-then-verify loopback bind** below.
 
-- **`serve start <name>`** — Picks a free `127.0.0.1` port, launches the worktree's `dev` script bound to that port with the framework-appropriate host flag (see below), blocks on a readiness probe (an actual HTTP response, not just "the process started"), confirms via an ownership check that the port's listener really is the process it just spawned, then confirms via a bind-address check that the listener is actually loopback-only, and records the entry. Its stdout, on both the reuse path and a successful fresh launch, is exactly the raw `http://127.0.0.1:<port>` URL as its only line — pid and all other narration go to stderr, so a scripted caller can capture stdout directly. A live, already-registered server for the same worktree is reused as-is (a `kill -0` liveness check) instead of spawning a duplicate — the bind-address check runs only against a freshly-launched listener, never on reuse.
-- **`serve stop <name>`** — Kills the whole recorded process group (a negative-pid kill against the setsid-launched leader, not just the single pid), so children forked by `next dev`, `vite`, or similar are not orphaned. The state entry is removed whether or not the kill fully succeeded.
-- **`serve status <name>`** — Prints **exactly one line of JSON** to stdout: `{"running":<bool>,"port":<number|null>,"pid":<number|null>}`, exit code `0` in every state case — no `.aimi/` locatable, no entry registered, a dead pid, a live pid with a complete entry, or a live pid with a partial/corrupt entry missing `port`. This exact shape is a contract — other tooling parses it with `jq`; do not add, rename, or omit keys. Status is a true read-only verb: it never runs the bind-address check, and — unlike before — it never removes a stale (dead-pid) entry either; that cleanup is exclusively `serve start`'s (its own reuse path) and `serve stop`'s job, so a concurrent status call can never race a start writing the same key.
+- **`serve start <name> [--dir <subfolder>]`** — Picks a free `127.0.0.1` port, launches the worktree's `dev` script bound to that port with the framework-appropriate host flag (see below), blocks on a readiness probe (an actual HTTP response), confirms via an ownership check that the port's listener really is the process it just spawned, then confirms via a bind-address check that the listener is actually loopback-only, and records the entry. Its stdout, on both the reuse path and a successful fresh launch, is exactly the raw `http://127.0.0.1:<port>` URL as its only line — pid and all narration go to stderr, so a caller can capture stdout directly. A live, already-registered server for the same worktree is reused as-is (a `kill -0` liveness check) instead of spawning a duplicate — the bind-address check runs only against a freshly-launched listener, never on reuse.
+- **`serve stop <name>`** — Kills the whole recorded process group (a negative-pid kill against the setsid-launched leader), so children forked by `next dev` or `vite` are not orphaned. The state entry is removed whether or not the kill fully succeeded.
+- **`serve status <name>`** — Prints **exactly one line of JSON** to stdout: `{"running":<bool>,"port":<number|null>,"pid":<number|null>}`, exit code `0` in every state case (no `.aimi/`, no entry, a dead pid, a live pid with a complete or partial/corrupt entry). This shape is a contract parsed with `jq`; do not add, rename, or omit keys. Status is read-only: it never runs the bind-address check and never removes a stale (dead-pid) entry; that cleanup belongs to `serve start` (its reuse path) and `serve stop`, so a status call never races a start writing the same key.
 
-**Attempt-then-verify loopback bind:** only `HOST=127.0.0.1` is set unconditionally, and that alone satisfies CRA/webpack-dev-server but not Next.js (wants `-H`/`HOSTNAME`), Vite, Astro, or Nuxt (want `--host`) — an unrecognized flag can be silently ignored, leaving the dev server bound to a wildcard address (`0.0.0.0`/`::`) reachable from the local network, with the worktree's real `.env` secrets loaded. `serve start` closes that gap in two halves:
+**Attempt-then-verify loopback bind:** only `HOST=127.0.0.1` is set unconditionally, and that alone satisfies CRA/webpack-dev-server but not Next.js (wants `-H`/`HOSTNAME`), Vite, Astro, or Nuxt (want `--host`) — an ignored flag leaves a wildcard bind (`0.0.0.0`/`::`) reachable from the network, with the worktree's real `.env` loaded. `serve start` closes that gap in two halves:
 1. **Attempt:** it reads `scripts.dev` from the worktree's `package.json` and classifies the command (`next dev`, `vite`, `astro dev`, `nuxt dev`, `react-scripts`, or unrecognized) to pick the right flag — `-H 127.0.0.1` for Next.js, `--host 127.0.0.1` for Vite/Astro/Nuxt, or none beyond the env pair for react-scripts/unrecognized.
-2. **Verify:** once the readiness probe succeeds, it resolves the listening socket's actual local address (via `ss`, falling back to `lsof`) and refuses to adopt anything but exactly `127.0.0.1` or `::1` — killing the process group, printing an error naming the detected (or "unrecognized") command and the actual address found, and writing no state entry. This is the guarantee; the flag in step 1 is only the mechanism.
+2. **Verify:** once the readiness probe succeeds, it resolves the listening socket's local address (`ss`, falling back to `lsof`) and adopts only exactly `127.0.0.1` or `::1` — otherwise it kills the process group, names the detected command and the address found, and writes no state entry. This is the guarantee; the flag in step 1 is only the mechanism.
 
 **Port injection has no universal mechanism**, so `serve start` tries two, in order, each carrying the host flag from step 1 above alongside the port mechanism:
 1. A `PORT` environment variable on the spawned command (covers Next.js, CRA, Nuxt, Remix).
 2. If the readiness probe still doesn't see anything on the chosen port within the timeout, `serve start` kills that attempt's process group and retries once with `-- --port <n>` appended to the dev command (covers Vite, Astro).
 
-If neither mechanism yields a listener, `serve start` reports a clear failure naming both mechanisms tried and exits `0` — it never assumes success and never blocks the caller.
+If neither yields a listener, `serve start` reports a failure naming both and exits `0`.
 
-**Ownership check:** once the readiness probe succeeds, `serve start` resolves the pid actually holding the listening socket on the chosen port and compares its process group to the process it just spawned. A mismatch (a stale process from a prior run, or an unrelated foreign service already on that port) is reported clearly and never adopted as the worktree's dev server. This runs before, and is independent of, the bind-address verification above.
+**Ownership check:** once the readiness probe succeeds, `serve start` resolves the pid actually holding the listening socket on the chosen port and compares its process group to the process it just spawned. A mismatch (a stale process, or a foreign service already on that port) is reported and never adopted. This is independent of the bind-address verification above.
 
-**State:** `.aimi/state/dev-server.json`, keyed by the container's absolute resolved path (`realpath -m` of the worktree directory) — **not** by worktree/branch name, so two project groups whose container gets the same `[branchName]` (e.g. two `.aimi/`-sharing project_roots in a multi-repo layout) never collide on the same entry. Each entry holds `port`, `pid` (the process-group leader pid, used for teardown), and `startedAt`. Written exclusively through a Bash-level atomic (mktemp-then-move, `flock`-protected) write inside `worktree-manager.sh` — **never** through the Write or Edit tool, which `guard-runtime-state.py` blocks unconditionally for any path under `.aimi/state/`. The `.aimi/` directory is located by walking upward from the current directory (not via this script's own `GIT_ROOT`), since a nested phase/story container's `GIT_ROOT` resolves to its own worktree root, not necessarily where `.aimi/` lives.
+**State:** `.aimi/state/dev-server.json`, keyed by the container's absolute resolved path (`realpath -m` of the worktree directory) — **not** by worktree/branch name, so two project groups whose container gets the same `[branchName]` (e.g. two project roots sharing one `.aimi/`) never collide on the same entry. Each entry holds `port`, `pid` (the process-group leader pid, used for teardown), `startedAt` and `dir` (the served directory, `.` for the root; an entry without it counts as `.`). Written only by `worktree-manager.sh` (atomic, `flock`-protected), never through Write or Edit, which `guard-runtime-state.py` blocks under `.aimi/state/`. `.aimi/` is found by walking upward from the current directory, not via `GIT_ROOT`, which in a nested container is its own worktree root.
+
+**Which directory is served:** the worktree root. With no root `package.json` and no `--dir`, the only first-level subfolder whose `package.json` has a `dev` script (never a hidden directory, `node_modules`, `vendor`, `dist` or `build`) is served, from inside it, and named on stderr; several candidates print no URL and name them and `--dir`. `--dir` takes exactly one first-level directory; an empty value, a path, `..`, a hidden or skipped name, a missing directory, a symlink leaving the worktree, an unknown option or a root with its own `package.json` is a usage error naming `--dir`. A live server registered for another directory is neither reused nor stopped: no URL, and stderr names it and `serve stop`.
+
+**Dependency refusal:** before launching or reusing anything, `serve start` exits `0` with no URL and a stderr reason when the install marker records `failed` or `needs-recipe` for the served directory, or, with no marker entry, when neither it nor any directory up to the worktree root has `node_modules` or `.pnp.cjs` while a directory above the worktree does (it would run another checkout's packages).
 
 **No package.json, or no `dev` script:** a clean skip — exits `0`, writes no state, and is never reported as an error.
 
-**Every other failure degrades gracefully too:** port exhaustion, readiness timeout, ownership mismatch, a confirmed non-loopback bind, and kill failure never produce a non-zero exit or abort the caller. A missing or invalid `<worktree-name>` argument is a usage error in all three verbs — non-zero exit, stderr message, no stdout line at all. `serve start` treats two more conditions the same way, because both mean the caller passed a name that never corresponded to a real worktree, not a runtime degradation: a worktree directory that doesn't exist, and a resolved path that escapes `.worktrees/` (the same containment check and exit code `install-deps` already uses for both).
+**Every other failure degrades gracefully too:** port exhaustion, readiness timeout, ownership mismatch, a non-loopback bind and kill failure never exit non-zero. A missing or invalid `<worktree-name>` is a usage error in all three verbs — non-zero exit, stderr message, no stdout. `serve start` treats two more conditions the same way, since the name never matched a real worktree: a directory that doesn't exist, and a resolved path that escapes `.worktrees/` (the check `install-deps` uses).
 
 **Example:**
 ```bash

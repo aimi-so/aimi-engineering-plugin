@@ -46,7 +46,7 @@ three cases: the description named no candidate (and then no forge was
 consulted at all), the working directory is not a git repository, and every
 candidate was dropped. Individual candidates leave quietly too — `not_found`
 was a version fragment, a line number, or an issue on another repository;
-`status: "error"` is offline, no forge configured, no `gh`/`glab`/`tea`,
+`status: "error"` is offline, no forge configured, no `gh`/`glab`,
 unauthenticated, or rate-limited; anything but `open` (`closed`, and on a
 number that names a pull request, `merged`) is work a plan does not close.
 Never surface a raw CLI error from this call to the user: a plan that cannot

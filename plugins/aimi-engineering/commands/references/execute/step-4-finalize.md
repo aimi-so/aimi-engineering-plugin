@@ -81,7 +81,7 @@ Task(
 
 ```
 cd EXEC_ROOT[group_key]
-merge_result = $WORKTREE_MGR merge-all [FINALIZE_WORKTREE] --into [EXEC_BRANCH[group_key]]
+merge_result = $WORKTREE_MGR merge-all [FINALIZE_WORKTREE] --subject-for [FINALIZE_WORKTREE] "Merge finalize step" --into [EXEC_BRANCH[group_key]]
 
 if merge_result is non-zero:
     FINALIZE_STATUS = failed

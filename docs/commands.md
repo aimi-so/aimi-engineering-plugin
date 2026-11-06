@@ -149,7 +149,7 @@ Multi-agent code review. Runs architecture, security, simplicity, performance, a
 /aimi:review feat/auth  # a specific branch
 ```
 
-Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+Detects which forge your remote points at rather than assuming GitHub — GitHub and GitLab are the only adapters today; any other host gets manual steps.
 
 ---
 
@@ -162,7 +162,7 @@ Opens a pull request from the current task branch. Detects the parent branch, bu
 /aimi:open-pr --branch feat/user-auth
 ```
 
-Detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+Detects which forge your remote points at rather than assuming GitHub — GitHub and GitLab are the only adapters today; any other host gets manual steps.
 
 ---
 
@@ -174,7 +174,7 @@ Reproduces a bug report and confirms whether the described behavior is real, usi
 /aimi:validate-bug Login fails silently when the email has a plus sign
 ```
 
-When given an issue or PR reference, detects which forge your remote points at rather than assuming GitHub — GitHub is the only working adapter today, with GitLab and Gitea behind the same contract.
+When given an issue or PR reference, detects which forge your remote points at rather than assuming GitHub — GitHub and GitLab are the only adapters today; any other host gets manual steps.
 
 ---
 

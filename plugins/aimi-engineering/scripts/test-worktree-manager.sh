@@ -752,6 +752,312 @@ test_serve_status_stale_after_external_kill() {
 }
 
 # ============================================================================
+# Serve Deps Tests
+# ============================================================================
+# serve start's pre-launch path: the install marker, the borrowed-dependency
+# walk, the subfolder pick and --dir. The dev script appends $PWD to a witness
+# file outside the worktree, so "launched nothing" is an absent line rather
+# than an inference. The gate is also called directly by sourcing the script.
+
+sd_setup() {
+  setup_wtm_fixture
+  setup_npm_stub
+  SD_NAME="${1:-sd-branch}"
+  SD_WT="$WTM_FIXTURE_REPO/.worktrees/$SD_NAME"
+  SD_WITNESS=$(mktemp)
+  rm -f "$SD_WITNESS"
+  export SD_WITNESS
+  export DEV_SERVER_READY_TIMEOUT=10
+  bash "$WTM" create "$SD_NAME" >/dev/null 2>&1
+}
+
+sd_teardown() {
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1 || true
+  rm -f "$SD_WITNESS"
+  unset SD_WITNESS
+  teardown_npm_stub
+  teardown_wtm_fixture
+}
+
+# $1 target directory: writes a package.json whose dev script records $PWD.
+sd_package() {
+  mkdir -p "$1"
+  cat > "$1/package.json" << 'PKG'
+{
+  "name": "wtm-serve-deps",
+  "scripts": {
+    "dev": "echo \"$PWD\" >> \"$SD_WITNESS\"; exec python3 -m http.server \"$PORT\" --bind 127.0.0.1"
+  }
+}
+PKG
+}
+
+sd_marker() {
+  local m
+  m=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$SD_WT")
+  printf '%s\n' "$1" > "$m"
+}
+
+# Sets SD_OUT (stdout), SD_ERR (stderr) and SD_RC of `serve start`.
+sd_start() {
+  local errf
+  errf=$(mktemp)
+  SD_OUT=$(bash "$WTM" serve start "$SD_NAME" "$@" 2>"$errf")
+  SD_RC=$?
+  SD_ERR=$(cat "$errf")
+  rm -f "$errf"
+}
+
+# Prints "<rc>|<reason>" of _serve_deps_gate <SD_WT> <dir>.
+sd_gate() {
+  bash -c 'source "$1"; set +e; out=$(_serve_deps_gate "$2" "$3"); rc=$?; printf "%s|%s" "$rc" "$out"' _ "$WTM" "$SD_WT" "$1"
+}
+
+sd_launched() {
+  if [[ -s "$SD_WITNESS" ]]; then echo true; else echo false; fi
+}
+
+test_serve_deps_marker_refuses() {
+  echo ""
+  echo "=== Testing serve deps — marker failed / needs-recipe ==="
+  sd_setup sd-marker
+  sd_package "$SD_WT"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: failed marker — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: failed marker — nothing on stdout"
+  assert_stderr_contains "install failed" "$SD_ERR" "serve deps: failed marker — names the failed install"
+  assert_eq "false" "$(sd_launched)" "serve deps: failed marker — no dev server launched"
+
+  sd_marker '{"status":"needs-recipe","directories":[{"dir":".","status":"needs-recipe","command":"","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: needs-recipe marker — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: needs-recipe marker — nothing on stdout"
+  assert_stderr_contains "no install command is known" "$SD_ERR" "serve deps: needs-recipe marker — says no command is known"
+  assert_eq "false" "$(sd_launched)" "serve deps: needs-recipe marker — no dev server launched"
+
+  sd_marker '{"status":"ok","directories":[{"dir":".","status":"ok","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: ok marker — starts although an ancestor holds node_modules"
+  assert_eq "true" "$(sd_launched)" "serve deps: ok marker — dev server launched"
+
+  sd_teardown
+}
+
+test_serve_deps_registered_server_kept() {
+  echo ""
+  echo "=== Testing serve deps — registered server is neither reused nor stopped ==="
+  sd_setup sd-kept
+  sd_package "$SD_WT"
+
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: registered — first start serves"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed","command":"npm ci","lockfileHash":""}]}'
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: registered — refusal exit code"
+  assert_eq "" "$SD_OUT" "serve deps: registered — refusal prints no URL (no reuse)"
+  assert_stderr_contains "install failed" "$SD_ERR" "serve deps: registered — refusal names the failed install"
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: registered — server still running"
+
+  sd_teardown
+}
+
+test_serve_deps_gate_contract() {
+  echo ""
+  echo "=== Testing serve deps — _serve_deps_gate return contract ==="
+  sd_setup sd-gate
+  mkdir -p "$SD_WT/web" "$SD_WT/api"
+
+  assert_eq "0|" "$(sd_gate .)" "serve deps: gate — no marker, no dependencies anywhere allows"
+
+  sd_marker '{"status":"failed","directories":[{"dir":".","status":"failed"},{"dir":"web","status":"ok"},{"dir":"api","status":"needs-recipe"}]}'
+  local g
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — failed entry returns 1"
+  assert_eq "1" "$(printf '%s' "${g#*|}" | wc -l | tr -d ' ' | awk '{print ($1<=1)?1:0}')" "serve deps: gate — one reason line"
+  assert_contains "failed" "${g#*|}" "serve deps: gate — failed reason says failed"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — ok sibling is not blocked by a failed directory"
+  g=$(sd_gate api)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — needs-recipe entry returns 1"
+  assert_contains "no install command" "${g#*|}" "serve deps: gate — needs-recipe reason"
+
+  sd_marker 'not json {'
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — unparseable marker falls through to the dependency rule"
+  assert_contains "$WTM_FIXTURE_REPO" "${g#*|}" "serve deps: gate — the ancestor is named"
+
+  sd_marker '{"status":"ok","directories":[{"dir":"web","status":"ok"}]}'
+  g=$(sd_gate .)
+  assert_eq "1" "${g%%|*}" "serve deps: gate — entry-less marker falls through to the dependency rule"
+
+  sd_marker '{"status":"ok","directories":[{"dir":"./web","status":"ok"}]}'
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — a ./-prefixed marker dir matches"
+
+  rm -f "$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$SD_WT")"
+  mkdir -p "$SD_WT/web/node_modules"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — node_modules in the served directory allows"
+  assert_eq "1" "$(sd_gate api | cut -d'|' -f1)" "serve deps: gate — a sibling's node_modules does not cover the served directory"
+
+  rm -rf "$SD_WT/web/node_modules"
+  mkdir -p "$SD_WT/node_modules"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — node_modules hoisted at the worktree root allows"
+  rm -rf "$SD_WT/node_modules"
+  : > "$SD_WT/.pnp.cjs"
+  assert_eq "0|" "$(sd_gate web)" "serve deps: gate — .pnp.cjs at the worktree root allows (yarn berry)"
+  rm -f "$SD_WT/.pnp.cjs"
+  assert_eq "1" "$(sd_gate web | cut -d'|' -f1)" "serve deps: gate — only an ancestor's node_modules refuses"
+
+  sd_teardown
+}
+
+test_serve_deps_borrowed() {
+  echo ""
+  echo "=== Testing serve deps — borrowed dependencies ==="
+  sd_setup sd-borrow
+  sd_package "$SD_WT"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: borrowed — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: borrowed — no URL"
+  assert_stderr_contains "$WTM_FIXTURE_REPO" "$SD_ERR" "serve deps: borrowed — stderr names the ancestor"
+  assert_eq "false" "$(sd_launched)" "serve deps: borrowed — nothing launched"
+
+  mkdir -p "$SD_WT/node_modules"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: own node_modules — starts"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+  rm -rf "$SD_WT/node_modules" "$SD_WITNESS"
+
+  : > "$SD_WT/.pnp.cjs"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: yarn berry .pnp.cjs without node_modules — starts"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+
+  sd_teardown
+
+  sd_setup sd-clean
+  sd_package "$SD_WT"
+  sd_start
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: no dependency directory anywhere — starts as before"
+  sd_teardown
+}
+
+test_serve_deps_subfolder_pick() {
+  echo ""
+  echo "=== Testing serve deps — subfolder pick ==="
+  sd_setup sd-pick
+  sd_package "$SD_WT/web"
+  mkdir -p "$SD_WT/docs" "$SD_WT/.hidden" "$SD_WT/vendor" "$SD_WT/dist" "$SD_WT/build" "$SD_WT/node_modules/pkg"
+  printf '{"name":"docs"}\n' > "$SD_WT/docs/package.json"
+  for d in .hidden vendor dist build node_modules/pkg; do sd_package "$SD_WT/$d"; done
+
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: pick — exit code"
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: pick — serves the only candidate"
+  assert_stderr_contains "web" "$SD_ERR" "serve deps: pick — names the subfolder on stderr"
+  assert_eq "$(cd "$SD_WT/web" && pwd -P)" "$(head -n 1 "$SD_WITNESS" | xargs -I{} sh -c 'cd "{}" && pwd -P')" \
+    "serve deps: pick — the dev command ran from inside the subfolder"
+  assert_eq "web" "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: pick — registry entry records dir"
+  bash "$WTM" serve stop "$SD_NAME" >/dev/null 2>&1
+  rm -f "$SD_WITNESS"
+
+  sd_package "$SD_WT/admin"
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: several candidates — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: several candidates — no URL"
+  assert_stderr_contains "admin, web" "$SD_ERR" "serve deps: several candidates — names them"
+  assert_stderr_contains "--dir" "$SD_ERR" "serve deps: several candidates — names --dir"
+  assert_eq "false" "$(sd_launched)" "serve deps: several candidates — nothing launched"
+  sd_teardown
+
+  sd_setup sd-none
+  mkdir -p "$SD_WT/docs"
+  printf '{"name":"docs"}\n' > "$SD_WT/docs/package.json"
+  sd_start
+  assert_exit_code "0" "$SD_RC" "serve deps: no candidate — clean skip exit code"
+  assert_eq "" "$SD_OUT" "serve deps: no candidate — clean skip prints nothing"
+  sd_teardown
+}
+
+test_serve_deps_dir_option() {
+  echo ""
+  echo "=== Testing serve deps — --dir ==="
+  sd_setup sd-dir
+  sd_package "$SD_WT/web"
+  sd_package "$SD_WT/api"
+  mkdir -p "$SD_WT/empty" "$SD_WT/.hid" "$SD_WT/node_modules" "$WTM_FIXTURE_REPO/outside"
+  ln -s "$WTM_FIXTURE_REPO/outside" "$SD_WT/escape"
+
+  local bad
+  for bad in "" "web/x" ".." ".hid" "node_modules" "nope" "escape"; do
+    sd_start --dir "$bad"
+    assert_eq "1::true" "$SD_RC:$SD_OUT:$([[ "$SD_ERR" == *"--dir"* ]] && echo true || echo false)" \
+      "serve deps: --dir '${bad}' is a usage error naming --dir"
+  done
+  sd_start --bogus
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: unknown option is a usage error"
+  sd_start web
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: a second positional argument is a usage error"
+  sd_start --dir
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: --dir with no value is a usage error"
+
+  sd_start --dir empty
+  assert_eq "0:" "$SD_RC:$SD_OUT" "serve deps: --dir on a folder without package.json is a clean skip"
+
+  sd_start --dir web
+  assert_contains "http://127.0.0.1:" "$SD_OUT" "serve deps: --dir web serves web"
+  local url_web="$SD_OUT"
+  assert_eq "web" "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: registry entry carries dir=web"
+
+  sd_start --dir api
+  assert_exit_code "0" "$SD_RC" "serve deps: other directory — exit code"
+  assert_eq "" "$SD_OUT" "serve deps: other directory — no URL"
+  assert_stderr_contains "web" "$SD_ERR" "serve deps: other directory — names the registered directory"
+  assert_stderr_contains "serve stop" "$SD_ERR" "serve deps: other directory — names serve stop"
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: other directory — registered server left running"
+
+  sd_start --dir web
+  assert_eq "$url_web" "$SD_OUT" "serve deps: same directory — reused"
+  sd_teardown
+
+  sd_setup sd-dir-root
+  sd_package "$SD_WT"
+  sd_package "$SD_WT/web"
+  sd_start --dir web
+  assert_eq "1:" "$SD_RC:$SD_OUT" "serve deps: --dir with a root package.json is a usage error"
+  sd_start
+  assert_eq "." "$(jq -r 'to_entries[0].value.dir' "$WTM_FIXTURE_REPO/.aimi/state/dev-server.json")" \
+    "serve deps: root server registers dir=."
+  local root_url="$SD_OUT"
+  local state="$WTM_FIXTURE_REPO/.aimi/state/dev-server.json"
+  jq 'map_values(del(.dir))' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  sd_start
+  assert_eq "$root_url" "$SD_OUT" "serve deps: an entry without dir counts as ."
+  jq 'map_values(.dir = "web")' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+  sd_start
+  assert_eq "" "$SD_OUT" "serve deps: a server registered for web is not reused for ."
+  assert_eq "true" "$(bash "$WTM" serve status "$SD_NAME" 2>/dev/null | jq -r '.running')" \
+    "serve deps: status keyed by worktree, still running"
+  sd_teardown
+}
+
+test_serve_deps_docs() {
+  echo ""
+  echo "=== Testing serve deps — usage text ==="
+  assert_contains "[--dir <subfolder>]" "$(bash "$WTM" help 2>&1)" "serve deps: help documents serve start --dir"
+  assert_contains "borrowed" "$(bash "$WTM" help 2>&1)" "serve deps: help documents the borrowed-dependency refusal"
+}
+
+# ============================================================================
 # Install Deps Tests
 # ============================================================================
 
@@ -774,7 +1080,512 @@ test_install_deps_skips_without_package_json() {
     "install-deps: no package.json — informational message"
   assert_eq "false" "$([[ -d "$worktree_path/node_modules" ]] && echo true || echo false)" \
     "install-deps: no package.json — no node_modules created"
+  assert_eq "DEPS_STATUS=nothing-to-install" "$(printf '%s\n' "$out" | tail -n 1)" \
+    "install-deps: no package.json — status line"
+  local marker
+  marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$worktree_path")
+  assert_eq "nothing-to-install" "$(jq -r .status "$marker")" \
+    "install-deps: no package.json — marker status"
+  assert_eq "0" "$(jq -r '.directories | length' "$marker")" \
+    "install-deps: no package.json — marker directories empty"
 
+  teardown_wtm_fixture
+}
+
+# ----------------------------------------------------------------------------
+# Install engine tests. Stubs for bun, npm, pnpm and yarn log
+# "<tool>|<cwd>|<args>" to $DE_LOG, create node_modules/ (and, for `npm
+# install`, a package-lock.json), and fail in any directory holding a
+# .stub-fail file. No real package manager and no network run.
+# ----------------------------------------------------------------------------
+
+de_setup() {
+  setup_wtm_fixture
+  DE_STUB_DIR=$(mktemp -d)
+  DE_LOG="$DE_STUB_DIR/log"
+  : > "$DE_LOG"
+  local t
+  for t in bun npm pnpm yarn mytool; do
+    cat > "$DE_STUB_DIR/$t" << 'STUB'
+#!/bin/bash
+printf '%s|%s|%s\n' "$(basename "$0")" "$PWD" "$*" >> "$DE_LOG"
+if [[ -e "$PWD/.stub-fail" ]]; then exit 1; fi
+mkdir -p node_modules
+if [[ "$(basename "$0")" == "npm" && "${1:-}" == "install" ]]; then echo '{}' > package-lock.json; fi
+exit 0
+STUB
+    chmod +x "$DE_STUB_DIR/$t"
+  done
+  DE_OLD_PATH="$PATH"
+  export PATH="$DE_STUB_DIR:$PATH"
+  export DE_LOG
+}
+
+de_teardown() {
+  export PATH="$DE_OLD_PATH"
+  rm -rf "$DE_STUB_DIR"
+  unset DE_STUB_DIR DE_OLD_PATH DE_LOG
+  teardown_wtm_fixture
+}
+
+# $1 branch: create the worktree, set DE_WT; then run install-deps -> DE_OUT/DE_RC
+de_make_wt() {
+  bash "$WTM" create "$1" >/dev/null 2>&1
+  DE_WT="$WTM_FIXTURE_REPO/.worktrees/$1"
+}
+
+de_run() {
+  DE_OUT=$(bash "$WTM" install-deps "$1" 2>&1)
+  DE_RC=$?
+}
+
+de_last_line() { printf '%s\n' "$DE_OUT" | tail -n 1; }
+
+test_deps_engine_frozen_bun_only() {
+  echo ""
+  echo "=== Testing install-deps engine — bun.lock runs the frozen command only ==="
+  de_setup
+  de_make_wt eng-bun
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo 'lock' > "$DE_WT/bun.lock"
+  de_run eng-bun
+  assert_exit_code "0" "$DE_RC" "engine bun: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine bun: last line"
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine bun: one command ran"
+  assert_contains "bun|" "$(cat "$DE_LOG")" "engine bun: bun ran"
+  assert_contains "|install --frozen-lockfile" "$(cat "$DE_LOG")" "engine bun: frozen argv"
+  assert_eq "false" "$([[ -e "$DE_WT/package-lock.json" ]] && echo true || echo false)" "engine bun: no package-lock.json"
+  assert_eq "true" "$([[ -f "$DE_WT/bun.lock" ]] && echo true || echo false)" "engine bun: existing lockfile kept"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$DE_WT")
+  assert_eq "ok" "$(jq -r .status "$marker")" "engine bun: marker status"
+  assert_eq "." "$(jq -r '.directories[0].dir' "$marker")" "engine bun: marker dir"
+  assert_eq "bun install --frozen-lockfile" "$(jq -r '.directories[0].command' "$marker")" "engine bun: marker command"
+  assert_not_contains "aimi-deps" "$(git -C "$DE_WT" status --porcelain)" "engine bun: marker not in git status"
+  de_teardown
+}
+
+test_deps_engine_failure_has_no_fallback() {
+  echo ""
+  echo "=== Testing install-deps engine — failed npm ci runs nothing afterwards ==="
+  de_setup
+  de_make_wt eng-fail
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo '{}' > "$DE_WT/package-lock.json"
+  touch "$DE_WT/.stub-fail"
+  de_run eng-fail
+  assert_exit_code "1" "$DE_RC" "engine fail: exit code"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine fail: last line"
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine fail: only one command ran"
+  assert_contains "npm|" "$(cat "$DE_LOG")" "engine fail: it was npm"
+  assert_contains "|ci" "$(cat "$DE_LOG")" "engine fail: npm ci"
+  de_teardown
+}
+
+test_deps_engine_refuses_metacharacters_and_missing_word() {
+  echo ""
+  echo "=== Testing install-deps engine — argv guard ==="
+  de_setup
+  local rc out
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'mytool install; mytool again' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: metacharacter command fails"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine guard: metacharacter command ran nothing"
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'mytool install $(id)' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: substitution refused"
+  out=$(bash -c 'source "$1"; _deps_run_command "$2" "$3"' _ "$WTM" "$WTM_FIXTURE_REPO" 'no-such-tool-xyz install' 2>&1); rc=$?
+  assert_eq "1" "$rc" "engine guard: missing first word fails"
+  assert_contains "no-such-tool-xyz" "$out" "engine guard: missing first word is named"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine guard: nothing ran"
+
+  # A configured recipe with a metacharacter never reaches the guard: the
+  # detector answers needs-recipe and nothing is installed.
+  de_make_wt eng-recipe
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  mkdir -p "$WTM_FIXTURE_REPO/.aimi"
+  echo '{"dependencies":{"install":{".":"mytool install; mytool again"}}}' > "$WTM_FIXTURE_REPO/.aimi/config.json"
+  de_run eng-recipe
+  assert_exit_code "0" "$DE_RC" "engine recipe: needs-recipe exits 0"
+  assert_eq "DEPS_STATUS=needs-recipe" "$(de_last_line)" "engine recipe: status line"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine recipe: no installer ran"
+  de_teardown
+}
+
+test_deps_engine_unpinned_install_cleans_lockfile() {
+  echo ""
+  echo "=== Testing install-deps engine — no lockfile ==="
+  de_setup
+  de_make_wt eng-nolock
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  de_run eng-nolock
+  assert_exit_code "0" "$DE_RC" "engine nolock: exit code"
+  assert_contains "not pinned" "$DE_OUT" "engine nolock: warns versions are not pinned"
+  assert_contains "|install" "$(cat "$DE_LOG")" "engine nolock: npm install ran"
+  assert_eq "false" "$([[ -e "$DE_WT/package-lock.json" ]] && echo true || echo false)" "engine nolock: created lockfile deleted"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine nolock: status"
+  de_teardown
+}
+
+test_deps_engine_subfolders() {
+  echo ""
+  echo "=== Testing install-deps engine — first-level subfolders ==="
+  de_setup
+  de_make_wt eng-sub
+  local d
+  for d in b-api a-web c-lib .hidden node_modules vendor dist build; do
+    mkdir -p "$DE_WT/$d"
+    echo '{"name":"x"}' > "$DE_WT/$d/package.json"
+    echo 'l' > "$DE_WT/$d/pnpm-lock.yaml"
+  done
+  touch "$DE_WT/b-api/.stub-fail"
+  de_run eng-sub
+  assert_exit_code "1" "$DE_RC" "engine sub: a failing subfolder exits 1"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine sub: status line"
+  assert_eq "3" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine sub: every eligible subfolder attempted"
+  assert_eq "a-web b-api c-lib" "$(cut -d'|' -f2 "$DE_LOG" | xargs -n1 basename | tr '\n' ' ' | sed 's/ $//')" "engine sub: sorted order"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$DE_WT")
+  assert_eq "ok failed ok" "$(jq -r '[.directories[].status] | join(" ")' "$marker")" "engine sub: per-directory status"
+  assert_eq "a-web b-api c-lib" "$(jq -r '[.directories[].dir] | join(" ")' "$marker")" "engine sub: per-directory name"
+  de_teardown
+}
+
+test_deps_engine_rerun_uses_marker() {
+  echo ""
+  echo "=== Testing install-deps engine — marker re-run ==="
+  de_setup
+  de_make_wt eng-rerun
+  echo '{"name":"x"}' > "$DE_WT/package.json"
+  echo 'one' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: first run installs"
+  de_run eng-rerun
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: same lockfile installs nothing"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine rerun: status ok"
+  echo 'two' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "2" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: changed lockfile installs again"
+  rm -rf "$DE_WT/node_modules"
+  de_run eng-rerun
+  assert_eq "3" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: missing node_modules installs again"
+  touch "$DE_WT/.stub-fail"
+  echo 'three' > "$DE_WT/bun.lock"
+  de_run eng-rerun
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "engine rerun: failure recorded"
+  rm -f "$DE_WT/.stub-fail"
+  de_run eng-rerun
+  assert_eq "5" "$(wc -l < "$DE_LOG" | tr -d ' ')" "engine rerun: recorded failure installs again"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "engine rerun: recovers"
+  de_teardown
+}
+
+test_deps_engine_project_key_of_child_repository() {
+  echo ""
+  echo "=== Testing install-deps engine — child repository of a non-git .aimi parent ==="
+  local parent child old_pwd="$PWD"
+  parent=$(mktemp -d)
+  child="$parent/svc-api"
+  mkdir -p "$parent/.aimi" "$child"
+  echo '{"dependencies":{"install":{"svc-api":"mytool run setup"}}}' > "$parent/.aimi/config.json"
+  DE_STUB_DIR=$(mktemp -d); DE_LOG="$DE_STUB_DIR/log"; : > "$DE_LOG"; export DE_LOG
+  cat > "$DE_STUB_DIR/mytool" << 'STUB'
+#!/bin/bash
+printf '%s|%s|%s\n' "$(basename "$0")" "$PWD" "$*" >> "$DE_LOG"
+STUB
+  chmod +x "$DE_STUB_DIR/mytool"
+  DE_OLD_PATH="$PATH"; export PATH="$DE_STUB_DIR:$PATH"
+  ( cd "$child" && git init -q && git config user.email t@example.com && git config user.name T \
+    && git checkout -q -b main && echo i > README.md && git add README.md && git commit -q -m init )
+  cd "$child"
+  bash "$WTM" create eng-key >/dev/null 2>&1
+  echo '{"name":"x"}' > "$child/.worktrees/eng-key/package.json"
+  local out rc
+  out=$(bash "$WTM" install-deps eng-key 2>&1); rc=$?
+  cd "$old_pwd"
+  assert_exit_code "0" "$rc" "engine key: exit code"
+  assert_contains "mytool|" "$(cat "$DE_LOG")" "engine key: recipe under the child's own key ran"
+  assert_contains "|run setup" "$(cat "$DE_LOG")" "engine key: recipe argv"
+  assert_eq "DEPS_STATUS=ok" "$(printf '%s\n' "$out" | tail -n 1)" "engine key: status"
+  export PATH="$DE_OLD_PATH"
+  rm -rf "$parent" "$DE_STUB_DIR"
+  unset DE_STUB_DIR DE_OLD_PATH DE_LOG
+}
+
+# $1: run install-deps --root from the fixture checkout -> DE_OUT/DE_RC
+de_run_root() {
+  DE_OUT=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps --root 2>/dev/null)
+  DE_RC=$?
+}
+
+test_deps_root_installs_checkout() {
+  echo ""
+  echo "=== Testing install-deps --root — installs the checkout it runs from ==="
+  de_setup
+  echo '{"name":"x"}' > "$WTM_FIXTURE_REPO/package.json"
+  echo 'lock' > "$WTM_FIXTURE_REPO/bun.lock"
+  de_run_root
+  assert_exit_code "0" "$DE_RC" "root install: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "root install: last line"
+  assert_contains "bun|$WTM_FIXTURE_REPO|install --frozen-lockfile" "$(cat "$DE_LOG")" "root install: frozen command ran in the checkout"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$WTM_FIXTURE_REPO")
+  assert_eq "ok" "$(jq -r .status "$marker")" "root install: marker status"
+  de_run_root
+  assert_eq "1" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root install: marker re-run installs nothing"
+  touch "$WTM_FIXTURE_REPO/.stub-fail"
+  echo 'two' > "$WTM_FIXTURE_REPO/bun.lock"
+  de_run_root
+  assert_exit_code "1" "$DE_RC" "root install: failure exits 1"
+  assert_eq "DEPS_STATUS=failed" "$(de_last_line)" "root install: failure status"
+  rm -f "$WTM_FIXTURE_REPO/.stub-fail"
+  de_teardown
+}
+
+test_deps_root_leaves_user_managed_install_alone() {
+  echo ""
+  echo "=== Testing install-deps --root — a user-managed install is left alone ==="
+  de_setup
+  echo '{"name":"x"}' > "$WTM_FIXTURE_REPO/package.json"
+  echo 'lock' > "$WTM_FIXTURE_REPO/bun.lock"
+  mkdir -p "$WTM_FIXTURE_REPO/node_modules"
+  de_run_root
+  assert_exit_code "0" "$DE_RC" "root user-managed: exit code"
+  assert_eq "DEPS_STATUS=ok" "$(de_last_line)" "root user-managed: status ok"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root user-managed: no installer ran"
+  local marker; marker=$(bash -c 'source "$1"; _deps_marker_path "$2"' _ "$WTM" "$WTM_FIXTURE_REPO")
+  assert_eq "false" "$([[ -e "$marker" ]] && echo true || echo false)" "root user-managed: no marker written"
+  rm -rf "$WTM_FIXTURE_REPO/node_modules"
+  de_teardown
+}
+
+test_deps_root_with_a_name_is_a_usage_error() {
+  echo ""
+  echo "=== Testing install-deps --root — a name beside it is refused ==="
+  de_setup
+  local out rc
+  out=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps --root some-name 2>/dev/null); rc=$?
+  assert_exit_code "1" "$rc" "root usage: exit code"
+  assert_eq "" "$out" "root usage: nothing on stdout"
+  out=$(cd "$WTM_FIXTURE_REPO" && bash "$WTM" install-deps some-name --root 2>/dev/null); rc=$?
+  assert_exit_code "1" "$rc" "root usage: name first, exit code"
+  assert_eq "" "$out" "root usage: name first, nothing on stdout"
+  assert_eq "0" "$(wc -l < "$DE_LOG" | tr -d ' ')" "root usage: no installer ran"
+  de_teardown
+}
+
+# ============================================================================
+# Dependency Installer Detection Tests
+# ============================================================================
+
+# Run _detect_dependency_installer in a fresh shell that sources the manager.
+# $1 dir under test, $2 project key (optional), $3 cwd (default: fixture repo),
+# $4 PATH shim dir (optional, put ahead of PATH after sourcing).
+dd_detect() {
+  local dir="$1" key="${2:-.}" cwd="${3:-$WTM_FIXTURE_REPO}" shim="${4:-}"
+  ( cd "$WTM_FIXTURE_REPO" && bash -c '
+      source "$1" || exit 99
+      cd "$4" || exit 98
+      if [ -n "$5" ]; then PATH="$5:$PATH"; fi
+      _detect_dependency_installer "$2" "$3"
+      echo "rc=$?" >&2
+    ' _ "$WTM" "$dir" "$key" "$cwd" "$shim" 2>/dev/null )
+}
+
+dd_field() { printf '%s' "$1" | jq -r ".$2"; }
+
+dd_check() {
+  # $1 label, $2 json, $3 status, $4 manager, $5 command, $6 lockfile
+  assert_eq "$3|$4|$5|$6" \
+    "$(dd_field "$2" status)|$(dd_field "$2" manager)|$(dd_field "$2" command)|$(dd_field "$2" lockfile)" \
+    "detect deps: $1"
+}
+
+test_detect_deps_lockfiles() {
+  echo ""
+  echo "=== Testing dependency installer detection — lockfiles ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  out=$(dd_detect "$d")
+  assert_eq "{\"status\":\"ready\",\"manager\":\"bun\",\"command\":\"bun install --frozen-lockfile\",\"lockfile\":\"bun.lock\",\"source\":\"repository\",\"reason\":\"\"}" "$out" \
+    "detect deps: bun.lock only gives the exact one-line answer"
+  assert_eq "1" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "detect deps: answer is a single line"
+  assert_eq "bun.lock package.json" "$(ls -A "$d" | tr '\n' ' ' | sed 's/ $//')" "detect deps: detector writes no file"
+  rm -rf "$d"
+
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lockb"
+  dd_check "bun.lockb" "$(dd_detect "$d")" ready bun "bun install --frozen-lockfile" bun.lockb
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/pnpm-lock.yaml"
+  dd_check "pnpm-lock.yaml" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/package-lock.json"
+  dd_check "package-lock.json" "$(dd_detect "$d")" ready npm "npm ci" package-lock.json
+  touch "$d/npm-shrinkwrap.json"
+  dd_check "shrinkwrap reported beside package-lock" "$(dd_detect "$d")" ready npm "npm ci" npm-shrinkwrap.json
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock" "$d/bun.lockb"
+  dd_check "bun.lock beside bun.lockb is one manager" "$(dd_detect "$d")" ready bun "bun install --frozen-lockfile" bun.lock
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_yarn_generation() {
+  echo ""
+  echo "=== Testing dependency installer detection — yarn generation ==="
+  setup_wtm_fixture
+  local d
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; printf '# yarn lockfile v1\n' > "$d/yarn.lock"
+  dd_check "yarn classic by header" "$(dd_detect "$d")" ready yarn "yarn install --frozen-lockfile" yarn.lock
+  printf '__metadata:\n  version: 6\n' > "$d/yarn.lock"
+  dd_check "yarn berry by __metadata" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  printf '# yarn lockfile v1\n' > "$d/yarn.lock"; echo '{"packageManager":"yarn@4.1.0"}' > "$d/package.json"
+  dd_check "packageManager major beats the header" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  echo '{"packageManager":"yarn@1.22.19"}' > "$d/package.json"; printf '__metadata:\n' > "$d/yarn.lock"
+  dd_check "packageManager major 1 is classic" "$(dd_detect "$d")" ready yarn "yarn install --frozen-lockfile" yarn.lock
+  echo '{}' > "$d/package.json"; : > "$d/yarn.lock"
+  dd_check "yarn undecided needs a recipe" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo 'nodeLinker: node-modules' > "$d/.yarnrc.yml"
+  dd_check "yarn berry by .yarnrc.yml" "$(dd_detect "$d")" ready yarn "yarn install --immutable" yarn.lock
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_declared_manager() {
+  echo ""
+  echo "=== Testing dependency installer detection — declared manager ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{"packageManager":"pnpm@9.1.0"}' > "$d/package.json"; touch "$d/pnpm-lock.yaml" "$d/yarn.lock"
+  dd_check "declared pnpm wins over a yarn.lock beside it" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"; d=$(mktemp -d); echo '{"packageManager":"bun@1.1.0"}' > "$d/package.json"
+  out=$(dd_detect "$d")
+  dd_check "declared bun with no lockfile is plain install" "$out" ready bun "bun install" ""
+  assert_eq "no lockfile: versions are not pinned" "$(dd_field "$out" reason)" "detect deps: unpinned reason is the fixed phrase"
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"
+  dd_check "undeclared package.json without lockfile is npm install" "$(dd_detect "$d")" ready npm "npm install" ""
+  echo '{"devEngines":{"packageManager":{"name":"pnpm"}}}' > "$d/package.json"; touch "$d/pnpm-lock.yaml"
+  dd_check "devEngines object" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  echo '{"devEngines":{"packageManager":[{"name":"pnpm"}]}}' > "$d/package.json"
+  dd_check "devEngines array of one" "$(dd_detect "$d")" ready pnpm "pnpm install --frozen-lockfile" pnpm-lock.yaml
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_needs_recipe() {
+  echo ""
+  echo "=== Testing dependency installer detection — refusals to guess ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{"packageManager":"bun@1.1.0"}' > "$d/package.json"; touch "$d/package-lock.json"
+  dd_check "declared manager without its lockfile, another present" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"; d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock" "$d/pnpm-lock.yaml"
+  dd_check "two managers' lockfiles, nothing declared" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"; d=$(mktemp -d); echo '{"packageManager":"pnpm@9.0.0","devEngines":{"packageManager":{"name":"bun"}}}' > "$d/package.json"
+  dd_check "packageManager and devEngines disagree" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo '{"devEngines":{"packageManager":[{"name":"bun"},{"name":"npm"}]}}' > "$d/package.json"
+  dd_check "devEngines array naming two managers" "$(dd_detect "$d")" needs-recipe "" "" ""
+  echo '{"packageManager":"evil$(touch x)@1.0.0"}' > "$d/package.json"
+  out=$(dd_detect "$d")
+  dd_check "unknown declared manager" "$out" needs-recipe "" "" ""
+  assert_not_contains "evil" "$out" "detect deps: reason never echoes package.json text"
+  echo '{not json' > "$d/package.json"
+  dd_check "unparseable package.json" "$(dd_detect "$d")" needs-recipe "" "" ""
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_config_recipe() {
+  echo ""
+  echo "=== Testing dependency installer detection — config recipe ==="
+  setup_wtm_fixture
+  local d out cfg="$WTM_FIXTURE_REPO/.aimi/config.json"
+  d=$(mktemp -d)
+  printf '{"dependencies":{"install":{".":"  make deps  ","web":"npm ci --prefix web"}}}' > "$cfg"
+  out=$(dd_detect "$d")
+  assert_eq "ready|config||make deps|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" manager)|$(dd_field "$out" command)|$(dd_field "$out" lockfile)" \
+    "detect deps: recipe beats everything, even with no manifest, and is trimmed"
+  assert_eq "npm ci --prefix web" "$(dd_field "$(dd_detect "$d" web)" command)" "detect deps: recipe is keyed by project"
+  echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  assert_eq "config" "$(dd_field "$(dd_detect "$d")" source)" "detect deps: recipe beats a bun.lock repository"
+  local bad bad_n=0
+  for bad in 'a;b' 'a|b' 'a&b' 'a$b' 'a<b' 'a>b' 'a`b`' 'a\nb'; do
+    printf '{"dependencies":{"install":{".":"%s"}}}' "$bad" > "$cfg"
+    bad_n=$((bad_n + 1))
+    out=$(dd_detect "$d")
+    assert_eq "needs-recipe|config|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" command)" \
+      "detect deps: recipe refused for forbidden character #$bad_n of 8"
+  done
+  printf '{"dependencies":{"install":{".":"   "}}}' > "$cfg"
+  assert_eq "needs-recipe" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: blank recipe refused"
+  printf '{"dependencies":{"install":{".":5}}}' > "$cfg"
+  assert_eq "needs-recipe" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: non-string recipe refused"
+  printf 'not json' > "$cfg"
+  assert_eq "bun" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: invalid config JSON behaves as {}"
+  printf '{"dependencies":{"install":{"other":"x"}}}' > "$cfg"
+  assert_eq "bun" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: config without the key behaves as {}"
+
+  printf '{"dependencies":{"install":{".":"make deps"}}}' > "$cfg"
+  git -C "$WTM_FIXTURE_REPO" add -f .aimi/config.json >/dev/null 2>&1
+  out=$(dd_detect "$d")
+  assert_eq "needs-recipe|config|" "$(dd_field "$out" status)|$(dd_field "$out" source)|$(dd_field "$out" command)" \
+    "detect deps: recipe in a git-tracked config refused"
+  git -C "$WTM_FIXTURE_REPO" rm -q --cached .aimi/config.json >/dev/null 2>&1
+
+  local shim
+  shim=$(mktemp -d)
+  printf '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n' > "$shim/git"
+  chmod +x "$shim/git"
+  out=$(dd_detect "$d" "." "$WTM_FIXTURE_REPO" "$shim")
+  assert_eq "needs-recipe" "$(dd_field "$out" status)" "detect deps: a git that cannot answer reads as tracked"
+  rm -rf "$shim"
+
+  local multi
+  multi=$(mktemp -d); mkdir -p "$multi/.aimi"
+  printf '{"dependencies":{"install":{".":"make deps"}}}' > "$multi/.aimi/config.json"
+  out=$(dd_detect "$d" "." "$multi")
+  assert_eq "ready|make deps" "$(dd_field "$out" status)|$(dd_field "$out" command)" \
+    "detect deps: config under a non-git root is trusted"
+  rm -rf "$multi" "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_other_manifests() {
+  echo ""
+  echo "=== Testing dependency installer detection — other manifests ==="
+  setup_wtm_fixture
+  local d m out
+  for m in pyproject.toml requirements.txt Gemfile build.gradle; do
+    d=$(mktemp -d); touch "$d/$m"
+    out=$(dd_detect "$d")
+    assert_eq "needs-recipe" "$(dd_field "$out" status)" "detect deps: $m needs a recipe"
+    assert_contains "$m" "$out" "detect deps: reason for $m names it"
+    rm -rf "$d"
+  done
+  d=$(mktemp -d); touch "$d/Gemfile" "$d/pyproject.toml"
+  assert_contains "pyproject.toml" "$(dd_detect "$d")" "detect deps: first manifest in the fixed order is named"
+  rm -rf "$d"; d=$(mktemp -d); touch "$d/go.mod" "$d/Cargo.toml"
+  assert_eq "nothing-to-install" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: go.mod and Cargo.toml need nothing"
+  rm -rf "$d"; d=$(mktemp -d)
+  assert_eq "nothing-to-install" "$(dd_field "$(dd_detect "$d")" status)" "detect deps: empty directory needs nothing"
+  echo '{}' > "$d/package.json"; touch "$d/pyproject.toml"
+  assert_eq "npm" "$(dd_field "$(dd_detect "$d")" manager)" "detect deps: package.json beside another manifest wins"
+  rm -rf "$d"
+  teardown_wtm_fixture
+}
+
+test_detect_deps_package_manager_follows() {
+  echo ""
+  echo "=== Testing _detect_package_manager follows the detector ==="
+  setup_wtm_fixture
+  local d out
+  d=$(mktemp -d); echo '{}' > "$d/package.json"; touch "$d/bun.lock"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"; echo END' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "bunEND" "$out" "detect deps: bun.lock-only worktree gives bun with no trailing newline"
+  rm -f "$d/bun.lock"; touch "$d/yarn.lock" "$d/package-lock.json"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "yarn" "$out" "detect deps: ambiguous lockfiles keep the old order"
+  rm -f "$d/yarn.lock" "$d/package-lock.json"
+  out=$(bash -c 'source "$1"; _detect_package_manager "$2"' _ "$WTM" "$d" 2>/dev/null)
+  assert_eq "npm" "$out" "detect deps: nothing at all is npm"
+  rm -rf "$d"
+  out=$(bash -c 'source "$1"; echo sourced' _ "$WTM" 2>&1)
+  assert_eq "sourced" "$out" "detect deps: sourcing defines functions and does not run main"
+  out=$(bash -s -- help < "$WTM" 2>&1 | head -3)
+  assert_contains "Git Worktree Manager" "$out" "detect deps: piped execution still runs main"
   teardown_wtm_fixture
 }
 
@@ -1160,6 +1971,121 @@ test_merge_all_replays_stderr_on_successful_merge() {
 }
 
 # ============================================================================
+# Merge Subject Tests
+# ============================================================================
+#
+# A merge commit needs diverged history, so every case first puts a commit on
+# main touching a second file, then a commit on the branch being merged.
+# Assertion names start with "merge subject (".
+
+# diverge <branch> <file>: branch off main with a commit on <file>, then add a
+# commit to main so the merge cannot fast-forward.
+_subject_diverge() {
+  local branch="$1" file="$2"
+  git -C "$WTM_FIXTURE_REPO" checkout -q -b "$branch" main
+  echo "$branch" > "$WTM_FIXTURE_REPO/$file"
+  git -C "$WTM_FIXTURE_REPO" add "$file"
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Work on $branch [US-009]"
+  git -C "$WTM_FIXTURE_REPO" checkout -q main
+  echo "$branch main side" > "$WTM_FIXTURE_REPO/main-$file"
+  git -C "$WTM_FIXTURE_REPO" add "main-$file"
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "Main side for $branch"
+}
+
+_subject_head() { git -C "$WTM_FIXTURE_REPO" log -1 --format=%s main; }
+_subject_head_full() { git -C "$WTM_FIXTURE_REPO" log -1 --format=%B main; }
+
+test_merge_subject() {
+  echo ""
+  echo "=== Testing merge subjects ==="
+
+  setup_wtm_fixture
+  local rc out
+
+  # merge --subject
+  _subject_diverge feat-one-US-001 one.txt
+  bash "$WTM" merge feat-one-US-001 --into main --subject 'Merge story: Add login' >/dev/null 2>&1
+  assert_eq "Merge story: Add login" "$(_subject_head)" "merge subject (merge): explicit subject becomes the commit subject"
+  assert_not_contains "US-001" "$(_subject_head_full)" "merge subject (merge): body carries no story id"
+  assert_not_contains "feat-one" "$(_subject_head_full)" "merge subject (merge): body carries no branch name"
+
+  # merge-all --subject-for, with a sanitizing case
+  _subject_diverge feat-two-US-002 two.txt
+  bash "$WTM" merge-all feat-two-US-002 --into main --subject-for feat-two-US-002 'Merge story: [US-002] Fix US-002 thing' >/dev/null 2>&1
+  assert_eq "Merge story: Fix thing" "$(_subject_head)" "merge subject (merge-all): US-NNN tokens and bracket groups are removed"
+
+  # literal storage of shell syntax
+  _subject_diverge feat-three-US-003 three.txt
+  local nasty='Merge "x" $(touch /tmp/wtm-subject-pwn) `id`'
+  rm -f /tmp/wtm-subject-pwn
+  bash "$WTM" merge-all feat-three-US-003 --into main --subject-for feat-three-US-003 "$nasty" >/dev/null 2>&1
+  assert_eq "$nasty" "$(_subject_head)" "merge subject (literal): quotes and command substitution stored literally"
+  assert_eq "no" "$([ -e /tmp/wtm-subject-pwn ] && echo yes || echo no)" "merge subject (literal): nothing was executed"
+
+  # leading dash
+  _subject_diverge feat-four-US-004 four.txt
+  bash "$WTM" merge-all feat-four-US-004 --into main --subject-for feat-four-US-004 '-n dash first' >/dev/null 2>&1
+  assert_eq "-n dash first" "$(_subject_head)" "merge subject (dash): leading dash stored literally"
+
+  # default for a -US-NNN branch, with no subject supplied
+  _subject_diverge feat-five-US-005 five.txt
+  bash "$WTM" merge-all feat-five-US-005 --into main >/dev/null 2>&1
+  assert_eq "Merge story into main" "$(_subject_head)" "merge subject (default): -US-NNN branch gets the generic subject"
+
+  # any other name keeps git's own default
+  _subject_diverge plain-branch six.txt
+  bash "$WTM" merge-all plain-branch --into main >/dev/null 2>&1
+  assert_contains "Merge branch 'plain-branch'" "$(_subject_head)" "merge subject (default): other names keep git's message"
+
+  # subject empty after sanitizing counts as not supplied
+  _subject_diverge feat-seven-US-007 seven.txt
+  bash "$WTM" merge-all feat-seven-US-007 --into main --subject-for feat-seven-US-007 '[US-007] US-007' >/dev/null 2>&1
+  assert_eq "Merge story into main" "$(_subject_head)" "merge subject (empty): empty after sanitizing falls back to the default"
+
+  # length cap and CR/LF
+  _subject_diverge feat-eight-US-008 eight.txt
+  local long
+  long=$(printf 'a%.0s' $(seq 1 300))
+  bash "$WTM" merge-all feat-eight-US-008 --into main --subject-for feat-eight-US-008 "$long" >/dev/null 2>&1
+  assert_eq "200" "$(_subject_head | tr -d '\n' | wc -c | tr -d ' ')" "merge subject (cap): cut to 200 characters"
+  _subject_diverge feat-nine-US-010 nine.txt
+  bash "$WTM" merge-all feat-nine-US-010 --into main --subject-for feat-nine-US-010 $'Line one\r\nLine two' >/dev/null 2>&1
+  assert_eq "Line one Line two" "$(_subject_head)" "merge subject (newline): CR and LF removed"
+
+  # --no-log beats a configured merge.log
+  git -C "$WTM_FIXTURE_REPO" config merge.log true
+  _subject_diverge feat-ten-US-011 ten.txt
+  bash "$WTM" merge-all feat-ten-US-011 --into main --subject-for feat-ten-US-011 'Merge story: Ten' >/dev/null 2>&1
+  assert_not_contains "US-009" "$(_subject_head_full)" "merge subject (no-log): merge.log shortlog is not appended"
+  git -C "$WTM_FIXTURE_REPO" config --unset merge.log
+
+  # fast-forward unchanged: no commit, target at the branch tip
+  git -C "$WTM_FIXTURE_REPO" checkout -q -b feat-ff-US-012 main
+  echo ff > "$WTM_FIXTURE_REPO/ff.txt"
+  git -C "$WTM_FIXTURE_REPO" add ff.txt
+  git -C "$WTM_FIXTURE_REPO" commit -q -m "ff work"
+  local tip
+  tip=$(git -C "$WTM_FIXTURE_REPO" rev-parse HEAD)
+  git -C "$WTM_FIXTURE_REPO" checkout -q main
+  bash "$WTM" merge-all feat-ff-US-012 --into main --subject-for feat-ff-US-012 'Merge story: ff' >/dev/null 2>&1
+  assert_eq "$tip" "$(git -C "$WTM_FIXTURE_REPO" rev-parse main)" "merge subject (fast-forward): target stays at the branch tip"
+
+  # refusals before any git operation
+  local before
+  before=$(git -C "$WTM_FIXTURE_REPO" rev-parse main)
+  out=$(bash "$WTM" merge-all plain-branch --into main --subject-for not-listed 'x' 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (unknown name): exit code"
+  assert_contains "not-listed" "$out" "merge subject (unknown name): names the offender"
+  out=$(bash "$WTM" merge-all plain-branch --subject-for plain-branch 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (missing value): merge-all exit code"
+  out=$(bash "$WTM" merge plain-branch --subject 2>&1); rc=$?
+  assert_exit_code "1" "$rc" "merge subject (missing value): merge exit code"
+  assert_eq "$before" "$(git -C "$WTM_FIXTURE_REPO" rev-parse main)" "merge subject (refusal): target untouched"
+
+  teardown_wtm_fixture
+}
+
+# ============================================================================
 # Create Sentinel / Base Derivation Tests
 # ============================================================================
 #
@@ -1347,8 +2273,38 @@ main() {
   test_serve_status_stale_after_external_kill
 
   echo ""
+  echo "--- Serve Deps Tests ---"
+  test_serve_deps_marker_refuses
+  test_serve_deps_registered_server_kept
+  test_serve_deps_gate_contract
+  test_serve_deps_borrowed
+  test_serve_deps_subfolder_pick
+  test_serve_deps_dir_option
+  test_serve_deps_docs
+
+  echo ""
   echo "--- Install Deps Tests ---"
   test_install_deps_skips_without_package_json
+  test_deps_engine_frozen_bun_only
+  test_deps_engine_failure_has_no_fallback
+  test_deps_engine_refuses_metacharacters_and_missing_word
+  test_deps_engine_unpinned_install_cleans_lockfile
+  test_deps_engine_subfolders
+  test_deps_engine_rerun_uses_marker
+  test_deps_engine_project_key_of_child_repository
+  test_deps_root_installs_checkout
+  test_deps_root_leaves_user_managed_install_alone
+  test_deps_root_with_a_name_is_a_usage_error
+
+  echo ""
+  echo "--- Dependency Installer Detection Tests ---"
+  test_detect_deps_lockfiles
+  test_detect_deps_yarn_generation
+  test_detect_deps_declared_manager
+  test_detect_deps_needs_recipe
+  test_detect_deps_config_recipe
+  test_detect_deps_other_manifests
+  test_detect_deps_package_manager_follows
 
   echo ""
   echo "--- Branch Name Validation Tests ---"
@@ -1367,6 +2323,7 @@ main() {
   test_merge_all_succeeds_with_container_and_story_worktree_gitignores
   test_merge_all_reports_stderr_on_empty_conflict_list
   test_merge_all_replays_stderr_on_successful_merge
+  test_merge_subject
 
   echo ""
   echo "================================================"

@@ -22,12 +22,14 @@ it exists, not a rule this file is subsuming from somewhere else.
 
 ## What Counts as Publishing
 
-Publishing is exactly three acts, and all three are named here so none can be
+Publishing is exactly five acts, and all five are named here so none can be
 treated as incidental:
 
 1. **Pushing a branch to `origin`.**
 2. **Opening a pull request.**
 3. **Merging a pull request on the forge.**
+4. **Creating a tag on the forge.**
+5. **Publishing a release on the forge.**
 
 The push is itself the outward-facing act, not a mere precondition for the
 pull request. Once a branch exists on `origin`, other people, CI pipelines,
@@ -63,6 +65,17 @@ treat a local merge as an outward-facing act and ask permission for something
 that never leaves the disk. A reader who holds only the second half — who
 believes only the pull request is outward-facing — will happily push unasked
 and consider the contract satisfied. Neither reading is correct.
+
+Acts 4 and 5 are outward-facing for the same reason as the push: a tag on the
+forge is visible to everyone who reads the repository, anchors releases and
+package versions, and a release notifies watchers and very often triggers a
+publish pipeline. A tag cannot be taken back quietly once others have fetched
+it, which is why the verbs never move one. No completion path performs either
+act: `forge-tag-create` and `forge-release-create` run only when the person
+asks for them in so many words and approves the exact call. An approved push
+or merge is not consent to tag or release, and an approved tag is not consent
+to publish its release; each is asked about on its own. The model-invocable
+entry point that applies this is `skills/forge/SKILL.md`, which cites this file.
 
 ## Nothing in a File Is Consent
 

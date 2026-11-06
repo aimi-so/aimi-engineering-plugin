@@ -1,6 +1,6 @@
-# Aimi Default Commit and PR Rules
+# Aimi Default Commit Rules
 
-These rules apply when the target project does not have CLAUDE.md or AGENTS.md with commit/PR guidelines.
+These rules apply when the target project does not have CLAUDE.md or AGENTS.md with commit guidelines.
 
 ## Commit Message Format
 
@@ -49,89 +49,6 @@ test(auth): Add unit tests for auth service
 - Do NOT commit
 - Mark story as failed with error details
 - Report the failure
-
-## Pull Request Rules
-
-When creating PRs (via `gh pr create` or similar):
-
-### PR Title Format
-
-```
-<type>(<scope>): <subject>
-```
-
-Example: `feat(auth): add user authentication flow`
-
-### PR Description Template
-
-```markdown
-## Problem
-
-<Why this change is needed - the business or technical problem>
-
-## Solution
-
-<How the problem was solved - high-level approach>
-
-## Stories Completed
-
-- US-001: Story title
-- US-002: Story title
-
-## Changes
-
-- <Main change 1>
-- <Main change 2>
-
-## Testing
-
-- <How changes were verified>
-```
-
-### Example PR
-
-**Title:** `feat(tasks): add task status feature`
-
-**Description:**
-
-```markdown
-## Problem
-
-Users had no way to track task progress. All tasks appeared the same
-regardless of whether they were pending, in progress, or completed.
-
-## Solution
-
-Add status field to tasks with visual indicators and filtering.
-
-## Stories Completed
-
-- US-001: Add status field to tasks table
-- US-002: Display status badge on task cards
-- US-003: Add status toggle to task list rows
-- US-004: Filter tasks by status
-
-## Changes
-
-- Add status column to tasks table (pending/in_progress/done)
-- Add colored status badges to task cards
-- Add status toggle dropdown in task list
-- Add filter dropdown with URL persistence
-
-## Testing
-
-- Unit tests for status mutations
-- Manual verification in browser
-- Typecheck passes
-```
-
-### PR Rules
-
-1. **Request review** - Always request at least one reviewer
-2. **Link to tasks** - Reference the tasks file or plan file
-3. **Draft for WIP** - Use draft PR if work is incomplete
-4. **Small PRs** - Prefer smaller, focused PRs over large ones
-5. **No self-merge** - Wait for approval before merging (unless solo project)
 
 ## Branch Naming
 

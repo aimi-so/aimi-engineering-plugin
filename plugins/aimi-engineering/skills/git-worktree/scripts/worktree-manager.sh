@@ -805,7 +805,14 @@ remove_worktree() {
 # single place this detection order is defined, instead of two drifted copies.
 _detect_package_manager() {
   local worktree_path="$1"
-  if [[ -f "$worktree_path/bun.lockb" ]]; then
+  # The dependency installer detector below is asked first; its `manager` is
+  # empty whenever it could not decide, and the order that follows stays the
+  # answer then.
+  local detected_pm
+  detected_pm=$(_detect_dependency_installer "$worktree_path" 2>/dev/null | jq -r '.manager // ""' 2>/dev/null) || detected_pm=""
+  if [[ -n "$detected_pm" ]]; then
+    printf '%s' "$detected_pm"
+  elif [[ -f "$worktree_path/bun.lockb" || -f "$worktree_path/bun.lock" ]]; then
     printf 'bun'
   elif [[ -f "$worktree_path/pnpm-lock.yaml" ]]; then
     printf 'pnpm'
@@ -816,119 +823,531 @@ _detect_package_manager() {
   fi
 }
 
-# Install dependencies inside a worktree by detecting the package manager from its lockfile.
-# Advisory/non-fatal contract: a missing package.json is not an error (exit 0), and an install
-# failure is reported clearly but never left in a state that trips the script's `set -e`.
-install_deps() {
-  local worktree_name="$1"
+# Print one compact JSON line describing how <dir> installs its dependencies.
+# Fields: status (ready|nothing-to-install|needs-recipe), manager, command,
+# lockfile, source (repository|config), reason. Always exits 0, installs
+# nothing and writes nothing. Reasons are fixed phrases; text read out of
+# package.json or the config never reaches them.
+_dep_emit() {
+  jq -nc --arg status "$1" --arg manager "$2" --arg command "$3" \
+    --arg lockfile "$4" --arg source "$5" --arg reason "$6" \
+    '{status:$status, manager:$manager, command:$command, lockfile:$lockfile, source:$source, reason:$reason}'
+}
 
-  if [[ -z "$worktree_name" ]]; then
-    echo -e "${RED}Error: Worktree name required${NC}"
-    echo "Usage: worktree-manager.sh install-deps <worktree-name>"
-    exit 1
+# Is <aimi-root>/.aimi/config.json tracked by git? A probe that could not ask
+# answers "tracked". A root that is not a git repository is trusted.
+_dep_config_tracked() {
+  local aimi_dir="$1/.aimi" rc=0
+  git -C "$aimi_dir" ls-files --error-unmatch -- config.json >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  elif [[ "$rc" -eq 1 ]]; then
+    return 1
+  fi
+  local gd_err
+  gd_err=$(git -C "$aimi_dir" rev-parse --git-dir 2>&1 >/dev/null) || true
+  if [[ "$gd_err" == *"not a git repository"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Frozen install command for a manager; yarn needs a generation (1 or 2).
+_dep_frozen_command() {
+  case "$1" in
+    bun) printf 'bun install --frozen-lockfile' ;;
+    pnpm) printf 'pnpm install --frozen-lockfile' ;;
+    npm) printf 'npm ci' ;;
+    yarn)
+      if [[ "$2" == "classic" ]]; then printf 'yarn install --frozen-lockfile'; else printf 'yarn install --immutable'; fi
+      ;;
+  esac
+}
+
+# Prints classic|berry, or nothing when it cannot be decided.
+# $1 dir, $2 packageManager major (may be empty).
+_dep_yarn_generation() {
+  local dir="$1" major="$2"
+  if [[ "$major" =~ ^[0-9]+$ ]]; then
+    if [[ "$major" -eq 1 ]]; then printf 'classic'; return 0; fi
+    if [[ "$major" -ge 2 ]]; then printf 'berry'; return 0; fi
+  fi
+  if [[ -f "$dir/yarn.lock" ]]; then
+    if grep -q '^# yarn lockfile v1' "$dir/yarn.lock" 2>/dev/null; then printf 'classic'; return 0; fi
+    if grep -q '^__metadata:' "$dir/yarn.lock" 2>/dev/null; then printf 'berry'; return 0; fi
+  fi
+  if [[ -f "$dir/.yarnrc.yml" ]]; then printf 'berry'; return 0; fi
+  return 0
+}
+
+_detect_dependency_installer() {
+  local dir="${1:-}" key="${2:-.}"
+  local aimi_root="" cfg=""
+
+  # 1. A recipe in .aimi/config.json beats everything the repository declares.
+  if aimi_root=$(find_aimi_root 2>/dev/null) && [[ -f "$aimi_root/.aimi/config.json" ]]; then
+    cfg="$aimi_root/.aimi/config.json"
+    local raw="" verdict=""
+    raw=$(jq -c --arg k "$key" '
+      if (type == "object") and ((.dependencies | type) == "object") and ((.dependencies.install | type) == "object") and (.dependencies.install | has($k))
+      then .dependencies.install[$k] else empty end' "$cfg" 2>/dev/null) || raw=""
+    if [[ -n "$raw" ]]; then
+      verdict=$(printf '%s' "$raw" | jq -r '
+        if type != "string" or test("^\\s*$") then "invalid"
+        elif test("[;|&$<>`\n\r]") then "invalid"
+        else "ok" end' 2>/dev/null) || verdict="invalid"
+      if [[ "$verdict" != "ok" ]]; then
+        _dep_emit needs-recipe "" "" "" config "the configured recipe is not a plain command"
+        return 0
+      fi
+      if _dep_config_tracked "$aimi_root"; then
+        _dep_emit needs-recipe "" "" "" config "the config file is tracked by git, so its recipe is not trusted"
+        return 0
+      fi
+      local recipe
+      recipe=$(printf '%s' "$raw" | jq -r 'gsub("^\\s+|\\s+$"; "")')
+      _dep_emit ready "" "$recipe" "" config ""
+      return 0
+    fi
   fi
 
-  # Validate worktree name before any filesystem access
-  validate_branch_name "$worktree_name"
+  # 2. package.json
+  if [[ -n "$dir" && -f "$dir/package.json" ]]; then
+    local info=""
+    if ! info=$(jq -c '
+      def nm: if type == "string" then (split("@")[0]) else null end;
+      def canon: . as $n | if $n == null then null
+                 elif (["bun","pnpm","yarn","npm"] | index($n)) != null then $n
+                 else "?" end;
+      if type != "object" then error("not an object") else . end
+      | .packageManager as $pm
+      | (try .devEngines.packageManager catch null) as $d
+      | { pm: (if ($pm | type) == "string" and ($pm | length) > 0 then ($pm | nm | canon) else null end),
+          major: (if ($pm | type) == "string" then ((((($pm | split("@"))[1]) // "") | capture("^(?<m>[0-9]+)") | .m) // "") else "" end),
+          dev: ((if $d == null then []
+                 elif ($d | type) == "object" then [$d.name]
+                 elif ($d | type) == "array" then [$d[] | select(type == "object") | .name]
+                 else [] end)
+                | map(select(type == "string") | nm | canon) | unique) }
+      ' "$dir/package.json" 2>/dev/null); then
+      _dep_emit needs-recipe "" "" "" repository "package.json cannot be parsed"
+      return 0
+    fi
+    local pm major devn dev0
+    pm=$(printf '%s' "$info" | jq -r '.pm // ""')
+    major=$(printf '%s' "$info" | jq -r '.major')
+    devn=$(printf '%s' "$info" | jq -r '.dev | length')
+    dev0=$(printf '%s' "$info" | jq -r '.dev[0] // ""')
 
-  local worktree_path="$WORKTREE_DIR/$worktree_name"
+    if [[ "$devn" -gt 1 ]]; then
+      _dep_emit needs-recipe "" "" "" repository "devEngines names more than one package manager"
+      return 0
+    fi
+    if [[ -n "$pm" && -n "$dev0" && "$pm" != "$dev0" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "packageManager and devEngines name different managers"
+      return 0
+    fi
+    local declared="${pm:-$dev0}"
+    if [[ "$declared" == "?" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "the declared manager is not one of bun, pnpm, yarn, npm"
+      return 0
+    fi
 
-  # Path containment check — prevent directory traversal
-  local resolved_path
-  resolved_path=$(realpath -m "$worktree_path")
-  local resolved_dir
-  resolved_dir=$(realpath -m "$WORKTREE_DIR")
-  if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
-    echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
-    exit 1
-  fi
+    # Lockfile per manager (first existing wins), and which managers have one.
+    local lf_bun="" lf_pnpm="" lf_yarn="" lf_npm="" present=0
+    if [[ -f "$dir/bun.lock" ]]; then lf_bun="bun.lock"; elif [[ -f "$dir/bun.lockb" ]]; then lf_bun="bun.lockb"; fi
+    [[ -f "$dir/pnpm-lock.yaml" ]] && lf_pnpm="pnpm-lock.yaml"
+    [[ -f "$dir/yarn.lock" ]] && lf_yarn="yarn.lock"
+    if [[ -f "$dir/npm-shrinkwrap.json" ]]; then lf_npm="npm-shrinkwrap.json"; elif [[ -f "$dir/package-lock.json" ]]; then lf_npm="package-lock.json"; fi
+    [[ -n "$lf_bun" ]] && present=$((present + 1))
+    [[ -n "$lf_pnpm" ]] && present=$((present + 1))
+    [[ -n "$lf_yarn" ]] && present=$((present + 1))
+    [[ -n "$lf_npm" ]] && present=$((present + 1))
 
-  if [[ ! -d "$worktree_path" ]]; then
-    echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
-    exit 1
-  fi
+    local mgr="" lockfile=""
+    if [[ -n "$declared" ]]; then
+      mgr="$declared"
+      case "$mgr" in
+        bun) lockfile="$lf_bun" ;;
+        pnpm) lockfile="$lf_pnpm" ;;
+        yarn) lockfile="$lf_yarn" ;;
+        npm) lockfile="$lf_npm" ;;
+      esac
+      if [[ -z "$lockfile" && "$present" -gt 0 ]]; then
+        _dep_emit needs-recipe "" "" "" repository "the declared manager has no lockfile while another manager's lockfile is present"
+        return 0
+      fi
+    elif [[ "$present" -gt 1 ]]; then
+      _dep_emit needs-recipe "" "" "" repository "lockfiles of more than one manager are present"
+      return 0
+    elif [[ "$present" -eq 1 ]]; then
+      if [[ -n "$lf_bun" ]]; then mgr=bun; lockfile="$lf_bun"
+      elif [[ -n "$lf_pnpm" ]]; then mgr=pnpm; lockfile="$lf_pnpm"
+      elif [[ -n "$lf_yarn" ]]; then mgr=yarn; lockfile="$lf_yarn"
+      else mgr=npm; lockfile="$lf_npm"; fi
+    else
+      mgr=npm
+    fi
 
-  if [[ ! -f "$worktree_path/package.json" ]]; then
-    echo -e "${YELLOW}ℹ️  No package.json in worktree, skipping dependency install: $worktree_name${NC}"
+    if [[ -z "$lockfile" ]]; then
+      _dep_emit ready "$mgr" "$mgr install" "" repository "no lockfile: versions are not pinned"
+      return 0
+    fi
+    local gen=""
+    if [[ "$mgr" == "yarn" ]]; then
+      local yarn_major=""
+      [[ "$pm" == "yarn" ]] && yarn_major="$major"
+      gen=$(_dep_yarn_generation "$dir" "$yarn_major")
+      if [[ -z "$gen" ]]; then
+        _dep_emit needs-recipe "" "" "" repository "the yarn generation cannot be determined"
+        return 0
+      fi
+    fi
+    _dep_emit ready "$mgr" "$(_dep_frozen_command "$mgr" "$gen")" "$lockfile" repository ""
     return 0
   fi
 
-  # Package manager name comes from the shared detector; the install-specific
-  # command and lockfile path (used below for the idempotency mtime check)
-  # are layered on top here since serve_start never needs either.
-  local pm_name pm_cmd lockfile_path=""
-  pm_name=$(_detect_package_manager "$worktree_path")
-  case "$pm_name" in
-    bun)
-      pm_cmd="bun install"
-      lockfile_path="$worktree_path/bun.lockb"
-      ;;
-    pnpm)
-      pm_cmd="pnpm install"
-      lockfile_path="$worktree_path/pnpm-lock.yaml"
-      ;;
-    yarn)
-      pm_cmd="yarn install"
-      lockfile_path="$worktree_path/yarn.lock"
-      ;;
-    npm)
-      if [[ -f "$worktree_path/package-lock.json" ]]; then
-        pm_cmd="npm ci"
-        lockfile_path="$worktree_path/package-lock.json"
-      else
-        pm_cmd="npm install"
-      fi
+  # 3. Other ecosystems' manifests
+  local m
+  for m in pyproject.toml requirements.txt Pipfile Gemfile composer.json mix.exs pom.xml build.gradle; do
+    if [[ -n "$dir" && -f "$dir/$m" ]]; then
+      _dep_emit needs-recipe "" "" "" repository "no recipe for $m: set dependencies.install in .aimi/config.json"
+      return 0
+    fi
+  done
+  _dep_emit nothing-to-install "" "" "" repository ""
+  return 0
+}
+
+# Absolute path of the marker install-deps records for <worktree-path>: the
+# worktree's own git directory, so `git status` never lists it.
+_deps_marker_path() {
+  local worktree_path="$1" gd
+  gd=$(git -C "$worktree_path" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  printf '%s/aimi-deps.json' "$gd"
+}
+
+# sha256 of a file, empty when no hashing tool is available.
+_deps_sha256() {
+  local out=""
+  if command -v sha256sum >/dev/null 2>&1; then
+    out=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1) || out=""
+  elif command -v shasum >/dev/null 2>&1; then
+    out=$(shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1) || out=""
+  fi
+  printf '%s' "$out"
+}
+
+# Main checkout of the repository that owns <worktree-path>; prints nothing
+# when it cannot be told.
+_deps_main_checkout() {
+  local common
+  common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 0
+  [[ "$common" == /* ]] || common="$1/$common"
+  (cd "$common/.." 2>/dev/null && pwd -P) || true
+}
+
+# Project key of the repository whose main checkout is <main>: its path
+# relative to the directory holding .aimi/, or . when the two coincide or the
+# checkout lies outside that directory.
+_deps_project_key() {
+  local main="$1" root=""
+  if [[ -z "$main" ]]; then printf '.'; return 0; fi
+  root=$(cd "$main" 2>/dev/null && find_aimi_root 2>/dev/null) || root=""
+  if [[ -n "$root" && "$main" == "$root"/* ]]; then
+    printf '%s' "${main#"$root"/}"
+  else
+    printf '.'
+  fi
+}
+
+# Write the {status, directories} marker atomically. A failure warns and
+# changes neither the status nor the exit code.
+_deps_write_marker() {
+  local worktree_path="$1" status="$2" dirs_json="$3" path tmp doc
+  if ! path=$(_deps_marker_path "$worktree_path"); then
+    echo -e "${YELLOW}⚠️  Could not locate the git directory, dependency marker not written${NC}" >&2
+    return 0
+  fi
+  if doc=$(jq -nc --arg s "$status" --argjson d "$dirs_json" '{status:$s, directories:$d}') \
+     && tmp=$(mktemp "${path}.XXXXXX") \
+     && printf '%s\n' "$doc" > "$tmp" \
+     && mv "$tmp" "$path"; then
+    return 0
+  fi
+  echo -e "${YELLOW}⚠️  Could not write the dependency marker: $path${NC}" >&2
+  return 0
+}
+
+# Run <command> as argv inside <dir>. Refuses shell metacharacters and a first
+# word that is not on PATH. No other command is ever tried.
+_deps_run_command() {
+  local dir="$1" cmd="$2"
+  case "$cmd" in
+    *[\;\|\&\$\<\>\`]*|*$'\n'*|*$'\r'*)
+      echo -e "${RED}Error: install command contains a shell metacharacter, nothing was run${NC}" >&2
+      return 1
       ;;
   esac
-
-  # Idempotency short-circuit: when a recognized lockfile exists and node_modules/
-  # is already at least as fresh as it, skip the install entirely — a resumed
-  # container that already had correct dependencies never pays a cold reinstall,
-  # and npm ci never deletes a node_modules/ that was already correct. Only
-  # applies when a lockfile was detected above; the no-lockfile (npm install)
-  # branch and a missing node_modules/ always fall through to a real install.
-  if [[ -n "$lockfile_path" ]] && [[ -d "$worktree_path/node_modules" ]]; then
-    local lockfile_mtime node_modules_mtime
-    lockfile_mtime=$(stat -c '%Y' "$lockfile_path" 2>/dev/null || stat -f '%m' "$lockfile_path" 2>/dev/null)
-    node_modules_mtime=$(stat -c '%Y' "$worktree_path/node_modules" 2>/dev/null || stat -f '%m' "$worktree_path/node_modules" 2>/dev/null)
-    if [[ -n "$lockfile_mtime" ]] && [[ -n "$node_modules_mtime" ]] && [[ "$node_modules_mtime" -ge "$lockfile_mtime" ]]; then
-      echo -e "${GREEN}✓ Dependencies already up to date in worktree '$worktree_name' (node_modules/ is not older than the lockfile), skipping install${NC}"
-      return 0
-    fi
-  fi
-
-  echo -e "${BLUE}Installing dependencies in worktree '$worktree_name' with $pm_name...${NC}"
-
-  # Guarded subshell: an install failure must never trip the script's top-level `set -e`.
-  if ! ( cd "$worktree_path" && eval "$pm_cmd" ); then
-    if [[ "$pm_cmd" == "npm ci" ]]; then
-      echo -e "${YELLOW}⚠️  npm ci failed, falling back to npm install...${NC}"
-      if ! ( cd "$worktree_path" && npm install ); then
-        echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' (npm, after npm ci and npm install fallback)${NC}" >&2
-        return 1
-      fi
-      echo -e "${GREEN}✓ Dependencies installed successfully with npm (install fallback) in worktree: $worktree_name${NC}"
-      return 0
-    fi
-
-    echo -e "${RED}Error: Dependency install failed for worktree '$worktree_name' using $pm_name${NC}" >&2
+  local -a argv=()
+  read -r -a argv <<< "$cmd" || true
+  if [[ ${#argv[@]} -eq 0 ]]; then
+    echo -e "${RED}Error: install command is empty, nothing was run${NC}" >&2
     return 1
   fi
-
-  echo -e "${GREEN}✓ Dependencies installed successfully with $pm_name in worktree: $worktree_name${NC}"
+  if ! command -v "${argv[0]}" >/dev/null 2>&1; then
+    echo -e "${RED}Error: install command not found on PATH: ${argv[0]}${NC}" >&2
+    return 1
+  fi
+  if ! ( cd "$dir" && "${argv[@]}" </dev/null ); then
+    return 1
+  fi
   return 0
+}
+
+# Install one directory from a detector answer and append its entry to
+# _DEPS_ENTRIES. $1 dir, $2 label (. for the root), $3 detector JSON, $4 marker
+# path of an earlier run (may not exist).
+_deps_process_dir() {
+  local dir="$1" label="$2" det="$3" prior="$4"
+  local status command lockfile manager reason
+  status=$(printf '%s' "$det" | jq -r '.status // ""')
+  command=$(printf '%s' "$det" | jq -r '.command // ""')
+  lockfile=$(printf '%s' "$det" | jq -r '.lockfile // ""')
+  manager=$(printf '%s' "$det" | jq -r '.manager // ""')
+  reason=$(printf '%s' "$det" | jq -r '.reason // ""')
+
+  case "$status" in
+    ready) ;;
+    needs-recipe)
+      echo -e "${YELLOW}⚠️  No install recipe for '$label': $reason${NC}"
+      _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" '{dir:$d, status:"needs-recipe", command:"", lockfileHash:""}')")
+      return 0
+      ;;
+    *) return 0 ;;
+  esac
+
+  local hash=""
+  if [[ -n "$lockfile" && -f "$dir/$lockfile" ]]; then
+    hash=$(_deps_sha256 "$dir/$lockfile")
+  fi
+
+  if [[ -n "$hash" && -d "$dir/node_modules" && -f "$prior" ]] \
+     && jq -e --arg d "$label" --arg c "$command" --arg h "$hash" \
+          '.directories[]? | select(.dir == $d and .status == "ok" and .command == $c and .lockfileHash == $h)' \
+          "$prior" >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ Dependencies already installed in '$label' (same command, same lockfile), skipping install${NC}"
+    _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" --arg c "$command" --arg h "$hash" '{dir:$d, status:"ok", command:$c, lockfileHash:$h}')")
+    return 0
+  fi
+
+  local -a known_locks=(bun.lock bun.lockb package-lock.json npm-shrinkwrap.json pnpm-lock.yaml yarn.lock)
+  local -a had=()
+  local lf
+  if [[ -n "$manager" && -z "$lockfile" ]]; then
+    for lf in "${known_locks[@]}"; do
+      if [[ -e "$dir/$lf" ]]; then had+=("$lf"); fi
+    done
+    echo -e "${YELLOW}⚠️  No lockfile in '$label': dependency versions are not pinned${NC}"
+  fi
+
+  echo -e "${BLUE}Installing dependencies in '$label' with: $command${NC}"
+  local rc=0
+  _deps_run_command "$dir" "$command" || rc=$?
+
+  if [[ -n "$manager" && -z "$lockfile" && ${#had[@]} -eq 0 ]]; then
+    for lf in "${known_locks[@]}"; do
+      if [[ -e "$dir/$lf" ]]; then rm -f "$dir/$lf"; fi
+    done
+  fi
+
+  local st="ok"
+  if [[ "$rc" -ne 0 ]]; then
+    st="failed"
+    echo -e "${RED}Error: Dependency install failed in '$label'${NC}" >&2
+    hash=""
+  fi
+  _DEPS_ENTRIES+=("$(jq -nc --arg d "$label" --arg s "$st" --arg c "$command" --arg h "$hash" '{dir:$d, status:$s, command:$c, lockfileHash:$h}')")
+  return 0
+}
+
+# Install dependencies inside a worktree with the repository's frozen install
+# command, run as argv with no fallback, in the root or else in each
+# first-level subfolder. Records {status, directories} in the marker and ends
+# stdout with one DEPS_STATUS=<status> line; exits 1 only for failed.
+install_deps() {
+  local worktree_name="" root_mode=false arg
+  for arg in "$@"; do
+    if [[ "$arg" == "--root" ]]; then
+      root_mode=true
+    elif [[ -z "$worktree_name" ]]; then
+      worktree_name="$arg"
+    else
+      echo -e "${RED}Error: install-deps takes one worktree name or --root${NC}" >&2
+      exit 1
+    fi
+  done
+
+  if [[ "$root_mode" == true && -n "$worktree_name" ]]; then
+    echo -e "${RED}Error: --root installs the current checkout and takes no worktree name${NC}" >&2
+    echo "Usage: worktree-manager.sh install-deps --root" >&2
+    exit 1
+  fi
+
+  local worktree_path
+  if [[ "$root_mode" == true ]]; then
+    # The checkout the command runs from: no name, so no .worktrees/ check.
+    worktree_path="$GIT_ROOT"
+  else
+    if [[ -z "$worktree_name" ]]; then
+      echo -e "${RED}Error: Worktree name required${NC}"
+      echo "Usage: worktree-manager.sh install-deps <worktree-name> | --root"
+      exit 1
+    fi
+
+    # Validate worktree name before any filesystem access
+    validate_branch_name "$worktree_name"
+
+    worktree_path="$WORKTREE_DIR/$worktree_name"
+
+    # Path containment check — prevent directory traversal
+    local resolved_path
+    resolved_path=$(realpath -m "$worktree_path")
+    local resolved_dir
+    resolved_dir=$(realpath -m "$WORKTREE_DIR")
+    if [[ ! "$resolved_path" == "$resolved_dir"/* ]]; then
+      echo -e "${RED}Error: Worktree path escapes expected directory${NC}" >&2
+      exit 1
+    fi
+
+    if [[ ! -d "$worktree_path" ]]; then
+      echo -e "${RED}Error: Worktree directory not found: $worktree_name${NC}" >&2
+      exit 1
+    fi
+  fi
+
+  local main_checkout key det prior=""
+  main_checkout=$(_deps_main_checkout "$worktree_path")
+  key=$(_deps_project_key "$main_checkout")
+  prior=$(_deps_marker_path "$worktree_path" 2>/dev/null) || prior=""
+
+  # A checkout installed by the user, not by us: a dependency directory is
+  # present and no marker records an install of ours. Leave it alone.
+  if [[ "$root_mode" == true && ( -z "$prior" || ! -f "$prior" ) ]]; then
+    local ud user_managed=false
+    if _serve_has_dependency_dir "$worktree_path"; then
+      user_managed=true
+    else
+      while IFS= read -r ud; do
+        case "$(basename "$ud")" in .*|node_modules|vendor|dist|build) continue ;; esac
+        if _serve_has_dependency_dir "$ud"; then user_managed=true; break; fi
+      done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+    fi
+    if [[ "$user_managed" == true ]]; then
+      echo "DEPS_STATUS=ok"
+      return 0
+    fi
+  fi
+
+  local -a _DEPS_ENTRIES=()
+  local detect_cwd="${main_checkout:-$PWD}"
+
+  det=$(cd "$detect_cwd" && _detect_dependency_installer "$worktree_path" "$key") || det=""
+  if [[ -z "$det" ]]; then
+    det=$(_dep_emit needs-recipe "" "" "" repository "the dependency detector returned no answer")
+  fi
+  local root_status
+  root_status=$(printf '%s' "$det" | jq -r '.status // ""')
+
+  if [[ "$root_status" != "nothing-to-install" ]]; then
+    _deps_process_dir "$worktree_path" "." "$det" "$prior"
+  else
+    local -a subdirs=()
+    local d base
+    while IFS= read -r d; do
+      base=$(basename "$d")
+      case "$base" in .*|node_modules|vendor|dist|build) continue ;; esac
+      subdirs+=("$d")
+    done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+    for d in "${subdirs[@]+"${subdirs[@]}"}"; do
+      base=$(basename "$d")
+      det=$(cd "$detect_cwd" && _detect_dependency_installer "$d" "$key") || det=""
+      if [[ -z "$det" ]]; then continue; fi
+      _deps_process_dir "$d" "$base" "$det" "$prior"
+    done
+  fi
+
+  local dirs_json="[]" agg="nothing-to-install"
+  if [[ ${#_DEPS_ENTRIES[@]} -gt 0 ]]; then
+    dirs_json=$(printf '%s\n' "${_DEPS_ENTRIES[@]}" | jq -sc '.')
+    agg=$(printf '%s' "$dirs_json" | jq -r '
+      map(.status) as $s
+      | if ($s | index("failed")) != null then "failed"
+        elif ($s | index("needs-recipe")) != null then "needs-recipe"
+        else "ok" end')
+  fi
+
+  if [[ "$agg" == "nothing-to-install" ]]; then
+    echo -e "${YELLOW}ℹ️  No package.json in worktree, skipping dependency install: $worktree_name${NC}"
+  fi
+
+  _deps_write_marker "$worktree_path" "$agg" "$dirs_json"
+  echo "DEPS_STATUS=$agg"
+  if [[ "$agg" == "failed" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+# Compose the subject of a merge commit. Prints nothing when the merge should
+# keep git's own default message. Args: <branch> <explicit-subject> <target>.
+# The explicit subject wins; otherwise a branch named `...-US-NNN` gets a
+# generic subject; any other name prints nothing. Whatever is composed is
+# sanitized once: `[..]` groups holding a US-NNN token, bare US-NNN tokens and
+# CR/LF are removed, whitespace collapses, and the result is cut to 200
+# characters. A subject empty after sanitizing counts as not supplied.
+_merge_subject_for() {
+  local branch="$1" explicit="$2" target="$3"
+  local subject=""
+  if [[ -n "$explicit" ]]; then
+    subject=$(_merge_subject_sanitize "$explicit")
+  fi
+  if [[ -z "$subject" && "$branch" =~ -US-[0-9]+$ ]]; then
+    subject=$(_merge_subject_sanitize "Merge story into $target")
+  fi
+  if [[ -n "$subject" ]]; then
+    printf '%s' "$subject"
+  fi
+  return 0
+}
+
+_merge_subject_sanitize() {
+  local subject
+  subject=$(printf '%s' "$1" | tr '\r\n' '  ' \
+    | sed -E 's/\[[^]]*US-[0-9]+[^]]*\]//g; s/US-[0-9]+//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  subject="${subject:0:200}"
+  printf '%s' "${subject% }"
 }
 
 # Merge a worktree branch into a target branch
 merge_worktree() {
   local worktree_name=""
   local target_branch=""
+  local explicit_subject=""
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --into)
         target_branch="$2"
+        shift 2
+        ;;
+      --subject)
+        if [[ $# -lt 2 ]]; then
+          echo -e "${RED}Error: --subject requires a value${NC}"
+          exit 1
+        fi
+        explicit_subject="$2"
         shift 2
         ;;
       *)
@@ -942,7 +1361,7 @@ merge_worktree() {
 
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}"
-    echo "Usage: worktree-manager.sh merge <worktree-name> [--into <branch>]"
+    echo "Usage: worktree-manager.sh merge <worktree-name> [--into <branch>] [--subject <subject>]"
     exit 1
   fi
 
@@ -992,8 +1411,18 @@ merge_worktree() {
   local merge_stderr
   merge_stderr=$(mktemp)
 
+  # A subject travels as one argv element, never through eval. --no-log keeps a
+  # configured merge.log from appending the merged commits' subjects; --no-edit
+  # keeps -m from opening an editor.
+  local subject
+  subject=$(_merge_subject_for "$worktree_branch" "$explicit_subject" "$target_branch")
+  local merge_args=()
+  if [[ -n "$subject" ]]; then
+    merge_args=(--no-log --no-edit -m "$subject")
+  fi
+
   # Attempt the merge
-  if git merge -- "$worktree_branch" 2>"$merge_stderr"; then
+  if git merge ${merge_args[@]+"${merge_args[@]}"} -- "$worktree_branch" 2>"$merge_stderr"; then
     local merge_hash
     merge_hash=$(git rev-parse HEAD)
     if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
@@ -1021,13 +1450,25 @@ merge_worktree() {
 merge_all_worktrees() {
   local branches=()
   local target_branch=""
+  # --subject-for pairs, kept in parallel arrays (no `declare -A` on bash 3.2)
+  local subject_names=()
+  local subject_values=()
 
-  # Parse arguments: collect branches and optional --into flag
+  # Parse arguments: collect branches and optional --into / --subject-for flags
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --into)
         target_branch="$2"
         shift 2
+        ;;
+      --subject-for)
+        if [[ $# -lt 3 ]]; then
+          echo -e "${RED}Error: --subject-for requires a name and a subject${NC}"
+          exit 1
+        fi
+        subject_names+=("$2")
+        subject_values+=("$3")
+        shift 3
         ;;
       *)
         branches+=("$1")
@@ -1038,7 +1479,7 @@ merge_all_worktrees() {
 
   if [[ ${#branches[@]} -eq 0 ]]; then
     echo -e "${RED}Error: At least one branch name required${NC}"
-    echo "Usage: worktree-manager.sh merge-all <branch1> <branch2> ... [--into <branch>]"
+    echo "Usage: worktree-manager.sh merge-all <branch1> <branch2> ... [--into <branch>] [--subject-for <name> <subject>]..."
     exit 1
   fi
 
@@ -1050,6 +1491,20 @@ merge_all_worktrees() {
       exit 1
     fi
   fi
+
+  # Every --subject-for name must be one of the listed branches; refuse before
+  # any git operation.
+  local sn sb sfound
+  for sn in ${subject_names[@]+"${subject_names[@]}"}; do
+    sfound=0
+    for sb in "${branches[@]}"; do
+      if [[ "$sb" == "$sn" ]]; then sfound=1; break; fi
+    done
+    if [[ $sfound -eq 0 ]]; then
+      echo -e "${RED}Error: --subject-for name is not among the listed branches: $sn${NC}"
+      exit 1
+    fi
+  done
 
   echo -e "${BLUE}Merging ${#branches[@]} branch(es) into '$target_branch'...${NC}"
   echo ""
@@ -1082,8 +1537,22 @@ merge_all_worktrees() {
     local merge_stderr
     merge_stderr=$(mktemp)
 
+    # Look the subject up by the argument as given, not the resolved branch
+    local explicit_subject="" si
+    for ((si = 0; si < ${#subject_names[@]}; si++)); do
+      if [[ "${subject_names[$si]}" == "$branch" ]]; then
+        explicit_subject="${subject_values[$si]}"
+      fi
+    done
+    local subject
+    subject=$(_merge_subject_for "$resolved_branch" "$explicit_subject" "$target_branch")
+    local merge_args=()
+    if [[ -n "$subject" ]]; then
+      merge_args=(--no-log --no-edit -m "$subject")
+    fi
+
     # Attempt merge
-    if git merge "$resolved_branch" 2>"$merge_stderr"; then
+    if git merge ${merge_args[@]+"${merge_args[@]}"} "$resolved_branch" 2>"$merge_stderr"; then
       local merge_hash
       merge_hash=$(git rev-parse HEAD)
       if [[ -s "$merge_stderr" ]]; then cat "$merge_stderr" >&2; fi
@@ -1530,13 +1999,105 @@ _classify_dev_command() {
   esac
 }
 
+# True when <dir> carries its own dependencies: a node_modules directory or a
+# Yarn Plug'n'Play map.
+_serve_has_dependency_dir() {
+  [[ -d "$1/node_modules" || -f "$1/.pnp.cjs" ]]
+}
+
+# First-level directory names serve never looks into or accepts as --dir.
+_serve_skipped_dir_name() {
+  case "$1" in
+    .*|node_modules|vendor|dist|build) return 0 ;;
+  esac
+  return 1
+}
+
+# Print, one per line and sorted, the first-level subfolders of <worktree-path>
+# whose package.json declares a non-empty scripts.dev.
+_serve_dev_candidates() {
+  local worktree_path="$1" d name dev
+  while IFS= read -r d; do
+    name="${d##*/}"
+    if _serve_skipped_dir_name "$name"; then continue; fi
+    if [[ ! -f "$d/package.json" ]]; then continue; fi
+    dev=$(jq -r '.scripts.dev // empty | select(type == "string")' "$d/package.json" 2>/dev/null) || dev=""
+    if [[ -n "$dev" ]]; then printf '%s\n' "$name"; fi
+  done < <(find "$worktree_path" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | LC_ALL=C sort)
+  return 0
+}
+
+# May a dev server start in <dir> (. or a first-level subfolder name) of
+# <worktree-path>? Prints nothing and returns 0 when it may; prints one reason
+# line and returns 1 when it may not. Never aborts a `set -e` caller.
+# The install marker's entry for exactly this directory decides first (a
+# sibling's failure never blocks it); with no entry, the walk from the served
+# directory up to the worktree root comes before looking above the worktree:
+# what is hoisted inside the worktree is its own, what is only above it is
+# another checkout's, which is how Node resolves a bare specifier.
+_serve_deps_gate() {
+  local worktree_path="$1" dir="$2" marker st="" served cur up
+  if marker=$(_deps_marker_path "$worktree_path" 2>/dev/null) && [[ -f "$marker" ]]; then
+    st=$(jq -r --arg d "$dir" '[.directories | arrays | .[] | objects | select(((.dir // "") | tostring | ltrimstr("./")) == $d)] | .[0] | .status // empty' "$marker" 2>/dev/null) || st=""
+  fi
+  case "$st" in
+    failed)
+      printf '%s\n' "the dependency install failed for '$dir' (see install-deps); not starting a dev server against missing packages"
+      return 1 ;;
+    needs-recipe)
+      printf '%s\n' "no install command is known for '$dir' (install-deps recorded needs-recipe); not starting a dev server without its dependencies"
+      return 1 ;;
+    ok)
+      return 0 ;;
+  esac
+
+  served="$worktree_path"
+  if [[ "$dir" != "." ]]; then served="$worktree_path/$dir"; fi
+  cur="$served"
+  while :; do
+    if _serve_has_dependency_dir "$cur"; then return 0; fi
+    if [[ "$cur" == "$worktree_path" || "$cur" == "/" || "$cur" == "." ]]; then break; fi
+    cur=$(dirname "$cur")
+  done
+  up=$(dirname "$worktree_path")
+  while :; do
+    if _serve_has_dependency_dir "$up"; then
+      printf '%s\n' "'$dir' has no dependencies of its own and would borrow the ones in $up, outside this worktree; install them in the worktree first"
+      return 1
+    fi
+    if [[ "$up" == "/" || "$up" == "." ]]; then break; fi
+    up=$(dirname "$up")
+  done
+  return 0
+}
+
 # Start (or reuse) a loopback dev server for a container worktree.
 serve_start() {
-  local worktree_name="$1"
+  local worktree_name="${1:-}"
+  shift || true
+  local dir_arg="" dir_given=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir)
+        dir_given=true
+        if [[ $# -ge 2 ]]; then dir_arg="$2"; shift 2; else dir_arg=""; shift; fi
+        ;;
+      --dir=*)
+        dir_given=true
+        dir_arg="${1#--dir=}"
+        shift
+        ;;
+      *)
+        echo -e "${RED}Error: serve start: unexpected argument or option: $1${NC}" >&2
+        echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
+        exit 1
+        ;;
+    esac
+  done
 
   if [[ -z "$worktree_name" ]]; then
     echo -e "${RED}Error: Worktree name required${NC}" >&2
-    echo "Usage: worktree-manager.sh serve start <worktree-name>" >&2
+    echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
     exit 1
   fi
 
@@ -1569,15 +2130,65 @@ serve_start() {
     exit 1
   fi
 
-  if [[ ! -f "$worktree_path/package.json" ]]; then
+  # Directory served: the root, a validated --dir, or the one first-level
+  # subfolder with a dev script when the root has no package.json.
+  local serve_dir="." serve_path="$worktree_path"
+  if [[ "$dir_given" == true ]]; then
+    local dir_problem=""
+    if [[ -z "$dir_arg" ]]; then
+      dir_problem="a first-level subfolder name is required"
+    elif [[ "$dir_arg" == */* || "$dir_arg" == *\\* ]] || _serve_skipped_dir_name "$dir_arg"; then
+      dir_problem="'$dir_arg' is not an accepted first-level subfolder name"
+    elif [[ ! -d "$worktree_path/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' is not a directory inside the worktree"
+    elif [[ "$(realpath "$worktree_path/$dir_arg" 2>/dev/null)" != "$(realpath "$worktree_path")/$dir_arg" ]]; then
+      dir_problem="'$dir_arg' resolves outside its place in the worktree"
+    elif [[ -f "$worktree_path/package.json" ]]; then
+      dir_problem="the worktree root has its own package.json, so there is nothing to select"
+    fi
+    if [[ -n "$dir_problem" ]]; then
+      printf '%b%s%b\n' "$RED" "Error: serve start --dir: $dir_problem" "$NC" >&2
+      echo "Usage: worktree-manager.sh serve start <worktree-name> [--dir <subfolder>]" >&2
+      exit 1
+    fi
+    serve_dir="$dir_arg"
+    serve_path="$worktree_path/$dir_arg"
+  elif [[ ! -f "$worktree_path/package.json" ]]; then
+    local cands cand_count=0 cand_line cand_list=""
+    cands=$(_serve_dev_candidates "$worktree_path")
+    while IFS= read -r cand_line; do
+      if [[ -n "$cand_line" ]]; then
+        cand_count=$((cand_count + 1))
+        cand_list="${cand_list:+$cand_list, }$cand_line"
+      fi
+    done <<< "$cands"
+    if [[ "$cand_count" -gt 1 ]]; then
+      printf '%b%s%b\n' "$YELLOW" "ℹ️  No package.json at the worktree root and several subfolders have a dev script ($cand_list); pass --dir <subfolder> to choose one: $worktree_name" "$NC" >&2
+      return 0
+    elif [[ "$cand_count" -eq 1 ]]; then
+      serve_dir="$cands"
+      serve_path="$worktree_path/$serve_dir"
+      printf '%b%s%b\n' "$BLUE" "Serving subfolder '$serve_dir' (the only one with a dev script): $worktree_name" "$NC" >&2
+    fi
+  fi
+
+  if [[ ! -f "$serve_path/package.json" ]]; then
     echo -e "${YELLOW}ℹ️  No package.json in worktree, no dev server applies: $worktree_name${NC}" >&2
     return 0
   fi
 
   local dev_script
-  dev_script=$(jq -r '.scripts.dev // empty' "$worktree_path/package.json" 2>/dev/null || echo "")
+  dev_script=$(jq -r '.scripts.dev // empty' "$serve_path/package.json" 2>/dev/null || echo "")
   if [[ -z "$dev_script" ]]; then
     echo -e "${YELLOW}ℹ️  No 'dev' script in package.json, no dev server applies: $worktree_name${NC}" >&2
+    return 0
+  fi
+
+  # Refuse before anything is registered, reused or stopped: a failed or
+  # borrowed install means the dev server would run the wrong packages.
+  local gate_reason
+  if ! gate_reason=$(_serve_deps_gate "$worktree_path" "$serve_dir"); then
+    printf '%b%s%b\n' "$YELLOW" "⚠️  Not starting a dev server for '$worktree_name': $gate_reason" "$NC" >&2
     return 0
   fi
 
@@ -1629,6 +2240,9 @@ serve_start() {
     existing_port=$(printf '%s' "$existing_entry" | jq -r '.port // empty')
     existing_identity=$(printf '%s' "$existing_entry" | jq -r '.identity // empty')
 
+    local existing_dir
+    existing_dir=$(printf '%s' "$existing_entry" | jq -r '.dir // "."')
+
     local reused=false
     if [[ -n "$existing_pid" ]] && dev_server_entry_is_ours "$existing_pid" "$existing_identity"; then
       # Identity match alone isn't enough to reuse: re-resolve who currently
@@ -1649,6 +2263,10 @@ serve_start() {
     fi
 
     if [[ "$reused" == true ]]; then
+      if [[ "$existing_dir" != "$serve_dir" ]]; then
+        printf '%b%s%b\n' "$YELLOW" "⚠️  Dev server for '$worktree_name' is already running for directory '$existing_dir', not '$serve_dir'; leaving it running. Run 'serve stop $worktree_name' first to serve another directory" "$NC" >&2
+        return 0
+      fi
       # Cap the log on reuse: a server kept alive across phase-mode waves
       # otherwise keeps the same log file growing for the life of the
       # container. Truncate to the final half in place (reopen the existing
@@ -1676,7 +2294,7 @@ serve_start() {
   # above); only the run-dev command array is specific to serve_start.
   local pm_name
   local -a pm_cmd
-  pm_name=$(_detect_package_manager "$worktree_path")
+  pm_name=$(_detect_package_manager "$serve_path")
   case "$pm_name" in
     bun) pm_cmd=(bun run dev) ;;
     pnpm) pm_cmd=(pnpm run dev) ;;
@@ -1706,9 +2324,9 @@ serve_start() {
 
   local leader_pid=""
   if [[ ${#attempt1_extra[@]} -gt 0 ]]; then
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt1_extra[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt1_extra[@]}")
   else
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}")
   fi
 
   # Capture _wait_ready's distinguishing return code (0 ready, 1 nothing ever
@@ -1743,7 +2361,7 @@ serve_start() {
     # would be redundant with that truncation (see _launch_dev_server above).
 
     echo -e "${BLUE}PORT env var attempt did not answer on port $port; retrying with -- --port ${port} (attempt 2)...${NC}" >&2
-    leader_pid=$(cd "$worktree_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
+    leader_pid=$(cd "$serve_path" && _launch_dev_server "$port" "$log_file" "$pid_file" "${pm_cmd[@]}" -- "${attempt2_extra[@]}")
 
     if [[ -n "$leader_pid" ]] && _wait_ready "$port" "$DEV_SERVER_READY_TIMEOUT"; then
       ready=true
@@ -1806,8 +2424,8 @@ serve_start() {
   fi
 
   local entry
-  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" \
-    '{port: $port, pid: $pid, startedAt: $started, identity: $identity}')
+  entry=$(jq -n --argjson port "$port" --argjson pid "$leader_pid" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg identity "$leader_identity" --arg dir "$serve_dir" \
+    '{port: $port, pid: $pid, startedAt: $started, identity: $identity, dir: $dir}')
   _dev_server_write_entry "$state_file" "$dev_server_key" "$entry"
 
   echo -e "${GREEN}✓ Dev server ready for '$worktree_name': http://127.0.0.1:${port} (pid $leader_pid)${NC}" >&2
@@ -1972,7 +2590,7 @@ serve_dispatch() {
   shift || true
   case "$subcmd" in
     start)
-      serve_start "$1"
+      serve_start "$@"
       ;;
     stop)
       serve_stop "$1"
@@ -1985,7 +2603,7 @@ serve_dispatch() {
       ;;
     *)
       echo -e "${RED}Error: Unknown serve subcommand: ${subcmd:-<none>}${NC}" >&2
-      echo "Usage: worktree-manager.sh serve start|stop|status|url <worktree-name> [<raw-url>]" >&2
+      echo "Usage: worktree-manager.sh serve start|stop|status|url <worktree-name> [<raw-url>]  (start also takes --dir <subfolder>)" >&2
       exit 1
       ;;
   esac
@@ -2025,7 +2643,8 @@ main() {
       cleanup_worktrees
       ;;
     install-deps)
-      install_deps "$2"
+      shift
+      install_deps "$@"
       ;;
     serve)
       shift
@@ -2059,17 +2678,30 @@ Commands:
   switch | go <name>                  Switch to worktree
   copy-env | env [name]               Copy .env files from main repo to worktree
                                       (if name omitted, uses current worktree)
-  merge <worktree-name> [--into <b>]  Merge worktree branch into target branch
+  merge <worktree-name> [--into <b>] [--subject <s>]  Merge worktree branch into target branch
                                       (defaults --into to current branch)
-  merge-all <b1> <b2> ... [--into <b>]  Merge multiple branches sequentially
+  merge-all <b1> <b2> ... [--into <b>] [--subject-for <name> <s>]...  Merge multiple branches sequentially
                                          (stops on first conflict)
   cleanup | clean                     Clean up inactive worktrees
-  install-deps <worktree-name>        Install dependencies inside a worktree
-                                      (detects package manager by lockfile)
-  serve start <worktree-name>         Start a dev server for a worktree, verify its
+  install-deps <worktree-name>        Install dependencies inside a worktree with the
+                                      frozen command, no fallback; last line is
+                                      DEPS_STATUS=<status>. Callers install every
+                                      container, whether or not it serves
+  install-deps --root                 The same for the checkout the command runs
+                                      from; a dependency directory with no marker
+                                      of ours is user-managed: no installer,
+                                      DEPS_STATUS=ok
+  serve start <worktree-name> [--dir <subfolder>]
+                                      Start a dev server for a worktree, verify its
                                       listener is actually loopback-only, print its
                                       raw URL to stdout only — pid and all narration
-                                      go to stderr (refuses and kills a wildcard bind)
+                                      go to stderr (refuses and kills a wildcard bind).
+                                      Declines (exit 0, no URL) when install-deps
+                                      recorded failed/needs-recipe for the served
+                                      directory, or its dependencies would be borrowed
+                                      from a checkout above the worktree. With no root
+                                      package.json it serves the only first-level
+                                      subfolder with a dev script; --dir picks one
   serve stop <worktree-name>          Stop a worktree's dev server (kills the
                                       whole process group)
   serve status <worktree-name>        Report a worktree's dev server status as
@@ -2092,18 +2724,33 @@ Merge:
   - On success: prints the merge commit hash
   - On conflict: prints conflicting files and exits with code 1
   - merge-all stops on first conflict and reports which branch failed
+  - --subject / --subject-for set the merge commit subject (sanitized; US-NNN tokens removed)
 
 Install Deps:
-  - Detection order (first lockfile match wins): bun.lockb -> bun install;
-    pnpm-lock.yaml -> pnpm install; yarn.lock -> yarn install;
-    package-lock.json -> npm ci (falls back to npm install on failure);
-    no recognized lockfile but package.json present -> npm install
-  - Idempotency short-circuit: when a recognized lockfile exists and
-    node_modules/ is already at least as fresh as it (mtime comparison),
-    the install is skipped entirely and this exits 0 with an informational
-    line — a resumed container that already had correct dependencies never
-    pays a cold reinstall. Does not apply when there's no recognized
-    lockfile, or node_modules/ doesn't exist yet, or the lockfile is newer
+  - Frozen commands, run as argv inside the target directory (never eval):
+    bun install --frozen-lockfile; pnpm install --frozen-lockfile; npm ci;
+    yarn install --frozen-lockfile (classic) or --immutable (berry). There is
+    no fallback: a failed command is final and no other manager is tried.
+    A command holding ; | & $ < > a backtick or a newline is refused and runs
+    nothing; a first word absent from PATH fails naming that word.
+  - package.json without a lockfile installs with the detector's command,
+    warns that versions are not pinned, and deletes any lockfile that install
+    created (a lockfile that existed before is never deleted)
+  - Directories: the root alone when the detector finds something to install
+    there; otherwise each first-level subfolder with a manifest, in sorted
+    order, skipping hidden directories, node_modules, vendor, dist and build.
+    A failing subfolder is recorded failed and the exit status is 1, but the
+    others are still installed
+  - Marker: <git dir of the worktree>/aimi-deps.json holds
+    {status, directories:[{dir, status, command, lockfileHash}]}; status is
+    failed over needs-recipe over ok over nothing-to-install. It never shows
+    in git status
+  - Output: the last stdout line is DEPS_STATUS=<status>; exit 1 for failed,
+    0 for ok, nothing-to-install and needs-recipe (the last two run nothing)
+  - Re-run: no installer runs and DEPS_STATUS=ok is printed when the marker
+    records ok for the directory with the same command and lockfile hash and
+    node_modules/ still exists. A changed lockfile, a missing node_modules/,
+    a recorded failure or a directory with no lockfile installs again
   - No package.json: prints an informational line and exits 0 (not an error)
   - Install failure: prints a clear error naming the package manager and
     worktree, and exits non-zero
@@ -2111,6 +2758,13 @@ Install Deps:
     treated as a degradation, not a fatal error. Callers such as the
     container mode of /aimi:execute should fall visual verification back to
     skipped/failed and never abort the wave loop because install-deps failed
+  - Every container is installed whether or not a story in it is visual; the
+    install is never tied to a visual gate, only serve start is
+  - --root (no name, exit 1 if combined with one): installs the checkout the
+    command runs from, with the same engine, marker and closing DEPS_STATUS=
+    line, and no .worktrees/ containment check. When a dependency directory is
+    already present and no marker records an install of ours, it runs no
+    installer, writes no marker, prints DEPS_STATUS=ok and exits 0
 
 Serve (Dev Server):
   - Attempt-then-verify loopback bind: serve start reads scripts.dev from the
@@ -2210,7 +2864,10 @@ Serve (Dev Server):
     serve start/stop/status/url never exit non-zero for these conditions. A
     missing or invalid worktree-name argument (see validate_branch_name) is
     a usage error in all four verbs — non-zero exit, stderr message, no
-    stdout line at all. serve start adds two more usage errors in the same
+    stdout line at all. serve start --dir takes exactly one first-level
+    subfolder (a bad value, or a root with its own package.json, is a usage
+    error naming --dir), and a registered server for another directory is
+    neither reused nor stopped. serve start adds two more usage errors in the same
     category, because both mean the caller passed a name that never
     corresponded to a real worktree, not a runtime degradation: a worktree
     directory that doesn't exist, and a resolved path that escapes
@@ -2240,4 +2897,6 @@ EOF
 }
 
 # Run
-main "$@"
+# Run only when executed; sourcing (a test shell) just defines the functions.
+# `:-$0` keeps piped execution (empty BASH_SOURCE) running main.
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi

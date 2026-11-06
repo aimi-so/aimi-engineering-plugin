@@ -464,6 +464,8 @@ REFERENCE_ALLOWLIST_LITERALS=(
   "container-execution.md"
   # carries picker (AskUserQuestion) wording rules
   "user-communication.md"
+  # carries the unbolded picker wording for the install-recipe question
+  "dependency-setup.md"
 )
 
 # ---------------------------------------------------------------------------

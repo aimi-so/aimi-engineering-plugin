@@ -15,6 +15,8 @@ set -uo pipefail
 #
 # Sections, in the order the single-file suite ran them:
 #   - Detect Default Branch Tests
+#   - Caller-repository default Tests (detect-default-branch, detect-parent-branch,
+#     resolve-base-branch and setup-branch with --project omitted)
 #   - Detect Parent Branch Tests
 #   - Archive Task Tests
 #   - Research Lookup Tests
@@ -27,6 +29,7 @@ set -uo pipefail
 #   - get-current-models Tests
 #   - list-models Tests
 #   - detect-models Tests
+#   - deps-recipe-record Tests (seventeen assertions)
 #   - Model-Validity Predicate Tests (the four disagreeing validity sites)
 #   - models-prompt-check / models-prompt-dismiss Tests
 #   - story-merge Tests
@@ -233,6 +236,157 @@ test_detect_default_branch_per_repo_scoping() {
 
   popd >/dev/null
   teardown_multi_repo_default_branch_fixture
+}
+
+# ============================================================================
+# Caller-repository default Tests
+# ============================================================================
+# detect-default-branch, detect-parent-branch, resolve-base-branch and
+# setup-branch answer for the repository the caller stands in when --project is
+# omitted. Fixtures are mktemp -d trees outside the repository; the multi-repo
+# one (setup_multi_repo_default_branch_fixture) is a NON-git .aimi root holding
+# repo-a (main) and repo-b (master).
+
+# Creates a git .aimi root (offline fixture) holding a nested, separate git
+# repository at <root>/nested and a linked worktree of the root under
+# <root>/.worktrees/wt. Sets CALLER_REPO_ROOT, CALLER_REPO_NESTED and
+# CALLER_REPO_WORKTREE; teardown with teardown_caller_repo_git_root_fixture.
+setup_caller_repo_git_root_fixture() {
+  setup_default_branch_offline_fixture
+  CALLER_REPO_ROOT="$DEFAULT_BRANCH_FIXTURE_DIR"
+  CALLER_REPO_NESTED="$CALLER_REPO_ROOT/nested"
+  CALLER_REPO_WORKTREE="$CALLER_REPO_ROOT/.worktrees/wt"
+  mkdir -p "$CALLER_REPO_NESTED"
+  (cd "$CALLER_REPO_NESTED" && git init >/dev/null 2>&1 && git checkout -b main >/dev/null 2>&1 \
+    && echo n > n.txt && git add n.txt && git commit -m "nested initial" >/dev/null 2>&1)
+  (cd "$CALLER_REPO_ROOT" && git worktree add "$CALLER_REPO_WORKTREE" -b wt-branch >/dev/null 2>&1)
+}
+
+teardown_caller_repo_git_root_fixture() {
+  teardown_default_branch_fixture
+  unset CALLER_REPO_ROOT CALLER_REPO_NESTED CALLER_REPO_WORKTREE
+}
+
+test_caller_repository_detect_default_branch() {
+  echo ""
+  echo "=== Testing caller-repository: detect-default-branch ==="
+
+  local out rc err
+  setup_multi_repo_default_branch_fixture
+
+  out=$(cd "$MULTI_REPO_FIXTURE_A" && "$CLI" detect-default-branch 2>&1) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "caller-repository detect-default-branch: repo-a caller -- exit code"
+  assert_eq "main" "$out" "caller-repository detect-default-branch: repo-a caller answers its own main"
+
+  out=$(cd "$MULTI_REPO_FIXTURE_B" && "$CLI" detect-default-branch 2>&1) && rc=0 || rc=$?
+  assert_eq "master" "$out" "caller-repository detect-default-branch: repo-b caller answers its own master, not a sibling's"
+
+  out=$(cd "$MULTI_REPO_FIXTURE_B" && "$CLI" detect-default-branch --project "$MULTI_REPO_FIXTURE_A" 2>&1) && rc=0 || rc=$?
+  assert_eq "main" "$out" "caller-repository detect-default-branch: explicit --project wins over the caller directory"
+
+  err=$(cd "$MULTI_REPO_FIXTURE_ROOT" && "$CLI" detect-default-branch 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository detect-default-branch: caller in no repository -- exit code"
+  assert_stderr_contains "Error: Not a git repository" "$err" "caller-repository detect-default-branch: caller in no repository -- message"
+
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_caller_repository_detect_parent_branch() {
+  echo ""
+  echo "=== Testing caller-repository: detect-parent-branch ==="
+
+  local out rc err
+  setup_multi_repo_default_branch_fixture
+  (cd "$MULTI_REPO_FIXTURE_B" && git checkout -b feat-x >/dev/null 2>&1 && echo x > x.txt && git add x.txt && git commit -m "x" >/dev/null 2>&1)
+
+  out=$(cd "$MULTI_REPO_FIXTURE_B" && "$CLI" detect-parent-branch feat-x 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "caller-repository detect-parent-branch: repo-b caller -- exit code"
+  assert_contains '"base":"master"' "$out" "caller-repository detect-parent-branch: repo-b caller resolves feat-x against its own repository"
+
+  err=$(cd "$MULTI_REPO_FIXTURE_ROOT" && "$CLI" detect-parent-branch feat-x 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository detect-parent-branch: caller in no repository -- exit code"
+  assert_stderr_contains "Error: Not a git repository" "$err" "caller-repository detect-parent-branch: caller in no repository -- message"
+
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_caller_repository_resolve_base_branch() {
+  echo ""
+  echo "=== Testing caller-repository: resolve-base-branch ==="
+
+  local out rc err
+  setup_multi_repo_default_branch_fixture
+
+  out=$(cd "$MULTI_REPO_FIXTURE_B" && "$CLI" resolve-base-branch feat/y --default-branch master 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "caller-repository resolve-base-branch: repo-b caller -- exit code"
+  assert_contains '"currentBranch":"master"' "$out" "caller-repository resolve-base-branch: repo-b caller reads its own current branch"
+
+  out=$(cd "$MULTI_REPO_FIXTURE_B" && "$CLI" resolve-base-branch feat/y --default-branch main --project "$MULTI_REPO_FIXTURE_A" 2>/dev/null) && rc=0 || rc=$?
+  assert_contains '"currentBranch":"main"' "$out" "caller-repository resolve-base-branch: explicit --project wins over the caller directory"
+
+  err=$(cd "$MULTI_REPO_FIXTURE_ROOT" && "$CLI" resolve-base-branch feat/y --default-branch main 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository resolve-base-branch: caller in no repository -- exit code"
+  assert_stderr_contains "Error: Not a git repository" "$err" "caller-repository resolve-base-branch: caller in no repository -- message"
+
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_caller_repository_setup_branch_multi_repo() {
+  echo ""
+  echo "=== Testing caller-repository: setup-branch in a non-git .aimi root ==="
+
+  local rc err
+  setup_multi_repo_default_branch_fixture
+
+  (cd "$MULTI_REPO_FIXTURE_A" && "$CLI" setup-branch feat/z --default-branch main >/dev/null 2>&1) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "caller-repository setup-branch: repo-a caller -- exit code"
+  assert_eq "feat/z" "$(cd "$MULTI_REPO_FIXTURE_A" && git branch --show-current)" "caller-repository setup-branch: the branch is created and checked out in repo-a"
+  assert_eq "master" "$(cd "$MULTI_REPO_FIXTURE_B" && git branch --show-current)" "caller-repository setup-branch: sibling repo-b stays on its own branch"
+  (cd "$MULTI_REPO_FIXTURE_B" && git rev-parse --verify -q feat/z >/dev/null 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository setup-branch: sibling repo-b gains no feat/z branch"
+
+  err=$(cd "$MULTI_REPO_FIXTURE_ROOT" && "$CLI" setup-branch feat/q --default-branch main 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository setup-branch: caller in no repository -- exit code"
+  assert_stderr_contains "Error: Not a git repository" "$err" "caller-repository setup-branch: caller in no repository -- message"
+
+  teardown_multi_repo_default_branch_fixture
+}
+
+test_caller_repository_setup_branch_same_repo_worktree() {
+  echo ""
+  echo "=== Testing caller-repository: setup-branch from a linked worktree of a git .aimi root ==="
+
+  local rc
+  setup_caller_repo_git_root_fixture
+
+  (cd "$CALLER_REPO_WORKTREE" && "$CLI" setup-branch feat/w --default-branch main >/dev/null 2>&1) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "caller-repository setup-branch worktree: exit code"
+  assert_eq "feat/w" "$(cd "$CALLER_REPO_ROOT" && git branch --show-current)" "caller-repository setup-branch worktree: the branch is created in the .aimi root's own checkout"
+  assert_eq "wt-branch" "$(cd "$CALLER_REPO_WORKTREE" && git branch --show-current)" "caller-repository setup-branch worktree: the worktree's HEAD does not move"
+
+  teardown_caller_repo_git_root_fixture
+}
+
+test_caller_repository_setup_branch_different_repo_refuses() {
+  echo ""
+  echo "=== Testing caller-repository: setup-branch from a different repository than a git .aimi root ==="
+
+  local rc err
+  setup_caller_repo_git_root_fixture
+
+  err=$(cd "$CALLER_REPO_NESTED" && "$CLI" setup-branch feat/v --default-branch main 2>&1 >/dev/null) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository setup-branch refusal: exit code"
+  assert_stderr_contains "$CALLER_REPO_ROOT" "$err" "caller-repository setup-branch refusal: message names the .aimi root directory"
+  assert_stderr_contains "$CALLER_REPO_NESTED" "$err" "caller-repository setup-branch refusal: message names the caller directory"
+  assert_stderr_contains "--project" "$err" "caller-repository setup-branch refusal: message names --project"
+  (cd "$CALLER_REPO_ROOT" && git rev-parse --verify -q feat/v >/dev/null 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository setup-branch refusal: the .aimi root gains no branch"
+  (cd "$CALLER_REPO_NESTED" && git rev-parse --verify -q feat/v >/dev/null 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "caller-repository setup-branch refusal: the caller repository gains no branch"
+  assert_eq "main" "$(cd "$CALLER_REPO_ROOT" && git branch --show-current)" "caller-repository setup-branch refusal: the .aimi root's HEAD does not move"
+  assert_eq "main" "$(cd "$CALLER_REPO_NESTED" && git branch --show-current)" "caller-repository setup-branch refusal: the caller repository's HEAD does not move"
+
+  teardown_caller_repo_git_root_fixture
 }
 
 test_clear_state_removes_per_repo_default_branch_cache() {
@@ -9202,6 +9356,70 @@ test_split_detect_after_lists_member_paths() {
 # Main
 # ============================================================================
 
+# ============================================================================
+# deps-recipe-record Tests
+# ============================================================================
+
+test_deps_recipe_record() {
+  echo ""
+  echo "=== Testing deps-recipe-record: records, refuses, keeps the rest, needs python3 ==="
+
+  local root out rc cfg
+  root=$(mktemp -d)
+  mkdir -p "$root/.aimi" "$root/sub/dir"
+  cfg="$root/.aimi/config.json"
+
+  out=$(cd "$root/sub/dir" && "$CLI" deps-recipe-record --project . --command ' make setup ' 2>/dev/null) && rc=0 || rc=$?
+  assert_exit_code "0" "$rc" "deps-recipe-record: exit code from a subdirectory"
+  assert_eq "recorded" "$(printf '%s' "$out" | jq -r '.status')" "deps-recipe-record: status recorded"
+  assert_eq "make setup" "$(jq -r '.dependencies.install["."]' "$cfg")" "deps-recipe-record: command trimmed and stored"
+
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make setup' 2>/dev/null)
+  assert_eq "unchanged" "$(printf '%s' "$out" | jq -r '.status')" "deps-recipe-record: same command is unchanged"
+
+  printf '{"other":1,"dependencies":{"install":{"a":"x"},"keep":true}}\n' > "$cfg"
+  (cd "$root" && "$CLI" deps-recipe-record --project api --command 'just deps' >/dev/null 2>&1)
+  assert_eq "x just deps" "$(jq -r '[.dependencies.install.a, .dependencies.install.api] | join(" ")' "$cfg")" "deps-recipe-record: other recipes survive"
+  assert_eq "other,dependencies" "$(jq -r 'keys_unsorted | join(",")' "$cfg")" "deps-recipe-record: key order survives"
+
+  local before
+  before=$(cat "$cfg")
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project api --command 'a; b' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: unsafe command exit code"
+  assert_contains "Error: deps-recipe-record:" "$out" "deps-recipe-record: unsafe command message"
+  assert_eq "$before" "$(cat "$cfg")" "deps-recipe-record: refusal leaves the config byte-identical"
+
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project ../up --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: key with .. refused"
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project api 2>&1) && rc=0 || rc=$?
+  assert_contains "Usage: aimi-cli.sh deps-recipe-record" "$out" "deps-recipe-record: missing flag prints usage"
+
+  printf '[1]\n' > "$cfg"
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: non-object config refused"
+
+  rm -f "$cfg"
+  (cd "$root" && git init -q . && printf '{}\n' > .aimi/config.json && git add -f .aimi/config.json) >/dev/null 2>&1
+  out=$(cd "$root" && "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record: git-tracked config refused"
+  assert_contains "tracked by git" "$out" "deps-recipe-record: tracked config message names the cause"
+
+  local nopy f
+  nopy=$(mktemp -d)
+  for f in /usr/bin/* /bin/*; do
+    case "$(basename "$f")" in python3*|python) continue ;; esac
+    [ -e "$nopy/$(basename "$f")" ] || ln -s "$f" "$nopy/$(basename "$f")" 2>/dev/null
+  done
+  local root2
+  root2=$(mktemp -d); mkdir -p "$root2/.aimi"
+  out=$(cd "$root2" && PATH="$nopy" "$CLI" deps-recipe-record --project . --command 'make' 2>&1) && rc=0 || rc=$?
+  assert_exit_code "1" "$rc" "deps-recipe-record without python3: exit code"
+  assert_contains "python3 is required" "$out" "deps-recipe-record without python3: names python3"
+  assert_eq "no" "$([ -e "$root2/.aimi/config.json" ] && echo yes || echo no)" "deps-recipe-record without python3: nothing written"
+
+  rm -rf "$root" "$root2" "$nopy"
+}
+
 main() {
   if [ -z "${AIMI_TEST_PART_RESULT_FILE:-}" ]; then
     echo "================================================"
@@ -9230,6 +9448,12 @@ main() {
   test_detect_default_branch_per_repo_scoping
   test_detect_default_branch_classic_single_repo_regression
   test_clear_state_removes_per_repo_default_branch_cache
+  test_caller_repository_detect_default_branch
+  test_caller_repository_detect_parent_branch
+  test_caller_repository_resolve_base_branch
+  test_caller_repository_setup_branch_multi_repo
+  test_caller_repository_setup_branch_same_repo_worktree
+  test_caller_repository_setup_branch_different_repo_refuses
 
   # Detect-parent-branch tests — uses own git fixture (independent of TEST_DIR)
   echo ""
@@ -9336,6 +9560,7 @@ main() {
   test_detect_models_default_mode_preserves_other_host
   test_detect_models_flag_mode_rejections
   test_detect_models_flag_mode_normalizes_and_warns
+  test_deps_recipe_record
 
   # model-validity predicate comparison
   echo ""

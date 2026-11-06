@@ -916,7 +916,7 @@ _aimi_models_prompt_marker_path() {
 # the file holds a JSON OBJECT KEYED BY FORGE HOST, e.g.
 #   {"github.com": {...}, "gitlab.com": {...}}
 # It is multi-entry by nature: one repository can carry remotes on more than
-# one host, and phases 3 and 4 add glab/tea hosts alongside github.com. Any
+# one host, and phase 3 adds glab hosts alongside github.com. Any
 # writer MUST read the existing document and merge its own host key into it,
 # and MUST NOT rebuild the document with `jq -n`. That exact mistake shipped
 # here before: CHANGELOG:487 (1.97.2), where `detect-models` in default mode
@@ -1643,17 +1643,24 @@ cmd_status() {
 
 # Get metadata only
 # Flags: --tasks-file <path> (optional; falls back to get_tasks_file)
+#        --with-deliverable-branch (optional; adds .deliverableBranch, the
+#        branch the plan's work is delivered on -- the phase branch for a
+#        phase-scoped split member, metadata.branchName otherwise)
 cmd_metadata() {
   local tasks_file=""
+  local with_branch=false
   while [ $# -gt 0 ]; do
     case "$1" in
       --tasks-file)
         shift
         tasks_file="${1:-}"
         ;;
+      --with-deliverable-branch)
+        with_branch=true
+        ;;
       *)
         echo "Error: Unknown flag: $1" >&2
-        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>]" >&2
+        echo "Usage: aimi-cli.sh metadata [--tasks-file <path>] [--with-deliverable-branch]" >&2
         exit 1
         ;;
     esac
@@ -1666,8 +1673,14 @@ cmd_metadata() {
   else
     tasks_file=$(get_tasks_file)
   fi
+
+  # One flag on the one crossing; the project root rides along only with it so
+  # the unflagged call line is byte-identical to what it always was.
+  local branch_args=()
+  [ "$with_branch" = true ] && branch_args=(--with-deliverable-branch --project-root "$PROJECT_ROOT")
+
   check_python3
-  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file"
+  python3 "$(_aimi_tasks_py)" metadata --tasks-file "$tasks_file" "${branch_args[@]}"
 }
 
 # Which stories carry a visual verification strategy (each with its own
@@ -3344,6 +3357,48 @@ _require_git_repo() {
   fi
 }
 
+# The directory the caller was standing in, for the branch verbs' default
+# repository. find_aimi_root cds to the .aimi/ root and records the caller's
+# own directory first (AIMI_INVOCATION_DIR); in a multi-repo layout that root
+# is a plain folder holding one repository per subfolder, so "the repository"
+# is the caller's, not the root's. Prints the directory when it still exists
+# and nothing otherwise; an empty answer keeps _require_git_repo's
+# current-directory behaviour. Defined once and read by detect-default-branch,
+# detect-parent-branch, resolve-base-branch and setup-branch.
+#
+# Usage: project_dir=$(_caller_project_dir)
+_caller_project_dir() {
+  if [ -n "${AIMI_INVOCATION_DIR:-}" ] && [ -d "$AIMI_INVOCATION_DIR" ]; then
+    printf '%s\n' "$AIMI_INVOCATION_DIR"
+  fi
+}
+
+# Absolute --git-common-dir of the repository containing <dir>, empty when
+# <dir> is in no repository. A linked worktree shares its main checkout's
+# common dir, so two directories of one repository compare equal. Same
+# two-step resolution _forge_account_store_path uses: the absolute form from
+# git first, then the bare answer joined to <dir> and normalised for git < 2.31.
+#
+# Usage: common=$(_git_common_dir_of "$dir")
+_git_common_dir_of() {
+  local dir="$1" common_dir=""
+  common_dir=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=""
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || common_dir=""
+    if [ -n "$common_dir" ]; then
+      case "$common_dir" in
+        /*) ;;
+        *) common_dir="$dir/$common_dir" ;;
+      esac
+      common_dir=$(resolve_path "$common_dir" 2>/dev/null) || common_dir=""
+    fi
+  fi
+  if [ -z "$common_dir" ] || [ "${common_dir#/}" = "$common_dir" ]; then
+    return 1
+  fi
+  printf '%s\n' "$common_dir"
+}
+
 # Derive a filesystem-safe cache-key suffix for a repository toplevel path,
 # so _resolve_default_branch's cache is scoped per repository instead of a
 # single shared file under AIMI_ROOT/.aimi/ (which silently leaked one
@@ -3430,6 +3485,7 @@ cmd_detect_default_branch() {
     shift
   done
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   _resolve_default_branch
@@ -3481,18 +3537,13 @@ _detect_forge_parse_host() {
 
 # Exact-or-subdomain classification of a lowercase hostname against the fixed
 # known-forge host list, first match wins: github.com -> github; gitlab.com
-# -> gitlab; gitea.com, codeberg.org -> gitea. Gitea's own SaaS host and
-# codeberg.org (the largest public Forgejo instance) are both recognized
-# under the single "gitea" adapter, since Forgejo is a compatibility-
-# preserving fork of Gitea and the two are deliberately NOT distinguished
-# anywhere in this contract. Any other host -- including a GitHub Enterprise
+# -> gitlab. Any other host -- including a GitHub Enterprise
 # Server host on a company-owned domain -- prints "unknown"; never guesses.
 _detect_forge_classify_host() {
   local host="$1"
   case "$host" in
     github.com|*.github.com) printf 'github' ;;
     gitlab.com|*.gitlab.com) printf 'gitlab' ;;
-    gitea.com|*.gitea.com|codeberg.org|*.codeberg.org) printf 'gitea' ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -3633,6 +3684,19 @@ _detect_forge_redact_userinfo() {
   printf '%s://%s%s' "$scheme" "$authority" "$path"
 }
 
+# The Gitea and Forgejo adapter was retired, so AIMI_FORGE_TYPE=gitea no longer
+# names a forge anyone can act on. It is read as `unknown`, which every forge
+# verb already answers with its manual steps, and one stderr line says so.
+# The variable is rewritten in this process, which is what keeps the notice to
+# one line: every later call sees `unknown`. Callers that fork before the first
+# call (a command substitution) would each print it once, so main() calls this
+# before dispatching any forge-* verb. Any other value is left untouched.
+_forge_normalize_type_override() {
+  [ "${AIMI_FORGE_TYPE:-}" = "gitea" ] || return 0
+  echo "Warning: AIMI_FORGE_TYPE=gitea names an adapter that no longer exists; reading it as unknown. Complete forge steps yourself -- GitHub and GitLab are the only adapters." >&2
+  AIMI_FORGE_TYPE="unknown"
+}
+
 # Composes the final {forge, host, remote, remoteUrl, source} object.
 # AIMI_FORGE_TYPE (already validated by the caller, cmd_detect_forge) short-
 # circuits before any git command runs at all when set and non-empty --
@@ -3645,6 +3709,7 @@ _detect_forge_redact_userinfo() {
 # under sibling --project calls, and any cache would go stale the moment a
 # remote is repointed.
 _detect_forge() {
+  _forge_normalize_type_override
   if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
     jq -nc --arg forge "$AIMI_FORGE_TYPE" \
       '{forge: $forge, host: null, remote: null, remoteUrl: null, source: "override"}'
@@ -3692,7 +3757,7 @@ _detect_forge() {
 # invocation and is never written to disk.
 declare -gA _DETECT_FORGE_TYPE_MEMO
 
-# The forge word alone -- github|gitlab|gitea|unknown -- for the callers
+# The forge word alone -- github|gitlab|unknown -- for the callers
 # that need only that and threw the rest of _detect_forge's envelope away.
 # No JSON is built or parsed anywhere on this path: it reaches the same
 # precedence rule through _detect_forge_select_remote_raw and the
@@ -3729,6 +3794,7 @@ declare -gA _DETECT_FORGE_TYPE_MEMO
 _detect_forge_type() {
   local -n _dft_out="$1"
 
+  _forge_normalize_type_override
   if [ -n "${AIMI_FORGE_TYPE:-}" ]; then
     _dft_out="$AIMI_FORGE_TYPE"
     return 0
@@ -3756,10 +3822,11 @@ _detect_forge_type() {
   _dft_out="$_dft_forge"
 }
 
-# Detect the forge (github|gitlab|gitea|unknown) for the active git remote.
+# Detect the forge (github|gitlab|unknown) for the active git remote.
 # AIMI_FORGE_TYPE overrides detection entirely and must be one of
-# github|gitlab|gitea, validated here -- before _detect_forge ever runs --
-# so an invalid value never reaches a git command. Never cached (see
+# github|gitlab, validated here -- before _detect_forge ever runs --
+# so an invalid value never reaches a git command. The retired value gitea is
+# still accepted and is read as unknown (see _forge_normalize_type_override). Never cached (see
 # _detect_forge's header comment: per-repository, per-invocation).
 cmd_detect_forge() {
   check_jq
@@ -3783,12 +3850,13 @@ cmd_detect_forge() {
     case "$AIMI_FORGE_TYPE" in
       github|gitlab|gitea) ;;
       *)
-        echo "Error: detect-forge: unrecognized AIMI_FORGE_TYPE value: $AIMI_FORGE_TYPE (expected one of: github, gitlab, gitea)" >&2
+        echo "Error: detect-forge: unrecognized AIMI_FORGE_TYPE value: $AIMI_FORGE_TYPE (expected one of: github, gitlab)" >&2
         exit 1
         ;;
     esac
   fi
 
+  _forge_normalize_type_override
   _detect_forge
 }
 
@@ -3941,6 +4009,7 @@ _verify_parent_candidate() {
 # verification.
 #
 # Usage: aimi-cli.sh detect-parent-branch <branch> [--project <path>]
+# (--project defaults to the caller's own repository, see _caller_project_dir)
 # Output: {"branch":<input>,"base":<resolved>,"verified":<bool>,"source":<source>,"candidates":<candidates>}
 #
 # `source` takes one of three values, following detect-forge's own
@@ -3999,6 +4068,7 @@ cmd_detect_parent_branch() {
     exit 1
   fi
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   # Validate branch name (security) — before any git command uses it
@@ -4100,7 +4170,7 @@ cmd_detect_parent_branch() {
 # field alongside status) — see that file's opening section for the full
 # statement.
 #
-# This section introduces NO gh/glab/tea invocation, no git-remote parsing,
+# This section introduces NO gh/glab invocation, no git-remote parsing,
 # and no forge-pr-view/forge-auth-status/forge-repo-info verb body. Those
 # belong to later stories in this phase, which call the functions below
 # rather than re-deriving the shapes they build.
@@ -4372,7 +4442,7 @@ _forge_build_write_data() {
 
 # Shared graceful-degradation gate (forge-contract.md "Degradation
 # Contract") for every forge-* verb that shells out to a forge CLI
-# (gh/glab/tea). `command -v` is a portable presence check that never
+# (gh/glab). `command -v` is a portable presence check that never
 # invokes the binary, so it cannot itself hang, prompt, or leak an
 # unguarded 127 -- guarding here is the whole point of this function.
 #
@@ -4770,7 +4840,7 @@ _forge_account_override_slots() {
 # and would leave the very before/after check that proves the machine account
 # was left alone structurally unable to detect a violation.
 #
-# NINE SITES, AND NO OTHERS (US-006's forge-pr-merge added the last two).
+# SIXTEEN SITES, AND NO OTHERS (US-006's forge-pr-merge added two; forge-tag-create four; forge-release-create three).
 # Each write function resolves BOTH slots ONCE into two locals immediately
 # after its own _forge_bin_check gate -- at most one is ever non-empty, and
 # only the matching one costs a `gh auth token` process -- then names both
@@ -4785,6 +4855,15 @@ _forge_account_override_slots() {
 #                                 cmd_forge_pr_view preflight read
 #   _forge_issue_create           gh issue create   the write
 #   _forge_resolve_review_thread  gh api graphql    the resolveReviewThread mutation
+#   _forge_tag_ensure_github      gh api            git/ref/tags/<tag> probe
+#                                 gh api            git/tags/<sha> read of an existing tag object
+#                                 gh api            POST git/tags, the tag object
+#                                 gh api            POST git/refs, the ref at that tag object
+#   _forge_release_github         gh api            releases/tags/<tag> probe
+#                                 gh api            releases?per_page=100 draft listing
+#                                 gh release create the write
+#                                 (it calls _forge_account_override_slots itself, after its own gh gate;
+#                                 the tag step it follows resolves its own slots too)
 #
 # Resolved ONCE per invocation, not once per site: a single forge-pr-create run
 # reaches gh three or four times and must not re-derive the host and re-mint the
@@ -4854,7 +4933,7 @@ _forge_account_override_slots() {
 #     account check that definitively answers "no" is still a successful
 #     lookup, not a broken one.
 #   - the forge's own CLI absent from PATH, or the resolved forge has no
-#     adapter yet (gitea/unknown -- gitlab gained one in phase 3) -> the
+#     adapter (unknown) -> the
 #     check itself could not run. status="error", data=null, message names
 #     why, naming the binary THAT forge needs (gh or glab, never a generic
 #     placeholder). Callers branch on status/message first, never on
@@ -4990,115 +5069,9 @@ _forge_auth_status_gitlab() {
       accounts: $ARGS.positional}' -- ${accounts[@]+"${accounts[@]}"}
 }
 
-# gitea adapter for forge-auth-status. Same {authenticated, account, accounts}
-# contract as its github and gitlab siblings, deliberately kept adjacent so
-# the three stay diffable -- and ONE deliberate divergence from the gitlab
-# arm, spelled out below because copying that arm by habit is what would
-# break this verb.
-#
-# `tea login list -o json` is an OFFLINE CONFIG READ (cmd/login/list.go,
-# modules/print/login.go:34-54): it prints the locally stored login entries
-# as an array of all-STRING rows keyed name, url, ssh_host, user, default.
-# It never dials the instance. That makes `authenticated: true` here a
-# WEAKER claim than gh's validated answer: it proves a login entry for this
-# host exists, NOT that its token still works. Recorded so a caller reading
-# `authenticated` on a Gitea remote calibrates it correctly rather than
-# assuming parity with GitHub's.
-#
-# WHY NOT `tea whoami`: it makes a network round trip
-# (client.Users.GetMyUserInfo, cmd/whoami.go:22-31) and then DISCARDS its own
-# error (`user, _, _ :=`) before printing. A probe that throws away the very
-# failure it is being asked about cannot answer this question, so no code
-# path in this adapter invokes it.
-#
-# THE ONE DELIBERATE DIVERGENCE FROM _forge_auth_status_gitlab: on a non-zero
-# exit, or on stdout jq cannot parse as an array, this returns NON-ZERO
-# instead of a clean `{authenticated: false}`. glab's non-zero exit IS its
-# confirmed "not authenticated" answer, so folding it into a negative there
-# is correct. `tea` exits 1 UNIFORMLY for every error (main.go:18-30 -- there
-# is no distinct exit code for anything), so the same reading would
-# manufacture a false clean negative out of a broken PATH, a corrupt config
-# or a jq-unparseable response. A false negative here is exactly what lets a
-# broken session walk into opening a duplicate pull request, which is the
-# defect this whole verb exists to prevent. Only an EMPTY match set on a
-# cleanly parsed list is a definitive `authenticated: false`.
-#
-# Entry selection is HOST-FILTERED, never first-wins: `tea login list`
-# returns every configured instance, so accepting entry zero would report a
-# codeberg.org session as proof of a gitea.com login. The `default` entry
-# among the matches wins, else the first match. Comparison is on the URL's
-# HOST component (scheme, userinfo, path and port stripped, case-folded), so
-# a stored `https://gitea.com/` matches a detected `gitea.com`.
-#
-# NO CREDENTIAL IS BOUND ANYWHERE IN THIS FUNCTION, and that is a security
-# property rather than an omission: `tea` honours GH_TOKEN whenever
-# GITEA_INSTANCE_URL is also set (modules/context/context_login.go:15-51), so
-# copying the GitHub write path's prefix-assignment habit would hand a GitHub
-# token to a Gitea instance. Identity selection on tea is `--login <name>`,
-# which names a stored entry and carries no secret; this read verb does not
-# need it and does not pass it.
-#
-# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
-# written on. Every flag, subcommand and JSON key above was read off
-# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
-# out of the real binary. What the tests prove is WHICH ARGV this function
-# emits and HOW it parses a fixture -- never what real `tea` does with them.
-# Where that under-verifies is the key NAMES themselves: the stub emits
-# whatever the author believed, so a wrong key would pass green on both
-# sides. Same declared ceiling _forge_map_pr_field_gitea's header states.
-#
-# Usage: _forge_auth_status_gitea <host>
-#   rc 0 -> {authenticated, account, accounts} on stdout
-#   rc 1 -> the check COULD NOT RUN; the caller must report error, never a
-#           negative
-_forge_auth_status_gitea() {
-  local host="${1:-}"
-  local out="" rc=0
-
-  # No `--login`, no `-r/--repo`: the login list is instance-wide and this
-  # call is the thing that decides WHICH login is active, so scoping it to
-  # one would beg the question.
-  out=$(tea login list -o json 2>/dev/null) || rc=$?
-
-  if [ "$rc" -ne 0 ]; then
-    return 1
-  fi
-
-  # A cleanly parsed ARRAY is the precondition for treating an empty match
-  # set as a definitive negative. Anything else -- empty stdout, a jq parse
-  # error, an object where an array was promised -- proves nothing, so it
-  # takes the same could-not-run exit as a non-zero rc above.
-  local shape=""
-  shape=$(printf '%s' "$out" | jq -r 'type' 2>/dev/null) || shape=""
-  if [ "$shape" != "array" ]; then
-    return 1
-  fi
-
-  jq -nc --arg host "$host" --argjson logins "$out" '
-    def hostof:
-      ((. // "") | tostring)
-      | sub("^[A-Za-z][A-Za-z0-9+.-]*://"; "")
-      | sub("^[^/@]*@"; "")
-      | sub("/.*$"; "")
-      | sub(":[0-9]+$"; "")
-      | ascii_downcase;
-    [ $logins[]
-      | select(type == "object")
-      | { user: ((.user // "") | tostring),
-          host: (.url | hostof),
-          isdefault: (((.default // "") | tostring) | ascii_downcase) } ] as $rows
-    | (if $host == "" then $rows
-       else [ $rows[] | select(.host == ($host | ascii_downcase)) ] end) as $matched
-    | ([ $matched[] | select(.isdefault == "true") ] + $matched) as $ordered
-    | { authenticated: (($matched | length) > 0),
-        account: (((($ordered[0] // {}).user) // "") | if . == "" then null else . end),
-        accounts: (reduce ($matched[] | .user | select(. != "")) as $u
-                     ([]; if (index($u) != null) then . else . + [$u] end)) }'
-}
-
 # Resolves forge/host via detect-forge's own helper (a direct function call,
 # never a `$AIMI_CLI detect-forge` subprocess), dispatches to the adapter the
-# detected forge needs -- gh for github, glab for gitlab, tea for gitea --
+# detected forge needs -- gh for github, glab for gitlab --
 # when that binary is present (checked via the shared _forge_bin_check above
 # in its quiet mode: a missing binary here has no caller-mandated stderr
 # banner; the caller decides whether a degraded result is fatal), and
@@ -5132,89 +5105,73 @@ _forge_auth_status() {
   # The adapters differ only in which CLI is asked and how its status text is
   # parsed -- both of which are settled before this point -- so the envelope
   # below is built exactly once rather than copied per forge. Only `unknown`
-  # leaves this empty and falls through to the no_adapter branch; gitea was
-  # routed to `tea` in phase 4 and no longer reaches it.
+  # leaves this empty and falls through to the no_adapter branch.
   local adapter_bin=""
   case "$forge" in
     github) adapter_bin="gh" ;;
     gitlab) adapter_bin="glab" ;;
-    gitea)  adapter_bin="tea" ;;
   esac
 
   if [ -n "$adapter_bin" ]; then
     if _forge_bin_check "$adapter_bin" quiet "$forge"; then
-      local cli_out="" cli_rc=0 authenticated_json account identity_requested identity_honored_json
-      # ONE adapter selection, THREE arms, still ONE shared envelope builder
-      # below -- the jq call is not copied per forge. Only the gitea arm can
-      # report "the check could not run at all": `tea` exits 1 UNIFORMLY for
-      # every error, so its adapter refuses to turn a failure into a clean
-      # negative and signals that refusal as a non-zero return instead. gh's
-      # and glab's non-zero exits ARE their own confirmed negatives, so
-      # neither can ever reach cli_rc != 0.
+      local cli_out="" authenticated_json account identity_requested identity_honored_json
+      # ONE adapter selection, TWO arms, still ONE shared envelope builder
+      # below -- the jq call is not copied per forge. gh's and glab's non-zero
+      # exits ARE their own confirmed negatives, so neither adapter ever
+      # signals "the check could not run at all" through its return status.
       case "$forge" in
         gitlab) cli_out=$(_forge_auth_status_gitlab "$host") ;;
-        gitea)  cli_out=$(_forge_auth_status_gitea "$host") || cli_rc=$? ;;
         *)      cli_out=$(_forge_auth_status_github "$host") ;;
       esac
 
-      if [ "$cli_rc" -ne 0 ]; then
-        # The adapter could not answer. That is an ERROR, never a negative:
-        # emitting authenticated=false here would manufacture a clean
-        # negative out of a tool failure, and it is precisely such a false
-        # negative that lets a broken session open a duplicate pull request.
-        # `data_json` stays null, so `authenticated` cannot be read at all.
-        message="$adapter_bin could not report authentication status -- the check did not run"
-        reason="cli_failed"
-      else
-        authenticated_json=$(printf '%s' "$cli_out" | jq -c '.authenticated')
-        account=$(printf '%s' "$cli_out" | jq -r '.account // empty')
+      authenticated_json=$(printf '%s' "$cli_out" | jq -c '.authenticated')
+      account=$(printf '%s' "$cli_out" | jq -r '.account // empty')
 
-        identity_requested="${AIMI_FORGE_IDENTITY:-}"
-        identity_honored_json="null"
-        if [ -n "$identity_requested" ]; then
-          if [ "$identity_requested" = "$account" ]; then
-            identity_honored_json="true"
-          else
-            identity_honored_json="false"
-          fi
+      identity_requested="${AIMI_FORGE_IDENTITY:-}"
+      identity_honored_json="null"
+      if [ -n "$identity_requested" ]; then
+        if [ "$identity_requested" = "$account" ]; then
+          identity_honored_json="true"
+        else
+          identity_honored_json="false"
         fi
-
-        status="found"
-        # This builder names every field it emits, one by one -- it never
-        # splats $cli_out through. That containment is load-bearing, not
-        # incidental: _forge_auth_status_github (and its gitlab sibling) also
-        # returns an `accounts` array (the whole login list, for the
-        # account-divergence section below), and forge-contract.md fixes this
-        # envelope's fields. A `+ $cli_out`-style merge here would leak a field
-        # the contract does not define into every forge-auth-status caller.
-        #
-        # `forge` is $forge verbatim, so a GitLab repository reports
-        # "gitlab" here -- open-pr.md Step 1a prints `.data.forge` rather than
-        # a hardcoded "GitHub", and that is what makes it render correctly.
-        data_json=$(jq -nc \
-          --arg forge "$forge" \
-          --arg host "$host" \
-          --argjson authenticated "$authenticated_json" \
-          --arg account "$account" \
-          --arg identityRequested "$identity_requested" \
-          --argjson identityHonored "$identity_honored_json" \
-          '{forge: $forge,
-            host: (if $host == "" then null else $host end),
-            authenticated: $authenticated,
-            account: (if $account == "" then null else $account end),
-            identityRequested: (if $identityRequested == "" then null else $identityRequested end),
-            identityHonored: $identityHonored}')
       fi
+
+      status="found"
+      # This builder names every field it emits, one by one -- it never
+      # splats $cli_out through. That containment is load-bearing, not
+      # incidental: _forge_auth_status_github (and its gitlab sibling) also
+      # returns an `accounts` array (the whole login list, for the
+      # account-divergence section below), and forge-contract.md fixes this
+      # envelope's fields. A `+ $cli_out`-style merge here would leak a field
+      # the contract does not define into every forge-auth-status caller.
+      #
+      # `forge` is $forge verbatim, so a GitLab repository reports
+      # "gitlab" here -- open-pr.md Step 1a prints `.data.forge` rather than
+      # a hardcoded "GitHub", and that is what makes it render correctly.
+      data_json=$(jq -nc \
+        --arg forge "$forge" \
+        --arg host "$host" \
+        --argjson authenticated "$authenticated_json" \
+        --arg account "$account" \
+        --arg identityRequested "$identity_requested" \
+        --argjson identityHonored "$identity_honored_json" \
+        '{forge: $forge,
+          host: (if $host == "" then null else $host end),
+          authenticated: $authenticated,
+          account: (if $account == "" then null else $account end),
+          identityRequested: (if $identityRequested == "" then null else $identityRequested end),
+          identityHonored: $identityHonored}')
     else
       # Names the binary the DETECTED forge actually needs -- `glab` on a
-      # GitLab remote, `tea` on a Gitea one, never `gh`. Telling a GitLab
+      # GitLab remote, never `gh`. Telling a GitLab
       # user to install gh is the exact "message names the wrong CLI" defect
       # the phase contract's fourth success criterion exists to prevent.
       message="$adapter_bin not found on PATH -- cannot check authentication status"
       reason="cli_missing"
     fi
   else
-    message="no forge adapter for ${forge} -- cannot check authentication status"
+    message="no forge adapter for ${forge} -- cannot check authentication status; GitHub and GitLab are the supported forges"
     reason="no_adapter"
   fi
 
@@ -5507,7 +5464,7 @@ _forge_account_divergence() {
 #      `models-prompt-check` returned `skip` whenever models.json existed, even
 #      when the current host's sub-table was missing or empty. The analogue here
 #      is worse than an inconvenience: the store file exists the moment THIS
-#      repository first answers, and phases 3/4 add gitlab.com and gitea hosts
+#      repository first answers, and phase 3 adds gitlab.com hosts
 #      to the same document, so a check that reads "file exists -> don't ask"
 #      would silence every host after the first. --check therefore decides on
 #      THIS HOST'S ENTRY, and an absent / empty / malformed store and an entry
@@ -6048,22 +6005,6 @@ _forge_repo_info() {
 
   local owner="" repo="" source=""
 
-  # THERE IS NO gitea TIER IN THIS CHAIN, AND ITS ABSENCE IS A DECISION.
-  # Recorded here rather than left as a gap, so the next reader meets a
-  # reason instead of an oversight:
-  #   - `tea` has no "show the current repository as JSON" command at all.
-  #   - `tea repos <owner>/<name>` REQUIRES the slug as an argument -- the
-  #     very thing a repo-info tier would have to local-parse out of the
-  #     remote URL first -- and then calls print.RepoDetails WITHOUT
-  #     honouring `--output` (cmd/repos.go:47-65), so there is no JSON to
-  #     read back either.
-  #   - `tea repos list` lists every accessible repository, not this one.
-  # A gitea arm would therefore local-parse the answer, ask tea about it, and
-  # learn nothing -- pure cost. gitea falls through to _forge_repo_info_parse_url
-  # below and reports source "local-parse", which is a correct answer and the
-  # reason this verb already worked for Gitea before any adapter existed.
-  # (Read off gitea/tea `main` source on 2026-08-06; `tea` is not installed
-  # on the machine this was written on.)
   if [ "$forge" = "github" ] && _forge_bin_check gh quiet github; then
     local gh_json=""
     if gh_json=$(_forge_repo_info_github); then
@@ -6186,8 +6127,7 @@ cmd_forge_repo_info() {
 # `.files[].path`) survives unchanged.
 #
 # Phase 3 added the gitlab adapter alongside it (_forge_pr_view_gitlab,
-# `glab mr view <ref> -F json`). gitea still has none, and it -- plus a
-# missing gh OR a missing glab -- degrades through the quiet
+# `glab mr view <ref> -F json`). A missing gh OR a missing glab degrades through the quiet
 # _forge_bin_check mode, matching review.md's own already-documented git-diff
 # fallback for a missing gh so a migration onto this verb introduces no new
 # warning banner.
@@ -6239,9 +6179,9 @@ _forge_pr_view_emit() {
 # "Normalized PR Field Set") to the field name GitHub's own
 # `gh pr view --json` uses for it. For phase 1 every one of the ten fields
 # maps to an identically-spelled gh field, but the table is written out
-# EXPLICITLY rather than assumed: it is the single seam a later GitLab or
-# Gitea adapter replaces (glab's `description`/`source_branch`/
-# `target_branch`, tea's `head`/`base`) without touching the verb body
+# EXPLICITLY rather than assumed: it is the single seam a later adapter
+# replaces (glab's `description`/`source_branch`/
+# `target_branch`) without touching the verb body
 # around it. An unmapped name prints nothing, so a field this adapter
 # cannot express is never silently passed through to gh as-is.
 # Usage: _forge_map_pr_field_github <contract-field>
@@ -6306,10 +6246,7 @@ _forge_map_pr_field_github() {
 # detailed_merge_status -- with the names and types this table asserts, in a
 # 64-key document, which is itself the whole-document claim below confirmed.
 # `state` came back `opened`, which _forge_map_state already normalizes to
-# `open` for gitlab. Nothing in this table needed correcting. (The same run
-# against Gitea DID correct a claim there -- see
-# _forge_map_pr_field_gitea's header -- so this is a measured result, not a
-# rubber stamp.)
+# `open` for gitlab. Nothing in this table needed correcting.
 #
 # WHAT REMAINS UNDER THE CEILING: the review-thread and issue paths, whose
 # keys were not exercised. For those the stub still emits whatever its author
@@ -6384,173 +6321,6 @@ _forge_map_pr_field_gitlab() {
   esac
 }
 
-# Maps one NORMALIZED PR contract field name (forge-contract.md's
-# "Normalized PR Field Set") to the key Gitea's own `tea` CLI uses for it.
-# This is the gitea arm of the seam _forge_map_pr_field_github's header names
-# as "the single seam a later GitLab or Gitea adapter replaces"; the three
-# mappers are kept ADJACENT and identically case-statement-shaped, ten
-# branches each, so they stay diffable side by side.
-#
-# An unmapped name prints nothing, so a field this adapter cannot express is
-# never silently passed through to tea as-is -- the identical silent-empty
-# default the other two mappers' case statements have.
-#
-# TEA EMITS TWO DIFFERENT JSON SHAPES FOR THE SAME PULL REQUEST, AND EVERY
-# KEY BELOW NAMES THE FIRST ONE. This has no gh or glab analogue and is the
-# single most likely way to get this adapter wrong:
-#
-#   DETAIL -- `tea pulls <index> -o json`. One OBJECT with TYPED values,
-#     built from the purpose-built `pullData` struct (cmd/pulls.go:29-52):
-#     `index` is a JSON number, `mergeable`/`hasMerged` are real booleans,
-#     and `base`/`head` are pr.Base.Ref/pr.Head.Ref -- BARE branch names
-#     with no `owner:` prefix (cmd/pulls.go:174-177).
-#
-#   LIST -- `tea pulls list -o json -f <csv>`. A JSON ARRAY whose keys are
-#     the --fields names VERBATIM. An earlier revision of this header said
-#     SNAKE-CASED, citing toSnakeCase (modules/print/table.go:175-179). That
-#     function exists but never fires: no valid --fields name is camelCase,
-#     and the two that carry a hyphen keep it. VERIFIED AGAINST A REAL
-#     BINARY: `-f index,author-id,base-commit` against Gitea 1.27.1 with tea
-#     0.15.1 returned the keys `index`, `author-id`, `base-commit` unchanged.
-#     Values are ALWAYS JSON STRINGS, because
-#     orderedRow.MarshalJSON (:187-208) marshals a map[string]string. `index`
-#     comes back "42", `mergeable` "true", `head` may carry an `owner:branch`
-#     prefix for a cross-fork PR (formatPRHead, modules/print/pull.go:83-93).
-#
-# THIS ADAPTER READS THE DETAIL PATH. _forge_build_pr_json already tolerates
-# a string number (`try ($number | tonumber) catch $number`), so the detail
-# document's typed values survive the trip through the builder unharmed.
-# Pointing a gitea verb at `tea pulls list` output instead would hand
-# _forge_pr_view_build_found an array, whose every has($k) probe fails and
-# whose every field is therefore skipped -- a silently all-null pr.
-#
-# TEA HAS A FIELD SELECTOR, SO DO NOT COPY GLAB'S SHAPE BY HABIT. `--fields,
-# -f` is a CSV flag over a fixed allowlist (cmd/flags/generic.go:157,
-# FieldsFlag) -- closer to gh's `--json <field-list>` than to glab.
-# _forge_pr_view_gitlab fetches the WHOLE marshalled document and picks keys
-# out of it afterwards (aimi-cli.sh:4688-4701) only because glab has no
-# selector at all; that is a workaround for a missing feature, not a house
-# style, and a gitea read verb must not inherit it.
-#
-# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY KEY BELOW, AND NOTE WHAT
-# HAS SINCE BEEN LIFTED. Every flag, subcommand and JSON key below was first
-# read off `gitea/tea` `main` source on 2026-08-06, file and line cited per
-# claim, with no binary present -- the same ceiling phase 3 declared for glab
-# at :4380-4389, and for the same reason. The suite still only proves WHICH
-# arguments this file emits and HOW it parses a fixture.
-#
-# WHAT WAS LATER OBSERVED, and is therefore no longer under that ceiling:
-# on 2026-08-06 the PR shape was checked against a real Gitea 1.27.1 in a
-# container with a real tea 0.15.1. `tea pulls <index> -o json` returned
-# exactly the 21 keys named below, with `index` a number, `mergeable` and
-# `hasMerged` real booleans, and `base`/`head` bare refs. `tea pulls list`
-# returned an array whose values are all JSON strings. That run also
-# CORRECTED one claim this header had made -- see the LIST note below on
-# key names, which source reading had got wrong.
-#
-# WHAT REMAINS UNDER THE CEILING: the issue-side key names, the review-comment
-# listing and resolve round trip, the `owner:` prefix on a cross-fork head,
-# and every glab key. For those the stub still emits whatever its author
-# believed, so a wrong key name passes green on both sides.
-#
-# THE THREE MAPPINGS THAT HAD TO BE DETERMINED RATHER THAN ASSUMED:
-#
-#   number -> index, NOT id. Both exist on pullData (`id` at cmd/pulls.go:30,
-#     `index` at :31). `id` is the Gitea instance's globally unique row id;
-#     `index` is the per-repository number the user sees in the PR URL and
-#     types at the CLI -- the same id-vs-iid distinction GitLab has. Mapping
-#     to `id` would yield a number that resolves to a DIFFERENT pull request.
-#
-#   files -> NOTHING, settled by absence rather than caution. tea exposes
-#     `diff` and `patch` (PullFields, modules/print/pull.go:170-196) but both
-#     resolve to x.DiffURL/x.PatchURL (:277-280) -- URLs, and the DETAIL
-#     document's `diffUrl` likewise. There is no parsed per-file list in
-#     either shape, so there is no key to name. Same answer, same grounds, as
-#     _forge_map_pr_field_gitlab's own `files` branch above.
-#
-#   isDraft -> NOTHING. Gitea models a draft as a TITLE PREFIX, not a field:
-#     `tea pulls create --draft` prepends "WIP: " to the title
-#     (cmd/pulls/create.go:89-91, utils.AddDraftPrefix). pullData carries no
-#     draft key and PullFields has no `draft` entry, so the CLI never
-#     surfaces one to read back. Deriving it by string-matching a title
-#     prefix would be a guess; reporting it in unsupported_fields is the
-#     contract's answer for exactly this case.
-#
-# `state` names the KEY only, and the gitea VALUE vocabulary needs more than
-# a table lookup -- see _forge_map_pr_state_gitea directly below, which is
-# where `merged` is derived. This mapper answers `state` so the raw value
-# still reaches _forge_pr_view_build_found; the merged derivation reads a
-# DIFFERENT key (`hasMerged`) and so cannot live in a one-field-one-key
-# table.
-#
-# THIS ONCE CONTRADICTED commands/references/forge-contract.md, AND NO LONGER
-# DOES. That document used to state tea "does not expose a distinct `merged`
-# value", that a merged PR "reads as `closed` under tea's own field list", and
-# that an adapter "should normalize tea's `closed` straight through". All
-# three are falsified by source: formatPRState (modules/print/pull.go:95-100)
-# returns "merged" whenever pr.Merged != nil, and the DETAIL path carries
-# `hasMerged`/`mergedAt` alongside the raw state (cmd/pulls.go:33,46,47). The
-# correct behaviour was implemented here first and the ruling was deleted
-# afterwards, so the contract's State Mapping section now describes this code
-# rather than misdirecting the next adapter author away from it.
-#
-# Usage: _forge_map_pr_field_gitea <contract-field>
-_forge_map_pr_field_gitea() {
-  case "$1" in
-    number)      printf 'index' ;;
-    url)         printf 'url' ;;
-    title)       printf 'title' ;;
-    body)        printf 'body' ;;
-    state)       printf 'state' ;;
-    headRefName) printf 'head' ;;
-    baseRefName) printf 'base' ;;
-    # Deliberately EMPTY, not missing. The branch is kept so the three mappers
-    # stay ten-for-ten diffable and a reader meets the omission at the line
-    # they look at, rather than only in the header. `diff`/`patch`/`diffUrl`
-    # are URLs, not a per-file list -- see the `files` note.
-    files)       ;;
-    # Deliberately EMPTY too: Gitea has no draft FIELD at all, only the
-    # "WIP: " title prefix `--draft` writes. See the `isDraft` note.
-    isDraft)     ;;
-    mergeable)   printf 'mergeable' ;;
-  esac
-}
-
-# Normalizes a `tea pulls <index> -o json` DETAIL document's state into the
-# contract vocabulary, printing `merged` for a merged pull request.
-#
-# This is a SIBLING of _forge_map_pr_field_gitea rather than a branch inside
-# it, because the merged answer reads a DIFFERENT key (`hasMerged`) than the
-# `state` key, which a one-field-one-key table cannot express. It is also
-# deliberately NOT a gitea arm of _forge_map_state: that function maps a raw
-# VALUE and knows nothing about documents, and _forge_pr_view_build_found's
-# own header promises its body stays forge-independent by construction. So
-# the derivation lives here, in the adapter, and _forge_map_state stays
-# gitea-free -- the same separation of "name the key" from "normalize the
-# value" the build_found body already keeps (:4509-4514).
-#
-# has("hasMerged") rather than a bare index mirrors _forge_pr_view_build_found's
-# own rule (:4474-4477): an absent key must not be collapsed with an explicit
-# null, and neither may invent `merged`. A document that carries no hasMerged
-# at all passes its raw state through untouched.
-#
-# Ceiling and source citations: see _forge_map_pr_field_gitea's header above.
-# Usage: _forge_map_pr_state_gitea <detail-json>
-_forge_map_pr_state_gitea() {
-  local doc="${1:-}" merged raw
-
-  merged=$(printf '%s' "$doc" | jq -r \
-    'if has("hasMerged") then (.hasMerged | tostring) else "" end' 2>/dev/null) || merged=""
-  if [ "$merged" = "true" ]; then
-    printf 'merged'
-    return 0
-  fi
-
-  raw=$(printf '%s' "$doc" | jq -r \
-    'if has("state") then (.state | if . == null then "" else tostring end) else "" end' 2>/dev/null) || raw=""
-  _forge_map_state gitea "$raw"
-}
-
 # THE ONE found-envelope construction, shared by every forge-pr-view adapter.
 # Takes a forge label, the adapter's RAW response document, and the caller's
 # requested contract-field list, and emits the finished
@@ -6592,7 +6362,6 @@ _forge_pr_view_build_found() {
     case "$forge" in
       github) native=$(_forge_map_pr_field_github "$field") ;;
       gitlab) native=$(_forge_map_pr_field_gitlab "$field") ;;
-      gitea)  native=$(_forge_map_pr_field_gitea "$field") ;;
       *)      native="" ;;
     esac
     [ -n "$native" ] || continue
@@ -6881,164 +6650,6 @@ _forge_pr_view_gitlab() {
   return 0
 }
 
-# gitea adapter for forge-pr-view. Same signature and same three outcomes as
-# the github and gitlab arms above, and all three are deliberately kept
-# adjacent and structurally parallel so a reader can diff them: probe, view,
-# classify.
-#
-# TWO ASYMMETRIES MAKE `tea` NOT `glab`, AND CARRYING THE GITLAB SHAPE OVER
-# BY HABIT IS THE SINGLE MOST LIKELY WAY TO GET THIS ADAPTER WRONG.
-#
-# (a) `tea` HAS a field selector. `--fields, -f` is a CSV flag over a fixed
-# allowlist (cmd/flags/generic.go:157). _forge_pr_view_gitlab fetches the
-# whole document and picks keys afterwards ONLY because glab has no selector
-# at all; that is not a house style to copy. So the LIST probe below asks for
-# exactly the two fields it consumes. But the selector does NOT extend to the
-# detail path: `tea pulls <index> -o json` emits a fixed `pullData`
-# projection (cmd/pulls.go:29-52, routed at :88-93), so no `-f` belongs on
-# that invocation either -- and a gh-style `--json <field-list>` belongs on
-# neither, because `tea` defines no such flag anywhere.
-#
-# (b) `tea` emits TWO DIFFERENT JSON SHAPES for the same resource, chosen by
-# whether an index argument was passed. This has no gh or glab analogue.
-#   DETAIL -- `tea pulls <index> -o json`: ONE OBJECT with TYPED values
-#     (index is a number, mergeable/hasMerged are real booleans), head/base
-#     are BARE refs (cmd/pulls.go:174-177).
-#   LIST -- `tea pulls list -o json -f <csv>`: a JSON ARRAY whose keys are
-#     the --fields names VERBATIM -- NOT snake-cased; see
-#     _forge_map_pr_field_gitea's header for the measurement that corrected
-#     this -- and whose values are ALWAYS STRINGS
-#     (modules/print/table.go:175-208), and whose `head` may carry an
-#     `owner:` prefix for a cross-fork pull request (formatPRHead,
-#     modules/print/pull.go:83-93).
-# This function uses DETAIL for the found path and LIST for the structural
-# probe, and must never mix their assumptions.
-#
-# not_found IS ESTABLISHED STRUCTURALLY, exactly like the two arms above,
-# and it has to be: `tea` exits 1 UNIFORMLY for every error (main.go:18-30)
-# with no distinct "not found" code at all -- the precise conflation this
-# verb exists to defeat. But the probe is HARDER here than on either other
-# forge, because `tea pulls list` has NO head/source-branch filter
-# (cmd/pulls/list.go:31 carries only --fields plus --state/--page/--limit).
-# So the listing is fetched with `--state all` -- a merged or closed pull
-# request must still count as found -- and filtered LOCALLY. The local
-# comparison is on the SUFFIX after the last `:`, never plain equality: a
-# cross-fork row spells its head `contributor:feat-x`, and reporting that as
-# absent would invite a duplicate pull request. Git refs cannot contain `:`,
-# so the split is unambiguous.
-#
-# THE PROBE ALSO RESOLVES THE INDEX. `tea pulls <arg>` takes an INDEX, never
-# a branch name, so a branch ref could not address the detail call at all
-# without this step -- which is why the probe selects `index` alongside
-# `head`. A purely numeric ref addresses the pull request directly and skips
-# the probe entirely, the same way `--head`/`--source-branch` are skipped
-# above.
-#
-# CONFLATING not_found WITH error IS THE DEFECT THIS VERB EXISTS TO PREVENT:
-# when the probe positively CONFIRMED the pull request exists and the detail
-# call then failed anyway, this reports error and does not consult stderr
-# wording at all -- not even when that wording happens to say 404. A string
-# cannot outvote a structural fact.
-#
-# NO CREDENTIAL IS BOUND ON ANY INVOCATION HERE. `tea` honours GH_TOKEN when
-# GITEA_INSTANCE_URL is also set (modules/context/context_login.go:15-51), so
-# a prefix assignment copied from the GitHub write path would hand a GitHub
-# token to a Gitea instance.
-#
-# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
-# written on. Every flag, subcommand and JSON key above was read off
-# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
-# out of the real binary. The tests prove WHICH ARGV this function emits and
-# HOW it parses a fixture -- never what real `tea` does with them. Same
-# declared ceiling _forge_map_pr_field_gitea's header states.
-_forge_pr_view_gitea() {
-  local ref="$1" fields_csv="$2"
-  local stdout="" stderr="" rc=0
-  # Set only when the structural probe below ran cleanly AND reported one or
-  # more matching pull requests -- i.e. existence is a confirmed structural
-  # fact, not an inference.
-  local list_confirmed_exists=false
-  # The argument the DETAIL call is addressed with. A numeric ref is already
-  # an index; a branch ref becomes one only if the probe resolves it.
-  local detail_ref="$ref"
-
-  if ! [[ "$ref" =~ ^[0-9]+$ ]]; then
-    local list_out="" list_rc=0 list_count="" list_index=""
-    list_out=$(tea pulls list --state all -f index,head -o json 2>/dev/null) || list_rc=$?
-    if [ "$list_rc" -eq 0 ]; then
-      # The local head filter, in the LIST vocabulary: every value is a
-      # string, and `head` may be `owner:branch`. `sub("^.*:"; "")` is greedy
-      # and therefore strips through the LAST colon, leaving a bare ref
-      # untouched when there is none.
-      list_count=$(printf '%s' "$list_out" | jq --arg ref "$ref" '
-        [ .[]
-          | select(type == "object")
-          | select((((.head // "") | tostring) | sub("^.*:"; "")) == $ref) ] | length' 2>/dev/null) || list_count=""
-      if [ "$list_count" = "0" ]; then
-        _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
-        return 0
-      fi
-      # A parseable, non-zero count is a confirmed existence fact. An
-      # UNPARSEABLE response is not: it proves nothing either way, so it
-      # leaves the flag false and falls through to the same detail-plus-
-      # stderr path a failed probe takes.
-      if [ -n "$list_count" ]; then
-        list_confirmed_exists=true
-        list_index=$(printf '%s' "$list_out" | jq -r --arg ref "$ref" '
-          [ .[]
-            | select(type == "object")
-            | select((((.head // "") | tostring) | sub("^.*:"; "")) == $ref) ][0].index // "" | tostring' 2>/dev/null) || list_index=""
-        [ -n "$list_index" ] && detail_ref="$list_index"
-      fi
-    fi
-  fi
-
-  _forge_capture stdout stderr rc -- tea pulls "$detail_ref" -o json || true
-
-  if [ "$rc" -eq 0 ]; then
-    # `merged` is DERIVED here, in the adapter, and nowhere else in this
-    # file. tea's DETAIL `state` is `pr.State` raw -- open/closed only
-    # (cmd/pulls.go:33) -- while merged-ness lives in the separate
-    # `hasMerged` boolean (:46). Reading a second key is exactly what a
-    # one-field-one-key mapper cannot express, which is why
-    # _forge_map_pr_state_gitea is a sibling of the mapper rather than a
-    # branch inside it, and why _forge_map_state stays gitea-free: that
-    # function normalizes SPELLING and must not invent a value the source
-    # data did not provide. The rewritten document is then handed to the ONE
-    # shared found-envelope builder, which does the key lookup through
-    # _forge_map_pr_field_gitea -- this arm builds no key table of its own.
-    local state_norm normalized
-    state_norm=$(_forge_map_pr_state_gitea "$stdout")
-    normalized=$(printf '%s' "$stdout" | jq -c --arg state "$state_norm" '
-      if (type == "object" and has("state")) then .state = $state else . end' 2>/dev/null) || normalized="$stdout"
-    [ -n "$normalized" ] || normalized="$stdout"
-    _forge_pr_view_build_found "gitea" "$normalized" "$fields_csv"
-    return 0
-  fi
-
-  # A structurally CONFIRMED existence outranks any stderr text, including
-  # text that happens to say 404. See the header.
-  if [ "$list_confirmed_exists" = true ]; then
-    _forge_pr_view_emit "error" "null" "null" "$stderr"
-    return 0
-  fi
-
-  # Secondary fallback only, for when the structural probe could not confirm
-  # anything (a numeric ref, or the probe itself failing). `tea` has no
-  # not-found exit code, so this reads its prose -- which is exactly the
-  # fragility the probe above exists to avoid, hence backstop-only.
-  if printf '%s' "$stderr" | grep -qiE '404|not found'; then
-    _forge_pr_view_emit "not_found" "null" "null" "no pull request found for ref: $ref"
-    return 0
-  fi
-
-  # Every other non-zero exit is a genuine tool failure (auth, network,
-  # malformed response) -- never folded into not_found. The message carries
-  # tea's own stderr text.
-  _forge_pr_view_emit "error" "null" "null" "$stderr"
-  return 0
-}
-
 # Field-selectable, three-way-status PR lookup. See this section's header
 # comment for the defect this fixes and why its envelope differs from the
 # generic forge-contract.md three-way envelope.
@@ -7054,7 +6665,7 @@ _forge_pr_view_gitea() {
 # gh-only names with no PR-contract equivalent (reviews, comments) are NOT
 # accepted here: this selector runs on the contract's vocabulary, not gh's,
 # and a name the contract cannot express would have no meaning on a later
-# gitlab/gitea adapter. A verb needing per-reviewer detail consumes the
+# gitlab adapter. A verb needing per-reviewer detail consumes the
 # forge-native object instead (forge-contract.md's Review/Approval Envelope
 # section says so explicitly).
 cmd_forge_pr_view() {
@@ -7121,9 +6732,9 @@ cmd_forge_pr_view() {
   _detect_forge_type forge
 
   # Each arm gates on the binary THAT forge needs -- gh for github, glab for
-  # gitlab, tea for gitea -- through the shared _forge_bin_check in its quiet
+  # gitlab -- through the shared _forge_bin_check in its quiet
   # mode, and its degraded message names that same binary. A GitLab user is
-  # never told to install gh, and neither is a Gitea one. The `*)` arm is
+  # never told to install gh. The `*)` arm is
   # still reachable, by `unknown`.
   case "$forge" in
     github)
@@ -7138,13 +6749,6 @@ cmd_forge_pr_view() {
         _forge_pr_view_gitlab "$pr_ref" "$fields_csv"
       else
         _forge_pr_view_emit "error" "null" "null" "glab not found on PATH -- this gitlab operation cannot run automatically."
-      fi
-      ;;
-    gitea)
-      if _forge_bin_check tea quiet gitea; then
-        _forge_pr_view_gitea "$pr_ref" "$fields_csv"
-      else
-        _forge_pr_view_emit "error" "null" "null" "tea not found on PATH -- this gitea operation cannot run automatically."
       fi
       ;;
     *)
@@ -7254,13 +6858,9 @@ _forge_pr_write_print_manual() {
   if [ -z "$host" ]; then
     # Per-forge default rather than a single github.com constant: on a GitLab
     # repository whose host could not be resolved, printing a github.com URL
-    # would be actively misleading rather than merely unhelpful. The same
-    # applies to Gitea/Forgejo -- gitea.com is Gitea's own SaaS host, and
-    # falling through to github.com here was a live wrong-output bug for every
-    # Gitea remote whose host could not be resolved, not a cosmetic default.
+    # would be actively misleading rather than merely unhelpful.
     case "$forge" in
       gitlab) host="gitlab.com" ;;
-      gitea)  host="gitea.com" ;;
       *)      host="github.com" ;;
     esac
   fi
@@ -7292,37 +6892,6 @@ _forge_pr_write_print_manual() {
         echo "$edit_cmd"
         if [ -n "$owner" ] && [ -n "$repo" ]; then
           echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$head_or_number"
-        fi
-      fi
-    elif [ "$forge" = "gitea" ]; then
-      # Gitea/Forgejo arm. THE NOUN STAYS "pull request" -- do NOT "fix" this
-      # into merge-request wording by symmetry with the gitlab arm above.
-      # Gitea calls them pull requests, exactly like GitHub; only GitLab says
-      # merge request. Three things do differ from the github arm below, and
-      # every one of them is a correctness matter:
-      #   - the CLI is tea, and its flag names are tea's own: -t/--title and
-      #     -d/--description, never gh's --body, plus --head in its LONG FORM
-      #     ONLY (tea gives it no short alias, and -h is urfave/cli's help
-      #     flag) and -b/--base. See the Gitea write adapters section header.
-      #   - Gitea's compare form is /<owner>/<repo>/compare/<base>...<head>
-      #     with no ?expand=1 -- that query parameter is GitHub's.
-      #   - Gitea's pull-request path is /<owner>/<repo>/pulls/<number>, with
-      #     an "s". GitHub's singular /pull/<number> 404s on a Gitea instance.
-      if [ "$mode" = "create" ]; then
-        echo "Warning: could not create this gitea pull request automatically -- create it yourself with:"
-        echo "  git push -u origin $head_or_number"
-        echo "  tea pulls create -t \"$title\" --head $head_or_number -b $base -d ..."
-        if [ -n "$owner" ] && [ -n "$repo" ]; then
-          echo "  Or open: https://$host/$owner/$repo/compare/$base...$head_or_number"
-        fi
-      else
-        echo "Warning: could not edit this gitea pull request automatically -- edit it yourself with:"
-        edit_cmd="  tea pulls edit $head_or_number"
-        if [ -n "$title" ]; then edit_cmd="$edit_cmd -t \"$title\""; fi
-        if [ -n "$body_provided" ]; then edit_cmd="$edit_cmd -d ..."; fi
-        echo "$edit_cmd"
-        if [ -n "$owner" ] && [ -n "$repo" ]; then
-          echo "  Or open: https://$host/$owner/$repo/pulls/$head_or_number"
         fi
       fi
     elif [ "$mode" = "create" ]; then
@@ -7671,392 +7240,6 @@ _forge_issue_create_gitlab() {
   _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
 }
 
-# ============================================================================
-# Gitea write adapters — forge-pr-create, forge-pr-edit, forge-issue-create
-# ============================================================================
-# The gitea arms of this file's THREE write verbs, kept together in one
-# section for the same reason the GitLab section above is: the one rule they
-# all obey is stated once, where a reviewer meets it before any code.
-#
-# THE RULE: EVERY tea WRITE INVOCATION CARRIES AT LEAST ONE FLAG. NO
-# EXCEPTIONS.
-#
-# This is the gitea analogue of the GitLab section's "-y FIRST" rule, and its
-# shape is DIFFERENT and worse if hit -- do not go looking for a -y here.
-# `tea` has NO -y/--yes/--confirm flag anywhere; inventing one by analogy with
-# glab would just be an unknown flag. What tea has instead is
-# cmd/pulls/create.go:75-81:
-#
-#     if ctx.IsInteractiveMode() { … interact.CreatePull(…) }
-#
-# and modules/context/context.go:55-59:
-#
-#     // IsInteractiveMode returns true if the command is running in
-#     // interactive mode (no flags provided and stdout is a terminal)
-#     func (ctx *TeaContext) IsInteractiveMode() bool {
-#         return ctx.Command.NumFlags() == 0
-#     }
-#
-# THE DOC COMMENT CLAIMS A TTY CHECK; THE IMPLEMENTATION PERFORMS NONE. The
-# sole condition is NumFlags() == 0, so a zero-flag `tea pulls create` enters
-# an interactive survey EVEN WITH A NON-TTY STDIN -- a hang, forever, with no
-# output explaining why, in an autonomous run with nobody present to answer.
-# Every write below passes -t/-d/--head/-b anyway, so the invariant costs
-# nothing; it is written down because the cheapest way to break it is an
-# innocent-looking refactor that moves a flag behind a conditional.
-#
-# ONE WRITE NOW DOES MOVE ITS FLAGS BEHIND A CONDITIONAL, AND STILL HOLDS.
-# `tea pulls edit` emits -t only when the caller passed --title and -d only
-# when it passed --body, because sending `-d ""` on a title-only edit would
-# blank an existing description. What keeps NumFlags() non-zero is not the
-# adapter but its wrapper: cmd_forge_pr_edit refuses a call supplying
-# NEITHER flag, so every invocation that reaches the adapter carries at
-# least one. The three combinations are spelled out as three literal
-# invocations rather than assembled from an array precisely so the
-# source-level guard below can still read a flag off every emitted line --
-# an array expansion would satisfy the runtime invariant while making it
-# unverifiable, which is the refactor the paragraph above warns about
-# wearing a different hat.
-#
-# The invariant is asserted from RECORDED ARGV, never from an exit status: a
-# fake tea never prompts, so it exits 0 whether or not a flag was passed and
-# an exit-status assertion would pass vacuously.
-#
-# TEA'S FLAG NAMES ARE NEITHER gh'S NOR glab'S. Read off `gitea/tea` `main`
-# source on 2026-08-06 (cmd/flags/issue_pr.go:94-118 for the shared
-# create/edit set, cmd/pulls/create.go:26-55 for the pull-specific pair):
-#   -t/--title           (same spelling as gh and glab)
-#   -d/--description     NOT gh's --body -- the same gotcha glab has
-#   --head               LONG FORM ONLY. tea gives it no short alias, and -h
-#                        is urfave/cli's help flag, so a "-h" here would print
-#                        help instead of naming a branch.
-#   -b/--base            NOT glab's --target-branch, and note that glab spells
-#                        its OWN -b as --target-branch while tea's -b is
-#                        --base -- the short letters agree by coincidence.
-# `tea pulls edit` takes the pull request as a POSITIONAL argument and reuses
-# IssuePREditFlags (cmd/flags/issue_pr.go:179-202), so -d again -- and -t
-# too, since IssuePREditFlags ends in `}, issuePRFlags...)` and it is that
-# shared base, not IssuePREditFlags's own edit-only fields, that carries the
-# title flag. Re-read on 2026-08-13 and unmoved; _forge_pr_edit_gitea's own
-# header carries the three-line citation and what tea does with an omitted
-# -t.
-#
-# ⚠️ GH_TOKEN HAZARD -- WHY NO tea CALL BELOW CARRIES A TOKEN PREFIX, AND WHY
-# NONE BLANKS ONE EITHER. tea honours GH_TOKEN, not only GITEA_TOKEN
-# (modules/context/context_login.go:15-51 reads both and falls back to the
-# GitHub one when GITEA_TOKEN is empty). Meanwhile
-# _forge_account_override_slots (:2983-2997) deliberately defaults an empty
-# slot to the AMBIENT GH_TOKEN. Copying the github arm's prefix-assignment
-# shape onto a tea call would therefore hand a GITHUB token to a GITEA
-# instance. So no tea invocation below carries a GH_TOKEN= or
-# GH_ENTERPRISE_TOKEN= prefix assignment.
-#
-# Blanking is refused for the OPPOSITE reason: a bare `GITEA_TOKEN=` prefix
-# would revoke the one account-selection mechanism a Gitea operator actually
-# has, exactly as phase 2's bare TOKEN="" prefix did on the gh side. So this
-# path sets nothing and unsets nothing -- an operator-exported GITEA_TOKEN
-# reaches tea untouched, and every call runs as the machine's active tea
-# session. `export` stays forbidden here for the same process-wide-state
-# reason it is forbidden on the gh and glab sides.
-#
-# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY BEHAVIOR BELOW. tea is NOT
-# installed on the machine this was written on; that is this phase's declared
-# ceiling, not an oversight. Not one invocation here has been observed against
-# the real binary. Every flag, subcommand and JSON key was read off
-# `gitea/tea` `main` source on 2026-08-06, file and line cited per claim. The
-# tests drive a fake tea that records its argv, so what is actually PROVEN is
-# WHICH ARGUMENTS THIS FILE EMITS and HOW IT PARSES A FIXTURE -- never what
-# real tea does with them.
-#
-# KNOWN, DELIBERATE DUPLICATE READ PATH -- NOT AN ACCIDENT, AWAITING
-# UNIFICATION. _forge_pr_create_gitea's idempotency probe below reads Gitea
-# pull requests through its own `tea pulls list --state all -o json` call and
-# a local head filter, and does NOT call _forge_pr_view_gitea. That is a
-# scheduling fact, not a design preference: _forge_pr_view_gitea lands in the
-# SAME wave as this section, so depending on it would make this story
-# unbuildable. The result is a second Gitea PR read path in this file --
-# recorded here by name so a later reader finds a known debt rather than
-# inferring a mistake. It is the same debt the GitLab arm still owes
-# (_forge_pr_view_gitlab plus the inline `glab mr view` in
-# _forge_pr_create_gitlab), and both should be unified together.
-#
-# WHY THE PROBE CANNOT ASK THE SERVER, AND WHAT THAT COSTS. `tea pulls list`
-# has NO --head / --source-branch filter at all -- its flags are --fields plus
-# PRListingFlags (cmd/pulls/list.go:31) = --state (all|open|closed only),
-# --page, --limit, --repo, --remote, --login, --output. `gh pr list --head`
-# and `glab mr list --source-branch` have no counterpart, so the filter has to
-# run locally, and the LIST document it filters differs from the DETAIL
-# document in two ways a naive implementation gets wrong:
-#
-#   (a) EVERY LIST VALUE IS A JSON STRING and every key is snake_cased
-#       (modules/print/table.go:175-208 marshals a map[string]string), so
-#       `index` arrives as "42", never 42. Comparisons here are therefore
-#       string comparisons, and the number reaches _forge_build_write_data as
-#       a string it turns into a JSON int with `tonumber`.
-#   (b) THE LIST `head` MAY CARRY AN `owner:` PREFIX for a cross-fork pull
-#       request (formatPRHead, modules/print/pull.go:83-93), while the DETAIL
-#       `head` is a bare ref (cmd/pulls.go:176). So the match cannot be plain
-#       equality -- `forkuser:feat-x` must still match the branch `feat-x`.
-#
-# ONLY AN OPEN PULL REQUEST BLOCKS CREATION. tea's LIST `state` can literally
-# be `merged` (formatPRState, modules/print/pull.go:95-100 returns it whenever
-# pr.Merged != nil), so a closed or merged pull request on the same branch
-# falls through to creation exactly as it does on the github and gitlab arms.
-# A reused branch is never blocked forever by a dead pull request.
-
-# Extracts the pull-request/issue URL from a tea write command's stdout.
-#
-# A SIBLING of _forge_glab_write_url rather than a rename of it, deliberately:
-# tea's two write paths have genuinely different framings that this header has
-# to state, and renaming the glab one would touch phase 3's shipped gitlab
-# arms while sibling stories hold this file open. Duplication over conflict.
-#
-#   `tea pulls create` ends in print.PullDetails (modules/task/pull_create.go:89)
-#   -- a MARKDOWN block whose URL line is appended only when the URL is
-#   NON-EMPTY (modules/print/pull.go:76-78), and `--output json` is not
-#   consulted on the create path at all. So "created but no parseable URL" is
-#   a REAL branch here, not a hypothetical: callers must treat an empty result
-#   as a genuine degraded outcome rather than as a parse bug.
-#
-#   `tea issues create` is friendlier: markdown PLUS a bare `issue.HTMLURL`
-#   line (modules/task/issue_create.go:28-30), so a URL is reliably present.
-#
-# Deliberately NOT `tail -n1` -- both paths wrap the URL in markdown, so the
-# URL is not reliably the last LINE. Scanning for the last http(s) TOKEN is
-# tolerant of that framing without depending on its exact wording.
-#
-# Prints the empty string when no URL is present -- callers treat that as a
-# degraded outcome rather than guessing one.
-# Usage: _forge_tea_write_url <captured-stdout>
-_forge_tea_write_url() {
-  local out="${1:-}" url=""
-  url=$(printf '%s' "$out" | tr -d '\r' | grep -oE 'https?://[^[:space:]]+' | tail -n1) || url=""
-  printf '%s' "$url"
-}
-
-# gitea adapter for forge-pr-create. Same contract as the github and gitlab
-# arms in _forge_pr_create: shared write envelope, MANDATORY-PRINT
-# degradation, non-zero exit on every degraded branch, never retries, never
-# prompts.
-#
-# IDEMPOTENCY is structural, like the github arm's and unlike the gitlab
-# arm's, but it is built from a LIST-plus-local-filter rather than from a
-# server-side head query -- see this section's header for why tea offers no
-# such query, for the two ways its LIST document differs from its DETAIL
-# document, and for why only an OPEN pull request blocks.
-#
-# A FAILED LOOKUP FALLS THROUGH TO CREATION rather than degrading, matching
-# the gitlab arm. tea has no distinct exit code for "not found" -- main.go:18-30
-# prints `Error: %v` and exits 1 for every error alike -- so a failed
-# `tea pulls list` is structurally indistinguishable from an empty one, and
-# refusing to create on it would strand every run whose listing hiccuped. Do
-# not "fix" this into a stderr match; that is exactly the fragility
-# forge-pr-view's structural not_found detection exists to avoid.
-_forge_pr_create_gitea() {
-  local title="$1" base="$2" head="$3" body="$4"
-
-  if ! _forge_bin_check tea mandatory gitea; then
-    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
-    _forge_emit_write_status degraded "" "tea not found -- this pull request was not created automatically."
-    return 1
-  fi
-
-  # Existing-PR probe, as the same account the create below will run as.
-  # --state all, because the local filter -- not the server -- decides which
-  # states block, and a merged pull request must be SEEN in order to be
-  # deliberately ignored.
-  local list_out="" list_err="" list_rc=0 existing_row="" existing_url="" existing_number=""
-  _forge_capture list_out list_err list_rc -- tea pulls list --state all -o json || true
-
-  if [ "$list_rc" -eq 0 ]; then
-    # The whole local filter, in one jq program:
-    #   - tostring on every value, because LIST values are strings already and
-    #     a future typed shape must not change the comparison's meaning;
-    #   - head matches either exactly or after an `owner:` prefix;
-    #   - state must fold to `open` -- `closed` and `merged` fall through.
-    existing_row=$(printf '%s' "$list_out" | jq -c --arg h "$head" '
-      [ .[]?
-        | select(type == "object")
-        | select((((.head // "") | tostring) == $h)
-                 or (((.head // "") | tostring) | endswith(":" + $h)))
-        | select((((.state // "") | tostring) | ascii_downcase) == "open")
-      ] | .[0] // empty' 2>/dev/null) || existing_row=""
-
-    if [ -n "$existing_row" ]; then
-      existing_url=$(printf '%s' "$existing_row" | jq -r '.url // empty' 2>/dev/null) || existing_url=""
-      existing_number=$(printf '%s' "$existing_row" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || existing_number=""
-      if [ -n "$existing_number" ]; then
-        _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
-        return 0
-      fi
-    fi
-  fi
-
-  # WRITE 1 (gitea). Four flags, so NumFlags() is never 0 -- see this
-  # section's header for why a zero-flag invocation hangs rather than fails.
-  # No token prefix assignment: see the GH_TOKEN hazard in the same header.
-  local stdout="" stderr_out="" rc=0
-  _forge_capture stdout stderr_out rc -- tea pulls create -t "$title" -d "$body" --head "$head" -b "$base" || true
-
-  if [ "$rc" -ne 0 ]; then
-    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
-    echo "Error: forge-pr-create: tea pulls create exited $rc: ${stderr_out:-unknown error}" >&2
-    _forge_emit_write_status degraded "" "tea pulls create exited $rc: ${stderr_out:-unknown error}"
-    return 1
-  fi
-
-  local pr_url=""
-  pr_url=$(_forge_tea_write_url "$stdout")
-
-  if [ -z "$pr_url" ]; then
-    _forge_pr_write_print_manual create gitea "$base" "$head" "$body" "$title"
-    echo "Error: forge-pr-create: tea pulls create succeeded but its output did not contain a parseable pull request URL." >&2
-    _forge_emit_write_status degraded "" "tea pulls create succeeded but its output did not contain a parseable pull request URL."
-    return 1
-  fi
-
-  # PAST THIS POINT THE PULL REQUEST EXISTS AND ITS URL IS IN HAND -- the same
-  # rule the github and gitlab arms state at length: never discard $pr_url,
-  # never print the create-it-yourself instructions again, never downgrade to
-  # degraded (which would force data to null and throw the created pull
-  # request's URL away). Only the number is unconfirmed, so it comes back null
-  # with a Warning, at exit 0.
-  #
-  # The URL's trailing segment is only an ADDRESS for the re-read, never the
-  # answer: the number reported below is `index`, read out of the DETAIL
-  # document tea returns, so a URL shape this file guessed wrong yields a null
-  # number rather than a wrong one.
-  local candidate="" reread_out="" reread_err="" reread_rc=0 pr_number=""
-  candidate=$(printf '%s' "$pr_url" | grep -oE '[0-9]+$') || candidate=""
-  if [ -n "$candidate" ]; then
-    _forge_capture reread_out reread_err reread_rc -- tea pulls "$candidate" -o json || true
-    if [ "$reread_rc" -eq 0 ]; then
-      pr_number=$(printf '%s' "$reread_out" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || pr_number=""
-    fi
-  fi
-
-  if [ -z "$pr_number" ]; then
-    echo "Warning: forge-pr-create: the pull request WAS created at $pr_url, but the post-create tea pulls re-read did not confirm its number -- only the number is unconfirmed. Do NOT create it again." >&2
-    _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "")"
-    return 0
-  fi
-
-  _forge_emit_write_status created "$(_forge_build_write_data "$pr_url" "$pr_number")"
-}
-
-# gitea adapter for forge-pr-edit. Same contract as the github and gitlab arms
-# in _forge_pr_edit, including its status word: a successful edit reports
-# "unchanged", never "created", because editing mints no new identifier.
-# The pull request is a POSITIONAL argument to `tea pulls edit`, like
-# `glab mr update <id>` and unlike `gh pr edit <number>`'s flag-shaped body.
-#
-# -t IS A REAL `tea pulls edit` FLAG, AND HERE IS THE READ IT COMES FROM.
-# Re-confirmed against `gitea/tea` `main` on 2026-08-13, inside this
-# section's declared VERIFICATION CEILING -- tea is still not installed
-# here, so this is a source reading and not an observation:
-#   cmd/pulls/edit.go:66      Flags: append(flags.IssuePREditFlags, ...)
-#   cmd/flags/issue_pr.go:202 IssuePREditFlags = append([]cli.Flag{...}, issuePRFlags...)
-#   cmd/flags/issue_pr.go:95-98   issuePRFlags carries {Name: "title", Aliases: []string{"t"}}
-# So title arrives through the SHARED create/edit base, not through
-# IssuePREditFlags's own edit-only fields (set-assignees, add-labels and the
-# rest) -- which is the part worth writing down, because reading only
-# IssuePREditFlags's literal body would conclude there is no title flag.
-# tea's own parser then gates the field on `ctx.IsSet("title")`
-# (cmd/flags/issue_pr.go:207-210), so an omitted -t leaves the stored title
-# alone -- exactly the semantics the conditional emission below relies on.
-_forge_pr_edit_gitea() {
-  local number="$1" body="$2" title="${3:-}" body_provided="${4:-}" title_provided="${5:-}"
-
-  if ! _forge_bin_check tea mandatory gitea; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
-    _forge_emit_write_status degraded "" "tea not found -- this pull request was not edited automatically."
-    return 1
-  fi
-
-  # WRITE 2 (gitea). Every branch below carries -t, -d, or both, so
-  # NumFlags() is never zero and the interactive-survey hang this section's
-  # header describes stays unreachable; the wrapper refusing a call that
-  # supplies neither flag is what makes that true for all three. Spelling
-  # the branches out rather than assembling an array is deliberate -- the
-  # header names "an innocent-looking refactor that moves a flag behind a
-  # conditional" as the cheapest way to break the invariant, and a literal
-  # flag on every emitted line is what keeps the source-level guard able to
-  # see it. No token prefix assignment, same GH_TOKEN hazard.
-  local stdout="" stderr_out="" rc=0
-  if [ -n "$title_provided" ] && [ -n "$body_provided" ]; then
-    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -t "$title" -d "$body" || true
-  elif [ -n "$title_provided" ]; then
-    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -t "$title" || true
-  else
-    _forge_capture stdout stderr_out rc -- tea pulls edit "$number" -d "$body" || true
-  fi
-
-  if [ "$rc" -ne 0 ]; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
-    echo "Error: forge-pr-edit: tea pulls edit exited $rc: ${stderr_out:-unknown error}" >&2
-    _forge_emit_write_status degraded "" "tea pulls edit exited $rc: ${stderr_out:-unknown error}"
-    return 1
-  fi
-
-  # Structured re-read, as the same account that just wrote. The DETAIL shape
-  # (`tea pulls <index> -o json`), whose `index` is a real JSON int and whose
-  # `url` is pr.HTMLURL -- NOT the LIST shape the create probe filters.
-  local reread_out="" reread_err="" reread_rc=0 pr_url="" pr_number=""
-  _forge_capture reread_out reread_err reread_rc -- tea pulls "$number" -o json || true
-  if [ "$reread_rc" -eq 0 ]; then
-    pr_url=$(printf '%s' "$reread_out" | jq -r '.url // empty' 2>/dev/null) || pr_url=""
-    pr_number=$(printf '%s' "$reread_out" | jq -r 'if has("index") then (.index | tostring) else "" end' 2>/dev/null) || pr_number=""
-  fi
-
-  if [ -z "$pr_number" ]; then
-    _forge_pr_write_print_manual edit gitea "" "$number" "$body" "$title" "$body_provided"
-    echo "Error: forge-pr-edit: tea pulls edit succeeded but the pull request could not be re-read afterward." >&2
-    _forge_emit_write_status degraded "" "tea pulls edit succeeded but the pull request could not be re-read afterward."
-    return 1
-  fi
-
-  _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
-}
-
-# gitea adapter for forge-issue-create. Keeps the github and gitlab arms'
-# SOFT-FAIL contract byte for byte: ALWAYS returns 0, on every branch
-# including degraded, so a failed issue never blocks PR creation. The caller
-# branches on the envelope's `status` field, never on an exit code. Giving the
-# gitea branch a different exit-code contract would silently reintroduce
-# exactly the coupling this verb exists to prevent.
-_forge_issue_create_gitea() {
-  local title="$1" body="$2"
-
-  if ! _forge_bin_check tea mandatory gitea; then
-    _forge_issue_create_print_manual "$title" "$body" gitea
-    _forge_emit_write_status degraded "" "tea not found -- this issue was not created automatically."
-    return 0
-  fi
-
-  # WRITE 3 (gitea). Two flags, same invariant, same header. No token prefix
-  # assignment, same GH_TOKEN hazard.
-  local stdout="" stderr_out="" rc=0
-  _forge_capture stdout stderr_out rc -- tea issues create -t "$title" -d "$body" || true
-
-  if [ "$rc" -ne 0 ]; then
-    _forge_issue_create_print_manual "$title" "$body" gitea
-    _forge_emit_write_status degraded "" "tea issues create exited $rc: ${stderr_out:-unknown error}"
-    return 0
-  fi
-
-  local issue_url="" issue_number=""
-  issue_url=$(_forge_tea_write_url "$stdout")
-  issue_number=$(printf '%s' "$issue_url" | grep -oE '[0-9]+$') || issue_number=""
-
-  if [ -z "$issue_url" ] || [ -z "$issue_number" ]; then
-    _forge_issue_create_print_manual "$title" "$body" gitea
-    _forge_emit_write_status degraded "" "tea issues create succeeded but its output did not contain a parseable issue URL: ${issue_url:-<empty>}"
-    return 0
-  fi
-
-  _forge_emit_write_status created "$(_forge_build_write_data "$issue_url" "$issue_number")"
-}
-
 # Shells `gh pr create --title <t> --base <b> --head <h> --body <b>`,
 # capturing stdout as the created PR's URL -- gh pr create has NO --json
 # flag (confirmed on this machine, exactly like gh issue create: only a
@@ -8128,14 +7311,9 @@ _forge_pr_create() {
       _forge_pr_create_gitlab "$title" "$base" "$head" "$body" || gl_rc=$?
       return "$gl_rc"
       ;;
-    gitea)
-      local gt_rc=0
-      _forge_pr_create_gitea "$title" "$base" "$head" "$body" || gt_rc=$?
-      return "$gt_rc"
-      ;;
     *)
       _forge_pr_write_print_manual create "$forge" "$base" "$head" "$body" "$title"
-      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      _forge_emit_write_status degraded "" "forge-pr-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
       return 1
       ;;
   esac
@@ -8367,12 +7545,11 @@ cmd_forge_pr_create() {
 # own for exactly the reason cmd_forge_pr_edit tracks the flag rather than
 # the value: an empty body is a legitimate deliberate clear.
 #
-# All three adapters therefore spell out the same three branches instead of
-# building an argv array. That is not a style choice: the gitea section
-# header's always-pass-a-flag invariant, and the two source-level guards
-# that enforce it and glab's -y over the whole file, both work by reading
-# the emitted line -- an array expansion would hide every flag from them
-# while the runtime behaviour looked unchanged.
+# Both adapters therefore spell out the same three branches instead of
+# building an argv array. That is not a style choice: the source-level
+# guards that enforce glab's -y over the whole file work by reading the
+# emitted line -- an array expansion would hide every flag from them while
+# the runtime behaviour looked unchanged.
 _forge_pr_edit() {
   local number="$1" body="$2" title="${3:-}" body_provided="${4:-}" title_provided="${5:-}"
   local forge=""
@@ -8387,14 +7564,9 @@ _forge_pr_edit() {
       _forge_pr_edit_gitlab "$number" "$body" "$title" "$body_provided" "$title_provided" || gl_rc=$?
       return "$gl_rc"
       ;;
-    gitea)
-      local gt_rc=0
-      _forge_pr_edit_gitea "$number" "$body" "$title" "$body_provided" "$title_provided" || gt_rc=$?
-      return "$gt_rc"
-      ;;
     *)
       _forge_pr_write_print_manual edit "$forge" "" "$number" "$body" "$title" "$body_provided"
-      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      _forge_emit_write_status degraded "" "forge-pr-edit: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
       return 1
       ;;
   esac
@@ -8518,7 +7690,7 @@ cmd_forge_pr_edit() {
   # DELIBERATELY THE OPPOSITE ANSWER TO --body "". An empty description is a
   # real value on all three forges and clearing one is a thing a caller
   # legitimately asks for, so --body "" is honoured. An empty TITLE is not a
-  # legal value on gh, glab or tea -- there is nothing it could mean but a
+  # legal value on gh or glab -- there is nothing it could mean but a
   # mistake -- so --title gets no "deliberate clear" escape hatch and is
   # refused here, before any forge CLI runs. Its own message, distinct from
   # the usage error above, because the two are different caller mistakes:
@@ -8549,29 +7721,20 @@ cmd_forge_pr_edit() {
 #
 # NORMALIZED CORE ONLY, DELIBERATELY: merge style is explicit and REQUIRED
 # (never defaulted), validated against the closed three-value enum
-# {merge, squash, rebase} -- never gitea's own fourth `rebase-merge` style.
+# {merge, squash, rebase}.
 # No conditional/auto-merge, no approval handling, no branch-deletion flag on
-# any forge. That exclusion is what makes the three forges normalizable: tea
-# exposes neither branch deletion nor an auto-merge equivalent, while gh and
-# glab expose both.
+# any forge.
 #
 # PREFLIGHT REUSES forge-pr-view IN-PROCESS, NEVER A SECOND BESPOKE PROBE.
-# Unlike forge-pr-create's gitlab/gitea idempotency checks (which had to
-# hand-roll a forge-native inline probe because forge-pr-view's own
-# gitlab/gitea adapters postdated forge-pr-create), all three forge-pr-view
-# adapters already exist by the time this verb is written, so every one of
-# the three merge adapters below resolves `{number, url, state}` through the
-# identical `cmd_forge_pr_view --pr <ref> --include number,url,state` call --
-# a direct function call, never a `$AIMI_CLI forge-pr-view` subprocess. The
-# call appears three times in source (github inline in _forge_pr_merge,
-# _forge_pr_merge_gitlab, _forge_pr_merge_gitea) rather than being factored
-# above the three-way dispatch, deliberately: that keeps the same
+# Both forge-pr-view adapters already exist by the time this verb is written,
+# so each of the merge adapters below resolves `{number, url, state}` through
+# the identical `cmd_forge_pr_view --pr <ref> --include number,url,state`
+# call -- a direct function call, never a `$AIMI_CLI forge-pr-view`
+# subprocess. The call appears twice in source (github inline in
+# _forge_pr_merge, and _forge_pr_merge_gitlab) rather than being factored
+# above the dispatch, deliberately: that keeps the same
 # self-contained-per-adapter shape forge-pr-create/forge-pr-edit already use
-# (each adapter does its own everything, callable and testable on its own) at
-# the cost of the call appearing three times rather than once. This is NOT
-# the file's own "KNOWN, DELIBERATE DUPLICATE READ PATH" debt named in the
-# Gitea write adapters section header -- that debt exists because an adapter
-# was missing when its caller was written; here nothing is missing.
+# (each adapter does its own everything, callable and testable on its own).
 #
 # ENVELOPE MAPPING (forge-pr-view's own found/not_found/error, read via the
 # preflight above):
@@ -8581,13 +7744,13 @@ cmd_forge_pr_edit() {
 #     naming the searched ref. There is nothing to merge.
 #   found, state == closed (closed, never merged)     -> degraded, data null,
 #     BEFORE any merge CLI call runs -- a structural pre-check, not left to
-#     whatever gh/glab/tea happen to do when asked to merge a closed PR, the
+#     whatever gh/glab happen to do when asked to merge a closed PR, the
 #     same not-worth-guessing reason forge-pr-view's own not_found detection
 #     was made structural.
 #   found, state == merged OR locked (GitLab's merged-and-lock-protected
 #     value)                                          -> unchanged, data
 #     {url, number} taken directly from the preflight, at exit 0, WITHOUT
-#     ever invoking gh/glab/tea's merge subcommand. A locked MR is already
+#     ever invoking gh/glab's merge subcommand. A locked MR is already
 #     merged; treating it as a second, undocumented state instead of folding
 #     it into the same branch as merged would invent a fifth outcome the
 #     decided envelope mapping does not have.
@@ -8615,21 +7778,12 @@ cmd_forge_pr_edit() {
 #
 # IDENTITY: no --token or credential-shaped flag, matching every other forge
 # write verb -- acting identity is read only from the environment
-# (AIMI_FORGE_IDENTITY / GH_TOKEN / an operator-exported GITLAB_TOKEN or
-# GITEA_TOKEN), never a flag.
-#
-# `tea`'s interactive-prompt behavior SPECIFICALLY FOR `tea pulls merge` (as
-# opposed to the already-documented `tea pulls create` hazard) is UNCONFIRMED
-# -- tea is not installed on this machine, matching every other gitea
-# adapter's own stated verification ceiling. The defense here is structural
-# rather than empirical: --style is required and ALWAYS passed on every code
-# path that reaches `tea pulls merge`, never optional and never defaulted, so
-# NumFlags() cannot be zero regardless of what tea's own prompt behavior for
-# this specific subcommand turns out to be.
+# (AIMI_FORGE_IDENTITY / GH_TOKEN / an operator-exported GITLAB_TOKEN),
+# never a flag.
 
 # Prints the MANDATORY manual-fallback instructions (forge-contract.md's
 # Degradation Contract, mandatory mode) for every forge-pr-merge failure path
-# -- an unsupported forge, a missing gh/glab/tea binary, a failed preflight
+# -- an unsupported forge, a missing gh/glab binary, a failed preflight
 # lookup, a closed-but-never-merged PR/MR, or the merge call itself failing
 # all funnel through this one function so the wording is identical
 # regardless of WHY automatic merging did not happen. Always stderr, never
@@ -8656,7 +7810,6 @@ _forge_pr_merge_print_manual() {
   if [ -z "$host" ]; then
     case "$forge" in
       gitlab) host="gitlab.com" ;;
-      gitea)  host="gitea.com" ;;
       *)      host="github.com" ;;
     esac
   fi
@@ -8672,12 +7825,6 @@ _forge_pr_merge_print_manual() {
       echo "  glab mr merge $pr_ref -y${glab_style_flag}"
       if [ -n "$owner" ] && [ -n "$repo" ]; then
         echo "  Or open: https://$host/$owner/$repo/-/merge_requests/$pr_ref"
-      fi
-    elif [ "$forge" = "gitea" ]; then
-      echo "Warning: could not merge this gitea pull request automatically -- merge it yourself with:"
-      echo "  tea pulls merge $pr_ref --style $style"
-      if [ -n "$owner" ] && [ -n "$repo" ]; then
-        echo "  Or open: https://$host/$owner/$repo/pulls/$pr_ref"
       fi
     else
       local gh_style_flag=""
@@ -8791,95 +7938,11 @@ _forge_pr_merge_gitlab() {
   _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
 }
 
-# gitea adapter for forge-pr-merge. Same preflight-then-branch shape as the
-# gitlab arm above, then shells `tea pulls merge <index> --style
-# <merge|squash|rebase>` -- --style ALWAYS present, never optional, never
-# defaulted, so `tea`'s NumFlags()-driven interactive-survey hazard
-# (documented in the "Gitea write adapters" section header) cannot fire even
-# though tea's own prompt behavior for `pulls merge` specifically remains
-# unconfirmed (see this section's own header). No token prefix assignment:
-# tea honours GH_TOKEN as well as GITEA_TOKEN, so a github-shaped prefix here
-# would hand a GitHub token to a Gitea instance -- the same GH_TOKEN hazard
-# every other tea write call in this file avoids.
-_forge_pr_merge_gitea() {
-  local pr_ref="$1" style="$2"
-
-  if ! _forge_bin_check tea mandatory gitea; then
-    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-    _forge_emit_write_status degraded "" "tea not found -- this pull request was not merged automatically."
-    return 1
-  fi
-
-  local existing="" existing_rc=0
-  existing=$(cmd_forge_pr_view --pr "$pr_ref" --include number,url,state) || existing_rc=$?
-  if [ "$existing_rc" -ne 0 ]; then
-    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-    echo "Error: forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)." >&2
-    _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view lookup failed while resolving the pull request to merge (exit $existing_rc)."
-    return 1
-  fi
-
-  local existing_status existing_state existing_url existing_number existing_message
-  existing_status=$(printf '%s' "$existing" | jq -r '.status')
-  case "$existing_status" in
-    found)
-      existing_state=$(printf '%s' "$existing" | jq -r '.pr.state // empty')
-      existing_url=$(printf '%s' "$existing" | jq -r '.pr.url // empty')
-      existing_number=$(printf '%s' "$existing" | jq -r '.pr.number // empty')
-      case "$existing_state" in
-        merged|locked)
-          _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
-          return 0
-          ;;
-        closed)
-          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-          echo "Error: forge-pr-merge: pull request $pr_ref is closed and was never merged." >&2
-          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref is closed and was never merged."
-          return 1
-          ;;
-        open) ;;
-        *)
-          _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-          echo "Error: forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}." >&2
-          _forge_emit_write_status degraded "" "forge-pr-merge: pull request $pr_ref has an unrecognized state: ${existing_state:-<empty>}."
-          return 1
-          ;;
-      esac
-      ;;
-    not_found)
-      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-      echo "Error: forge-pr-merge: no pull request found for ref: $pr_ref" >&2
-      _forge_emit_write_status degraded "" "forge-pr-merge: no pull request found for ref: $pr_ref"
-      return 1
-      ;;
-    error|*)
-      existing_message=$(printf '%s' "$existing" | jq -r '.message // empty')
-      _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-      echo "Error: forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}" >&2
-      _forge_emit_write_status degraded "" "forge-pr-merge: forge-pr-view reported an error while resolving $pr_ref: ${existing_message:-unknown error}"
-      return 1
-      ;;
-  esac
-
-  # WRITE (gitea). --style ALWAYS present -- see this section's header.
-  local stdout="" stderr_out="" rc=0
-  _forge_capture stdout stderr_out rc -- tea pulls merge "$existing_number" --style "$style" || true
-
-  if [ "$rc" -ne 0 ]; then
-    _forge_pr_merge_print_manual gitea "$pr_ref" "$style"
-    echo "Error: forge-pr-merge: tea pulls merge exited $rc: ${stderr_out:-unknown error}" >&2
-    _forge_emit_write_status degraded "" "tea pulls merge exited $rc: ${stderr_out:-unknown error}"
-    return 1
-  fi
-
-  _forge_emit_write_status unchanged "$(_forge_build_write_data "$existing_url" "$existing_number")"
-}
-
 # Routing function for forge-pr-merge. Detects the forge, degrades
-# no_adapter-style for anything but github/gitlab/gitea, routes gitlab/gitea
-# to their self-contained adapters above under this file's usual `set -e`
-# capture convention (`|| gl_rc=$?` / `|| gt_rc=$?`, mandatory because both
-# adapters return 1 on every degraded branch by contract), and for github
+# no_adapter-style for anything but github/gitlab, routes gitlab
+# to its self-contained adapter above under this file's usual `set -e`
+# capture convention (`|| gl_rc=$?`, mandatory because the
+# adapter returns 1 on every degraded branch by contract), and for github
 # runs the preflight-then-merge sequence inline -- the same shape
 # _forge_pr_create/_forge_pr_edit use for their own github arm.
 #
@@ -8902,14 +7965,9 @@ _forge_pr_merge() {
       _forge_pr_merge_gitlab "$pr_ref" "$style" || gl_rc=$?
       return "$gl_rc"
       ;;
-    gitea)
-      local gt_rc=0
-      _forge_pr_merge_gitea "$pr_ref" "$style" || gt_rc=$?
-      return "$gt_rc"
-      ;;
     *)
       _forge_pr_merge_print_manual "$forge" "$pr_ref" "$style"
-      _forge_emit_write_status degraded "" "forge-pr-merge: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      _forge_emit_write_status degraded "" "forge-pr-merge: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
       return 1
       ;;
   esac
@@ -9009,7 +8067,7 @@ _forge_pr_merge() {
 # first to learn that. --style is validated against the closed
 # {merge, squash, rebase} enum and --pr against forge-pr-view's own
 # combined numeric-or-branch-name regex, both before _require_git_repo runs
-# and before either is ever interpolated into a git/gh/glab/tea invocation.
+# and before either is ever interpolated into a git/gh/glab invocation.
 # Delegates exactly once to _forge_pr_merge.
 cmd_forge_pr_merge() {
   check_jq
@@ -9042,7 +8100,7 @@ cmd_forge_pr_merge() {
       ;;
   esac
 
-  # Validate --pr before it is ever interpolated into a git/gh/glab/tea
+  # Validate --pr before it is ever interpolated into a git/gh/glab
   # invocation -- the exact combined regex cmd_forge_pr_view already applies
   # to its own --pr flag.
   if ! [[ "$pr_ref" =~ ^[0-9]+$ ]] && ! [[ "$pr_ref" =~ ^[a-zA-Z0-9][a-zA-Z0-9/_-]*$ ]]; then
@@ -9053,6 +8111,657 @@ cmd_forge_pr_merge() {
   _require_git_repo "$project_dir"
 
   _forge_pr_merge "$pr_ref" "$style"
+}
+
+# ============================================================================
+# forge-tag-create
+# ============================================================================
+# Creates an ANNOTATED tag on the forge at an explicit commit, from explicit
+# inputs, and never moves one that exists. The shape is forge-pr-merge's: a
+# public wrapper (cmd_forge_tag_create) parses and validates, and one private
+# function (_forge_tag_ensure) owns every tag decision and routes on the
+# forge. US-011 reuses _forge_tag_ensure, which is why it emits no JSON.
+#
+# ENVELOPE: the write-verb envelope of forge-contract.md, `data` being
+# {tag, commit}. `created` -- the tag did not exist and now does. `unchanged`
+# -- it already sits at the target commit and nothing was written.
+# `degraded` -- anything else, exit 1, reason in `message`.
+#
+# AN EXISTING TAG IS NEVER MOVED. There is no delete, force or re-point call
+# anywhere below. The probe decides whether a tag exists: neither forge
+# documents which status code a duplicate create answers with, so a status
+# code is never used to detect one. The probe reports "absent" only on a 404;
+# a probe that could not answer is degraded, never read as absent.
+#
+# GITHUB: a tag object is created first (POST git/tags, no tagger so the
+# acting account is credited), then a ref at THAT TAG OBJECT'S sha -- a ref at
+# the commit's sha would be a lightweight tag. Fields go through `-f`, never
+# `-F`, which reads a leading `@` as a file name and would let a message
+# exfiltrate one. The remembered account (or AIMI_FORGE_IDENTITY) acts, by the
+# same prefix assignment as every routed write; see ROUTING RULE above.
+#
+# GITLAB: one POST to repository/tags with the message creates an annotated
+# tag. The active glab session acts and no token variable is set. glab api's
+# --method, -f/--raw-field and :id placeholder are documented at
+# https://docs.gitlab.com/cli/api/ ("glab api | GitLab Docs").
+
+# Prints the manual steps for a tag that could not be created automatically.
+# Always stderr. Not printed for a tag that exists at another commit: there
+# nothing is owed to a human but the report, and a re-point is a decision.
+# Usage: _forge_tag_print_manual <tag> <commit>
+_forge_tag_print_manual() {
+  local tag="$1" commit="$2"
+  {
+    echo "Warning: could not create tag $tag automatically -- create it yourself with:"
+    echo "  git tag -a $tag $commit"
+    echo "  git push origin $tag"
+  } >&2
+}
+
+# True when a failed call's stdout or stderr carries an HTTP 404.
+# Usage: _forge_tag_is_404 <stdout> <stderr>
+_forge_tag_is_404() {
+  printf '%s\n%s\n' "${1:-}" "${2:-}" | grep -Eq '(^|[^0-9])404([^0-9]|$)'
+}
+
+# Prints the one stderr line GitLab owes when a remembered account exists but
+# cannot apply (glab acts as its active session). Nothing otherwise.
+_forge_tag_gitlab_account_notice() {
+  local host="" login="" store="" entry=""
+  _forge_account_host_cached host
+  if [ -n "${AIMI_FORGE_IDENTITY:-}" ]; then
+    login="$AIMI_FORGE_IDENTITY"
+  elif [ -n "$host" ]; then
+    store=$(_forge_account_store_path) || store=""
+    if [ -n "$store" ]; then
+      entry=$(_forge_account_stored_entry "$store" "$host")
+      if [ "$entry" != "null" ]; then
+        login=$(printf '%s' "$entry" | jq -r 'if .mode == "account" then (.account // empty) else empty end')
+      fi
+    fi
+  fi
+  [ -n "$login" ] || return 0
+  echo "Note: account \"$login\" is remembered for this repository, but glab acts as its own active session; the tag is created by that session." >&2
+}
+
+# github adapter. Returns 0 (created/unchanged), 1 (degraded) or 2 (degraded,
+# tag exists at another commit: no manual steps). Sets the caller's two named
+# variables.
+# Usage: _forge_tag_ensure_github <outcome_var> <detail_var> <tag> <commit> <message>
+_forge_tag_ensure_github() {
+  local -n _ftg_out="$1" _ftg_detail="$2"
+  local tag="$3" commit="$4" message="$5"
+  _ftg_out="degraded"
+  _ftg_detail=""
+
+  if ! _forge_bin_check gh mandatory github; then
+    _ftg_detail="gh not found -- this tag was not created automatically."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local host="" host_args=()
+  _forge_account_host_cached host
+  case "$host" in
+    ""|github.com) ;;
+    *) host_args=(--hostname "$host") ;;
+  esac
+
+  local out="" err="" rc=0 existing="" otype="" osha=""
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/ref/tags/$tag" ${host_args[@]+"${host_args[@]}"} || true
+
+  if [ "$rc" -eq 0 ]; then
+    otype=$(printf '%s' "$out" | jq -r '.object.type // empty' 2>/dev/null) || otype=""
+    osha=$(printf '%s' "$out" | jq -r '.object.sha // empty' 2>/dev/null) || osha=""
+    case "$otype" in
+      commit) existing="$osha" ;;
+      tag)
+        if [ -n "$osha" ]; then
+          GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+            _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/tags/$osha" ${host_args[@]+"${host_args[@]}"} || true
+          if [ "$rc" -eq 0 ]; then
+            existing=$(printf '%s' "$out" | jq -r '.object.sha // empty' 2>/dev/null) || existing=""
+          fi
+        fi
+        ;;
+    esac
+    if [ -z "$existing" ]; then
+      _ftg_detail="tag $tag exists but the commit it points at could not be read: ${err:-unknown error}"
+      return 1
+    fi
+    if [ "$existing" = "$commit" ]; then
+      _ftg_out="unchanged"
+      return 0
+    fi
+    _ftg_detail="tag $tag already exists at commit $existing, not at $commit; it was left where it is."
+    return 2
+  fi
+
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _ftg_detail="could not tell whether tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/tags" \
+      -f "tag=$tag" -f "message=$message" -f "object=$commit" -f "type=commit" \
+      ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ]; then
+    _ftg_detail="creating the tag object failed (gh api exited $rc; the target commit may not be pushed yet, or a ruleset refused the tag): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+  local tag_sha=""
+  tag_sha=$(printf '%s' "$out" | jq -r '.sha // empty' 2>/dev/null) || tag_sha=""
+  if [ -z "$tag_sha" ]; then
+    _ftg_detail="creating the tag object returned no sha."
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/git/refs" \
+      -f "ref=refs/tags/$tag" -f "sha=$tag_sha" \
+      ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ]; then
+    _ftg_detail="creating the ref failed after tag object $tag_sha was created (gh api exited $rc); that tag object is orphaned: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _ftg_out="created"
+  return 0
+}
+
+# gitlab adapter; same contract as the github one.
+# Usage: _forge_tag_ensure_gitlab <outcome_var> <detail_var> <tag> <commit> <message>
+_forge_tag_ensure_gitlab() {
+  local -n _ftl_out="$1" _ftl_detail="$2"
+  local tag="$3" commit="$4" message="$5"
+  _ftl_out="degraded"
+  _ftl_detail=""
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _ftl_detail="glab not found -- this tag was not created automatically."
+    return 1
+  fi
+
+  _forge_tag_gitlab_account_notice
+
+  local enc="" out="" err="" rc=0 existing=""
+  enc=$(jq -rn --arg t "$tag" '$t | @uri')
+  _forge_capture out err rc -- glab api "projects/:id/repository/tags/$enc" || true
+
+  if [ "$rc" -eq 0 ]; then
+    existing=$(printf '%s' "$out" | jq -r '.commit.id // empty' 2>/dev/null) || existing=""
+    if [ -z "$existing" ]; then
+      _ftl_detail="tag $tag exists but the commit it points at could not be read."
+      return 1
+    fi
+    if [ "$existing" = "$commit" ]; then
+      _ftl_out="unchanged"
+      return 0
+    fi
+    _ftl_detail="tag $tag already exists at commit $existing, not at $commit; it was left where it is."
+    return 2
+  fi
+
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _ftl_detail="could not tell whether tag $tag exists (glab api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab api projects/:id/repository/tags --method POST \
+    -f "tag_name=$tag" -f "ref=$commit" -f "message=$message" || true
+  if [ "$rc" -ne 0 ]; then
+    _ftl_detail="creating the tag failed (glab api exited $rc; the target commit may not be pushed yet, or a ruleset refused the tag): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ')"
+    return 1
+  fi
+
+  _ftl_out="created"
+  return 0
+}
+
+# Owns every tag decision. Sets <outcome_var> to created, unchanged or
+# degraded and, when degraded, <detail_var> to the reason; returns 0 for the
+# first two and 1 for degraded. Emits no JSON. Prints the manual steps itself
+# on every degraded outcome except a tag that exists at another commit.
+# The _fte_ prefix keeps the name-reference targets clear of a caller's own
+# locals, as _forge_account_override_slots does.
+# Usage: _forge_tag_ensure <outcome_var> <detail_var> <forge> <tag> <commit> <message>
+_forge_tag_ensure() {
+  local -n _fte_out="$1" _fte_detail="$2"
+  local _fte_outname="$1" _fte_detailname="$2"
+  local _fte_forge="$3" _fte_tag="$4" _fte_commit="$5" _fte_message="$6"
+  local _fte_rc=0
+  _fte_out="degraded"
+  _fte_detail=""
+
+  case "$_fte_forge" in
+    github) _forge_tag_ensure_github "$_fte_outname" "$_fte_detailname" "$_fte_tag" "$_fte_commit" "$_fte_message" || _fte_rc=$? ;;
+    gitlab) _forge_tag_ensure_gitlab "$_fte_outname" "$_fte_detailname" "$_fte_tag" "$_fte_commit" "$_fte_message" || _fte_rc=$? ;;
+    *)
+      _fte_detail="forge-tag-create: no adapter for forge \"$_fte_forge\" -- GitHub and GitLab are the only adapters."
+      _fte_rc=1
+      ;;
+  esac
+
+  case "$_fte_rc" in
+    0) return 0 ;;
+    2) _fte_out="degraded"; return 1 ;;
+    *)
+      _fte_out="degraded"
+      _forge_tag_print_manual "$_fte_tag" "$_fte_commit"
+      return 1
+      ;;
+  esac
+}
+
+# The --tag and --target refusals, written once for forge-tag-create and
+# forge-release-create so each wording exists in one place. Prints the error
+# for <verb> and returns 1; the caller exits.
+# Usage: _forge_tag_check_ref_args <verb> <tag> <target>
+_forge_tag_check_ref_args() {
+  local verb="$1" tag="$2" target="$3"
+  if ! [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._/+-]*$ ]] || ! git check-ref-format "refs/tags/$tag" >/dev/null 2>&1; then
+    echo "Error: $verb: invalid --tag value: $tag" >&2
+    return 1
+  fi
+  case "$target" in
+    -*)
+      echo "Error: $verb: invalid --target value: $target" >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# Resolves --target to a commit in the current repository, into the caller's
+# named variable. Prints the error for <verb> and returns 1 when it cannot.
+# Usage: _forge_tag_resolve_target <verb> <target> <commit_var>
+_forge_tag_resolve_target() {
+  local -n _ftrt_commit="$3"
+  _ftrt_commit=$(git rev-parse --verify "${2}^{commit}" 2>/dev/null) || _ftrt_commit=""
+  if [ -z "$_ftrt_commit" ]; then
+    echo "Error: $1: --target does not resolve to a commit in this repository: $2" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Public wrapper: parses --tag/--target/--message|--message-file/--project
+# (deliberately no token flag), refuses bad input by flag name before any forge
+# call, reads --message-file BEFORE the cd that --project performs, resolves
+# --target to a commit, then delegates to _forge_tag_ensure and emits the
+# envelope. degraded exits 1: a tag has no fallback and a release must not
+# follow a failed tag.
+cmd_forge_tag_create() {
+  check_jq
+
+  local tag="" target="" message="" message_file="" project_dir=""
+  local message_set=0 file_set=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag)          shift; tag="${1:-}" ;;
+      --target)       shift; target="${1:-}" ;;
+      --message)      shift; message="${1:-}"; message_set=1 ;;
+      --message-file) shift; message_file="${1:-}"; file_set=1 ;;
+      --project)      shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-tag-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ -z "$tag" ] || [ -z "$target" ]; then
+    echo "Usage: aimi-cli.sh forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]" >&2
+    exit 1
+  fi
+
+  _forge_tag_check_ref_args forge-tag-create "$tag" "$target" || exit 1
+
+  if [ $((message_set + file_set)) -ne 1 ]; then
+    echo "Error: forge-tag-create: exactly one of --message or --message-file is required." >&2
+    exit 1
+  fi
+
+  if [ "$file_set" -eq 1 ]; then
+    if [ -z "$message_file" ] || [ ! -f "$message_file" ] || [ ! -r "$message_file" ]; then
+      echo "Error: forge-tag-create: --message-file is not a readable file: $message_file" >&2
+      exit 1
+    fi
+    message=$(cat "$message_file") || {
+      echo "Error: forge-tag-create: --message-file could not be read: $message_file" >&2
+      exit 1
+    }
+    if [ -z "${message//[[:space:]]/}" ]; then
+      echo "Error: forge-tag-create: --message-file is empty: $message_file" >&2
+      exit 1
+    fi
+  elif [ -z "${message//[[:space:]]/}" ]; then
+    echo "Error: forge-tag-create: --message must not be empty." >&2
+    exit 1
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local commit=""
+  _forge_tag_resolve_target forge-tag-create "$target" commit || exit 1
+
+  local forge=""
+  _detect_forge_type forge
+
+  local outcome="" detail="" rc=0
+  _forge_tag_ensure outcome detail "$forge" "$tag" "$commit" "$message" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$outcome" = "degraded" ]; then
+    echo "Error: forge-tag-create: ${detail:-the tag was not created.}" >&2
+    _forge_emit_write_status degraded "" "${detail:-the tag was not created.}"
+    return 1
+  fi
+
+  _forge_emit_write_status "$outcome" "$(jq -nc --arg tag "$tag" --arg commit "$commit" '{tag: $tag, commit: $commit}')"
+}
+
+# ============================================================================
+# forge-release-create
+# ============================================================================
+# Publishes a release for a tag from explicit inputs: makes sure the ANNOTATED
+# tag exists at the commit --target resolves to (_forge_tag_ensure, with the
+# title as the tag message), then creates the release. Same shape as
+# forge-pr-merge: cmd_forge_release_create parses and validates, one private
+# function (_forge_release_create) owns every decision and routes on the forge.
+#
+# ENVELOPE: write-verb envelope, `data` being {tag, url}. `created` -- the
+# release was published now. `unchanged` -- a release for the tag already
+# exists (published or draft) and nothing was written. `degraded` -- anything
+# else, exit 1, reason in `message`.
+#
+# A RUN THAT STOPPED HALFWAY RESUMES: a tag already at the target commit still
+# leads to the release, a tag with no release continues to the release, and an
+# existing release is `unchanged`. A tag at ANOTHER commit is degraded with
+# both commits named and no release; no tag is ever moved (_forge_tag_ensure
+# has no delete, force or re-point call). A failed tag step prints its own
+# manual steps (once) and no release is attempted. A release has no fallback,
+# so every degraded outcome exits non-zero.
+#
+# PROBES NEVER READ AS ABSENT. GitHub: `releases/tags/<tag>` answers published
+# releases only, so a release reads absent only when that lookup returns 404
+# AND `releases?per_page=100` then answers without a draft carrying the tag.
+# The newest 100 releases are the bound: a draft older than that is not seen.
+# GitLab has no drafts: absent means the lookup returned 404.
+#
+# GITHUB: `gh release create <tag> --verify-tag --title=<title>` plus
+# `--notes-file=<absolute path>` or `--generate-notes`; --draft and
+# --prerelease only when given; never --target, because the tag already
+# exists. The URL is the last stdout line that starts with https; if none
+# does, the release is reported `created` with a null url and a Warning,
+# since degrading would send the caller back to publish twice. Every gh call
+# of this path (the probes and the create) acts as the remembered account.
+#
+# GITLAB: `glab release create <tag> --name=<title> --notes-file=<path>
+# --no-update`; --name, --notes-file and --no-update are documented at
+# https://docs.gitlab.com/cli/release/create/ ("glab release create | GitLab
+# Docs"). The release's own link is read back from `_links.self`. No token
+# variable is set; the active glab session acts. --draft, --prerelease and
+# --generate-notes have no glab equivalent here and degrade BEFORE any write,
+# so no tag is created either. The remembered-account line is printed once by
+# the tag step (_forge_tag_gitlab_account_notice), so this path never prints
+# a second one.
+
+# Prints the manual release step. Always stderr.
+# Usage: _forge_release_print_manual <forge> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_print_manual() {
+  local forge="$1" tag="$2" commit="$3" title="$4" notes_mode="$5" notes_file="$6" draft="$7" prerelease="$8"
+  {
+    echo "Warning: the tag $tag exists at commit $commit, but its release was not published -- publish it yourself with:"
+    if [ "$forge" = "gitlab" ]; then
+      echo "  glab release create $tag --name=\"$title\" --notes-file=\"$notes_file\" --no-update"
+    else
+      local extra=""
+      [ "$notes_mode" = "file" ] && extra=" --notes-file=\"$notes_file\"" || extra=" --generate-notes"
+      [ "$draft" = "1" ] && extra="$extra --draft"
+      [ "$prerelease" = "1" ] && extra="$extra --prerelease"
+      echo "  gh release create $tag --verify-tag --title=\"$title\"$extra"
+    fi
+    echo "Re-running the same forge-release-create command also resumes: the tag is kept and only the release is published."
+  } >&2
+}
+
+# github adapter. Sets <outcome_var>/<detail_var>/<url_var>; returns 0 for
+# created/unchanged and 1 for degraded.
+# Usage: _forge_release_github <outcome_var> <detail_var> <url_var> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_github() {
+  local -n _frg_out="$1" _frg_detail="$2" _frg_url="$3"
+  local tag="$4" commit="$5" title="$6" notes_mode="$7" notes_file="$8" draft="$9" prerelease="${10}"
+  _frg_out="degraded"; _frg_detail=""; _frg_url=""
+
+  if ! _forge_bin_check gh mandatory github; then
+    _frg_detail="gh not found -- the tag $tag exists at $commit but its release was not published."
+    return 1
+  fi
+
+  local gh_token_override="" ghe_token_override=""
+  _forge_account_override_slots gh_token_override ghe_token_override
+
+  local host="" host_args=()
+  _forge_account_host_cached host
+  case "$host" in
+    ""|github.com) ;;
+    *) host_args=(--hostname "$host") ;;
+  esac
+
+  local out="" err="" rc=0
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/releases/tags/$tag" ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -eq 0 ]; then
+    _frg_url=$(printf '%s' "$out" | jq -r '.html_url // empty' 2>/dev/null) || _frg_url=""
+    _frg_out="unchanged"
+    return 0
+  fi
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _frg_detail="could not tell whether a release for tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh api "repos/{owner}/{repo}/releases?per_page=100" ${host_args[@]+"${host_args[@]}"} || true
+  if [ "$rc" -ne 0 ] || ! printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    _frg_detail="could not tell whether a draft release for tag $tag exists (gh api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+  local draft_url=""
+  draft_url=$(printf '%s' "$out" | jq -r --arg tag "$tag" '[.[] | select(.tag_name == $tag)] | first | .html_url // empty' 2>/dev/null) || draft_url=""
+  if printf '%s' "$out" | jq -e --arg tag "$tag" 'any(.[]; .tag_name == $tag)' >/dev/null 2>&1; then
+    _frg_url="$draft_url"
+    _frg_out="unchanged"
+    return 0
+  fi
+
+  local create_args=(release create "$tag" --verify-tag "--title=$title")
+  if [ "$notes_mode" = "file" ]; then
+    create_args+=("--notes-file=$notes_file")
+  else
+    create_args+=(--generate-notes)
+  fi
+  [ "$draft" = "1" ] && create_args+=(--draft)
+  [ "$prerelease" = "1" ] && create_args+=(--prerelease)
+
+  GH_TOKEN="$gh_token_override" GH_ENTERPRISE_TOKEN="$ghe_token_override" \
+    _forge_capture out err rc -- gh "${create_args[@]}" || true
+  if [ "$rc" -ne 0 ]; then
+    _frg_detail="gh release create exited $rc: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+  _frg_url=$(printf '%s' "$out" | jq -Rrs 'split("\n") | map(select(startswith("https://"))) | last // empty' 2>/dev/null) || _frg_url=""
+  if [ -z "$_frg_url" ]; then
+    echo "Warning: forge-release-create: the release for $tag was published but gh printed no url; data.url is null." >&2
+  fi
+  _frg_out="created"
+  return 0
+}
+
+# gitlab adapter; same contract as the github one.
+# Usage: _forge_release_gitlab <outcome_var> <detail_var> <url_var> <tag> <commit> <title> <notes_file>
+_forge_release_gitlab() {
+  local -n _frl_out="$1" _frl_detail="$2" _frl_url="$3"
+  local tag="$4" commit="$5" title="$6" notes_file="$7"
+  _frl_out="degraded"; _frl_detail=""; _frl_url=""
+
+  if ! _forge_bin_check glab mandatory gitlab; then
+    _frl_detail="glab not found -- the tag $tag exists at $commit but its release was not published."
+    return 1
+  fi
+
+  local enc="" out="" err="" rc=0
+  enc=$(jq -rn --arg t "$tag" '$t | @uri')
+  _forge_capture out err rc -- glab api "projects/:id/releases/$enc" || true
+  if [ "$rc" -eq 0 ]; then
+    _frl_url=$(printf '%s' "$out" | jq -r '._links.self // empty' 2>/dev/null) || _frl_url=""
+    _frl_out="unchanged"
+    return 0
+  fi
+  if ! _forge_tag_is_404 "$out" "$err"; then
+    _frl_detail="could not tell whether a release for tag $tag exists (glab api exited $rc): $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab release create "$tag" "--name=$title" "--notes-file=$notes_file" --no-update || true
+  if [ "$rc" -ne 0 ]; then
+    _frl_detail="glab release create exited $rc: $(printf '%s' "${err:-${out:-unknown error}}" | tr '\n' ' ') The tag exists at $commit; re-running the same command resumes."
+    return 1
+  fi
+
+  _forge_capture out err rc -- glab api "projects/:id/releases/$enc" || true
+  if [ "$rc" -eq 0 ]; then
+    _frl_url=$(printf '%s' "$out" | jq -r '._links.self // empty' 2>/dev/null) || _frl_url=""
+  fi
+  if [ -z "$_frl_url" ]; then
+    echo "Warning: forge-release-create: the release for $tag was published but its link could not be read back; data.url is null." >&2
+  fi
+  _frl_out="created"
+  return 0
+}
+
+# Owns every release decision and emits the envelope. Returns 0 for
+# created/unchanged and 1 for degraded.
+# Usage: _forge_release_create <forge> <tag> <commit> <title> <notes_mode> <notes_file> <draft> <prerelease>
+_forge_release_create() {
+  local forge="$1" tag="$2" commit="$3" title="$4" notes_mode="$5" notes_file="$6" draft="$7" prerelease="$8"
+  local outcome="" detail="" url="" rc=0
+
+  if [ "$forge" = "gitlab" ]; then
+    local gaps=()
+    [ "$draft" = "1" ] && gaps+=(--draft)
+    [ "$prerelease" = "1" ] && gaps+=(--prerelease)
+    [ "$notes_mode" = "generate" ] && gaps+=(--generate-notes)
+    if [ "${#gaps[@]}" -gt 0 ]; then
+      detail="forge-release-create: GitLab does not support ${gaps[*]} here; nothing was written, no tag was created."
+      echo "Error: $detail" >&2
+      _forge_emit_write_status degraded "" "$detail"
+      return 1
+    fi
+  fi
+
+  _forge_tag_ensure outcome detail "$forge" "$tag" "$commit" "$title" || rc=$?
+  if [ "$rc" -ne 0 ] || [ "$outcome" = "degraded" ]; then
+    detail="${detail:-the tag was not created.}"
+    echo "Error: forge-release-create: $detail No release was attempted." >&2
+    _forge_emit_write_status degraded "" "$detail No release was attempted."
+    return 1
+  fi
+
+  case "$forge" in
+    github) _forge_release_github outcome detail url "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease" || true ;;
+    *)      _forge_release_gitlab outcome detail url "$tag" "$commit" "$title" "$notes_file" || true ;;
+  esac
+  if [ "$outcome" = "degraded" ]; then
+    echo "Error: forge-release-create: $detail" >&2
+    case "$detail" in
+      "gh release create exited"*|"glab release create exited"*)
+        _forge_release_print_manual "$forge" "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease"
+        ;;
+    esac
+    _forge_emit_write_status degraded "" "$detail"
+    return 1
+  fi
+
+  _forge_emit_write_status "$outcome" "$(jq -nc --arg tag "$tag" --arg url "$url" '{tag: $tag, url: (if $url == "" then null else $url end)}')"
+}
+
+# Public wrapper: parses and validates, resolves everything that depends on
+# the caller's directory BEFORE the cd that --project performs (the notes file
+# is made absolute), then delegates. Refusals name the flag, exit 1 and happen
+# before any forge call. The notes mode is checked before the notes file.
+# The notes file is tested with grep on the file itself, never read into a
+# variable.
+cmd_forge_release_create() {
+  check_jq
+
+  local tag="" target="" title="" notes_file="" project_dir=""
+  local generate=0 draft=0 prerelease=0 file_set=0 title_set=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tag)            shift; tag="${1:-}" ;;
+      --target)         shift; target="${1:-}" ;;
+      --title)          shift; title="${1:-}"; title_set=1 ;;
+      --notes-file)     shift; notes_file="${1:-}"; file_set=1 ;;
+      --generate-notes) generate=1 ;;
+      --draft)          draft=1 ;;
+      --prerelease)     prerelease=1 ;;
+      --project)        shift; project_dir="${1:-}" ;;
+      *)
+        echo "Error: forge-release-create: unknown flag: $1" >&2
+        exit 1
+        ;;
+    esac
+    shift || true
+  done
+
+  if [ -z "$tag" ] || [ -z "$target" ]; then
+    echo "Usage: aimi-cli.sh forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]" >&2
+    exit 1
+  fi
+
+  _forge_tag_check_ref_args forge-release-create "$tag" "$target" || exit 1
+
+  if [ $((generate + file_set)) -ne 1 ]; then
+    echo "Error: forge-release-create: exactly one of --notes-file or --generate-notes is required." >&2
+    exit 1
+  fi
+
+  local title_nl=""
+  title_nl=$(printf '%s' "$title" | tr '\n\r' '  ')
+  if [ "$title_set" -ne 1 ] || [ "$title_nl" != "$title" ] || [ -z "${title//[[:space:]]/}" ]; then
+    echo "Error: forge-release-create: invalid --title value: must be one non-empty line." >&2
+    exit 1
+  fi
+
+  local notes_mode="generate"
+  if [ "$file_set" -eq 1 ]; then
+    notes_mode="file"
+    if [ -z "$notes_file" ] || [ ! -f "$notes_file" ] || [ ! -r "$notes_file" ] || ! grep -q '[^[:space:]]' "$notes_file" 2>/dev/null; then
+      echo "Error: forge-release-create: invalid --notes-file value: not a readable, non-empty file: $notes_file" >&2
+      exit 1
+    fi
+    case "$notes_file" in
+      /*) ;;
+      *) notes_file="$PWD/$notes_file" ;;
+    esac
+  fi
+
+  _require_git_repo "$project_dir"
+
+  local commit=""
+  _forge_tag_resolve_target forge-release-create "$target" commit || exit 1
+
+  local forge=""
+  _detect_forge_type forge
+
+  _forge_release_create "$forge" "$tag" "$commit" "$title" "$notes_mode" "$notes_file" "$draft" "$prerelease"
 }
 
 # ============================================================================
@@ -9073,27 +8782,26 @@ cmd_forge_pr_merge() {
 # what lets a future caller preserve that behavior once it migrates off a
 # raw `gh issue create` shell-out.
 #
-# GitHub was the only adapter in phase 1. Phase 3 added GitLab and phase 4
-# added Gitea, to the READ verb (forge-issue-view -> `glab issue view <n> -F
-# json` / `tea issues <n> -o json`) AND to forge-issue-create itself
-# (_forge_issue_create_gitlab / _forge_issue_create_gitea), so this verb is no
+# GitHub was the only adapter in phase 1. Phase 3 added GitLab, to the READ
+# verb (forge-issue-view -> `glab issue view <n> -F json`) AND to
+# forge-issue-create itself (_forge_issue_create_gitlab), so this verb is no
 # longer GitHub-only. A detected forge with no adapter still degrades exactly
 # like a missing CLI binary rather than attempting a call that could only
 # fail.
 
 # Forge-native issue/PR state strings, normalized per forge-contract.md's
 # "State Mapping" table. Case-folded first because GitHub's gh CLI returns
-# OPEN/CLOSED/MERGED in uppercase while GitLab/Gitea's APIs are lowercase.
-# Once case-folded, every cell in that table already agrees across all
-# three forges EXCEPT GitLab's "opened", which has no "open"-spelled
+# OPEN/CLOSED/MERGED in uppercase while GitLab's API is lowercase.
+# Once case-folded, every cell in that table already agrees across both
+# forges EXCEPT GitLab's "opened", which has no "open"-spelled
 # sibling anywhere else -- that is the one and only translation this
-# function performs. GitLab's "locked" has no GitHub or Gitea/Forgejo
+# function performs. GitLab's "locked" has no GitHub
 # equivalent and passes through unchanged rather than being collapsed into
 # "merged" (collapsing would silently discard a real GitLab-only signal).
 # An unrecognized forge, or a raw value this table does not name, passes
 # through case-folded and otherwise untouched -- this function normalizes
 # spelling, it never invents a value the source data did not provide.
-# Usage: _forge_map_state <forge: github|gitlab|gitea> <raw-state>
+# Usage: _forge_map_state <forge: github|gitlab> <raw-state>
 _forge_map_state() {
   local forge="$1" raw
   raw=$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')
@@ -9124,9 +8832,9 @@ _forge_extract_issue_number_from_url() {
 # [] on GitHub: forge-contract.md's issue object treats comments as the
 # ONE capability-gated field, and GitHub can supply it cheaply (a comment
 # COUNT, derived here from the length of gh's own comments array) -- only
-# GitLab's noisier discussion model and tea's uncertain counting semantics
-# keep it capability-gated at all. `labels` is not in forge-contract.md's
-# issue field table today -- GitHub/GitLab/Gitea all expose it as a
+# GitLab's noisier discussion model
+# keeps it capability-gated at all. `labels` is not in forge-contract.md's
+# issue field table today -- GitHub and GitLab both expose it as a
 # portable-core concept, so it rides alongside _forge_build_issue_json's
 # output via a jq merge rather than waiting on a contract-doc update this
 # story does not own.
@@ -9171,18 +8879,8 @@ _forge_issue_view() {
     return 0
   fi
 
-  if [ "$forge" = "gitea" ]; then
-    if ! _forge_bin_check tea quiet "$forge"; then
-      # Names tea, never gh -- the phase contract's fourth success criterion.
-      _forge_emit_status error "" "tea not found -- this issue lookup did not run automatically." cli_missing
-      return 0
-    fi
-    _forge_issue_view_gitea "$number" "$host"
-    return 0
-  fi
-
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- github, gitlab and gitea are the adapters available today." no_adapter
+    _forge_emit_status error "" "forge-issue-view: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -9314,114 +9012,6 @@ _forge_issue_view_gitlab() {
   return 0
 }
 
-# gitea adapter for forge-issue-view. Same three-way found/not_found/error
-# envelope (_forge_emit_status), same shared issue builder
-# (_forge_build_issue_json), same quiet degrade posture -- only the CLI, the
-# key vocabulary and the not-found signal differ.
-#
-# `tea issues <index> -o json` is the DETAIL form (cmd/issues.go's `issueData`
-# struct: id, index, title, state, created, labels[], user, body,
-# assignees[], url, closedAt, comments[]). No `-f`, and no gh-style
-# `--json <field-list>`: tea's `-f` selector lives on the LIST path only, and
-# the detail path emits a fixed projection.
-#
-# THE KEYS COME FROM _forge_map_pr_field_gitea, NOT FROM A SECOND HAND-
-# WRITTEN TABLE HERE -- the same reuse _forge_issue_view_gitlab makes, and
-# for the same reason. Gitea spells the five portable-core contract fields
-# identically on an issue and on a pull request: `index`, `url`, `title`,
-# `body` and `state` are struct fields on BOTH `pullData` and `issueData`.
-# The PR-only fields (headRefName/baseRefName/isDraft/mergeable/files) are
-# simply never asked for.
-#
-# `comments` IS DELIBERATELY NOT SUPPLIED, so it comes back null AND named in
-# unsupported_fields. This is not caution about tea's counting semantics
-# alone -- it is a data fact: `issueData.Comments` is an ARRAY that is
-# populated ONLY when `--comments` is passed (cmd/issues.go:148-154), and is
-# an EMPTY ARRAY otherwise. Deriving a count from its length here would
-# report `comments: 0` for every issue in existence. A wrong count is worse
-# than a declared absence, and the contract's unsupported_fields array is the
-# mechanism for exactly this.
-#
-# `labels` rides alongside the builder's output via a jq merge, the same way
-# the github and gitlab arms add it, and through the same either-shape
-# expression: tea's own printer can hand back plain strings while the API
-# object carries `{name}`, so accepting either is what keeps a label list
-# from being silently dropped.
-#
-# THERE IS DELIBERATELY NO STRUCTURAL not_found PROBE HERE, unlike
-# _forge_pr_view_gitea, and this is a recorded decision rather than an
-# oversight so it is not later "improved" into a scan: `tea issues list` is
-# PAGINATED (--page/--limit) and has no index filter at all, so a local scan
-# of one page could report a real issue as missing. A FALSE not_found is the
-# one outcome that must never be invented, and a paginated scan can invent
-# it. So absence is claimed only on a POSITIVE 404/not-found stderr match,
-# and every other failure resolves to error -- falling through in the SAFE
-# direction, which is the same rule the pr-view arm applies to an
-# unparseable probe.
-#
-# NO CREDENTIAL IS BOUND ON ANY INVOCATION HERE -- see
-# _forge_auth_status_gitea's header for why a GH_TOKEN prefix assignment on a
-# `tea` call would be a real leak rather than a hypothetical one.
-#
-# VERIFICATION CEILING: `tea` is NOT INSTALLED on the machine this was
-# written on. Every flag, subcommand and JSON key above was read off
-# `gitea/tea` `main` source on 2026-08-06 and has never been observed coming
-# out of the real binary. The tests prove WHICH ARGV this function emits and
-# HOW it parses a fixture -- never what real `tea` does with them.
-_forge_issue_view_gitea() {
-  local number="$1" host="${2:-}"
-  local stdout rc=0
-  local stderr_out
-  _forge_capture stdout stderr_out rc -- tea issues "$number" -o json || true
-
-  if [ "$rc" -eq 0 ]; then
-    local num title_val body_val url_val state_raw state_norm labels_json data
-    num=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea number)" '.[$k] // empty')
-    title_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea title)" '.[$k] // ""')
-    body_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea body)" '.[$k] // ""')
-    url_val=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea url)" '.[$k] // ""')
-    state_raw=$(printf '%s' "$stdout" | jq -r --arg k "$(_forge_map_pr_field_gitea state)" '.[$k] // ""')
-    # Key mapping and VALUE normalization are separate jobs. There is no
-    # hasMerged derivation on this path and there must not be: an ISSUE is
-    # never merged, so _forge_map_state's plain case-fold is the whole job.
-    state_norm=$(_forge_map_state "gitea" "$state_raw")
-    labels_json=$(printf '%s' "$stdout" | jq -c '[(.labels // [])[] | if type == "object" then .name else . end]')
-    data=$(_forge_build_issue_json --number "$num" --url "$url_val" --title "$title_val" \
-      --body "$body_val" --state "$state_norm" --raw "$stdout")
-    data=$(printf '%s' "$data" | jq -c --argjson labels "$labels_json" '. + {labels: $labels}')
-    _forge_emit_status found "$data"
-    return 0
-  fi
-
-  # not_found is a query RESULT, never a verb failure -- the same distinction
-  # the github and gitlab arms draw. A POSITIVE match is required; see the
-  # header for why nothing weaker may claim absence on this path.
-  if printf '%s' "$stderr_out" | grep -qiE '404|not found'; then
-    _forge_emit_status not_found
-    return 0
-  fi
-
-  # Reached only after the not-found match above already failed, so tea
-  # genuinely broke. tea's presence was confirmed by the caller's own
-  # _forge_bin_check gate, so cli_missing is already ruled out and only
-  # not_authenticated vs cli_failed remains. Determined STRUCTURALLY, by
-  # asking _forge_auth_status_gitea whether a login entry for this host
-  # exists at all -- never by pattern-matching tea's failure wording, which
-  # is translatable and rewordable. That adapter returns NON-ZERO when it
-  # could not read the login list, which lands here as an empty $auth_json
-  # and therefore cli_failed: anything short of a definite
-  # "authenticated: false" resolves to cli_failed, the safe direction for an
-  # already-known failure.
-  local reason="cli_failed" auth_json authenticated
-  auth_json=$(_forge_auth_status_gitea "$host" 2>/dev/null) || auth_json=""
-  authenticated=$(printf '%s' "$auth_json" | jq -r '.authenticated' 2>/dev/null) || authenticated=""
-  if [ "$authenticated" = "false" ]; then
-    reason="not_authenticated"
-  fi
-  _forge_emit_status error "" "tea issues exited $rc: ${stderr_out:-unknown error}" "$reason"
-  return 0
-}
-
 # Public wrapper: parses --number/--url/--project, validates the numeric
 # identifier BEFORE it is ever interpolated into a gh command (mirroring
 # the branchName-validation posture in plugins/aimi-engineering/CLAUDE.md's
@@ -9495,7 +9085,7 @@ cmd_forge_issue_view() {
 # that cannot reach a forge is still a plan, and the only thing lost is an
 # optional key. So a cwd that is not a git repository, a description naming
 # no candidate, and a candidate whose envelope is an `error` (offline, no
-# gh/glab/tea, unauthenticated, rate-limited) all leave quietly -- `[]` or a
+# gh/glab, unauthenticated, rate-limited) all leave quietly -- `[]` or a
 # dropped row, at exit 0. Only a caller-side usage error exits non-zero.
 #
 # check_jq is called here rather than relied upon from the dispatcher: this
@@ -9683,13 +9273,9 @@ _forge_issue_create() {
       _forge_issue_create_gitlab "$title" "$body"
       return 0
       ;;
-    gitea)
-      _forge_issue_create_gitea "$title" "$body"
-      return 0
-      ;;
     *)
       _forge_issue_create_print_manual "$title" "$body" "$forge"
-      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters."
+      _forge_emit_write_status degraded "" "forge-issue-create: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters."
       return 0
       ;;
   esac
@@ -10154,260 +9740,9 @@ _forge_pr_review_threads_gitlab() {
   _forge_emit_status found "$data_json"
 }
 
-# ----------------------------------------------------------------------------
-# GITEA REVIEW-THREAD ADAPTERS (phase 4). This header covers BOTH
-# _forge_pr_review_threads_gitea (immediately below) and
-# _forge_resolve_review_thread_gitea (beside its gitlab sibling further down),
-# because every constraint here applies to the pair.
-#
-# VERIFICATION CEILING -- READ BEFORE TRUSTING ANY FLAG OR KEY BELOW. `tea` is
-# NOT installed on the machine this was written on. Not one subcommand, flag
-# or JSON key below has ever been observed coming out of the real binary:
-# every one was read off `gitea/tea` `main` source on 2026-08-06, file and
-# line cited per claim. This is the same ceiling phase 3 declared for glab
-# (:4380) and that this phase's own field mapper already declared for tea
-# (:4497). The tests prove WHICH ARGV this file emits and HOW it parses a
-# fixture, never what real tea does with either.
-#
-# The two halves are NOT equally well covered by that, and saying so is the
-# point of declaring the ceiling rather than merely noting it. Argv-shape
-# assertions are SOUND against a fake -- the defect this adapter can plausibly
-# ship on the emitting side is a wrong flag, and a wrong flag is visible in
-# the recorded argv. Key names and document shapes are the opposite: the stub
-# emits whatever the author believed, so the assertion only confirms the
-# author agrees with themselves and a wrong key passes green on both sides.
-# tea's output shape is this section's unobservable.
-#
-# VERSION FLOOR: tea >= v0.14.0. `tea pulls review-comments`, `tea pulls
-# resolve` and `tea pulls unresolve` all landed in tea v0.14.0; the current
-# release is v0.15.1 (2026-08-02). An older tea answers with an unknown-
-# subcommand error, which is a non-zero exit carrying tea's own stderr and is
-# therefore reported as cli_failed -- never as a confirmed not_found.
-#
-# THE LIST PATH MARSHALS EVERY VALUE AS A STRING. tea emits two different JSON
-# shapes for the same resource: a purpose-built typed object on the DETAIL
-# path (`tea pulls <index> -o json`) and, on the LIST path, an array of rows
-# whose keys are snake_cased and whose values are ALWAYS JSON strings
-# (orderedRow.MarshalJSON, modules/print/table.go:187-208, marshals a
-# map[string]string). `review-comments` is a LIST path. That is why `line` is
-# coerced to a number below and why `isResolved` is derived from a STRING
-# comparison. _forge_map_pr_field_gitea (:4548) works the DETAIL path; its
-# assumptions do not carry across.
-#
-# NO SERVER-SIDE RESOLUTION FILTER EXISTS, so the filter is LOCAL -- the exact
-# opposite of the gitlab arm above, which asks GitLab for `--state
-# unresolved` (:6600) and says so in its own header. `tea pulls
-# review-comments` carries only flags.AllDefaultFlags plus `--fields`
-# (cmd/pulls/review_comments.go:31); there is no `--state` and no other
-# resolution-state selector to pass. The default (unresolved-only) view is
-# therefore produced by dropping rows whose `resolver` is non-empty AFTER the
-# call, and `--all` skips that drop. Reading the returned list can never tell
-# a local filter from a server-side one, which is why the accompanying test
-# asserts the ABSENCE of `--state` from the recorded argv and drives a fixture
-# that carries both a resolved and an unresolved row.
-#
-# EVERY THREAD IS DEGENERATE: EXACTLY ONE COMMENT. tea lists review COMMENTS,
-# flattened across every review (modules/task/pull_review_comment.go:16-44
-# iterates the pull request's reviews and concatenates their comments), and
-# exposes no thread/conversation object anywhere. So one review comment
-# becomes one thread with comments.totalCount == 1. Inventing grouping by
-# `path`, by reviewer or by timestamp would fabricate a structure the forge
-# does not have; the gap is DECLARED instead, as `threads[].grouping`.
-#
-# `threads[].grouping` IS EMITTED AS AN EXPLICIT null KEY, not merely named.
-# It is the one gap this forge has that neither other forge has, and it names
-# a missing STRUCTURE rather than a missing field -- which is exactly why it
-# is spelled out as a key: forge-contract.md's rule is "null PLUS its name
-# recorded in unsupported_fields, never a bare unmarked null", and a name in
-# the array with no key in the payload would be the mirror-image omission. A
-# reader who dumps one gitea thread sees `"grouping": null` and can look the
-# name up. The key is gitea-only by construction and no consumer reads it.
-#
-# `threads[].diffSide` IS PERMANENTLY UNRECOVERABLE HERE, and the reason is
-# NOT the usual "the forge has no such field". tea prints ONE `line` column,
-# collapsing LineNum and OldLineNum into it (modules/print/
-# pull_review_comment.go:52-59 falls back from the one to the other), so by
-# the time the value reaches this adapter there is nothing left to say whether
-# it was the post-image or the pre-image side. The gitlab arm CAN derive
-# RIGHT/LEFT because GitLab hands it separate new_line and old_line keys
-# (:6680-6685). Do not port that derivation here -- there is no second number
-# to branch on, and guessing RIGHT would be a fabricated answer.
-#
-# NO ACCOUNT OVERRIDE IS APPLIED, AND THAT IS A SAFETY PROPERTY, NOT AN
-# OMISSION. tea reads GH_TOKEN as a fallback credential
-# (modules/context/context_login.go:15-51: it prefers GITEA_TOKEN and falls
-# back to GH_TOKEN when GITEA_TOKEN is empty), while
-# _forge_account_override_slots (:2983-2997) deliberately defaults an empty
-# override slot to the AMBIENT GH_TOKEN and every routed github write
-# prefix-assigns it. Copying that prefix-assignment shape onto a tea
-# invocation would hand a GitHub token to a Gitea instance. Neither gitea
-# function below assigns or exports GH_TOKEN, GH_ENTERPRISE_TOKEN,
-# GITEA_TOKEN or GITEA_INSTANCE_URL, and a test counts those assignments over
-# both function bodies to keep it that way.
-#
-# --owner/--repo ARE NOT FORWARDED, for the same reason the gitlab arm gives:
-# they are gh's flat owner/repo pair, and tea addresses the repository through
-# the current working directory's remote. Both gitea arms therefore return
-# BEFORE _forge_pr_review_threads' gh-specific owner/repo resolution block.
-#
-# FAILURE CLASSIFICATION. tea exits 1 uniformly for every error (main.go:18-30
-# prints `Error: %v` and calls os.Exit(1)) with no distinct not-found code, so
-# a `404` in stderr is the ONLY confirmed negative -- matched on the HTTP
-# status code rather than on English wording, exactly as the gitlab arms
-# above. Every other non-zero exit stays status=error/reason=cli_failed
-# carrying tea's own stderr. Misreading a could-not-attempt failure as a
-# confirmed answer is the dangerous direction; the catch-all points the safe
-# way.
-#
-# CAPABILITY GAPS, all reported through unsupported_fields per
-# forge-contract.md:
-#   pr.title / pr.url                   `tea pulls review-comments` returns
-#     comments only; supplying these would cost a SECOND `tea pulls <index>`
-#     round trip this verb deliberately does not make -- the same argument
-#     the gitlab arm makes at :6579-6581.
-#   threads[].startLine                 tea has no start-line field at all.
-#   threads[].diffSide                  unrecoverable, see above.
-#   threads[].isOutdated / isCollapsed  no field; GitHub review-UI concepts.
-#   threads[].grouping                  no conversation object, see above.
-#   threads[].comments.nodes[].outdated same gap as isOutdated, per comment.
-#
-# AND ONE FIELD THAT IS *NOT* A GAP HERE, though it is on GitLab:
-#   threads[].comments.nodes[].url      tea's review-comment field allowlist
-#     carries `url` (modules/print/pull_review_comment.go:13-23), so it is
-#     REQUESTED, populated and deliberately absent from unsupported_fields.
-#     GitLab lists it as a gap (:6721); copying that array wholesale is the
-#     expected mistake, and a test asserts the name appears nowhere in the
-#     gitea array.
-# ----------------------------------------------------------------------------
-
-# gitea adapter for forge-pr-review-threads. <index> is already validated as a
-# positive integer by cmd_forge_pr_review_threads before this ever runs;
-# <all_threads> is the literal string "true"/"false". See the GITEA
-# REVIEW-THREAD ADAPTERS header directly above for the verification ceiling,
-# the tea >= v0.14.0 version floor, and every capability gap named below.
-_forge_pr_review_threads_gitea() {
-  local index="$1" all_threads="$2"
-  local stdout rc=0
-  local stderr_out
-
-  # `-f` is tea's OWN field selector (--fields, cmd/flags/generic.go:157), a
-  # CSV over a fixed allowlist -- never a gh-style `--json <field-list>`,
-  # which tea does not have. `-o json` selects the output format. The list is
-  # the full review-comment allowlist (modules/print/
-  # pull_review_comment.go:13-23) rather than the subcommand's own narrower
-  # default (id,path,line,body,reviewer,resolver), because `created`,
-  # `updated` and `url` are all contract fields this verb must populate.
-  #
-  # No account override, no GH_TOKEN prefix assignment -- see the header.
-  _forge_capture stdout stderr_out rc -- tea pulls review-comments "$index" \
-    -f id,path,line,body,reviewer,resolver,created,updated,url -o json || true
-
-  if [ "$rc" -ne 0 ]; then
-    # tea has ONE exit code for every failure, so `404` in stderr is the only
-    # confirmed negative. Everything else is a could-not-attempt.
-    if printf '%s' "$stderr_out" | grep -q "404"; then
-      _forge_emit_status not_found
-      return 0
-    fi
-    _forge_emit_status error "" "tea pulls review-comments exited $rc: ${stderr_out:-unknown error}" cli_failed
-    return 0
-  fi
-
-  # ZERO REVIEW COMMENTS IS A `found` RESULT CARRYING AN EMPTY LIST, never
-  # not_found -- not_found means the PULL REQUEST itself could not be located.
-  # Go marshals an empty slice as `[]` and a nil slice as `null`, and a
-  # command that printed nothing at all is the same fact again, so all three
-  # collapse here rather than to an error.
-  local comments_json=""
-  if [ -n "$stdout" ]; then
-    comments_json=$(printf '%s' "$stdout" | jq -c '. // []' 2>/dev/null) || comments_json=""
-    if [ -z "$comments_json" ]; then
-      _forge_emit_status error "" "tea pulls review-comments returned output that is not JSON" cli_failed
-      return 0
-    fi
-  else
-    comments_json='[]'
-  fi
-
-  local all_flag_json
-  if [ "$all_threads" = "true" ]; then all_flag_json=true; else all_flag_json=false; fi
-
-  # The one place a tea review COMMENT becomes a contract THREAD.
-  #
-  # The select() is the LOCAL resolution filter tea offers no server-side
-  # equivalent for. `resolver` is a username or the empty string -- there is
-  # no boolean anywhere in the payload -- so isResolved is DERIVED from it by
-  # the same comparison, and the two can never disagree.
-  #
-  # `line` is coerced to a NUMBER because the LIST path marshals it as the
-  # string tea printed; `tonumber?` yields nothing for a non-numeric value,
-  # which `// null` then turns into an honest null rather than a zero.
-  # `id` goes the other way and is cast to STRING, so the contract's thread
-  # and comment ids stay one type across all three forges.
-  #
-  # comments.totalCount is the literal 1: tea exposes no conversation object,
-  # so one comment is the whole thread. See the header.
-  local threads_json
-  threads_json=$(printf '%s' "$comments_json" | jq -c --argjson all "$all_flag_json" '
-    [ .[]
-      | select($all or (((.resolver // "") | tostring) == ""))
-      | {
-          id: (.id | tostring),
-          isResolved: (((.resolver // "") | tostring) != ""),
-          isOutdated: null,
-          isCollapsed: null,
-          grouping: null,
-          path: (if ((.path // "") | tostring) == "" then null else (.path | tostring) end),
-          line: ((.line | tonumber?) // null),
-          startLine: null,
-          diffSide: null,
-          comments: {
-            totalCount: 1,
-            nodes: [ {
-              id: (.id | tostring),
-              author: {login: (if ((.reviewer // "") | tostring) == "" then null else (.reviewer | tostring) end)},
-              body: (if ((.body // "") | tostring) == "" then null else (.body | tostring) end),
-              createdAt: (if ((.created // "") | tostring) == "" then null else (.created | tostring) end),
-              updatedAt: (if ((.updated // "") | tostring) == "" then null else (.updated | tostring) end),
-              url: (if ((.url // "") | tostring) == "" then null else (.url | tostring) end),
-              outdated: null
-            } ]
-          }
-        } ]
-  ' 2>/dev/null) || threads_json=""
-
-  # A payload that parsed as JSON but is not the ARRAY OF COMMENTS the
-  # transform above expects (an error object, say) would otherwise reach
-  # `jq --argjson threads ""` below and spill a raw jq error onto stderr --
-  # unacceptable on a verb whose degrade mode is QUIET. Caught here instead,
-  # exactly as the gitlab arm does.
-  if [ -z "$threads_json" ]; then
-    _forge_emit_status error "" "tea pulls review-comments returned JSON that is not a review-comment array" cli_failed
-    return 0
-  fi
-
-  local data_json
-  data_json=$(jq -nc \
-    --arg number "$index" \
-    --argjson threads "$threads_json" \
-    '{
-      pr: {number: ($number | tonumber), title: null, url: null},
-      threads: $threads,
-      unsupported_fields: ["pr.title",
-                           "pr.url",
-                           "threads[].startLine",
-                           "threads[].diffSide",
-                           "threads[].isOutdated",
-                           "threads[].isCollapsed",
-                           "threads[].grouping",
-                           "threads[].comments.nodes[].outdated"]
-    }')
-  _forge_emit_status found "$data_json"
-}
-
 # Resolves forge/owner/repo, routes a forge with no adapter or a missing
 # forge CLI to a QUIET status=error result, and otherwise delegates to the
-# github, gitlab or gitea adapter. Owner/repo are resolved via US-003's
+# github or gitlab adapter. Owner/repo are resolved via US-003's
 # _forge_repo_info as a direct function call (never a `$AIMI_CLI
 # forge-repo-info` subprocess, never a second private gh-repo-view call)
 # whenever --owner/--repo are not both supplied, replacing
@@ -10436,24 +9771,11 @@ _forge_pr_review_threads() {
     return 0
   fi
 
-  # Gitea returns HERE too, and for the same reason: `tea` addresses the
-  # repository through the cwd remote and has no owner/repo pair to be given.
-  # Same shared _forge_bin_check gate, same quiet mode, naming `tea`.
-  if [ "$forge" = "gitea" ]; then
-    if ! _forge_bin_check tea quiet "$forge"; then
-      _forge_emit_status error "" "tea not found -- this review-thread lookup did not run automatically." cli_missing
-      return 0
-    fi
-    _forge_pr_review_threads_gitea "$pr_number" "$all_threads"
-    return 0
-  fi
-
   # Still reachable: `unknown`, the classification _detect_forge_classify_host
-  # answers for any host that is not one of the three named adapters. It is
-  # now the ONLY forge word that reaches this branch, since AIMI_FORGE_TYPE
-  # validates against github|gitlab|gitea (:2130).
+  # answers for any host that is not one of the two named adapters. It is
+  # the ONLY forge word that reaches this branch.
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters." no_adapter
+    _forge_emit_status error "" "forge-pr-review-threads: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -10494,15 +9816,12 @@ _forge_pr_review_threads() {
 # comments: {totalCount, nodes: [{id, author: {login}, body, createdAt,
 # updatedAt, url, outdated}]}.
 #
-# On GitLab and on Gitea the SHAPE is identical -- same keys, same three-way
+# On GitLab the SHAPE is identical -- same keys, same three-way
 # status -- but several fields are capability-gated and come back null with
 # their names in `unsupported_fields`; see _forge_pr_review_threads_gitlab's
-# and _forge_pr_review_threads_gitea's headers for the list and the reason for
-# each. A merge request with zero unresolved discussions, or a Gitea pull
-# request with zero unresolved review comments, is `found` with an empty
-# `threads` array, NOT `not_found`. Gitea threads additionally carry a
-# `grouping` key, always null and always declared in `unsupported_fields`:
-# tea exposes no conversation object, so each thread is exactly one comment.
+# header for the list and the reason for each. A merge request with zero
+# unresolved discussions is `found` with an empty `threads` array, NOT
+# `not_found`.
 # --owner/--repo are honored on GitHub only.
 # Usage: aimi-cli.sh forge-pr-review-threads --pr <number> [--owner <owner>
 # --repo <repo>] [--all] [--project <path>]
@@ -10554,52 +9873,6 @@ cmd_forge_pr_review_threads() {
   _forge_pr_review_threads "$pr_number" "$owner" "$repo" "$all_threads"
 }
 
-# ----------------------------------------------------------------------------
-# GITEA CAPABILITY-GAP NOTE -- REWRITTEN IN PHASE 4, BECAUSE ITS FACTUAL
-# CLAIM WAS FALSE.
-#
-# WHAT THIS NOTE USED TO SAY, and what is now retracted: written in phase 1
-# as documentation only, it ruled that a Gitea/Forgejo `tea` adapter could
-# not resolve a review thread by any means, and that this was a PERMANENT
-# capability gap rather than the temporary state an unwritten adapter is in.
-# Source falsifies both halves. `tea pulls review-comments <pull index>`
-# (cmd/pulls/review_comments.go:24-32) lists a pull request's review
-# comments, and `tea pulls resolve <comment id>` / `tea pulls unresolve`
-# (cmd/pulls/resolve.go, unresolve.go) mark one resolved or unresolved. All
-# three landed in tea v0.14.0; the current release is v0.15.1. Both verbs are
-# ROUTED for gitea today -- see the GITEA REVIEW-THREAD ADAPTERS section
-# above.
-#
-# WHAT THE REAL GAP IS: GROUPING, not resolution, and it is both narrower and
-# different from the ruling it replaces. tea lists review COMMENTS, flattened
-# across every review (modules/task/pull_review_comment.go:16-44), and
-# exposes no thread/conversation object at all, so the adapter emits one
-# DEGENERATE single-comment thread per review comment. Alongside it,
-# `threads[].diffSide` is unrecoverable, and for a reason that is not the
-# usual absence: tea collapses LineNum and OldLineNum into one printed
-# column (modules/print/pull_review_comment.go:52-59), leaving nothing to
-# tell the post-image side from the pre-image one -- unlike GitLab, whose
-# separate new_line/old_line keys the gitlab arm above genuinely does derive
-# RIGHT/LEFT from. Add `threads[].startLine`, `threads[].isOutdated`,
-# `threads[].isCollapsed`, `pr.title` and `pr.url`, and that is the whole
-# gap.
-#
-# WHAT THE ADVICE STILL SAYS, UNCHANGED, because only the factual claim was
-# wrong: a PERMANENT capability gap is reported through the
-# `unsupported_fields` array naming the thing that is missing, never by
-# reusing the generic no-adapter `message` text an unwritten adapter
-# produces. "This forge cannot do this at all" and "nobody wrote the adapter
-# yet" are two different facts, and collapsing them would make a permanent
-# gap look like a temporary one. Applying that advice is what
-# `threads[].grouping` in the gitea listing arm's own unsupported_fields is.
-#
-# WHAT CHANGED IS THE WORKED EXAMPLE. The old note offered an
-# unsupported_fields entry naming the resolveReviewThread mutation as the
-# value to emit. That is now exactly the WRONG answer: resolution is
-# supported on this forge, so naming it as a gap would report a capability
-# the adapter has as one it lacks -- the same collapse the advice above
-# exists to prevent, pointing the other way.
-# ----------------------------------------------------------------------------
 # github adapter for forge-resolve-review-thread. <thread_id> is already
 # validated by cmd_forge_resolve_review_thread before this ever runs. Binds
 # threadId via -f only -- see the section header above for why the mutation
@@ -10693,71 +9966,6 @@ _forge_resolve_review_thread_gitlab() {
   }')"
 }
 
-# gitea adapter for forge-resolve-review-thread (phase 4). <thread_id> is
-# already validated by cmd_forge_resolve_review_thread before this ever runs.
-# See the GITEA REVIEW-THREAD ADAPTERS header above _forge_pr_review_threads_
-# gitea for the verification ceiling, the tea >= v0.14.0 version floor, and
-# the GH_TOKEN hazard that forbids any account override on this path.
-#
-# RESOLVES ONLY; POSTS NO REPLY. `tea pulls resolve` marks the review comment
-# resolved and writes no comment of its own, which is this verb's established
-# meaning here -- the same property the gitlab arm above insists on. This
-# adapter issues ONE tea invocation and it is not a comment-creating one.
-#
-# THE PULL REQUEST IS NOT NAMED, because it is not part of the identifier.
-# `tea pulls resolve` takes a COMMENT id, which is what makes the round trip
-# work: _forge_pr_review_threads_gitea emits tea's own `id` and this hands
-# that exact string back (ResolvePullReviewComment consumes the same id,
-# modules/task/pull_review_comment.go:47-57). Nothing here re-derives,
-# truncates or re-formats it. A numeric id also passes
-# cmd_forge_resolve_review_thread's existing ^[A-Za-z0-9+/=_-]+$ guard
-# unchanged, so that guard needed no edit for this forge.
-#
-# Always QUIET and always returns 0, same as the other two adapters.
-_forge_resolve_review_thread_gitea() {
-  local thread_id="$1"
-  local stdout rc=0
-  local stderr_out
-
-  # No account override, no GH_TOKEN prefix assignment: tea reads GH_TOKEN as
-  # a fallback credential, so the github arm's shape would hand a GitHub token
-  # to a Gitea instance. See the section header.
-  _forge_capture stdout stderr_out rc -- tea pulls resolve "$thread_id" || true
-
-  if [ "$rc" -ne 0 ]; then
-    # A comment id Gitea cannot find is a CONFIRMED negative (the call ran;
-    # the answer is "no such comment"), reported as status="found" with
-    # resolved=false -- byte-identical to the other two adapters' own
-    # confirmed-invalid-id result, per forge-contract.md's Three-Way Status
-    # Convention. Matched on the HTTP status code `404` only, never on
-    # English wording, and every other failure stays status="error" so the
-    # wrapper prints its manual instruction and exits non-zero.
-    if printf '%s' "$stderr_out" | grep -q "404"; then
-      _forge_emit_status found "$(jq -nc '{resolved: false, thread: null, unsupported_fields: []}')"
-      return 0
-    fi
-    # cli_failed hard-coded rather than classified, for the same reason the
-    # gitlab arm gives: the shared classifier is gh-specific and there is no
-    # tea auth probe in this repository.
-    _forge_emit_status error "" "tea pulls resolve exited $rc: ${stderr_out:-unknown error}" cli_failed
-    return 0
-  fi
-
-  # tea reports success by exit status, not by a JSON document: it prints
-  # `Comment %d resolved` to stdout (modules/task/pull_review_comment.go:55)
-  # and returns nothing structured. So the thread object is rebuilt from what
-  # is known for certain -- the id that was just resolved, and the fact that
-  # it now is -- reusing the shape `glab mr note resolve` already established
-  # directly above. path/line are GitHub's, come from the GraphQL mutation's
-  # own response there, and have no counterpart in tea's output: null plus
-  # unsupported_fields, per forge-contract.md.
-  _forge_emit_status found "$(jq -nc --arg id "$thread_id" '{
-    resolved: true,
-    thread: {id: $id, isResolved: true, path: null, line: null},
-    unsupported_fields: ["thread.path", "thread.line"]
-  }')"
-}
-
 _forge_resolve_review_thread() {
   local thread_id="$1"
   local forge_info forge host
@@ -10780,21 +9988,9 @@ _forge_resolve_review_thread() {
     return 0
   fi
 
-  # Same gate again for gitea, naming `tea`. The wrapper below stays the only
-  # layer that prints and exits non-zero, so a missing tea degrades through
-  # exactly the path a missing gh already does.
-  if [ "$forge" = "gitea" ]; then
-    if ! _forge_bin_check tea quiet "$forge"; then
-      _forge_emit_status error "" "tea not found -- this thread could not be resolved automatically." cli_missing
-      return 0
-    fi
-    _forge_resolve_review_thread_gitea "$thread_id"
-    return 0
-  fi
-
   # Still reachable by `unknown` -- the only forge word left with no adapter.
   if [ "$forge" != "github" ]; then
-    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub, GitLab and Gitea are the only adapters." no_adapter
+    _forge_emit_status error "" "forge-resolve-review-thread: no adapter for forge \"$forge\" yet -- GitHub and GitLab are the only adapters." no_adapter
     return 0
   fi
 
@@ -12582,6 +11778,61 @@ anthropic/claude-opus-4-7"
   printf '%s\n' "$_models_json"
 }
 
+# deps-recipe-record --project <key> --command <cmd>
+#
+# Records the install command a person confirmed for one project key at
+# dependencies.install[<key>] of <AIMI_ROOT>/.aimi/config.json, which
+# _detect_dependency_installer reads back as source "config". Bash owns the
+# flags, check_python3 and the lock; scripts/deps_recipe.py owns the document
+# rules and makes the read-merge-write in ONE crossing made inside the lock, so
+# invocations for different keys racing each other all survive. A writer with no
+# honest degrade, like detect-models, so a missing python3 refuses at exit 1
+# before anything is read or written. --project and --command are values, not
+# paths, and stay out of _PATH_ARG_FLAGS.
+cmd_deps_recipe_record() {
+  local project="" command_text="" have_project=0 have_command=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)
+        if [ $# -lt 2 ]; then
+          echo "Error: deps-recipe-record: --project requires a value" >&2
+          echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+          exit 1
+        fi
+        project="$2"; have_project=1; shift 2 ;;
+      --command)
+        if [ $# -lt 2 ]; then
+          echo "Error: deps-recipe-record: --command requires a value" >&2
+          echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+          exit 1
+        fi
+        command_text="$2"; have_command=1; shift 2 ;;
+      *)
+        echo "Error: deps-recipe-record: unknown flag: $1" >&2
+        echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+        exit 1 ;;
+    esac
+  done
+  if [ "$have_project" -eq 0 ] || [ -z "$project" ] || [ "$have_command" -eq 0 ] || [ -z "$command_text" ]; then
+    echo "Error: deps-recipe-record: --project and --command are both required and must not be empty" >&2
+    echo "Usage: aimi-cli.sh deps-recipe-record --project <key> --command <cmd>" >&2
+    exit 1
+  fi
+
+  check_python3
+
+  local config="$AIMI_DIR/config.json"
+  validate_path_in_project "$config"
+
+  local rc=0
+  (
+    _lock "${config}.lock"
+    python3 "$(_aimi_script_py deps_recipe.py)" record \
+      --config "$config" --project "$project" --command "$command_text"
+  ) 200>"${config}.lock" || rc=$?
+  return "$rc"
+}
+
 # Check whether the first-run model-selection prompt should be shown.
 # Echoes exactly one token to stdout:
 #   skip   — models.json already exists OR the marker file already exists
@@ -12663,6 +11914,7 @@ cmd_models_prompt_dismiss() {
 
 # Setup branch: deterministic branch creation/checkout logic
 # Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]
+# (--project defaults to the caller's own repository, see _caller_project_dir)
 cmd_setup_branch() {
   local branch_name="" default_branch="" project_dir="" base_override=""
 
@@ -12703,6 +11955,31 @@ cmd_setup_branch() {
   if [ -z "$branch_name" ] || [ -z "$default_branch" ]; then
     echo "Usage: aimi-cli.sh setup-branch <branchName> --default-branch <defaultBranch> [--base <baseBranch>] [--project <path>]" >&2
     exit 1
+  fi
+
+  # This verb mutates the tree, so it decides which repository before touching
+  # anything. Without --project: an .aimi root outside any repository (the
+  # multi-repo layout) acts on the caller's repository; a root inside one acts
+  # on its own checkout when the caller is in the same repository (same
+  # --git-common-dir, a linked worktree included) or in no repository, and
+  # refuses when the caller is in a different one.
+  if [ -z "$project_dir" ]; then
+    local caller_dir root_dir
+    caller_dir=$(_caller_project_dir)
+    root_dir=$(pwd)
+    if [ -n "$caller_dir" ]; then
+      if ! git -C "$root_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        project_dir="$caller_dir"
+      else
+        local root_common caller_common
+        root_common=$(_git_common_dir_of "$root_dir") || root_common=""
+        caller_common=$(_git_common_dir_of "$caller_dir") || caller_common=""
+        if [ -n "$caller_common" ] && [ "$caller_common" != "$root_common" ]; then
+          echo "Error: setup-branch: the .aimi root $root_dir is a different repository than the caller directory $caller_dir; no branch was created. Pass --project <path> to name the repository." >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
 
   _require_git_repo "$project_dir"
@@ -13052,6 +12329,7 @@ cmd_resolve_base_branch() {
     exit 1
   fi
 
+  [ -n "$project_dir" ] || project_dir=$(_caller_project_dir)
   _require_git_repo "$project_dir"
 
   # Validate branch name (security)
@@ -17942,8 +17220,10 @@ COMMANDS:
     status [--counts-only] [--tasks-file <path>]
                               Get status summary as JSON
                               --counts-only  Return aggregate counts without userStories array
-    metadata [--tasks-file <path>]
+    metadata [--tasks-file <path>] [--with-deliverable-branch]
                               Get metadata only
+                              --with-deliverable-branch  Add .deliverableBranch (the phase branch for a
+                                                         phase-scoped split member, branchName otherwise)
     verification-report [--tasks-file <path>]
                               Visual stories (id/project/url) plus the malformed-verification
                               partition (repairable/unrepairable). Defaults to get_tasks_file.
@@ -18209,7 +17489,8 @@ COMMANDS:
                               naming it.
     get-state                 Get all state files as JSON
     detect-default-branch [--project <path>]
-                              Detect and cache the repository's default branch
+                              Detect and cache the repository's default branch.
+                              Without --project, answers for the caller's own repository
     detect-parent-branch <branch> [--project <path>]
                               Detect branch's parent (base) branch by token-aware
                               git log decoration parsing + git merge-base verification.
@@ -18223,13 +17504,15 @@ COMMANDS:
                               tied names instead of asserting a winner).
     detect-forge [--project <path>]
                               Classify the active git remote's hostname into
-                              github|gitlab|gitea|unknown (exact-or-subdomain,
+                              github|gitlab|unknown (exact-or-subdomain,
                               port-aware). Output: {forge, host, remote,
                               remoteUrl, source ("override"|"remote"|
                               "no-remote"|"ambiguous-remotes")}. Set
-                              AIMI_FORGE_TYPE=github|gitlab|gitea to override
+                              AIMI_FORGE_TYPE=github|gitlab to override
                               detection entirely (source=override, no git
                               remote read runs); any other value exits 1.
+                              The retired value gitea is read as unknown, with
+                              one stderr line naming the variable.
                               Never cached -- re-derived on every invocation.
     forge-auth-status [--project <path>]
                               Report whether the active forge session is authenticated
@@ -18240,7 +17523,7 @@ COMMANDS:
                               with status="found" is a confirmed logged-out session;
                               status="error" means the check itself could not run --
                               the binary the DETECTED forge needs is missing (gh,
-                              glab or tea), or it ran and could not answer, or the
+                              or glab), or it ran and could not answer, or the
                               forge has no adapter at all. Set
                               AIMI_FORGE_IDENTITY=<login> (env var only, never a flag)
                               to compare against the active account -- this does not
@@ -18290,9 +17573,7 @@ COMMANDS:
                               forge-CLI call -- `gh repo view` on github, `glab
                               repo view -F json` on gitlab -- falling back to
                               parsing the git remote URL whenever that CLI is
-                              unavailable or the forge has no such tier. gitea
-                              always takes the fallback, by decision: tea has no
-                              "show THIS repository as JSON" command to call.
+                              unavailable.
                               Output: {status ("found"|"not_found"), data,
                               message}. data (when found) carries {forge, host,
                               owner, repo, nameWithOwner,
@@ -18308,9 +17589,9 @@ COMMANDS:
                               headRefName, baseRefName, files, isDraft,
                               mergeable -- defaults to the portable core
                               (excludes files/isDraft/mergeable) when
-                              omitted. Any other name exits 1. github,
-                              gitlab and gitea each have an adapter; only
-                              `unknown`, or a missing gh/glab/tea binary,
+                              omitted. Any other name exits 1. github
+                              and gitlab each have an adapter; only
+                              `unknown`, or a missing gh/glab binary,
                               degrades to status=error with no stderr
                               output.
     forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]
@@ -18332,7 +17613,7 @@ COMMANDS:
                               stderr (MANDATORY-PRINT degrade mode) and
                               EXITS NON-ZERO -- a hard failure, so a
                               caller's own per-repository failure isolation
-                              can react. github, gitlab and gitea each have
+                              can react. github and gitlab each have
                               an adapter. Identity, when needed, is read from
                               an env var (e.g. AIMI_FORGE_IDENTITY /
                               GH_TOKEN), never a flag.
@@ -18352,18 +17633,16 @@ COMMANDS:
                               refused, since no forge stores an empty title.
                               Same guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create.
-                              github, gitlab and gitea each have an adapter
-                              (glab mr update -t/-d, tea pulls edit -t/-d).
+                              github and gitlab each have an adapter
+                              (glab mr update -t/-d).
     forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]
                               Write verb -- resolves the PR/MR's
                               {number, url, state} via an in-process
                               forge-pr-view preflight, then shells gh pr
-                              merge/glab mr merge/tea pulls merge. --pr and
+                              merge/glab mr merge. --pr and
                               --style are BOTH REQUIRED; --style is
                               validated against the closed enum
-                              {merge, squash, rebase} (never gitea's own
-                              fourth rebase-merge style, which this verb
-                              deliberately does not expose). Output:
+                              {merge, squash, rebase}. Output:
                               {status: "unchanged"|"degraded", data:
                               {url, number}, message} -- "created" is
                               structurally unreachable (a merge mints no new
@@ -18376,13 +17655,12 @@ COMMANDS:
                               {url, number} rather than re-reading. Same
                               guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create --
-                              a missing gh/glab/tea binary or an unsupported
+                              a missing gh/glab binary or an unsupported
                               forge prints manual merge-it-yourself
                               instructions to stderr (MANDATORY-PRINT
-                              degrade mode) and EXITS NON-ZERO. github,
-                              gitlab and gitea each have an adapter (glab mr
-                              merge -y [-s|-r], tea pulls merge --style,
-                              --style ALWAYS passed on the gitea call). No
+                              degrade mode) and EXITS NON-ZERO. github
+                              and gitlab each have an adapter (glab mr
+                              merge -y [-s|-r]). No
                               conditional/auto-merge and no branch-deletion
                               flag on any forge. Identity, when needed, is
                               read from an env var, never a flag.
@@ -18394,7 +17672,7 @@ COMMANDS:
                               labels, comments, unsupported_fields, raw} on
                               found. QUIET degrade mode: a missing or
                               unauthenticated forge CLI yields status "error"
-                              with no stderr output. github, gitlab and gitea
+                              with no stderr output. github and gitlab
                               each have an adapter.
     forge-issue-scan --description <text> [--project <path>]
                               Reads free text, prints the issues it names that
@@ -18414,8 +17692,8 @@ COMMANDS:
                               repository, and when every candidate is dropped.
                               A candidate whose envelope is status "error"
                               leaves silently. Resolution goes through
-                              forge-issue-view's own adapter, so github, gitlab
-                              and gitea all work.
+                              forge-issue-view's own adapter, so github
+                              and gitlab both work.
     forge-issue-create --title <t> --body <b> [--project <path>]
                               Write verb -- shells gh issue create (no --json
                               flag exists on it; the URL/number are captured
@@ -18430,8 +17708,8 @@ COMMANDS:
                               (exit stays 0) -- it prints a manual "create
                               this yourself" instruction to stderr
                               (MANDATORY-PRINT degrade mode) and lets the
-                              caller branch on status instead. github, gitlab
-                              and gitea each have an adapter.
+                              caller branch on status instead. github
+                              and gitlab each have an adapter.
     forge-pr-review-threads --pr <number> [--owner <owner> --repo <repo>] [--all] [--project <path>]
                               Read verb -- ports get-pr-comments' reviewThreads
                               GraphQL query verbatim; owner, repo and the PR
@@ -18451,7 +17729,7 @@ COMMANDS:
                               when not both supplied. QUIET degrade mode: a
                               missing forge CLI, unsupported forge, or CLI
                               failure yields status=error with no stderr.
-                              github, gitlab and gitea each have an adapter.
+                              github and gitlab each have an adapter.
     forge-resolve-review-thread --thread-id <id> [--project <path>]
                               Write verb -- ports resolve-pr-thread's
                               resolveReviewThread GraphQL mutation verbatim;
@@ -18469,7 +17747,28 @@ COMMANDS:
                               changed tab" instruction to stderr and exits
                               non-zero, since there is no gh subcommand or
                               REST fallback for resolving a review thread.
-                              github, gitlab and gitea each have an adapter.
+                              github and gitlab each have an adapter.
+    forge-tag-create --tag <name> --target <ref> (--message <text> | --message-file <path>) [--project <path>]
+                              Write verb -- creates an ANNOTATED tag on the
+                              forge at the commit --target resolves to.
+                              Output: {status, data: {tag, commit}, message}.
+    forge-release-create --tag <name> --target <ref> --title <text> (--notes-file <path> | --generate-notes) [--draft] [--prerelease] [--project <path>]
+                              Write verb -- makes sure the annotated tag
+                              exists at the commit --target resolves to, then
+                              publishes the release for it; a re-run resumes
+                              and never moves a tag. GitLab supports
+                              --notes-file only.
+                              Output: {status, data: {tag, url}, message}.
+                              "created" at exit 0; re-running it prints
+                              "unchanged" and writes nothing. An existing tag
+                              is never moved: one at another commit is
+                              "degraded" (exit 1) naming both commits. Bad
+                              --tag, --target or message input is refused at
+                              exit 1 before any forge call. Any other failure
+                              is "degraded" at exit 1 with the reason in
+                              message, and manual `git tag -a` / `git push
+                              origin <tag>` steps on stderr.
+                              github and gitlab each have an adapter.
     slugify (--stdin | <text>)
                               Print an ASCII directory slug for free text: NFKD
                               fold to ASCII, lowercase, runs of non-alphanumerics
@@ -18529,6 +17828,14 @@ COMMANDS:
                               (research=fast/haiku, review=powerful/opus,
                               design+workflow+executor=balanced/sonnet).
                               Emits the written JSON on stdout.
+    deps-recipe-record --project <key> --command <cmd>
+                              Record the install command a person confirmed for one
+                              project key at dependencies.install[<key>] of
+                              .aimi/config.json (key "." on a one-repository plan).
+                              Prints {status, project, command, config}; status is
+                              "recorded" or "unchanged". Refuses an unsafe command
+                              or key, an unreadable config and a config tracked by
+                              git; needs python3.
     models-prompt-check       Check whether the model-selection prompt should be shown.
                               Per-host decision:
                               - prompt when the config file is missing entirely (always
@@ -18549,7 +17856,9 @@ COMMANDS:
                               still re-triggers the prompt — the marker only suppresses
                               when the file exists but the host has no config.
     setup-branch <name> --default-branch <branch> [--project <path>]
-                              Create or checkout branch with deterministic logic
+                              Create or checkout branch with deterministic logic.
+                              Without --project, acts on the caller's repository; refuses
+                              when a git .aimi root is a different repository
     resolve-base-branch <name> --default-branch <branch> [--base <branch>] [--project <path>]
                               Decide what branch a new branch or container should be cut
                               from -- no checkout is performed. Prints a single JSON object:
@@ -19498,6 +18807,12 @@ main() {
     fi
   fi
 
+  # One notice for a retired AIMI_FORGE_TYPE value, before any forge verb forks
+  # a subshell that would each print it again.
+  case "${1:-}" in
+    forge-*) _forge_normalize_type_override ;;
+  esac
+
   # Skip auto-discovery for commands that don't touch .aimi/
   case "${1:-help}" in
     help|--help|-h) cmd_help; return ;;
@@ -19532,6 +18847,8 @@ main() {
     forge-issue-create) shift; cmd_forge_issue_create "$@"; return ;;
     forge-pr-review-threads) shift; cmd_forge_pr_review_threads "$@"; return ;;
     forge-resolve-review-thread) shift; cmd_forge_resolve_review_thread "$@"; return ;;
+    forge-tag-create) shift; cmd_forge_tag_create "$@"; return ;;
+    forge-release-create) shift; cmd_forge_release_create "$@"; return ;;
   esac
 
   # Universal --help/-h: any subcommand with --help or -h anywhere in its args
@@ -19633,6 +18950,7 @@ main() {
     apply-audit-patches) shift; cmd_apply_audit_patches "$@" ;;
     validate-outline) shift; cmd_validate_outline "$@" ;;
     validate-staging) shift; cmd_validate_staging "$@" ;;
+    deps-recipe-record) shift; cmd_deps_recipe_record "$@" ;;
     outline-shift) shift; cmd_outline_shift "$@" ;;
     split-detect)      shift; cmd_split_detect "$@" ;;
     roadmap-init)          shift; cmd_roadmap_init "$@" ;;

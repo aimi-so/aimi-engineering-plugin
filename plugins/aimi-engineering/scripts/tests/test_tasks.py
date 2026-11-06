@@ -5337,7 +5337,14 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # names, never a write. No new root, and no leaf this module chose: the
     # operand is a literal word of the verify, joined onto the story's base by
     # confined_spec_path and refused when it escapes.
-    assert code.count("os.path.") == 56
+    #
+    # The last five are deliverable_branch's: a basename of the tasks path to
+    # recognise a SIDE-axis member, a basename and a dirname of
+    # metadata.roadmapPath for the feature name, and a join and a dirname that
+    # build the phase's tasks path. They compose strings and touch nothing: both
+    # document-sourced paths reach the disk only through confined_spec_path, and
+    # the reads go through load_docs, so no open() arrived with them.
+    assert code.count("os.path.") == 61
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -11607,3 +11614,159 @@ def test_verification_url_sentence_is_the_one_r15_reports(label):
     # the recording prefixes the tasks file's resolved path; the rest is the sentence
     for suffix, error in zip(expected, actual):
         assert error.endswith(suffix), (suffix, error)
+
+
+# ---------------------------------------------------------------------------
+# deliverable_branch -- the branch a plan's finished work is delivered on
+# ---------------------------------------------------------------------------
+
+
+def _deliverable_layout(tmp_path, phase=None, phase_tasks_type=None, roadmap=True):
+    """A project root holding a roadmap and a phase-scoped SPLIT member file."""
+    root = tmp_path / "proj"
+    feature_dir = root / ".aimi" / "tasks" / "feat-x"
+    phase_dir = feature_dir / "phase-5.5-core"
+    phase_dir.mkdir(parents=True)
+    entry = {"id": 5.5, "slug": "core", "dir": "phase-5.5-core"}
+    entry.update(phase or {})
+    if roadmap:
+        (feature_dir / "roadmap.json").write_text(json.dumps({"phases": [entry]}))
+    if phase_tasks_type:
+        (phase_dir / "feat-x-phase-5.5-tasks.json").write_text(
+            json.dumps({"metadata": {"type": phase_tasks_type}})
+        )
+    return root, phase_dir
+
+
+def _member_doc(**metadata):
+    base = {
+        "branchName": "feat/feat-x-phase-5-5-core-api",
+        "roadmapPath": ".aimi/tasks/feat-x/roadmap.json",
+        "phase": {"id": 5.5, "dir": "phase-5.5-core"},
+        "splitGroup": {"project": "api", "index": 1, "total": 2, "siblings": []},
+    }
+    base.update(metadata)
+    return {"metadata": base, "userStories": []}
+
+
+def test_deliverable_branch_derives_the_phase_branch_for_a_project_axis_member(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path, phase_tasks_type="fix")
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "fix/feat-x-phase-5-5-core"
+
+
+def test_deliverable_branch_defaults_the_type_to_feat_without_a_phase_tasks_file(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core"
+
+
+def test_deliverable_branch_never_reads_a_phase_file_outside_the_project(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "feat-x-phase-5.5-tasks.json").write_text(
+        json.dumps({"metadata": {"type": "leaked"}})
+    )
+    phase_dir.rmdir()
+    phase_dir.symlink_to(outside)
+    path = str(root / ".aimi" / "tasks" / "feat-x" / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core"
+
+
+def test_deliverable_branch_prefers_the_roadmap_branch_when_set(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path, phase={"branch": "release/x"})
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "release/x"
+
+
+def test_deliverable_branch_drops_the_slug_when_the_phase_has_none(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path, phase={"slug": ""})
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5"
+
+
+def test_deliverable_branch_recognises_a_side_axis_member_by_basename(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    doc = _member_doc()
+    del doc["metadata"]["splitGroup"]
+    side = str(phase_dir / "feat-x-phase-5.5-frontend-tasks.json")
+    main = str(phase_dir / "feat-x-phase-5.5-tasks.json")
+    assert T.deliverable_branch(doc, side, str(root)) == "feat/feat-x-phase-5-5-core"
+    assert T.deliverable_branch(doc, main, str(root)) == doc["metadata"]["branchName"]
+
+
+def test_deliverable_branch_is_branchname_for_a_flat_or_non_phase_file(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    flat = _member_doc()
+    del flat["metadata"]["phase"]
+    assert T.deliverable_branch(flat, path, str(root)) == "feat/feat-x-phase-5-5-core-api"
+    assert T.deliverable_branch({}, path, str(root)) is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda m: m.pop("roadmapPath"),
+        lambda m: m.update(roadmapPath="../../outside.json"),
+        lambda m: m.update(roadmapPath=7),
+        lambda m: m.update(roadmapPath=".aimi/tasks/feat-x/missing.json"),
+        lambda m: m["phase"].update(id="5.5"),
+        lambda m: m["phase"].update(id=True),
+        lambda m: m["phase"].update(id=9),
+    ],
+)
+def test_deliverable_branch_falls_back_when_the_roadmap_cannot_answer(tmp_path, mutate):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    doc = _member_doc()
+    mutate(doc["metadata"])
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(doc, path, str(root)) == "feat/feat-x-phase-5-5-core-api"
+
+
+@pytest.mark.parametrize("body", ["{not json", "[]", '{"phases": 3}', '{"phases": [null, 4]}'])
+def test_deliverable_branch_survives_a_malformed_roadmap(tmp_path, body):
+    root, phase_dir = _deliverable_layout(tmp_path)
+    (root / ".aimi/tasks/feat-x/roadmap.json").write_text(body)
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core-api"
+
+
+def test_deliverable_branch_rejects_a_derived_name_outside_the_branch_pattern(tmp_path):
+    root, phase_dir = _deliverable_layout(tmp_path, phase={"slug": "bad slug!"})
+    path = str(phase_dir / "feat-x-phase-5.5-api-tasks.json")
+    assert T.deliverable_branch(_member_doc(), path, str(root)) == "feat/feat-x-phase-5-5-core-api"
+
+
+def _run_metadata(tmp_path, doc, *extra):
+    root = tmp_path / "proj"
+    f = root / ".aimi" / "tasks" / "feat-x" / "phase-5.5-core" / "feat-x-phase-5.5-api-tasks.json"
+    f.write_text(json.dumps(doc))
+    return subprocess.run(
+        [sys.executable, TASKS_PY, "metadata", "--tasks-file", str(f), *extra],
+        capture_output=True, text=True,
+    )
+
+
+def test_deliverable_branch_flag_adds_the_key_and_never_rewrites_branchname(tmp_path):
+    _deliverable_layout(tmp_path)
+    doc = _member_doc()
+    plain = _run_metadata(tmp_path, doc)
+    flagged = _run_metadata(
+        tmp_path, doc, "--with-deliverable-branch", "--project-root", str(tmp_path / "proj")
+    )
+    assert plain.returncode == 0 and flagged.returncode == 0
+    assert "deliverableBranch" not in json.loads(plain.stdout)
+    out = json.loads(flagged.stdout)
+    assert out["deliverableBranch"] == "feat/feat-x-phase-5-5-core"
+    assert out["branchName"] == "feat/feat-x-phase-5-5-core-api"
+    del out["deliverableBranch"]
+    assert out == json.loads(plain.stdout)
+
+
+def test_deliverable_branch_flag_without_project_root_is_a_usage_error(tmp_path):
+    _deliverable_layout(tmp_path)
+    result = _run_metadata(tmp_path, _member_doc(), "--with-deliverable-branch")
+    assert result.returncode == 1
+    assert "--project-root" in result.stderr

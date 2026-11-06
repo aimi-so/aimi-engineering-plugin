@@ -25,3 +25,14 @@ Branch setup: [action]
 ```
 
 Where `[action]` is the `action` field from the JSON response (e.g., `already-on-branch`, `checked-out-local`, `checked-out-remote`, `created-from-default`, `created-from-current`, `created-from-base`).
+
+**Inline runs install the checkout.** Install the checkout once the branch is set up, so a verify run in it resolves its own packages. The output stays visible; the status is the last `DEPS_STATUS=` line of stdout, and a missing line reads as `failed`. Carry it as `DEPS_STATUS[group_key]`. `needs-recipe` is reported and the run moves on, after `${CLAUDE_PLUGIN_ROOT}/commands/references/dependency-setup.md` has had its one chance to record a recipe for that root; `failed` is reported with the warning that verify results may have resolved another checkout's packages, and the run moves on too. A visual story whose group's status is `failed` is recorded `skipped` in Step 4's post-merge visual verification. A user-managed install (a dependency directory with no marker of ours) is left alone and reports `ok`.
+
+```bash
+WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
+: "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
+DEPS_OUT=$($WORKTREE_MGR install-deps --root </dev/null)
+printf '%s\n' "$DEPS_OUT"
+DEPS_LINE=$(printf '%s\n' "$DEPS_OUT" | sed -n 's/^DEPS_STATUS=//p' | tail -n 1)
+echo "DEPS_STATUS[$(git rev-parse --show-toplevel)]=${DEPS_LINE:-failed}"
+```

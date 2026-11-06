@@ -84,3 +84,11 @@ This is a real broadening of unattended write consent, and it is intentional. A 
 Points at the installed plugin directory so commands can find the CLI scripts, skill references, and agent definitions.
 
 The installer sets it. Do not set it by hand unless you have a custom layout — and note that inside Claude Code it is ignored entirely, because Claude Code resolves the plugin from its own cache instead.
+
+---
+
+## Tags, releases and the raw forge guard
+
+`forge-tag-create` and `forge-release-create` are `aimi-cli.sh` verbs for GitHub and GitLab, the only forge adapters. The `forge` skill (`skills/forge/SKILL.md`) is how the model reaches them: it asks you before every write and, in agent mode, only prints the call.
+
+On OpenCode that confirmation is the only gate. Claude Code also runs a hook that refuses a raw `gh` or `glab` write when a forge verb can express it, and `AIMI_FORGE_GUARD=off` turns that hook off. OpenCode does not run the hook, because the installer wires no hooks, so the variable has no effect there and a raw `gh` call is not intercepted. This is the same consent trade-off as the section above: the verbs are in the `aimi-cli.sh *` allowlist, and the skill's question is what stands between the model and the write.

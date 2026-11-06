@@ -4,8 +4,8 @@ Shared reference for the normalized forge PR/issue field contract and the
 degradation convention every `forge-*` verb in `aimi-cli.sh` builds on. This
 is the **single arbiter** of the vocabulary below — every later forge verb
 (`forge-auth-status`, `forge-repo-info`, `forge-pr-view`, `forge-pr-create`,
-`forge-pr-edit`, `forge-pr-merge`, `forge-issue-view`, `forge-issue-create`,
-the review-thread verbs) consumes the field names, the envelope shapes, and
+`forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-view`,
+`forge-issue-create`, the review-thread verbs) consumes the field names, the envelope shapes, and
 the three-way
 status convention exactly as documented here. **No sibling verb may
 introduce a variant field-name casing (e.g. camelCase `unsupportedFields`),
@@ -23,17 +23,17 @@ degradation signal stays forbidden.
 **Consumed by:** `aimi-cli.sh`'s shared jq builder functions
 (`_forge_build_pr_json`, `_forge_build_issue_json`, `_forge_emit_status`,
 `_forge_emit_write_status`, `_forge_build_write_data`, `_forge_bin_check`)
-and every forge verb built on top of them. Three adapters ship today: GitHub
-(`gh`) from phase 1, GitLab (`glab`) added in phase 3, and Gitea/Forgejo
-(`tea`) added in phase 4. This contract was written when only the first
-existed, and neither later addition changed the shape any existing caller
-already depended on — which is the property a fourth adapter must preserve
-too.
+and every forge verb built on top of them. Two adapters ship today: GitHub
+(`gh`) from phase 1 and GitLab (`glab`) added in phase 3. This contract was
+written when only the first existed, and the later addition did not change
+the shape any existing caller already depended on — which is the property a
+further adapter must preserve too. A host with no adapter classifies as
+`unknown` and every write verb prints its manual steps.
 
 ## Result Envelope Shapes — the complete list
 
 This file defines exactly **four** result envelope shapes and no others. An
-adapter author adding a GitLab or Gitea backend reads this list rather than
+adapter author adding a backend reads this list rather than
 inferring the total by reading all eleven `forge-*` verb bodies, and a new
 verb picks one of these four rather than inventing a fifth.
 
@@ -41,7 +41,7 @@ verb picks one of these four rather than inventing a fifth.
 |---|---|---|---|---|
 | 1 | **Read three-way** — `{status, data, message, reason}` | `found` / `not_found` / `error` | `_forge_emit_status` | `forge-auth-status`, `forge-repo-info`, `forge-issue-view`, `forge-pr-review-threads`, `forge-resolve-review-thread` |
 | 2 | **`forge-pr-view`'s own** — `{status, pr, unsupported_fields, message}` | `found` / `not_found` / `error` | `_forge_pr_view_emit` | `forge-pr-view` only |
-| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-pr-merge`, `forge-issue-create` |
+| 3 | **Write three-way** — `{status, data, message}` | `created` / `unchanged` / `degraded` | `_forge_emit_write_status` | `forge-pr-create`, `forge-pr-edit`, `forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-create` |
 | 4 | **Review/Approval** — `{approved, changes_requested, approvals_count, unsupported_fields, raw}` | *(no `status` field)* | *(no builder yet)* | *(no verb yet — spec only)* |
 
 Envelopes 1 and 3 share the three field names `status`, `data` and `message`
@@ -66,16 +66,16 @@ three capability-gated fields that are NOT cheap or structured everywhere.
 
 | Field | Type | Portable core? | Notes |
 |---|---|---|---|
-| `number` | int | yes | GitHub `number` / GitLab `iid` / Gitea `index`. Always the project-scoped number a human types (`!123`, `#123`), never GitLab's separate global `id`. |
-| `url` | string | yes | GitHub `url` / GitLab `web_url` / Gitea `url`. Direct 1:1 across all three. |
-| `title` | string | yes | Direct 1:1 across all three. |
-| `body` | string | yes | GitHub/Gitea `body` / GitLab `description`. Same concept, different key upstream — always normalized to `body` here. |
+| `number` | int | yes | GitHub `number` / GitLab `iid`. Always the project-scoped number a human types (`!123`, `#123`), never GitLab's separate global `id`. |
+| `url` | string | yes | GitHub `url` / GitLab `web_url`. Direct 1:1 across both. |
+| `title` | string | yes | Direct 1:1 across both. |
+| `body` | string | yes | GitHub `body` / GitLab `description`. Same concept, different key upstream — always normalized to `body` here. |
 | `state` | string | yes | See **State Mapping** below — never an assumed shared enum. |
-| `headRefName` | string | yes | GitHub `headRefName` / GitLab `source_branch` / Gitea `head`. |
-| `baseRefName` | string | yes | GitHub `baseRefName` / GitLab `target_branch` / Gitea `base`. |
-| `files` | array \| null | **capability-gated** | See **Capability-Gated Fields** below. |
-| `isDraft` | bool \| null | **capability-gated** | See **Capability-Gated Fields** below. |
-| `mergeable` | string \| null | **capability-gated** | See **Capability-Gated Fields** below. Deliberately untyped (not forced to boolean) — GitHub/Gitea reduce to a boolean, GitLab's `detailed_merge_status` is a 16-value enum describing *why* it's blocked. Forcing a shared boolean would discard GitLab's richer signal; a verb that only needs yes/no can test truthiness itself. |
+| `headRefName` | string | yes | GitHub `headRefName` / GitLab `source_branch`. |
+| `baseRefName` | string | yes | GitHub `baseRefName` / GitLab `target_branch`. |
+| `files` | array \| null | **capability-gated** |
+| `isDraft` | bool \| null | **capability-gated** |
+| `mergeable` | string \| null | **capability-gated** | See **Capability-Gated Fields** below. Deliberately untyped (not forced to boolean) — GitHub reduces to a boolean, GitLab's `detailed_merge_status` is a 16-value enum describing *why* it's blocked. Forcing a shared boolean would discard GitLab's richer signal; a verb that only needs yes/no can test truthiness itself. |
 | `unsupported_fields` | array of string | — | Names every capability-gated field the caller did NOT supply a value for. Empty array, never omitted, when every capability-gated field was supplied. |
 | `raw` | object \| null | — | The forge-native object, untouched, alongside the normalized shape. Never discarded even when every normalized field above is populated. |
 
@@ -87,57 +87,31 @@ contract must not regress any of them.
 ### State Mapping
 
 `state` needs an explicit mapping table, not an assumed shared enum —
-GitLab's `locked` value has no GitHub or Gitea/Forgejo equivalent.
+GitLab's `locked` value has no GitHub equivalent.
 
-| Normalized `state` | GitHub | GitLab | Gitea/Forgejo (`tea`) |
-|---|---|---|---|
-| `open` | `state: OPEN` | `state: opened` | `state: open` |
-| `closed` | `state: CLOSED` | `state: closed` | `state: closed` |
-| `merged` | `state: MERGED` | `state: merged` | `state: merged` on the list path; derived from `hasMerged: true` on the detail path — see note |
-| `locked` | *(no equivalent)* | `state: locked` | *(no equivalent)* |
+| Normalized `state` | GitHub | GitLab |
+|---|---|---|
+| `open` | `state: OPEN` | `state: opened` |
+| `closed` | `state: CLOSED` | `state: closed` |
+| `merged` | `state: MERGED` | `state: merged` |
+| `locked` | *(no equivalent)* | `state: locked` |
 
 - **GitLab's `locked`** describes a merged-and-lock-protected MR. Neither
-  GitHub nor Gitea/Forgejo expose an equivalent fourth value — normalize it
+  GitHub exposes an equivalent fourth value — normalize it
   through unchanged as `"locked"` rather than collapsing it into `"merged"`,
   since collapsing would silently discard a real GitLab-only signal.
-- **Gitea/Forgejo's `tea` reports a merged pull request distinctly**, but
-  which key carries that fact depends on which of `tea`'s two JSON shapes an
-  adapter read — so there is no single "the `tea` state field" to describe.
-  On the LIST path (`tea pulls list -o json`), `formatPRState` prints the
-  literal string `merged` whenever `pr.Merged != nil` (`gitea/tea`
-  `modules/print/pull.go:95-100`), so the value already arrives in this
-  table's vocabulary. On the DETAIL path (`tea pulls <index> -o json`) it
-  does not: `state` is `pr.State` raw, `open`/`closed` only
-  (`cmd/pulls.go:33`), and merged-ness lives in a separate `hasMerged`
-  boolean beside a `mergedAt` timestamp (`cmd/pulls.go:46,47`). An adapter on
-  the detail path therefore **derives** `merged`: read `hasMerged`, emit
-  `"merged"` when it is `true`, and otherwise normalize the raw `state`. A
-  document carrying no `hasMerged` key at all passes its raw `state` through
-  untouched: an absent key is not the same as an explicit `false`, and
-  neither of them licenses inventing `merged`.
-- **That derivation lives in the adapter, not in `_forge_map_state`.** The
-  shipped Gitea adapter puts it in `_forge_map_pr_state_gitea`, a sibling of
-  `_forge_map_pr_field_gitea` rather than a branch inside it: a
-  one-field-one-key mapper answers "which native key spells `state`" and
-  cannot express "answer `state` by reading `hasMerged` as well".
-  `_forge_map_state` is handed one raw VALUE and no document, so it cannot
-  reach a second key either — and manufacturing `merged` there would
-  invent a value the raw `state` never carried. This is the same separation
-  `_forge_pr_view_build_found` already keeps everywhere else: name the key in
-  `_forge_map_pr_field_*`, normalize the value separately. A future adapter
-  for a fourth forge with the same split should follow the same shape.
 
 ## Capability-Gated Fields
 
 These three fields do not generalize across forges and are capability-gated
-from day one — GitHub can populate all three fully today; GitLab and Gitea
+from day one — GitHub can populate all three fully today; GitLab
 cannot, or can only partially.
 
-| Field | GitHub | GitLab | Gitea/Forgejo (`tea`) |
-|---|---|---|---|
-| `files` | Yes — a single `--json files` call returns a structured per-file array (`path`, `additions`, `deletions`). | No single cheap call. The MR resource itself exposes only `changes_count` (an async-populated string count); the full file list needs a second `Get single MR changes`/diffs call. | Only raw `diff`/`patch` fields — not a parsed per-file list. Sharper still: both resolve to `x.DiffURL`/`x.PatchURL` (`modules/print/pull.go:277-280`), so they are **URLs**, not inline diff text, and the detail shape's `diffUrl` likewise. There is no key to name either way. |
-| `isDraft` | Yes — `isDraft` boolean. | Yes — `draft` boolean. | **Not exposed by the CLI at all.** `tea`'s documented PR field list has no `draft`/`is-draft` entry; Gitea/Forgejo support draft PRs in the web UI but `tea` cannot report it. The reason there is nothing to read back: `tea` *writes* a draft as a `"WIP: "` TITLE PREFIX (`cmd/pulls/create.go`, `utils.AddDraftPrefix`), not as a field. Deriving `isDraft` by string-matching that prefix would be a guess, so this stays capability-gated. |
-| `mergeable` (merge-status detail) | Yes — a plain boolean. | Yes, but richer: `detailed_merge_status` is a 16-value enum (`mergeable`, `conflict`, `ci_must_pass`, `ci_still_running`, `discussions_not_resolved`, `draft_status`, `checking`, `unchecked`, `commits_status`, `merge_request_blocked`, `status_checks_must_pass`, `jira_association_missing`, `title_regex`, `locked_paths`, `locked_lfs_files`, `approvals_syncing`) describing *why* it's blocked, not just whether. | Yes — a plain boolean, on the DETAIL shape (`tea pulls <index> -o json`), which is the shape the shipped adapter reads. On the LIST shape it is the string `"true"`/`"false"` and is forced false for any non-open PR (`modules/print/pull.go:268-270`), so a list-path reading would be both mistyped and wrong for a merged PR. |
+| Field | GitHub | GitLab |
+|---|---|---|
+| `files` | Yes — a single `--json files` call returns a structured per-file array (`path`, `additions`, `deletions`). | No single cheap call. The MR resource itself exposes only `changes_count` (an async-populated string count); the full file list needs a second `Get single MR changes`/diffs call. |
+| `isDraft` | Yes — `isDraft` boolean. | Yes — `draft` boolean. |
+| `mergeable` (merge-status detail) | Yes — a plain boolean. | Yes, but richer: `detailed_merge_status` is a 16-value enum (`mergeable`, `conflict`, `ci_must_pass`, `ci_still_running`, `discussions_not_resolved`, `draft_status`, `checking`, `unchecked`, `commits_status`, `merge_request_blocked`, `status_checks_must_pass`, `jira_association_missing`, `title_regex`, `locked_paths`, `locked_lfs_files`, `approvals_syncing`) describing *why* it's blocked, not just whether. |
 
 An unpopulated capability-gated field is **always** represented as `null`
 **plus its name recorded in `unsupported_fields`** — never a bare, unmarked
@@ -150,12 +124,12 @@ existing caller re-touched the day a stricter distinction becomes necessary.
 
 | Field | Type | Portable core? | Notes |
 |---|---|---|---|
-| `number` | int | yes | GitHub `number` / GitLab `iid` / Gitea `index` — same convention as the PR object. |
+| `number` | int | yes | GitHub `number` / GitLab `iid` — same convention as the PR object. |
 | `url` | string | yes | Direct 1:1 across all three. |
-| `title` | string | yes | Direct 1:1 across all three. |
-| `body` | string | yes | GitHub/Gitea `body` / GitLab `description`. |
+| `title` | string | yes | Direct 1:1 across both. |
+| `body` | string | yes | GitHub `body` / GitLab `description`. |
 | `state` | string | yes | `open`/`closed` — issues do not carry the PR-only `merged`/`locked` values. |
-| `comments` | int \| null | **capability-gated** | GitHub: a comment count from the discussion thread. GitLab's `notes`/`discussions` model conflates PR/issue discussion with system-generated events ("changed the description") unless explicitly filtered, so a naive pass-through would double-count noise as comments. `tea` exposes a `comments` field on both its `pr` and `tea issue` field lists, but its counting semantics are not guaranteed to match GitHub's filtered count — and on the PR detail path the `comments` array is empty unless `--comments` is passed (`cmd/pulls.go:188-195`), so a pass-through would read as "zero comments" for a PR that has many. Capability-gated for these reasons, not because any forge lacks the concept entirely. |
+| `comments` | int \| null | **capability-gated** | GitHub: a comment count from the discussion thread. GitLab's `notes`/`discussions` model conflates PR/issue discussion with system-generated events ("changed the description") unless explicitly filtered, so a naive pass-through would double-count noise as comments. Capability-gated for this reason, not because any forge lacks the concept entirely. |
 | `unsupported_fields` | array of string | — | Same convention as the PR object. |
 | `raw` | object \| null | — | Same convention as the PR object. |
 
@@ -184,8 +158,8 @@ unified enum:
 | Field | Type | Notes |
 |---|---|---|
 | `approved` | bool \| null | `true`/`false` when the forge can report it; `null` (with the name recorded in `unsupported_fields`) when it cannot. |
-| `changes_requested` | bool \| null | GitHub/Gitea: derived from a discrete `CHANGES_REQUESTED` review state. GitLab: **always capability-gated** — GitLab's Merge Request Approvals API has no "changes requested" concept at all, only an `approved` boolean and an approvals count. |
-| `approvals_count` | int \| null | GitHub/Gitea: count of `APPROVED` reviews. GitLab: `approvals_left`/`approvals_required` from the (Premium/Ultimate-gated) Approvals API. |
+| `changes_requested` | bool \| null | GitHub: derived from a discrete `CHANGES_REQUESTED` review state. GitLab: **always capability-gated** — GitLab's Merge Request Approvals API has no "changes requested" concept at all, only an `approved` boolean and an approvals count. |
+| `approvals_count` | int \| null | GitHub: count of `APPROVED` reviews. GitLab: `approvals_left`/`approvals_required` from the (Premium/Ultimate-gated) Approvals API. |
 | `unsupported_fields` | array of string | Same convention as the PR/issue objects — every one of the three fields above is individually capability-gated, since any of them can be absent depending on forge and plan tier. |
 | `raw` | object \| null | The forge-native review/approval payload, untouched, alongside the normalized envelope. |
 
@@ -198,7 +172,7 @@ shape.)
 
 Reviews themselves (the per-reviewer list of discrete review objects) have
 **no shared data model across forges** and are explicitly out of scope for
-this envelope — GitHub/Gitea's `reviews` arrays and GitLab's discussion
+this envelope — GitHub's `reviews` arrays and GitLab's discussion
 `notes` are structurally different enough that a later verb needing per-
 reviewer detail must consume the forge-native `raw` object directly rather
 than expect this envelope to carry it.
@@ -247,7 +221,7 @@ whole reason a caller can branch on it instead of grepping `message` prose:
 
 | `reason` | Meaning | What the caller should do |
 |---|---|---|
-| `no_adapter` | The active forge has no adapter written for it yet. `github`, `gitlab` and `gitea` each have one today, so in practice this is `detect-forge`'s `unknown` verdict — a host none of the three matched. A **permanent** gap for this install — retrying will not fix it, and neither will installing anything. | Stop. Do not retry. |
+| `no_adapter` | The active forge has no adapter written for it yet. `github` and `gitlab` each have one today, so in practice this is `detect-forge`'s `unknown` verdict — a host neither matched. A **permanent** gap for this install — retrying will not fix it, and neither will installing anything. | Stop. Do not retry. |
 | `cli_missing` | The forge CLI binary is not on `PATH` at all. | Install it, or complete the operation manually. |
 | `not_authenticated` | The forge CLI ran, but a live re-check of auth state against the same host — the same authenticated/account check `forge-auth-status` already performs — reports no valid credentials. Determined **structurally**, by re-querying auth state; **never** by pattern-matching the failing command's own stderr text, which reworks between CLI releases and varies by locale. | Re-authenticate, then retry. |
 | `cli_failed` | The forge CLI ran and failed for any other reason — network unreachable, malformed response, an owner/repo that could not be auto-resolved, or an unexpected exit code the structural auth re-check did not attribute to `not_authenticated`. | Read `message` for the detail. |
@@ -294,7 +268,7 @@ shape.
 ## Write-Verb Status Convention
 
 Every forge **write** verb (`forge-pr-create`, `forge-pr-edit`,
-`forge-pr-merge`, `forge-issue-create`) reports one of exactly three
+`forge-pr-merge`, `forge-tag-create`, `forge-release-create`, `forge-issue-create`) reports one of exactly three
 outcomes, through the same `{status, data, message}` field names and the
 same null-forcing discipline the read side uses. A write is never "not
 found" — nothing was looked up — so the read trio would be a bad fit; three
@@ -333,6 +307,19 @@ either. `status: "created"` is consequently **structurally unreachable** for
 `forge-issue-create` never reports `unchanged` at all: it only ever mints a
 new issue.
 
+**`forge-tag-create` carries `data` of `{tag, commit}`, not `{url, number}`:** a tag
+has neither. `created` means the annotated tag did not exist and now does;
+`unchanged` means it already sits at the target commit and nothing was written.
+An existing tag is never moved, so a tag at another commit is `degraded` with
+both commits named in `message`.
+
+**`forge-release-create` carries `data` of `{tag, url}`:** `created` means the
+annotated tag was ensured at the `--target` commit and the release was published
+now; `unchanged` means a release for the tag already exists, published or draft,
+and nothing was written. A run that stopped halfway resumes: a tag already at the
+target still leads to the release. `url` is null with a stderr Warning when the
+forge's reply or read-back carried none, at `created`.
+
 **The exit-code contract is unchanged by this envelope, and is not replaced
 by it.** The hard-fail versus soft-fail split stated in `aimi-cli.sh`'s own
 `EXIT CONTRACT DIFFERS FROM forge-issue-create ON PURPOSE` comment survives
@@ -343,6 +330,8 @@ completely intact:
 | `forge-pr-create` | **non-zero** | Opening a PR has no fallback. `references/execute/phase-completion-offer-pull-request.md`'s per-repository loop needs a real non-zero exit for its own per-repository failure isolation. |
 | `forge-pr-edit` | **non-zero** | Same contract as `forge-pr-create`. |
 | `forge-pr-merge` | **non-zero** | Same contract as `forge-pr-create`/`forge-pr-edit`. Merging a PR/MR has no fallback either, so a caller's own per-repository failure isolation needs the identical real non-zero exit. |
+| `forge-tag-create` | **non-zero** | A tag has no fallback, and a release must not follow a failed tag. Every degraded outcome exits 1 with the reason in `message`; all but a tag that already exists at another commit also print `git tag -a` and `git push origin <tag>` on stderr. |
+| `forge-release-create` | **non-zero** | A release has no fallback and must not follow a failed tag. Every degraded outcome exits 1 with the reason in `message`; a failed tag step prints its own `git tag -a` and `git push origin <tag>` steps once and attempts no release, and a failed release call after the tag exists prints the manual release step. |
 | `forge-issue-create` | **always `0`** | A failed backend issue must never block PR creation (`open-pr.md`'s documented soft-fail behavior). A caller branches on `status`, never on this verb's exit code. |
 
 What the envelope adds is an **in-band** signal: stdout is no longer silent
@@ -381,7 +370,6 @@ forge adapter may decline to support:
   held. The closest mechanism is an externally-supplied `GITLAB_TOKEN` env
   var override, which requires the caller to already hold that token rather
   than pulling it from a `glab`-native multi-identity vault.
-- `tea` supports it natively via `--login <name>` per invocation.
 
 **Whatever CREDENTIAL is used, it is passed to a forge CLI only via an
 environment variable, never as a command-line argument.** A token passed as
@@ -389,15 +377,10 @@ a CLI argument leaks through `ps` and shell history; an environment variable
 does not. This applies to every current and future forge verb, with no
 exception for a "just this once" convenience call.
 
-The rule is scoped to credentials deliberately, because `tea`'s `--login
-<name>` above **is** a command-line argument and does not violate it: it
-names a login entry `tea` already holds and carries no secret, so nothing it
-puts in `ps` is worth reading. A non-secret account SELECTOR is therefore out
-of scope for this rule. That is a licence, not an instruction — no shipped
-verb passes `--login` today (`_forge_auth_status_gitea` deliberately omits
-it, since the login list is instance-wide and scoping the query to one login
-would beg the question it exists to answer), and a verb that wants it must
-still justify it on its own terms.
+The rule is scoped to credentials deliberately: a non-secret account SELECTOR
+that names an already-stored login and carries no secret puts nothing in `ps`
+worth reading, so it is out of scope for this rule. That is a licence, not an
+instruction, and a verb that wants one must still justify it on its own terms.
 
 ### The Remembered Answer — `forge-account-select`
 
@@ -549,11 +532,13 @@ inheritance this file's **Credential/Identity Model** promises stays intact. A
 recorded account still outranks an ambient token, because a non-empty override
 never reaches that default.
 
-**Which calls are routed.** The five write paths — create PR, edit PR, merge
-PR, create issue, resolve review thread — plus the reads a write makes as
+**Which calls are routed.** The seven write paths — create PR, edit PR, merge
+PR, create issue, resolve review thread, create tag, create release — plus the reads a write makes as
 part of the same logical operation: `forge-pr-create`'s idempotency check and
 post-create re-read, `forge-pr-edit`'s post-edit re-read, and
-`forge-pr-merge`'s preflight read (github only — gitlab and gitea apply no
+`forge-tag-create`'s and `forge-release-create`'s probe and write calls (github only: gitlab's active glab
+session acts, and one stderr line says so when a remembered account exists but
+cannot apply), and `forge-pr-merge`'s preflight read (github only — gitlab applies no
 account override on this verb either, exactly as their existing create/edit
 adapters already do not). That last group is correctness, not tidiness: on a
 **private** repository the account that creates or merges a PR can see it
@@ -612,9 +597,9 @@ is introduced by any of this.
 
 ## Degradation Contract
 
-A forge CLI (`gh`, `glab`, `tea`) may not be installed at all, and a forge
+A forge CLI (`gh`, `glab`) may not be installed at all, and a forge
 with no adapter yet — every host `detect-forge` classifies as `unknown`, now
-that all three named forges have one — must not crash a caller that
+that both named forges have one — must not crash a caller that
 tries to use it anyway. `_forge_bin_check` (see **Shared Builder Functions**
 below) is the one shared presence check every forge verb uses instead of a
 raw, unguarded `command -v` or a bare invocation that would fail with an
@@ -688,7 +673,7 @@ JSON assembly per verb — mirroring how `roadmap.py`'s `_verdict` centralizes
   <forge-label>`. See **Degradation Contract** above for the mode
   semantics.
 
-None of these functions parse a git remote, invoke `gh`/`glab`/`tea`, or
+None of these functions parse a git remote, invoke `gh`/`glab`, or
 implement a `forge-pr-view`/`forge-auth-status`/`forge-repo-info` verb body
 — they are pure, forge-agnostic assembly helpers. `detect-forge` (which
 resolves *which* forge is active) and the read/write verbs (which call an

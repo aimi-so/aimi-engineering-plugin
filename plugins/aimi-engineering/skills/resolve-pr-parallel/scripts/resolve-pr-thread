@@ -28,7 +28,7 @@ if ! RESULT=$("$AIMI_CLI" forge-resolve-review-thread --thread-id "$THREAD_ID" 2
 
     # `no_adapter` is one of the four fixed values in forge-contract.md's
     # Degradation Reason Enum, and the only one meaning the active forge
-    # (e.g. a Gitea remote) has no review-thread-resolution equivalent at
+    # (e.g. an unrecognized host) has no review-thread-resolution equivalent at
     # all -- a PERMANENT capability gap, not a temporary tool failure. A
     # caller looping over several thread ids must continue to the next id
     # instead of aborting, so this is non-fatal: print the result, a
