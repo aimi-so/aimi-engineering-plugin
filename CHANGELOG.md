@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.157.1] - 2026-11-11
+
+Three fixes from issue #183: `forge-pr-edit` takes the same `--pr` flag as the other pull request verbs, design bundle detection for a phase no longer offers other features' bundles, and an `outline:NN` reference can no longer reach a tasks file unresolved.
+
+### Fixed
+- `forge-pr-edit` accepts `--pr <n>`, the flag `forge-pr-view`, `forge-pr-merge` and `forge-pr-review-threads` take, where it used to refuse it as an unknown flag. `--number <n>` still works as an alias. The value must be a number, and the error message names the spelling the caller used. `/aimi:open-pr` and the `forge` skill now use `--pr`.
+- `/aimi:plan --phase N` no longer offers design bundles from unrelated features. The relevance filter read only the typed description, which is empty on a bare `--phase N` run, and an empty description turned the filter off. In roadmap mode the filter now also reads the feature slug and the phase's name and goal.
+- `story-merge` rewrites `outline:NN` references in `title`, `description` and `verification.expect`, which its text pass did not cover before.
+- `validate-staging` reports an `outline:` reference that is not exactly two digits (`outline:7`, `outline:007`), since it names no staged file and the merge leaves it as text.
+- `validate-tasks` refuses an `outline:` followed by digits left anywhere in a story (rule R26), naming the story, the field and the token. `outline:edit:NN` decision anchors are not affected.
+
 ## [1.157.0] - 2026-11-01
 
 Gitea and Forgejo support is removed, leaving GitHub and GitLab as the only forge adapters. Two forge verbs are added for annotated tags and releases, behind a new `forge` skill and a hook that refuses the raw `gh` and `glab` writes those verbs cover. Dependency installation now covers every execution root, and several verbs answer for the repository the caller stands in.
