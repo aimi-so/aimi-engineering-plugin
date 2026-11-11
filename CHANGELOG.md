@@ -8,7 +8,7 @@ Three fixes from issue #183: `forge-pr-edit` takes the same `--pr` flag as the o
 
 ### Fixed
 - `forge-pr-edit` accepts `--pr <n>`, the flag `forge-pr-view`, `forge-pr-merge` and `forge-pr-review-threads` take, where it used to refuse it as an unknown flag. `--number <n>` still works as an alias. The value must be a number, and the error message names the spelling the caller used. `/aimi:open-pr` and the `forge` skill now use `--pr`.
-- `/aimi:plan --phase N` no longer offers design bundles from unrelated features. The relevance filter read only the typed description, which is empty on a bare `--phase N` run, and an empty description turned the filter off. In roadmap mode the filter now also reads the feature slug and the phase's name and goal.
+- `/aimi:plan --phase N` no longer offers design bundles from unrelated features. The relevance filter read only the typed description, which is empty on a bare `--phase N` run, and an empty description turned the filter off. With `--phase-dir`, `detect-design-bundle --feature-stdin` now also reads the feature and the phase's name, slug and goal from the `roadmap.json` beside that directory. A missing or malformed roadmap adds nothing.
 - `story-merge` rewrites `outline:NN` references in `title`, `description` and `verification.expect`, which its text pass did not cover before.
 - `validate-staging` reports an `outline:` reference that is not exactly two digits (`outline:7`, `outline:007`), since it names no staged file and the merge leaves it as text.
 - `validate-tasks` refuses an `outline:` followed by digits left anywhere in a story (rule R26), naming the story, the field and the token. `outline:edit:NN` decision anchors are not affected.

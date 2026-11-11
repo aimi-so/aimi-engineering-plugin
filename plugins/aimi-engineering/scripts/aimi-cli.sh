@@ -10296,8 +10296,14 @@ _select_design_bundle() {
   # output below is then byte-identical to what it was before the flag existed.
   local filter_active=false filtered_json="[]"
   if [ "$feature_stdin" = true ] && [ "$scan_count" -gt 0 ]; then
+    # --phase-dir was confined by cmd_detect_design_bundle before python3
+    # starts; bundle_relevance.py reads the roadmap.json beside it for the
+    # phase's own words, so a bare `/aimi:plan --phase N` (empty description)
+    # still filters (GitHub issue #183).
     local relevance_json
-    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" -- "${scan_candidates[@]}") || {
+    local -a relevance_args=()
+    [ -z "$phase_dir" ] || relevance_args=(--phase-dir "$phase_dir")
+    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" "${relevance_args[@]+"${relevance_args[@]}"}" -- "${scan_candidates[@]}") || {
       echo "Error: detect-design-bundle: the --feature-stdin relevance filter failed" >&2
       exit 1
     }
@@ -18041,9 +18047,12 @@ COMMANDS:
                               listing only the relevant ones. The discarded
                               bundles are named on stderr and, on the JSON
                               object outputs, listed in a filtered[] array of
-                              paths. An empty, whitespace-only or all-stop-word
-                              description turns the filter off and adds no
-                              filtered key. The phase tier, --bundle and --all
+                              paths. With --phase-dir, the feature and the
+                              phase's name, slug and goal from the roadmap.json
+                              beside it count as part of the description. An
+                              empty, whitespace-only or all-stop-word
+                              description with no such phase words turns the
+                              filter off and adds no filtered key. The phase tier, --bundle and --all
                               are never filtered. Without the flag every
                               output is unchanged. Requires python3 and
                               refuses with exit 1 without it.

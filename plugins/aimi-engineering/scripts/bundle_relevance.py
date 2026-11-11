@@ -26,14 +26,22 @@ what lets an accented description match an unaccented directory name. The
 description is capped at 2000 characters, counted on the text as received and
 before folding.
 
-A description with no token left (empty, whitespace, or only stop-words) cannot
-say what is relevant, so the filter turns itself OFF: every candidate is
-relevant and `active` is false. Silence about relevance never discards a bundle.
+With `--phase-dir <dir>`, the words of that phase in the roadmap.json beside
+it (the feature, the phase's name, slug and goal, from roadmap.py's
+phase_relevance_text) count as part of the description, outside its cap. A bare
+`/aimi:plan --phase N` has no typed description, and without them the filter
+would be off and offer every bundle in the tree (GitHub issue #183). A roadmap
+that is missing, malformed or does not hold the phase adds nothing.
+
+A description with no token left (empty, whitespace, or only stop-words, and no
+phase words) cannot say what is relevant, so the filter turns itself OFF: every
+candidate is relevant and `active` is false. Silence about relevance never
+discards a bundle.
 
 THE VERB
 ========
 
-    bundle_relevance.py [--] <dir>...     the description on stdin, UTF-8
+    bundle_relevance.py [--phase-dir <dir>] [--] <dir>...     the description on stdin, UTF-8
 
 Candidate directories arrive as argv and the description only on stdin, so free
 text never reaches a shell or a process listing. Prints one JSON object
@@ -43,7 +51,9 @@ text never reaches a shell or a process listing. Prints one JSON object
 with both lists in argv order and every directory spelled as it was given, and
 exits 0. An unknown flag is refused on stderr with exit 1.
 
-This module imports only the standard library and `ascii_fold` from slug.py.
+This module imports only the standard library and `ascii_fold` from slug.py,
+plus, only when `--phase-dir` is given, `phase_relevance_text` from roadmap.py,
+the one module that knows roadmap.json's shape.
 """
 
 import json
@@ -155,9 +165,25 @@ def bundle_tokens(bundle_dir):
     return tokens(name) | tokens(business_spec_title(bundle_dir))
 
 
-def bundle_relevance_filter(description, bundle_dirs):
-    """Split `bundle_dirs` into (active, relevant, filtered) for a description."""
-    wanted = description_tokens(description)
+def phase_text(phase_dir):
+    """The roadmap's words about the phase at `phase_dir`, or "" without one."""
+    if not phase_dir:
+        return ""
+    from roadmap import phase_relevance_text
+
+    directory = phase_dir.rstrip("/")
+    return phase_relevance_text(
+        os.path.join(os.path.dirname(directory), "roadmap.json"), os.path.basename(directory)
+    )
+
+
+def bundle_relevance_filter(description, bundle_dirs, extra=""):
+    """Split `bundle_dirs` into (active, relevant, filtered) for a description.
+
+    `extra` is text whose tokens count beside the description's, outside its
+    cap: the phase words `--phase-dir` reads.
+    """
+    wanted = description_tokens(description) | tokens(extra)
     if not wanted:
         return False, list(bundle_dirs), []
     relevant = []
@@ -172,21 +198,26 @@ def bundle_relevance_filter(description, bundle_dirs):
 
 def main(argv):
     dirs = []
+    phase_dir = ""
     flags_over = False
-    for arg in argv:
+    args = iter(argv)
+    for arg in args:
         if not flags_over and arg == "--":
             flags_over = True
+        elif not flags_over and arg == "--phase-dir":
+            phase_dir = next(args, "")
         elif not flags_over and arg.startswith("--"):
             sys.stderr.write(
                 "Error: bundle_relevance: unknown flag: " + arg
-                + " (usage: bundle_relevance.py [--] <dir>... with the description on stdin)\n"
+                + " (usage: bundle_relevance.py [--phase-dir <dir>] [--] <dir>... with the"
+                " description on stdin)\n"
             )
             return 1
         else:
             dirs.append(arg)
 
     description = sys.stdin.buffer.read().decode("utf-8", errors="replace")
-    active, relevant, filtered = bundle_relevance_filter(description, dirs)
+    active, relevant, filtered = bundle_relevance_filter(description, dirs, phase_text(phase_dir))
     sys.stdout.write(
         json.dumps({"active": active, "relevant": relevant, "filtered": filtered})
         + "\n"

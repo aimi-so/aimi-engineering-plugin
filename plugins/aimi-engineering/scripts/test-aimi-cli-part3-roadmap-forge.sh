@@ -997,6 +997,34 @@ test_detect_design_bundle_feature_stdin_never_filters_all_bundle_or_phase_tier()
   rm -rf "$tmp" ".aimi/tasks/myfeature-relevance"
 }
 
+# --phase-dir feeds the phase's own words from roadmap.json to the filter, so
+# an empty description (a bare `/aimi:plan --phase N`) no longer turns it off
+# and offers other features' bundles as ambiguous candidates (#183).
+test_detect_design_bundle_feature_stdin_reads_the_phase_words() {
+  echo ""
+  echo "=== Testing detect-design-bundle --feature-stdin --phase-dir: an empty description is filtered by the phase's own words ==="
+
+  local tmp stdout exit_code phase_dir
+  tmp=$(mktemp -d)
+  _make_bundle "$tmp" "checkout-redesign" >/dev/null
+  _make_bundle "$tmp" "billing-dashboard" >/dev/null
+  mkdir -p ".aimi/tasks/brackets-relevance"
+  printf '%s\n' '{"feature":"brackets-relevance","phases":[{"id":2,"name":"Scheduling","slug":"scheduling","goal":"Schedule games across venues","dir":"phase-2-scheduling"}]}' \
+    > ".aimi/tasks/brackets-relevance/roadmap.json"
+  phase_dir="$(pwd)/.aimi/tasks/brackets-relevance/phase-2-scheduling"
+
+  stdout=$(printf '' | "$CLI" detect-design-bundle --phase-dir "$phase_dir" --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --phase-dir empty description: no exit-3 ambiguity"
+  assert_eq "null" "$stdout" "detect-design-bundle --phase-dir empty description: two unrelated bundles are discarded"
+
+  _make_bundle "$tmp" "venues-board" >/dev/null
+  stdout=$(printf '' | "$CLI" detect-design-bundle --phase-dir "$phase_dir" --root "$tmp" --feature-stdin 2>/dev/null) && exit_code=0 || exit_code=$?
+  assert_exit_code "0" "$exit_code" "detect-design-bundle --phase-dir empty description: exit code with a related bundle"
+  assert_eq "venues-board" "$(printf '%s' "$stdout" | jq -r '.path' | sed 's#.*/##')" "detect-design-bundle --phase-dir empty description: a bundle sharing a goal word is selected"
+
+  rm -rf "$tmp" ".aimi/tasks/brackets-relevance"
+}
+
 # --feature-stdin refuses at exit 1 without python3; the same call without the
 # flag still answers.
 test_detect_design_bundle_feature_stdin_requires_python3() {
@@ -10126,6 +10154,7 @@ main() {
   test_detect_design_bundle_feature_stdin_blank_description_filters_nothing
   test_detect_design_bundle_feature_stdin_folds_accents
   test_detect_design_bundle_feature_stdin_never_filters_all_bundle_or_phase_tier
+  test_detect_design_bundle_feature_stdin_reads_the_phase_words
   test_detect_design_bundle_feature_stdin_requires_python3
   test_detect_design_bundle_help_documents_feature_stdin_flag
 
