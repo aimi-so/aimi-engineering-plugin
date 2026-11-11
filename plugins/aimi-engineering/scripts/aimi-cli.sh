@@ -17322,6 +17322,8 @@ COMMANDS:
                               With --outline, a story that consumes a name another outline
                               entry produces but whose dependsOn lacks that entry's
                               outline:NN token is a finding too (ext: consumes need none).
+                              So is an outline: reference in any field that is not exactly
+                              two digits (outline:7, outline:007): it names no staged file.
                               A staged file that is not valid JSON is skipped.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,

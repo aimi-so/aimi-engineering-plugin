@@ -530,8 +530,11 @@ def _rewrite_story_text(story, sub):
     The one walk both text passes share -- the outline:NN pass before the split and
     the US-NNN pass after it -- so they cannot disagree on which fields they own.
     Covers implementation.approach, implementation.verify,
-    implementation.guardRails[], tasks[], notes, acceptanceCriteria[], gate.prompt
-    and gate.options[], in that order. `path` is the field path ("tasks[1]"), and
+    implementation.guardRails[], tasks[], notes, acceptanceCriteria[], gate.prompt,
+    gate.options[], title, description and verification.expect, in that order.
+    The last three were added after the others (GitHub issue #183): a reference in
+    them survived both passes, so they come last and the order in which the
+    earlier fields report an unmapped token is unchanged. `path` is the field path ("tasks[1]"), and
     `shell` is true for verify and guardRails only: those two are shell text, and a
     pass that adds anything but a bare id to them can break the script.
 
@@ -568,6 +571,11 @@ def _rewrite_story_text(story, sub):
     if isinstance(gate, dict):
         field(gate, "prompt", "gate.prompt")
         entries(gate, "options", "gate.options")
+    field(story, "title", "title")
+    field(story, "description", "description")
+    verification = story.get("verification")
+    if isinstance(verification, dict):
+        field(verification, "expect", "verification.expect")
 
 
 def remap_story_text_tokens(stories, mapping):
@@ -2185,6 +2193,36 @@ def leftover_outline_token_smells(stories):
     return entries
 
 
+def malformed_outline_token_findings(story):
+    """One finding per `outline:` + digits in a staged story that is not OUTLINE_TOKEN.
+
+    Staged files are named by a two-digit idx (`NN-slug.json`), so `outline:7` or
+    `outline:007` names no file. The merge's remap deliberately leaves such text
+    alone rather than guess which story was meant, so the token would reach the
+    tasks file unresolved (GitHub issue #183). validate-staging reports it while
+    the expander can still be re-spawned to fix it. Every string field is read,
+    dependsOn included, and `outline:edit:NN` (a decision anchor, not a story
+    reference) never matches.
+    """
+    findings = []
+    for key, value in story.items():
+        if key in _WORKING_KEYS or key.startswith("_"):
+            continue
+        for path, text in _string_fields(value, key):
+            for match in LEFTOVER_OUTLINE_PATTERN.finditer(text):
+                token = match.group(0)
+                if OUTLINE_TOKEN.fullmatch(token):
+                    continue
+                finding = rm_sanitize(
+                    path + ": " + token + " is not an outline reference; write outline:NN"
+                    " with the two-digit idx of the staged file it names",
+                    _FINDING_MAXLEN,
+                )
+                if finding not in findings:
+                    findings.append(finding)
+    return findings
+
+
 def ac_test_enumeration_smells(stories):
     """One entry per acceptance criterion naming AC_TEST_ENUMERATION_MIN or more distinct tests."""
     entries = []
@@ -3030,6 +3068,7 @@ def validate_staging(staging_dir, outline=None):
             findings.extend(verify_refusal_findings(entry))
             findings.extend(rail_and_path_findings(entry))
             findings.extend(verification_url_findings_sanitized(entry))
+            findings.extend(malformed_outline_token_findings(entry))
         if entries:
             tokens = _depends_on_tokens(entries)
             for edge in edges:

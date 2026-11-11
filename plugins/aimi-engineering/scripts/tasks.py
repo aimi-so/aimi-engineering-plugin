@@ -3221,7 +3221,57 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ": " + finding
                 )
 
+    # R26 -- an `outline:` + digits left in a story. There is no R25: that
+    # number belonged to the citation rule the known-gaps backtest withheld, and
+    # it stays unused so the two are never confused. Appended AFTER R24 for
+    # R17's reason. An ERROR: outline:NN is a staging-only reference that
+    # story-merge rewrites to US-NNN, so one that survived names nothing an
+    # executor can resolve (GitHub issue #183: notes still citing outline:NN
+    # after the merge). story-merge already refuses a two-digit token whose idx
+    # has no staged file; this catches the forms its remap leaves as text and
+    # anything written into the file after the merge. `outline:edit:NN`, the
+    # decision anchor, does not match.
+    for doc in docs:
+        for story in _stories(doc):
+            if not isinstance(story, dict):
+                continue
+            for path, token in _leftover_outline_tokens(story):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + path + " still carries " + token
+                    + ", a staging reference story-merge did not resolve; replace it"
+                    " with the US-NNN id of the story it names"
+                )
+
     return errors
+
+
+# R26's pattern: the same `outline:` + one or more digits story_merge's
+# LEFTOVER_OUTLINE_PATTERN uses for its advisory smell, so the smell and the
+# error can never disagree about what a leftover token is.
+_LEFTOVER_OUTLINE = re.compile(r"outline:[0-9]+")
+
+
+def _leftover_outline_tokens(story):
+    """(field path, token) for each distinct leftover outline token in a story."""
+    found = []
+
+    def walk(value, path):
+        if isinstance(value, str):
+            for match in _LEFTOVER_OUTLINE.finditer(value):
+                if (path, match.group(0)) not in found:
+                    found.append((path, match.group(0)))
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                walk(child, path + "." + str(key) if path else str(key))
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, path)
+
+    for key, value in story.items():
+        walk(value, str(key))
+    return found
 
 
 def _validate_endpoints(docs, tasks_file, business_spec_path, errors, warn):

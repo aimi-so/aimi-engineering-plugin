@@ -74,7 +74,7 @@ done <<< "$VALIDATE_FILES"
 
 **If any validation fails (non-zero exit):**
 1. Read the error output to identify the issues
-2. Fix the offending story IDs, `dependsOn` references, dependency cycles, or malformed `skills[]` entries
+2. Fix the offending story IDs, `dependsOn` references, dependency cycles, or malformed `skills[]` entries. An `outline:` token left in a story (`validate-tasks` rule R26) is replaced with the `US-NNN` id of the story it names, the one expanded from the staged file with that idx
 3. Re-write the tasks.json file using the Write tool
 4. Re-run all validations until they pass
 
