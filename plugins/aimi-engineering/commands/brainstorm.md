@@ -1818,6 +1818,8 @@ Next steps:
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:plan`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:plan`). Copy the block verbatim.
 
+**Fresh session hint:** After the block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode.
+
 **If user selects "Continue brainstorming":** Return to Phase 2 with the existing document as context. Generate targeted follow-up questions about areas not yet explored.
 
 **If user selects "Done for now":** End the session. Display:

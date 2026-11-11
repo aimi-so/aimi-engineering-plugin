@@ -389,3 +389,5 @@ Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 - Run `/aimi:review [branchName]` for code review
 ```
 
+**Fresh session hint:** After either Next Steps block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode and when `NEXT_PHASE_HANDOFF` is set, since the run continues into `/aimi:plan`.
+

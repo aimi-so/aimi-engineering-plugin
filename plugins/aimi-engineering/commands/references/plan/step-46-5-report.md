@@ -56,6 +56,8 @@ Next steps:
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
 
+**Fresh session hint:** After the block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it when `INTERACTIVE_MODE=agent`.
+
 **Audit line:** `Audit: shipped unaudited` is printed exactly when the Failure Fallback stub fired in this run (`auditFailed`); story-merge confirms it with a stderr line containing `plan shipped unaudited`. A run whose audit never failed prints nothing here.
 
 **Audit warnings / Audit deferred line:** present only when Phase 3d.5 ran, `unresolved[]` was non-empty, and the Phase 3d.5 Unresolved Gate above resolved it via **Apply anyway** or **Defer with reason** — never via Abort, since Step 5 is never reached on that path. `N` is the count of items in `unresolved[]`. The two lines are mutually exclusive, keyed by the gate's outcome:
