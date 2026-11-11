@@ -330,10 +330,12 @@ _VERB_FUNCS = {
 
 
 def _verb_flags(func: str) -> set[str]:
+    """The verb's flags, one per case label; in `--a|--b)` the first spelling
+    is the flag and the rest are aliases of it, so an alias is never a role."""
     text = _CLI.read_text()
     m = re.search(rf"^{func}\(\) \{{\n(.*?)^\}}\n", text, re.S | re.M)
     assert m, f"{func} not found in aimi-cli.sh"
-    labels = re.findall(r"^\s*(--[a-z][a-z-]*)\)", m.group(1), re.M)
+    labels = re.findall(r"^\s*(--[a-z][a-z-]*)(?:\|--[a-z][a-z-]*)*\)", m.group(1), re.M)
     return {label[2:] for label in labels} - {"project"}
 
 

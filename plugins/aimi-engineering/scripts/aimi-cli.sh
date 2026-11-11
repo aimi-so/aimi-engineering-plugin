@@ -7634,11 +7634,12 @@ _forge_pr_edit() {
   _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
 }
 
-# Public wrapper: parses --number/--title/--body/--project (no --token or
-# similarly credential-shaped flag -- see this section's header comment),
+# Public wrapper: parses --pr (or its older spelling --number)/--title/--body/
+# --project (no --token or similarly credential-shaped flag -- see this
+# section's header comment),
 # applies the same three standard guards as cmd_forge_pr_create (project cd,
 # git-repository check, identifier validation before shelling out) --
-# --number is validated as numeric-only (^[0-9]+$) rather than the branch-
+# the PR number is validated as numeric-only (^[0-9]+$) rather than the branch-
 # name pattern, matching cmd_forge_issue_view's own numeric-identifier guard
 # -- then delegates exactly once to _forge_pr_edit.
 #
@@ -7649,14 +7650,21 @@ _forge_pr_edit() {
 # --body alone. Nothing in the plugin passes --title today; forge-pr-create
 # has accepted one since it was written, and this is the symmetric ability
 # forge-pr-edit simply lacked (GitHub issue #110).
+#
+# --pr is the spelling forge-pr-view, forge-pr-merge and forge-pr-review-threads
+# take, so a caller that learned it from them is not refused here (GitHub issue
+# #183). --number is kept as an alias because commands written against it still
+# run verbatim. Unlike forge-pr-view, the value is a number and never a branch:
+# an edit has to name exactly one PR. The validation message names whichever
+# spelling the caller used.
 cmd_forge_pr_edit() {
   check_jq
 
-  local number="" body="" title="" project_dir="" body_provided="" title_provided=""
+  local number="" number_flag="--pr" body="" title="" project_dir="" body_provided="" title_provided=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --number)  shift; number="${1:-}" ;;
+      --pr|--number) number_flag="$1"; shift; number="${1:-}" ;;
       # body_provided tracks whether the FLAG was seen, deliberately not
       # whether its value is non-empty: `gh pr edit N --body ""` blanks a
       # description, so "flag omitted entirely" (a caller that forgot it,
@@ -7682,7 +7690,8 @@ cmd_forge_pr_edit() {
   _require_git_repo "$project_dir"
 
   if [ -z "$number" ] || { [ -z "$body_provided" ] && [ -z "$title_provided" ]; }; then
-    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]" >&2
+    echo "Usage: aimi-cli.sh forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]" >&2
+    echo "       --number <n> is accepted as an alias of --pr <n>" >&2
     echo "       at least one of --title / --body is required" >&2
     exit 1
   fi
@@ -7702,7 +7711,7 @@ cmd_forge_pr_edit() {
   fi
 
   if ! [[ "$number" =~ ^[0-9]+$ ]]; then
-    echo "Error: forge-pr-edit: --number must be a positive integer (got: $number)" >&2
+    echo "Error: forge-pr-edit: $number_flag must be a positive integer (got: $number)" >&2
     exit 1
   fi
 
@@ -17617,7 +17626,7 @@ COMMANDS:
                               an adapter. Identity, when needed, is read from
                               an env var (e.g. AIMI_FORGE_IDENTITY /
                               GH_TOKEN), never a flag.
-    forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]
+    forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]
                               Write verb -- shells gh pr edit <number> with
                               --title and/or --body, then re-reads the PR via
                               forge-pr-view to confirm and report
@@ -17633,6 +17642,8 @@ COMMANDS:
                               refused, since no forge stores an empty title.
                               Same guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create.
+                              --number <n> is accepted as an alias of --pr <n>;
+                              unlike forge-pr-view, the value must be a number.
                               github and gitlab each have an adapter
                               (glab mr update -t/-d).
     forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]

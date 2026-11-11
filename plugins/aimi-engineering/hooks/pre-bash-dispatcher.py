@@ -524,12 +524,12 @@ _RAW_FORGE_VERBS: dict[tuple[str, str, str], dict] = {
     },
     ("gh", "pr", "edit"): {
         "verb": "forge-pr-edit",
-        "usage": "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]",
+        "usage": "forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]",
         "flags": {
             "--title": ("title", True), "-t": ("title", True),
             "--body": ("body", True), "-b": ("body", True),
         },
-        "positionals": ["number"],
+        "positionals": ["pr"],
     },
     ("gh", "pr", "merge"): {
         "verb": "forge-pr-merge",
@@ -578,13 +578,13 @@ _RAW_FORGE_VERBS: dict[tuple[str, str, str], dict] = {
     },
     ("glab", "mr", "update"): {
         "verb": "forge-pr-edit",
-        "usage": "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]",
+        "usage": "forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]",
         "flags": {
             "--title": ("title", True), "-t": ("title", True),
             "--description": ("body", True), "-d": ("body", True),
             "--yes": ("-", False), "-y": ("-", False),
         },
-        "positionals": ["number"],
+        "positionals": ["pr"],
     },
     ("glab", "mr", "merge"): {
         "verb": "forge-pr-merge",

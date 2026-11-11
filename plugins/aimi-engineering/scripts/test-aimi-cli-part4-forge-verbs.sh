@@ -3587,6 +3587,56 @@ test_forge_pr_edit_invalid_number_guard() {
   teardown_detect_forge_fixture
 }
 
+# --pr is the spelling forge-pr-view and forge-pr-merge take (GitHub issue
+# #183); --number stays as an alias, which every other forge-pr-edit test here
+# still exercises. The gh log proves --pr reaches gh as the same positional
+# number, and the invalid case proves the message names the spelling used.
+test_forge_pr_edit_accepts_pr_flag() {
+  echo ""
+  echo "=== forge-pr-edit: --pr is accepted like forge-pr-view/forge-pr-merge, --number stays an alias ==="
+
+  setup_detect_forge_fixture origin https://github.com/owner/repo.git
+  pushd "$DETECT_FORGE_FIXTURE_DIR" >/dev/null
+
+  local sandbox
+  sandbox=$(setup_forge_cli_sandbox)
+  trap "teardown_forge_cli_sandbox '$sandbox'" RETURN
+
+  local gh_log="$sandbox/gh-invocations.log"
+  cat > "$sandbox/gh" << FAKE_GH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$gh_log"
+if [ "\$1" = "pr" ] && [ "\$2" = "edit" ]; then
+  exit 0
+fi
+if [ "\$1" = "pr" ] && [ "\$2" = "view" ]; then
+  echo '{"url":"https://github.com/owner/repo/pull/303","number":303}'
+  exit 0
+fi
+exit 99
+FAKE_GH
+  chmod +x "$sandbox/gh"
+
+  local out exit_code
+  out=$(PATH="$sandbox" "$CLI" forge-pr-edit --pr 303 --body "updated body") && exit_code=0 || exit_code=$?
+
+  assert_exit_code "0" "$exit_code" "forge-pr-edit --pr: exit 0"
+  assert_eq '{"status":"unchanged","data":{"url":"https://github.com/owner/repo/pull/303","number":303},"message":null}' \
+    "$out" "forge-pr-edit --pr: the same envelope --number produces"
+  assert_eq "1" "$(grep -c '^pr edit 303 ' "$gh_log" || true)" \
+    "forge-pr-edit --pr: gh pr edit receives the number as its positional"
+
+  local stderr_file="/tmp/forge_pr_edit_bad_pr_stderr.$$"
+  "$CLI" forge-pr-edit --pr "feat/branch" --body B >/dev/null 2>"$stderr_file" && exit_code=0 || exit_code=$?
+  assert_exit_code "1" "$exit_code" "forge-pr-edit --pr with a branch name: exit 1, an edit names one PR by number"
+  assert_stderr_contains "--pr must be a positive integer" "$(cat "$stderr_file")" \
+    "forge-pr-edit --pr with a branch name: the message names --pr, the spelling the caller used"
+  rm -f "$stderr_file"
+
+  popd >/dev/null
+  teardown_detect_forge_fixture
+}
+
 test_forge_write_verbs_share_one_data_shape() {
   echo ""
   echo "=== forge-pr-create created / forge-pr-create unchanged / forge-pr-edit unchanged: all three nest an IDENTICAL {url, number} under data (AC3) ==="
@@ -3721,7 +3771,7 @@ test_forge_pr_create_and_edit_registered_in_help_and_dispatcher() {
   local help_out
   help_out=$("$CLI" help 2>&1)
   assert_contains "forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-create with its flags"
-  assert_contains "forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags, --title and --body both shown as optional"
+  assert_contains "forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]" "$help_out" "help: lists forge-pr-edit with its flags, --title and --body both shown as optional"
   assert_contains "at least one is" "$help_out" "help: states the at-least-one-of rule, so the two optional brackets are not read as 'both may be omitted'"
   assert_contains "a title-only edit passes no --body" "$help_out" "help: names the conditional emission, which is the part a caller cannot infer from the flag list"
 
@@ -9963,6 +10013,7 @@ main() {
   test_forge_pr_edit_missing_gh_mandatory_print_nonzero_exit
   test_forge_pr_edit_gh_failure_prints_manual_nonzero_exit
   test_forge_pr_edit_invalid_number_guard
+  test_forge_pr_edit_accepts_pr_flag
   test_forge_pr_edit_omitted_body_is_rejected
   test_forge_pr_edit_explicit_empty_body_still_clears
   test_forge_pr_edit_title_only_sends_no_body

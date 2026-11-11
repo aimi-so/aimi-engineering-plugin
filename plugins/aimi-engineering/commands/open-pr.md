@@ -1051,7 +1051,7 @@ EOF
     ISSUE_URL=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.url')
     ISSUE_NUMBER=$(printf '%s' "$ISSUE_CREATE_JSON" | jq -r '.data.number')
     if [ -n "$PR_BODY" ]; then
-      PR_EDIT_JSON=$($AIMI_CLI forge-pr-edit --number "$PR_NUMBER" --body "$(cat <<EOF
+      PR_EDIT_JSON=$($AIMI_CLI forge-pr-edit --pr "$PR_NUMBER" --body "$(cat <<EOF
 $PR_BODY
 
 ---
