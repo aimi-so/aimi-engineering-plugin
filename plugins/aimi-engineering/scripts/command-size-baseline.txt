@@ -68,7 +68,7 @@ references/scope-contexts.md	24576
 plan.md	24576
 deepen.md	20480
 
-skills/story-executor/SKILL.md	69632
+skills/story-executor/SKILL.md	32768
 skills/task-planner/SKILL.md	24576
 
 agents/research/aimi-foundation-architect.md	24576

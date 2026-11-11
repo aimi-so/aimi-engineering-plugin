@@ -234,15 +234,9 @@ echo "DEPS_STATUS[$CONTAINER_ROOT/.worktrees/$BRANCH_NAME]=$DEPS_STATUS_VALUE"
 
 The status is the last `DEPS_STATUS=` line, a missing line reads as `failed`, and it is carried as `DEPS_STATUS[CONTAINER_ROOT]` into Step 5. `needs-recipe` is reported and the run continues, after `${CLAUDE_PLUGIN_ROOT}/commands/references/dependency-setup.md` has had its one chance to record a recipe for that root; `failed` is reported with the warning that verify results may have resolved another checkout's packages, and the run continues too. A non-zero exit never blocks story execution. Calling it unconditionally, instead of gating on the container directory's pre-existence, means a first install that failed is retried on the next invocation rather than being skipped forever. Inline mode installs nothing: it runs in the user's own checkout.
 
-## Step 2: Load Project Guidelines
+## Step 2: Find Project Guidelines
 
-Load project guidelines following the discovery order defined in `story-executor/SKILL.md` → "PROJECT GUIDELINES" section:
-
-1. **CLAUDE.md** — If `PROJECT_PATH` is set, look for `CLAUDE.md` in `PROJECT_PATH` first. Otherwise use the current project root.
-2. **AGENTS.md** (any directory) - Module-specific patterns
-3. **Aimi defaults** from story-executor - Fallback if neither exists
-
-Read these files and store the content as `PROJECT_GUIDELINES`.
+Find the project's guideline files; do not read them. The worker reads them itself, following `skills/story-executor/SKILL.md` § Project Guidelines. Look for `CLAUDE.md` and `AGENTS.md` at `PROJECT_PATH` when it is set, otherwise at the current project root, and store the absolute paths of the ones that exist as `PROJECT_GUIDELINES` (empty when neither exists).
 
 ## Step 3: Display Current Story
 
@@ -285,28 +279,41 @@ Tasks:
 
 ## Step 4: Build Worker Prompt
 
-**CRITICAL:** Construct the worker prompt following the canonical template in `story-executor/SKILL.md`.
+The prompt is a POINTER to the story-executor skill, never a copy of it: do not paste, summarize or paraphrase the skill into the prompt. Resolve the values in one Bash call:
 
-Interpolate the following into the template:
-- `PROJECT_GUIDELINES` = guidelines loaded in Step 2
-- `PROJECT_PATH` = resolved project path from Step 1b (include <project_context> section only if set)
-- `STORY_ID` = story.id
-- `STORY_TITLE` = story.title
-- `STORY_DESCRIPTION` = story.description
-- `ACCEPTANCE_CRITERIA` = story.acceptanceCriteria (bulleted)
-- `story.tasks` = story.tasks (include <tasks> block only if story.tasks is a non-empty array; place after <acceptance_criteria> and before <notes>)
-- `story.notes` = story.notes (include <previous_notes> section only if non-empty)
-- `WORKTREE_PATH` = `CONTAINER_PATH` from Step 1c when that step resolved a container (`CONTAINER_MODE=true` — the file's own `metadata.execution` or, when passed, a `--container` override that resolved `EXECUTION_MODE` to `"container"`) — the story executes and commits inside the container, on the feature branch, with no per-story worktree. Otherwise (`CONTAINER_MODE=false`), no WORKTREE_PATH (sequential mode — worker operates in current directory, or PROJECT_PATH if set), exactly as before this story.
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+BRIEF="$(cd "$(dirname "$AIMI_CLI")/.." && pwd)/skills/story-executor/SKILL.md"
+if [ -f "$BRIEF" ]; then echo "EXECUTOR_BRIEF=$BRIEF"; else echo "EXECUTOR_BRIEF_MISSING=$BRIEF"; fi
+TASKS_FILE=$($AIMI_CLI get-state | jq -r '.tasks // empty')
+[ -n "$TASKS_FILE" ] || TASKS_FILE=$($AIMI_CLI find-tasks)
+echo "TASKS_FILE_PATH=$TASKS_FILE"
+echo "AIMI_ROOT=${TASKS_FILE%%/.aimi/*}"
+echo "SCRATCH_STEM=$(basename "$TASKS_FILE" .json)"
+```
+
+On `EXECUTOR_BRIEF_MISSING`, report the path and STOP: never spawn a worker without its brief. `TASKS_FILE_PATH` is the file `next-story` read in Step 1 (the session's current-tasks pointer, which that verb keeps valid), and `AIMI_ROOT` is the directory holding its `.aimi/`.
 
 ```
 # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
 Task general-purpose: "Execute [STORY_ID]: [STORY_TITLE]
 
-[story-executor/SKILL.md prompt template with interpolated values]
+You are a story worker for aimi-engineering. Before any other action, read [EXECUTOR_BRIEF] in full with the Read tool and follow it exactly: it is your whole brief, and the values below are its inputs.
+
+STORY_ID: [STORY_ID]
+TASKS_FILE_PATH: [TASKS_FILE_PATH]
+AIMI_ROOT: [AIMI_ROOT]
+SCRATCH_PREFIX: [SCRATCH_STEM]-[STORY_ID]
+WORKTREE_PATH: [CONTAINER_PATH]          (only when Step 1c resolved a container, CONTAINER_MODE=true)
+PROJECT_PATH: [PROJECT_PATH]             (only when Step 1b set it)
+PROJECT_GUIDELINES: [paths from Step 2]  (only when Step 2 found any)
 "
 ```
 
-> Passing `WORKTREE_PATH` does not change the tasks-file-update contract below. Both the with-`WORKTREE_PATH` and without-`WORKTREE_PATH` branches of `story-executor/SKILL.md`'s `<worktree_context>` already forbid the worker from touching `tasks.json` and leave status updates to the caller — so Step 5 is unchanged by container mode.
+In container mode (`CONTAINER_MODE=true` — the file's own `metadata.execution`, or a `--container` override that resolved `EXECUTION_MODE` to `"container"`), the story executes and commits inside the container, on the feature branch, with no per-story worktree. Otherwise there is no `WORKTREE_PATH` line: the worker operates in the current directory, or `PROJECT_PATH` if set.
+
+> Passing `WORKTREE_PATH` does not change the tasks-file-update contract below. The story-executor skill's Boundaries and Step 6 already forbid the worker from touching `tasks.json` and leave status updates to the caller — so Step 5 is unchanged by container mode.
 
 ## Step 5: Handle Result
 
@@ -405,7 +412,7 @@ PREVIOUS ATTEMPT FAILED:
 
 Please try a different approach or fix the issue described above.
 
-[Full prompt from Step 4 including PROJECT GUIDELINES]
+[The same pointer prompt and values as Step 4]
 "
 ```
 

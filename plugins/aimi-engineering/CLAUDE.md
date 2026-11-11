@@ -15,6 +15,7 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/planning-verbs.md` | `story-merge`, `apply-audit-patches`, `validate-outline`/`validate-staging`/`outline-shift`, `plan_checks.py`, advisory smells |
 | `docs/dev/cli-verbs.md` | the research and spec-derivation verbs, `check-version`, `slugify`, `detect-design-bundle` |
 | `docs/dev/roadmap.md` | a `roadmap-*` verb, `roadmap.py`, or the `roadmap.json` shape |
+| `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it |
 | `docs/dev/tasks-schema.md` | the `tasks.json` shape or a validator over it |
 | `docs/dev/jq-census.md` | a `jq` call in `aimi-cli.sh` or under `commands/` (the principle stays below) |
 
@@ -168,12 +169,9 @@ The same counting rule covers the four **`models.json` readers** — `cmd_resolv
    - Keeps the orchestrator's working memory slim across waves — no inlined story body, no inlined prototype HTML in the spawn prompt
    - Prototype files are read by the subagent itself using the Read tool when `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set
 
-2. **Use CLAUDE.md/AGENTS.md** - Project conventions inline or referenced
-   - Small files (<2KB) are inlined in prompt
-   - Larger files are referenced for agent to read
+2. **Guidelines by path** - The orchestrator finds the project's `CLAUDE.md`/`AGENTS.md` and passes their absolute paths as `PROJECT_GUIDELINES`; the worker reads them itself. The orchestrator never reads or inlines them.
 
-3. **Compact prompts** - First story in a session gets the full template (SKILL.md "Prompt Template"); subsequent stories get the condensed variant (SKILL.md "Compact Template") where static sections (`<project_guidelines>`, `<execution_flow>`, `<tools>`, `<on_failure>`, `<project_root_boundary>`) are condensed to one-line summaries — NOT omitted, since each agent has fresh context. Story-specific and context-varying sections remain in full
-   - Reduces prompt size by collapsing static sections; actual savings depend on story content and have not been benchmarked
+3. **The worker reads its own brief** - A story worker's spawn prompt is a fixed pointer ("read `EXECUTOR_BRIEF` in full and follow it") plus the input values; `EXECUTOR_BRIEF` is `skills/story-executor/SKILL.md`, resolved beside `$AIMI_CLI`. Never paste, summarize or paraphrase the skill into a spawn prompt: there is one copy of every executor rule, and the worker always reads the same text. `docs/dev/story-executor.md` records why.
 
 4. **Fresh context per story** - Each Task agent starts with clean context
    - No memory carryover between stories

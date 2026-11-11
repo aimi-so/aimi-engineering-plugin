@@ -2,23 +2,22 @@
 
 > Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
 
-## Step 3.3: Load Project Guidelines
+## Step 3.3: Find Project Guidelines
 
-Load project guidelines following the discovery order defined in `story-executor/SKILL.md` "PROJECT GUIDELINES" section:
+Find the project's guideline files; do not read them. The worker reads them itself, following `skills/story-executor/SKILL.md` § Project Guidelines:
 
-1. **CLAUDE.md** (project root) - Primary project instructions
-2. **AGENTS.md** (any directory) - Module-specific patterns
-3. **Aimi defaults** from story-executor - Fallback if neither exists
+1. **CLAUDE.md** at the project root
+2. **AGENTS.md** at the project root
 
-Read these files and store the content as `PROJECT_GUIDELINES`.
+Store the absolute paths of the ones that exist as `PROJECT_GUIDELINES` (empty when neither exists; the worker then falls back to the skill's default commit rules).
 
 ### Per-Project Guidelines
 
-When stories target different projects (via the `project` field), each project may have its own `CLAUDE.md` and `AGENTS.md`. Load guidelines per unique project path and store as a map: `PROJECT_GUIDELINES_MAP[project_path] = guidelines_content`.
+When stories target different projects (via the `project` field), each project may have its own `CLAUDE.md` and `AGENTS.md`. Find them per unique project path and store a map: `PROJECT_GUIDELINES_MAP[project_path] = [absolute paths]`.
 
-- For stories without a `project` field, use the default `PROJECT_GUIDELINES` (loaded from the current repo root).
+- For stories without a `project` field, use the default `PROJECT_GUIDELINES` (found at the current repo root).
 - For stories with a `project` field, look up `PROJECT_GUIDELINES_MAP[story.project]` and pass it as `PROJECT_GUIDELINES` in the worker prompt.
-- If no stories have `project` fields, skip this map and use default `PROJECT_GUIDELINES` (backwards compatible).
+- If no stories have `project` fields, skip this map and use the default `PROJECT_GUIDELINES`.
 
 ### Container Dev Server Bootstrap
 

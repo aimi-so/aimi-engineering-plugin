@@ -7,7 +7,6 @@
 
 ```
 wave = 1
-is_first_story_in_session = true
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
 
@@ -26,6 +25,14 @@ WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else TASKS_PATH
 # run that block in the Bash call that needs the value and read it back from
 # the PLAN_DISC= line it echoes, since every Bash call is an isolated shell.
 PLAN_DISC = sanitized stem of WAVE_TASKS_FILE
+
+# EXECUTOR_BRIEF — absolute path of the story-executor skill, the worker's whole
+# brief. Resolve it once, in a Bash call that already resolved $AIMI_CLI, and
+# read it back from the line it echoes (the skill sits beside the CLI that runs
+# this session, on both hosts and under AIMI_DEV_DIR alike):
+#   B="$(cd "$(dirname "$AIMI_CLI")/.." && pwd)/skills/story-executor/SKILL.md"; [ -f "$B" ] && echo "EXECUTOR_BRIEF=$B" || echo "EXECUTOR_BRIEF_MISSING=$B"
+# On EXECUTOR_BRIEF_MISSING, stop and report: never spawn a worker without its brief.
+EXECUTOR_BRIEF = path echoed above
 
 while true:
     # ========================================
@@ -282,56 +289,45 @@ while true:
     #
     # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
     #
-    # Template selection: full for first story in session, compact for subsequent.
-    # In a multi-story wave, the first story uses full_template only if is_first_story_in_session
-    # is true; all others in the wave use compact_template.
+    # The prompt is a POINTER, never a copy: the worker reads EXECUTOR_BRIEF itself.
+    # Do not paste, summarize or paraphrase the skill into the prompt — a pasted
+    # copy is what drifted before, and a paraphrase drops rules.
     # In one tool-call turn, emit N Task calls (across ALL project groups):
-    story_index = 0
     for full_story in full_stories:
         wt = all_worktrees[full_story.id]
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
-        template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
-
         Task(
             subagent_type: "general-purpose",
             model: <AGENT_MODELS.executor when not "inherit">,
             description: "Execute [full_story.id]: [full_story.title]",
-            prompt: [story-executor SKILL.md [template] with:
-                - WORKTREE_PATH = wt.worktree_path
-                - PROJECT_PATH = project_path (only include if non-null)
-                - PROJECT_GUIDELINES = project_guidelines
-                - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
-                - Omit the <visual_verification> section entirely for worktree stories
-                  (the dev server cannot see worktree changes; verification runs after merge-all instead)
+            prompt: exactly this text, one "NAME: value" line per field below, nothing else:
+                "You are a story worker for aimi-engineering. Before any other action, read
+                 [EXECUTOR_BRIEF] in full with the Read tool and follow it exactly: it is your
+                 whole brief, and the values below are its inputs."
+              with:
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
                 - TASKS_FILE_PATH = WAVE_TASKS_FILE  ← this wave's own resolved tasks file. The
-                  story-executor SKILL.md <task_pointer> template substitutes TASKS_FILE_PATH onto
-                  its own get-story-context call, so the spawned executor reads this orchestrator's
-                  file even when a sibling split orchestrator's init-session call last wrote the
-                  shared pointer
+                  brief's <task_pointer> passes TASKS_FILE_PATH to its own get-story-context call,
+                  so the worker reads this orchestrator's file even when a sibling split
+                  orchestrator's init-session call last wrote the shared pointer
                 - AIMI_ROOT = this run's already-resolved AIMI_ROOT (the directory holding `.aimi/`)
                   ← passed in, never re-derived inside a worktree, which has no `.aimi/` of its own;
                   the executor exports it beside TASKS_FILE_PATH for both verify runs
                 - SCRATCH_PREFIX = PLAN_DISC + "-" + full_story.id  ← the executor's scratchpad
-                  namespace, handed over ALREADY COMPOSED rather than left to be chosen. `PLAN_DISC`
-                  is READ here and never recomposed nor re-sanitized: `### Plan Discriminator` under
-                  Multi-Repo Handling derived it once from WAVE_TASKS_FILE, its sanitization is
-                  load-bearing (`validate_branch_name` refuses a single dot), and a second derivation
-                  is only a second chance to disagree with the first.
-                  The axis is the PLAN and the story id comes SECOND, which is why that order is
-                  not arbitrary. The collision measured on 2026-09-08 was not
-                  sibling-against-sibling: a `verify-US-002.sh` left in the shared scratchpad by an
-                  EARLIER plan's run was read by this run's US-002, whose id happened to be the same
-                  string. A prefix keyed on the story id alone composes the identical name for both
-                  and would have separated nothing — only the plan's own identity does.
-                - Do NOT modify the tasks.json file — report result (success/failure + details)
-            ]
+                  namespace, handed over ALREADY COMPOSED. `PLAN_DISC` is READ here and never
+                  recomposed nor re-sanitized (`### Plan Discriminator` under Multi-Repo Handling
+                  derived it once). The plan comes FIRST: the measured collision was an earlier
+                  plan's file for a story with the same `US-NNN`, which a story-id-only prefix
+                  cannot separate.
+                - WORKTREE_PATH = wt.worktree_path
+                - PROJECT_PATH = project_path (only include if non-null)
+                - PROJECT_GUIDELINES = project_guidelines (the absolute paths Step 3.3 found; omit when empty)
+                - VISUAL_VERIFICATION = post-merge  ← every worktree story: the dev server cannot see
+                  worktree changes, so visual verification runs after merge-all instead
+                - HEADED_MODE: never for a worktree story, for the same reason
         )
-        story_index += 1
-
-    is_first_story_in_session = false
 
     # All Tasks return in the same turn. Collect results.
     failed_stories = []
