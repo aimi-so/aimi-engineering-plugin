@@ -11,33 +11,31 @@
 # corpus did not have to move, and the same two roots absorb agents/ too —
 # see test-command-size.sh's header for the rule and where it is applied.
 #
-# Every line is a promise that someone measured this exact file's size and
-# wrote it down -- never rounded up. The budget is a RATCHET, not a ceiling
-# in one direction only: growing past it fails ("over budget"), and
-# shrinking below it fails too ("stale budget"). That second failure is
-# deliberate -- it forces the commit that shrinks one of these files to
-# lower its number in the same diff, so a budget can never sit generous
-# after the file that earned it got smaller. Slack like that is exactly what
-# a later, unrelated change could spend without anyone noticing.
+# Every budget is a multiple of 4096 (BUDGET_STEP in test-command-size.sh):
+# the smallest one that holds the file. The budget is a RATCHET in steps, not
+# a ceiling in one direction only: growing past it fails ("over budget"),
+# and shrinking into the step below fails too ("stale budget"). That second
+# failure is deliberate -- it forces the commit that shrinks one of these
+# files by a step to lower its number in the same diff, so a budget can never
+# sit a whole step generous after the file that earned it got smaller. A
+# number that is not a multiple of the step fails as "malformed budget"; the
+# finding always names the number to write instead.
+#
+# The steps replaced exact byte counts. With exact counts every edit to one
+# of these files, however small, had to touch this baseline too, and most of
+# those touches recorded growth as routine. A step is crossed rarely enough
+# that crossing one is worth a reviewer's attention.
 #
 # Every corpus file NOT listed here is held to DEFAULT_CEILING (16384 bytes,
-# declared in test-command-size.sh) instead. The first twelve were the only
-# files that already exceeded that ceiling when this baseline was first
-# written; a global rule strict enough to catch a new bloated file cannot
-# also pass execute.md's tree today (20x any plausible ceiling), so these get
-# an individual budget instead of a shared one.
+# also a multiple of the step) instead. The files below are the ones that
+# already exceeded that ceiling when they joined the corpus; a global rule
+# strict enough to catch a new bloated file cannot also pass them, so they
+# get an individual budget instead of a shared one. A file that shrinks back
+# under the ceiling loses its line.
 #
-# The two skills/ entries joined on the same terms, on the day the corpus
-# widened to reach them — grandfathered at the size they already were, never
-# at a rounded-up one. A budget here is a ratchet against further growth and
-# says nothing about whether the file is the right size: story-executor's
-# 613 lines are already over create-agent-skills' 300-line guidance, and this
-# suite measures bytes and cannot see that at all.
-#
-# The two agents/ entries joined the same way, on the day command_block_files()
-# widened to reach agents/**/*.md: of 33 agent definition files, these were the
-# only two already over DEFAULT_CEILING, grandfathered at their measured size
-# (wc -c against the base tree) rather than a rounded-up one.
+# A budget here is a ratchet against further growth and says nothing about
+# whether the file is the right size, and this suite measures bytes and
+# cannot see a line count at all.
 #
 # Measured against the source .md files under commands/, never against
 # install.sh's OpenCode translation. translate_command_body() prepends a
@@ -49,32 +47,32 @@
 # commands/references/context-budget.md for the classification this budget
 # backs.
 
-execute.md	32908
-references/execute/phase-completion-creates-verification.md	31594
-references/execute/phase-completion-handoff-and-mark.md	20352
-references/execute/phase-completion-offer-pull-request.md	26016
-references/execute/step-4-wave-execution-loop.md	61397
-references/execute/step-5-completion.md	30965
-references/execute/paired-split-merge-and-continue.md	22323
-references/execute/step-1-7-claim-the-phase.md	18178
-references/execute/step-0-9-split-flow.md	17244
-brainstorm.md	144635
-open-pr.md	87859
-references/forge-contract.md	43573
-references/container-execution.md	36710
-references/visual-variants.md	27154
-next.md	23239
-references/cli-path-resolution.md	38829
-review.md	22577
-references/scope-contexts.md	20743
-plan.md	20816
-deepen.md	18696
+execute.md	36864
+references/execute/phase-completion-creates-verification.md	32768
+references/execute/phase-completion-handoff-and-mark.md	20480
+references/execute/phase-completion-offer-pull-request.md	28672
+references/execute/step-4-wave-execution-loop.md	61440
+references/execute/step-5-completion.md	32768
+references/execute/paired-split-merge-and-continue.md	24576
+references/execute/step-1-7-claim-the-phase.md	20480
+references/execute/step-0-9-split-flow.md	20480
+brainstorm.md	147456
+open-pr.md	90112
+references/forge-contract.md	45056
+references/container-execution.md	36864
+references/visual-variants.md	28672
+next.md	24576
+references/cli-path-resolution.md	40960
+review.md	24576
+references/scope-contexts.md	24576
+plan.md	24576
+deepen.md	20480
 
-skills/story-executor/SKILL.md	68526
-skills/task-planner/SKILL.md	23241
+skills/story-executor/SKILL.md	69632
+skills/task-planner/SKILL.md	24576
 
-agents/research/aimi-foundation-architect.md	23014
-agents/workflow/aimi-story-expander.md	54290
-agents/research/aimi-learnings-researcher.md	16750
-agents/research/aimi-design-bundle-researcher.md	16870
-agents/review/aimi-cross-story-auditor.md	20048
+agents/research/aimi-foundation-architect.md	24576
+agents/workflow/aimi-story-expander.md	57344
+agents/research/aimi-learnings-researcher.md	20480
+agents/research/aimi-design-bundle-researcher.md	20480
+agents/review/aimi-cross-story-auditor.md	20480
