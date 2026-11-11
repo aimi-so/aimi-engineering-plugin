@@ -16,8 +16,15 @@ def _frontmatter():
     return AGENT.split("---", 2)[1]
 
 
-def test_frontmatter_declares_tools_read_only():
-    assert re.search(r"^tools: Read$", _frontmatter(), re.M)
+def test_frontmatter_declares_read_and_write():
+    assert re.search(r"^tools: Read, Write$", _frontmatter(), re.M)
+
+
+def test_agent_writes_only_the_result_path_and_spawn_passes_it():
+    assert "RESULT_PATH" in AGENT
+    assert "You write no other file" in AGENT
+    assert "RESULT_PATH: <RUN_DIR>/audit-result.json" in SPAWN
+    assert "AUDIT_RESULT_BEFORE" in SPAWN and "AUDIT_RESULT_AFTER" in SPAWN
 
 
 def test_allowed_tools_named_nowhere():

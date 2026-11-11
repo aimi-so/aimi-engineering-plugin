@@ -241,10 +241,13 @@ def test_prose_cites_policy_and_wires_step_five_and_error_rows():
     assert "A refusal never deletes a written tasks file" in PLAN_TEXT
 
 
-def test_guardrails_mentioned_in_the_three_plan_places_and_the_skill():
+def test_guardrails_mentioned_in_the_plan_the_expander_and_the_skill():
     assert PLAN_TEXT.count("guardRails") >= 3
-    assert "'guardRails': [" in PLAN_TEXT
     assert '"guardRails": [' in PLAN_TEXT
+    # The expander's story shape lives in its agent file, which the spawn template points at.
+    expander = (ROOT / "agents" / "workflow" / "aimi-story-expander.md").read_text(encoding="utf-8")
+    assert '"guardRails": [' in expander
+    assert '"Single-story output shape"' in PLAN_TEXT
     assert "implementation.guardRails" in PLAN_TEXT
     skill = SKILL.read_text(encoding="utf-8")
     assert "implementation.guardRails" in skill

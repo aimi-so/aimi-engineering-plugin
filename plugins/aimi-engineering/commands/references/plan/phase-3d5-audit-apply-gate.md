@@ -4,7 +4,7 @@
 
 ### Persist audit-result.json
 
-Immediately after parsing the auditor's output, use the `Write` tool to write the literal parsed object (`{patches, unresolved}`) to `<RUN_DIR>/audit-result.json`. story-merge deletes `RUN_DIR` on success — copy the file out before that point if you need it afterward.
+Only when the auditor answered with a fenced `json` block instead of writing the file (see the end of `phase-3d5-audit-spawn.md`): immediately after parsing it, use the `Write` tool to write the literal parsed object (`{patches, unresolved}`) to `<RUN_DIR>/audit-result.json`. When the auditor wrote the file itself, skip this step. story-merge deletes `RUN_DIR` on success — copy the file out before that point if you need it afterward.
 
 ### Patch Validation and Application
 
@@ -23,7 +23,7 @@ The line printed carries `applied` (patches landed), `dropped` (the entries abov
 
 ### Failure Fallback
 
-When the auditor Task crashes, times out, returns no parseable fenced `json` block, `apply-audit-patches` exits non-zero in the apply step, or `<RUN_DIR>/consolidation.md` is still missing or empty after the consolidation step of `phase-3d5-audit-spawn.md`:
+When the auditor Task crashes, times out, neither writes `audit-result.json` nor returns a parseable fenced `json` block, `apply-audit-patches` exits non-zero in the apply step, or `<RUN_DIR>/consolidation.md` is still missing or empty after the consolidation step of `phase-3d5-audit-spawn.md`:
 
 1. Sanitize the error string as Phase 3d retry does (strip `$(`, remove backticks, newlines to spaces, truncate to 500 characters).
 2. Emit exactly one log line: `[plan] Phase 3d.5 audit failed: <sanitized error>; proceeding to story-merge without patches`
