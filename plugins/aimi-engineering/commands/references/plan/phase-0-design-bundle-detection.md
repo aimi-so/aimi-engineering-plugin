@@ -90,23 +90,27 @@ esac
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 BUNDLE_ERR_FILE=$(mktemp)
+BUNDLE_RELEVANCE_TEXT="$FEATURE_DESCRIPTION"
+if [ "$ROADMAP_MODE" = true ]; then
+  BUNDLE_RELEVANCE_TEXT=$(printf '%s\n%s\n%s\n%s' "$FEATURE_DESCRIPTION" "$featureSlug" "$PHASE_NAME" "$PHASE_GOAL")
+fi
 if [ -n "$BUNDLE_FINAL" ]; then
   BUNDLE_STDOUT=$($AIMI_CLI detect-design-bundle --bundle "$BUNDLE_FINAL" 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ] && [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$BUNDLE_RELEVANCE_TEXT" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ "$ROADMAP_MODE" = true ]; then
-  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$BUNDLE_RELEVANCE_TEXT" | $AIMI_CLI detect-design-bundle --phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 elif [ -n "$BUNDLE_OVERRIDE" ]; then
-  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --feature-stdin 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$BUNDLE_RELEVANCE_TEXT" | $AIMI_CLI detect-design-bundle --root "$BUNDLE_OVERRIDE" --feature-stdin 2>"$BUNDLE_ERR_FILE")
 else
-  BUNDLE_STDOUT=$(printf '%s' "$FEATURE_DESCRIPTION" | $AIMI_CLI detect-design-bundle --feature-stdin 2>"$BUNDLE_ERR_FILE")
+  BUNDLE_STDOUT=$(printf '%s' "$BUNDLE_RELEVANCE_TEXT" | $AIMI_CLI detect-design-bundle --feature-stdin 2>"$BUNDLE_ERR_FILE")
 fi
 BUNDLE_EXIT=$?
 BUNDLE_STDERR=$(cat "$BUNDLE_ERR_FILE" 2>/dev/null)
 rm -f "$BUNDLE_ERR_FILE"
 ```
 
-`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode. Every arm except `--bundle` pipes `$FEATURE_DESCRIPTION` to `--feature-stdin` — on stdin, never as an argument — so a scan-tier bundle sharing no word with the description (a stray or placeholder bundle) is dropped before the election; the phase tier, `--bundle` and `--all` are never filtered, and an empty or all-stop-word description turns the filter off. When it discards bundles the verb names them on stderr, and a JSON object answer carries them in a `filtered` array of paths (`null` is still the bare literal, with the discarded names on stderr only).
+`--bundle` takes precedence over everything else whenever `BUNDLE_FINAL` is non-empty (named directly, or resolved through the import step above). Otherwise `--phase-dir "$AIMI_ROOT/.aimi/tasks/$featureSlug/$PHASE_DIR"` is passed — composed with `--root "$BUNDLE_OVERRIDE"` when both apply — whenever `ROADMAP_MODE=true`, reusing `$PHASE_DIR` from `#### Extract selected-phase working memory` above; `--phase-dir` is never passed when `ROADMAP_MODE=false`. The pre-existing `--root` forwarding is unchanged beyond now composing with `--phase-dir` in roadmap mode. Every arm except `--bundle` pipes `$BUNDLE_RELEVANCE_TEXT` to `--feature-stdin` — on stdin, never as an argument — so a scan-tier bundle sharing no word with the description (a stray or placeholder bundle) is dropped before the election. In a flat run that text is `$FEATURE_DESCRIPTION` alone. In roadmap mode it adds `$featureSlug`, `$PHASE_NAME` and `$PHASE_GOAL` from `#### Extract selected-phase working memory`, because `/aimi:plan --phase N` leaves `$FEATURE_DESCRIPTION` empty, and an empty text would turn the filter off and offer every bundle under `.aimi/design-bundles/`, other features' included, as a candidate; the phase tier, `--bundle` and `--all` are never filtered, and an empty or all-stop-word description turns the filter off. When it discards bundles the verb names them on stderr, and a JSON object answer carries them in a `filtered` array of paths (`null` is still the bare literal, with the discarded names on stderr only).
 
 **Branch on `BUNDLE_EXIT`:**
 
