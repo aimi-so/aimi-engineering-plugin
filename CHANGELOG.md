@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.158.0] - 2026-11-11
+
+The commands now spend fewer turns and less context for the same work. Every story worker reads one brief, the setup steps of `/aimi:execute` run in fewer Bash calls, the cross-story auditor writes its own result, and the files loaded on every run carry less rationale. A new hook suggests a fresh session when an aimi command starts in a long one. Nothing in the state on disk, the CLI verbs' output or the verification gates changes.
+
+### Added
+- A `UserPromptSubmit` hook, `hooks/context-size-hint.py`. When the typed prompt is an aimi command (other than `/aimi:status` and `/aimi:setup-models`) and the session's last measured context is above 100000 tokens, it shows one line suggesting `/clear` before running the command. It never blocks and adds nothing to Claude's context. It runs on Claude Code only. `AIMI_CONTEXT_HINT_TOKENS` moves the threshold, and `AIMI_CONTEXT_GUARD=off` turns it off.
+- The final reports of `/aimi:plan`, `/aimi:execute`, `/aimi:brainstorm` and `/aimi:review` say that the state is on disk and that the next command can start in a fresh session. The next-phase handoff says to `/clear` before `/aimi:plan --phase`. Agent mode is unchanged.
+- `docs/dev/` under the plugin holds the development notes that used to live in the plugin `CLAUDE.md`, plus `execute-wave-loop.md` and `cli-path-resolution.md`, which hold the reasoning moved out of the wave loop and the CLI resolution reference.
+
+### Changed
+- `skills/story-executor/SKILL.md` is the story worker's one brief. The compact template that `/aimi:execute` pasted into most spawns is gone, along with its drift: it lacked `guardRails`, the never-stage rule for `implementation.outputs` and fail-fast. `/aimi:execute` and `/aimi:next` now spawn a worker with a fixed prompt that names the brief's absolute path, resolved beside `$AIMI_CLI`, plus its input values. The brief gains a Tools section: read files with Read, Grep and Glob, use Bash to run things, send long output to a log and read its tail.
+- Project guidelines (`CLAUDE.md`, `AGENTS.md`) reach a worker as absolute paths in `PROJECT_GUIDELINES` and are read by the worker; the orchestrator no longer inlines them.
+- `/aimi:next` now passes `TASKS_FILE_PATH`, `AIMI_ROOT` and `SCRATCH_PREFIX`, which it did not pass before.
+- CLI resolution has a fast path. Layers 0, 0-dev and 1 and the version check run in one Bash call, and the remaining layers run only when that call prints `AIMI_CLI_UNRESOLVED`. Resolve Agent Models echoes `AGENT_MODELS`, `INTERACTIVITY` and `MODELS_PROMPT` from one block. `/aimi:brainstorm` now runs the version check as well.
+- `/aimi:execute` Steps 0.7, 1, 1.5, 1.6 and 3 each run in one call and echo the values later steps read: the visual counts, `PHASE_MODE`, `EXECUTION_OVERRIDE`, `EXECUTION_MODE`, `CONTAINER_MODE`, `AIMI_ROOT_IS_GIT_REPO`, `DEFAULT_BRANCH`, the fetch result, the base-selection gating conditions and the pending count.
+- The cross-story auditor declares Read and Write. It writes `audit-result.json` to the path its prompt names and answers with one line. Phase 3d.5 compares the file's `cksum` before and after the spawn to tell the auditor's write from a stub or a stale result, persists a fenced block only when the file did not change, and otherwise takes the Failure Fallback. On OpenCode the auditor's `edit` permission is now `allow`.
+- The expander spawn template no longer restates the story JSON shape and the authoring rules that are the same for every story; the agent file holds them. The rules the agent file lacked moved there: the foundation-entry skill attach, the spec-driven decomposition, the DesignSpec § 2.2 prop-signature criterion, the prototype-versus-DesignSpec canonical split and the no-paraphrase rule for visual literals.
+- The plugin `CLAUDE.md` went from 203 KB to 22 KB, small enough to load whole: an index of `docs/dev/` plus the rules that apply to every change.
+- `scripts/test-command-size.sh` holds budgets in 4096-byte steps. A file passes when its size is above the step below its budget and at most the budget. Growing past the budget fails as over budget, shrinking into the step below fails as stale, and a budget that is not a multiple of 4096 fails as malformed. Each finding names the number to write. The corpus file count is derived rather than pinned.
+- The wave loop's comments and § Resolve CLI Path keep one line of instruction each; the reasoning moved to `docs/dev/`. Step 4 went from 62847 to 48330 bytes and `cli-path-resolution.md` from 38829 to 27149 bytes. The "moved here verbatim" line is gone from 84 step files.
+
+### Fixed
+- Step 3.2 of `/aimi:execute` read `maxConcurrency` from `init-session`, which never returns it, so every run used 20. It reads `metadata` now.
+- The gate checks in Step 4 and Step 5 read `.gate` from `status` rows, which carry no gate; they read it from `get-story`. The post-merge visual check read `verification` and `prototypeAnchor` from `list-ready --brief` stubs, which carry neither; it reads the full story.
+- Step 1.6 compared against a `DEFAULT_BRANCH` its own shell never set, and Step 0.7 read variables assigned in another shell.
+- Two serve-url blocks in Step 4 called `$AIMI_CLI` without resolving it, and one read the tasks file with raw `jq` instead of `metadata`.
+- `next.md` and `step-3-3` referred to a "PROJECT GUIDELINES" section that does not exist.
+
 ## [1.157.1] - 2026-11-11
 
 Three fixes from issue #183: `forge-pr-edit` takes the same `--pr` flag as the other pull request verbs, design bundle detection for a phase no longer offers other features' bundles, and an `outline:NN` reference can no longer reach a tasks file unresolved.
