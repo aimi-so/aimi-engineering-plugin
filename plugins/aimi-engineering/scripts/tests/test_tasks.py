@@ -10421,12 +10421,13 @@ def test_every_metadata_key_plan_md_writes_is_named_in_the_plugin_s_schema_doc()
     the enumeration would push those paragraphs into a list that cannot hold
     them. What it refuses is a key that appears nowhere in the section at all.
     """
-    with open(os.path.join(PLUGIN_ROOT, "CLAUDE.md"), encoding="utf-8") as handle:
+    with open(os.path.join(PLUGIN_ROOT, "docs", "dev", "tasks-schema.md"), encoding="utf-8") as handle:
         claude = handle.read()
     heading = "## Tasks File Schema"
     assert claude.count(heading) == 1
     section = claude[claude.index(heading):]
-    section = section[:section.index("\n## ", 1)]
+    end = section.find("\n## ", 1)
+    section = section if end == -1 else section[:end]
 
     undocumented = [
         key for key in _metadata_keys_plan_md_emits()
@@ -10434,7 +10435,7 @@ def test_every_metadata_key_plan_md_writes_is_named_in_the_plugin_s_schema_doc()
     ]
     assert undocumented == [], (
         "plan.md writes these metadata keys and "
-        "plugins/aimi-engineering/CLAUDE.md's Tasks File Schema section names "
+        "plugins/aimi-engineering/docs/dev/tasks-schema.md's Tasks File Schema section names "
         "none of them: " + ", ".join(undocumented) + ". Document each one there "
         "-- in the key enumeration, or in a paragraph of its own -- in the same "
         "commit that adds it to plan.md's template."

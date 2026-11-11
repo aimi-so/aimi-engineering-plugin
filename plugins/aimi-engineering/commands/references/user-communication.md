@@ -45,7 +45,7 @@ Examples: "false root," "bipartition invariant," "token-aware." If a term like t
 Being real code doesn't put an ALL-CAPS symbol in Bucket 1 — the test is whether a person outside this codebase would recognize it or search for it, not whether it exists in the source.
 
 - `PHASE_SPLIT_MODE`, `CONTAINER_MODE` — **Bucket 2.** Internal state flags meaningful only to the orchestrating command's own control flow, not names a person would recognize or search for. A completion report should say "the stories ran as separate splits, one per output file," never surface the variable name.
-- `--split full-stack` — **Bucket 1**, even though it is also a literal CLI flag: it is documented in `aimi-cli.sh`'s own help output and in `plugins/aimi-engineering/CLAUDE.md`, so a person can search and find it.
+- `--split full-stack` — **Bucket 1**, even though it is also a literal CLI flag: it is documented in `aimi-cli.sh`'s own help output and in `plugins/aimi-engineering/docs/dev/planning-verbs.md`, so a person can search and find it.
 
 The dividing question for any ALL-CAPS symbol: would a person outside this codebase recognize it or successfully search for it? If yes, Bucket 1. If it only means something inside this plugin's own control flow, Bucket 2 — gloss it or cut it before it reaches the human.
 
