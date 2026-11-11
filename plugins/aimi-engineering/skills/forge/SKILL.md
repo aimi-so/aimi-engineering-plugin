@@ -33,7 +33,7 @@ Read verbs change nothing and need no confirmation. Each prints a JSON envelope 
 Each write verb prints `{status, data, message}` with `status` of `created`, `unchanged` or `degraded`. A re-run of a verb that already did its work answers `unchanged` and writes nothing.
 
 - `forge-pr-create --title <t> --base <branch> --head <branch> [--body <text>] [--project <path>]`: open a PR; an open PR on `--head` is reported, not duplicated.
-- `forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]`: change the title or body of a PR.
+- `forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]`: change the title or body of a PR. `--number <n>` is an alias of `--pr <n>`.
 - `forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]`: merge a PR; both flags are required.
 - `forge-issue-create --title <t> --body <b> [--project <path>]`: open an issue.
 - `forge-resolve-review-thread --thread-id <id> [--project <path>]`: mark one review thread resolved.

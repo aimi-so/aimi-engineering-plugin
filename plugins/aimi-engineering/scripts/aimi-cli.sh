@@ -7634,11 +7634,12 @@ _forge_pr_edit() {
   _forge_emit_write_status unchanged "$(_forge_build_write_data "$pr_url" "$pr_number")"
 }
 
-# Public wrapper: parses --number/--title/--body/--project (no --token or
-# similarly credential-shaped flag -- see this section's header comment),
+# Public wrapper: parses --pr (or its older spelling --number)/--title/--body/
+# --project (no --token or similarly credential-shaped flag -- see this
+# section's header comment),
 # applies the same three standard guards as cmd_forge_pr_create (project cd,
 # git-repository check, identifier validation before shelling out) --
-# --number is validated as numeric-only (^[0-9]+$) rather than the branch-
+# the PR number is validated as numeric-only (^[0-9]+$) rather than the branch-
 # name pattern, matching cmd_forge_issue_view's own numeric-identifier guard
 # -- then delegates exactly once to _forge_pr_edit.
 #
@@ -7649,14 +7650,21 @@ _forge_pr_edit() {
 # --body alone. Nothing in the plugin passes --title today; forge-pr-create
 # has accepted one since it was written, and this is the symmetric ability
 # forge-pr-edit simply lacked (GitHub issue #110).
+#
+# --pr is the spelling forge-pr-view, forge-pr-merge and forge-pr-review-threads
+# take, so a caller that learned it from them is not refused here (GitHub issue
+# #183). --number is kept as an alias because commands written against it still
+# run verbatim. Unlike forge-pr-view, the value is a number and never a branch:
+# an edit has to name exactly one PR. The validation message names whichever
+# spelling the caller used.
 cmd_forge_pr_edit() {
   check_jq
 
-  local number="" body="" title="" project_dir="" body_provided="" title_provided=""
+  local number="" number_flag="--pr" body="" title="" project_dir="" body_provided="" title_provided=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      --number)  shift; number="${1:-}" ;;
+      --pr|--number) number_flag="$1"; shift; number="${1:-}" ;;
       # body_provided tracks whether the FLAG was seen, deliberately not
       # whether its value is non-empty: `gh pr edit N --body ""` blanks a
       # description, so "flag omitted entirely" (a caller that forgot it,
@@ -7682,7 +7690,8 @@ cmd_forge_pr_edit() {
   _require_git_repo "$project_dir"
 
   if [ -z "$number" ] || { [ -z "$body_provided" ] && [ -z "$title_provided" ]; }; then
-    echo "Usage: aimi-cli.sh forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]" >&2
+    echo "Usage: aimi-cli.sh forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]" >&2
+    echo "       --number <n> is accepted as an alias of --pr <n>" >&2
     echo "       at least one of --title / --body is required" >&2
     exit 1
   fi
@@ -7702,7 +7711,7 @@ cmd_forge_pr_edit() {
   fi
 
   if ! [[ "$number" =~ ^[0-9]+$ ]]; then
-    echo "Error: forge-pr-edit: --number must be a positive integer (got: $number)" >&2
+    echo "Error: forge-pr-edit: $number_flag must be a positive integer (got: $number)" >&2
     exit 1
   fi
 
@@ -10287,8 +10296,14 @@ _select_design_bundle() {
   # output below is then byte-identical to what it was before the flag existed.
   local filter_active=false filtered_json="[]"
   if [ "$feature_stdin" = true ] && [ "$scan_count" -gt 0 ]; then
+    # --phase-dir was confined by cmd_detect_design_bundle before python3
+    # starts; bundle_relevance.py reads the roadmap.json beside it for the
+    # phase's own words, so a bare `/aimi:plan --phase N` (empty description)
+    # still filters (GitHub issue #183).
     local relevance_json
-    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" -- "${scan_candidates[@]}") || {
+    local -a relevance_args=()
+    [ -z "$phase_dir" ] || relevance_args=(--phase-dir "$phase_dir")
+    relevance_json=$(printf '%s' "$feature_desc" | python3 "$(_aimi_script_py bundle_relevance.py)" "${relevance_args[@]+"${relevance_args[@]}"}" -- "${scan_candidates[@]}") || {
       echo "Error: detect-design-bundle: the --feature-stdin relevance filter failed" >&2
       exit 1
     }
@@ -17313,6 +17328,8 @@ COMMANDS:
                               With --outline, a story that consumes a name another outline
                               entry produces but whose dependsOn lacks that entry's
                               outline:NN token is a finding too (ext: consumes need none).
+                              So is an outline: reference in any field that is not exactly
+                              two digits (outline:7, outline:007): it names no staged file.
                               A staged file that is not valid JSON is skipped.
     acknowledge-evidence --reason <text> [--tasks-file <path>]
                               Record metadata.evidenceAcknowledged {reason, acknowledgedAt,
@@ -17617,7 +17634,7 @@ COMMANDS:
                               an adapter. Identity, when needed, is read from
                               an env var (e.g. AIMI_FORGE_IDENTITY /
                               GH_TOKEN), never a flag.
-    forge-pr-edit --number <n> [--title <text>] [--body <text>] [--project <path>]
+    forge-pr-edit --pr <n> [--title <text>] [--body <text>] [--project <path>]
                               Write verb -- shells gh pr edit <number> with
                               --title and/or --body, then re-reads the PR via
                               forge-pr-view to confirm and report
@@ -17633,6 +17650,8 @@ COMMANDS:
                               refused, since no forge stores an empty title.
                               Same guards, degrade contract, and
                               non-zero-exit-on-failure as forge-pr-create.
+                              --number <n> is accepted as an alias of --pr <n>;
+                              unlike forge-pr-view, the value must be a number.
                               github and gitlab each have an adapter
                               (glab mr update -t/-d).
     forge-pr-merge --pr <branch-or-number> --style <merge|squash|rebase> [--project <path>]
@@ -18028,9 +18047,12 @@ COMMANDS:
                               listing only the relevant ones. The discarded
                               bundles are named on stderr and, on the JSON
                               object outputs, listed in a filtered[] array of
-                              paths. An empty, whitespace-only or all-stop-word
-                              description turns the filter off and adds no
-                              filtered key. The phase tier, --bundle and --all
+                              paths. With --phase-dir, the feature and the
+                              phase's name, slug and goal from the roadmap.json
+                              beside it count as part of the description. An
+                              empty, whitespace-only or all-stop-word
+                              description with no such phase words turns the
+                              filter off and adds no filtered key. The phase tier, --bundle and --all
                               are never filtered. Without the flag every
                               output is unchanged. Requires python3 and
                               refuses with exit 1 without it.

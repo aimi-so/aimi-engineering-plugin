@@ -3877,3 +3877,31 @@ def test_verification_url_merge_does_not_refuse_a_rejected_url(tmp_path):
     proc, doc = _merge(tmp_path, {"01-a.json": _url_story("A", "POST /api/x")})
     assert proc.returncode == 0, proc.stderr
     assert doc["userStories"][0]["verification"]["url"] == "POST /api/x"
+
+
+# GitHub issue #183: a reference in title, description or verification.expect
+# survived both text passes. The walk now covers them, after the older fields.
+
+
+def test_outline_ref_rewrites_title_description_and_verification_expect(tmp_path):
+    files = _gap_files(
+        **{
+            "01-a.json": {
+                "title": "A after outline:04",
+                "description": "As a user, once outline:02 lands, I want A.",
+                "verification": {"strategy": "test", "status": "pending", "expect": "outline:04 passes"},
+            }
+        }
+    )
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 0, proc.stderr
+    a = _by_title(doc)["A after US-003"]
+    assert a["description"] == "As a user, once US-002 lands, I want A."
+    assert a["verification"]["expect"] == "US-003 passes"
+
+
+def test_outline_ref_in_description_on_an_unstaged_idx_is_refused_by_field(tmp_path):
+    files = _gap_files(**{"02-b.json": {"description": "As a user, after outline:03, I want B."}})
+    proc, doc = _merge(tmp_path, files)
+    assert proc.returncode == 1 and doc is None
+    assert "US-002 description: outline:03" in proc.stderr

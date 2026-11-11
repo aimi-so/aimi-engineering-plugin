@@ -175,7 +175,7 @@ from roadmap import (
 # file is a DIFFERENT function -- validate_waves' own read-only twin, which
 # returns a dict and omits any story a cycle or a dangling dependency never
 # reaches. This import is the writer; that one stays the checker.
-from story_merge import compute_waves
+from story_merge import compute_waves, outline_tokens_in
 
 # The one prose sanitizer roadmap.py and story_merge.py already import -- see
 # sanitize.py's own docstring for why it is a module of its own rather than a
@@ -3221,7 +3221,33 @@ def validate_tasks(docs, tasks_file, project_root, fields, warn):
                     + ": " + finding
                 )
 
+    # R26 -- an `outline:` + digits left in a story. There is no R25: that
+    # number belonged to the citation rule the known-gaps backtest withheld, and
+    # it stays unused so the two are never confused. Appended AFTER R24 for
+    # R17's reason. An ERROR: outline:NN is a staging-only reference that
+    # story-merge rewrites to US-NNN, so one that survived names nothing an
+    # executor can resolve (GitHub issue #183: notes still citing outline:NN
+    # after the merge). story-merge already refuses a two-digit token whose idx
+    # has no staged file; this catches the forms its remap leaves as text and
+    # anything written into the file after the merge. `outline:edit:NN`, the
+    # decision anchor, does not match. What counts as a token is
+    # story_merge.outline_tokens_in, the reading the merge's smell and
+    # validate-staging share, so the three cannot disagree.
+    for doc in docs:
+        for story in _stories(doc):
+            if not isinstance(story, dict):
+                continue
+            for path, token in dict.fromkeys(outline_tokens_in(story)):
+                errors.append(
+                    tasks_file + ": "
+                    + jq_tostring(jq_index(story, "id", ".userStories[]"))
+                    + ": " + path + " still carries " + token
+                    + ", a staging reference story-merge did not resolve; replace it"
+                    " with the US-NNN id of the story it names"
+                )
+
     return errors
+
 
 
 def _validate_endpoints(docs, tasks_file, business_spec_path, errors, warn):

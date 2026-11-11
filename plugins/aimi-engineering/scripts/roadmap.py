@@ -2650,6 +2650,36 @@ def read_doc(path, verb):
         die("Error: " + verb + ": malformed roadmap.json: " + path)
 
 
+def phase_relevance_text(roadmap_path, phase_dir_name):
+    """The words roadmap.json holds about one phase, for bundle relevance.
+
+    The phase is the one whose `dir` is `phase_dir_name`; the text is the
+    document's `feature` and that phase's `name`, `slug` and `goal`, one per
+    line. bundle_relevance.py adds it to the feature description, because a
+    bare `/aimi:plan --phase N` has no description of its own and an empty one
+    turns the filter off (GitHub issue #183).
+
+    Returns "" for a missing, unreadable or malformed document and for a phase
+    it does not hold. Unlike read_doc this never dies: the caller is a filter,
+    and a roadmap it cannot read means "nothing to add", not a failed detection.
+    """
+    try:
+        with open(roadmap_path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(doc, dict):
+        return ""
+    phases = doc.get("phases")
+    if not isinstance(phases, list):
+        return ""
+    for phase in phases:
+        if isinstance(phase, dict) and phase.get("dir") == phase_dir_name:
+            parts = [doc.get("feature"), phase.get("name"), phase.get("slug"), phase.get("goal")]
+            return "\n".join(part for part in parts if isinstance(part, str) and part)
+    return ""
+
+
 def write_doc_atomically(path, doc):
     """tmp beside the target, then rename. Same discipline every roadmap writer uses."""
     directory = os.path.dirname(path) or "."

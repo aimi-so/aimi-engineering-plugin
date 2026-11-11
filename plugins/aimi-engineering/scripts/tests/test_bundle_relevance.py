@@ -189,3 +189,54 @@ class TestVerb:
         assert proc.returncode == 1
         assert b"unknown flag" in proc.stderr
         assert proc.stdout == b""
+
+
+# --phase-dir: the phase's words from roadmap.json (GitHub issue #183). A bare
+# `/aimi:plan --phase N` has an empty description, which used to turn the
+# filter off and offer every bundle in the tree.
+
+
+def make_phase_dir(tmp_path, goal="Schedule group games across venues"):
+    feature = tmp_path / ".aimi" / "tasks" / "tournament-brackets"
+    feature.mkdir(parents=True)
+    (feature / "roadmap.json").write_text(json.dumps({
+        "feature": "tournament-brackets",
+        "phases": [{"id": 2, "name": "Scheduling", "slug": "scheduling", "goal": goal,
+                    "dir": "phase-2-scheduling"}],
+    }))
+    return str(feature / "phase-2-scheduling")
+
+
+def run_module_with_phase(description, phase_dir, dirs):
+    return subprocess.run(
+        [sys.executable, MODULE, "--phase-dir", phase_dir, "--"] + list(dirs),
+        input=description.encode("utf-8"),
+        capture_output=True,
+    )
+
+
+def test_phase_words_keep_the_filter_on_for_an_empty_description(tmp_path):
+    phase_dir = make_phase_dir(tmp_path)
+    unrelated = [make_bundle(tmp_path, "checkout-redesign"), make_bundle(tmp_path, "billing-dashboard")]
+    proc = run_module_with_phase("", phase_dir, unrelated)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {"active": True, "relevant": [], "filtered": unrelated}
+
+
+def test_phase_words_make_a_bundle_named_after_the_phase_relevant(tmp_path):
+    phase_dir = make_phase_dir(tmp_path)
+    related = make_bundle(tmp_path, "venue-schedule")
+    unrelated = make_bundle(tmp_path, "checkout-redesign")
+    proc = run_module_with_phase("", phase_dir, [related, unrelated])
+    assert json.loads(proc.stdout) == {"active": True, "relevant": [related], "filtered": [unrelated]}
+
+
+def test_phase_words_count_outside_the_description_cap():
+    long_description = "lorem " * 400
+    assert B.bundle_relevance_filter(long_description, ["x/venues/"], "venues")[1] == ["x/venues/"]
+
+
+def test_a_phase_dir_with_no_roadmap_adds_nothing(tmp_path):
+    bundle = make_bundle(tmp_path, "checkout-redesign")
+    proc = run_module_with_phase("", str(tmp_path / "nowhere" / "phase-1"), [bundle])
+    assert json.loads(proc.stdout) == {"active": False, "relevant": [bundle], "filtered": []}

@@ -5158,3 +5158,47 @@ def test_force_does_not_bypass_the_visual_gate_either(tmp_path):
     assert proc.returncode != 0
     assert "roadmap-record-visual-gate" in proc.stderr
     assert _stored_status(root, feature) == "in_progress"
+
+
+# ---------------------------------------------------------------------------
+# phase_relevance_text: the phase's words for the bundle relevance filter
+# (GitHub issue #183). It reads, and it never dies.
+# ---------------------------------------------------------------------------
+
+
+def _relevance_roadmap(tmp_path, doc):
+    path = tmp_path / "roadmap.json"
+    path.write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
+    return str(path)
+
+
+def test_phase_relevance_text_is_feature_name_slug_and_goal_of_the_matching_dir(tmp_path):
+    path = _relevance_roadmap(tmp_path, {
+        "feature": "tournament-brackets",
+        "phases": [
+            {"id": 1, "name": "Draw", "slug": "draw", "goal": "Run the draw", "dir": "phase-1-draw"},
+            {"id": 2, "name": "Scheduling", "slug": "scheduling", "goal": "Schedule games", "dir": "phase-2-scheduling"},
+        ],
+    })
+    assert R.phase_relevance_text(path, "phase-2-scheduling") == (
+        "tournament-brackets\nScheduling\nscheduling\nSchedule games"
+    )
+
+
+def test_phase_relevance_text_skips_missing_and_non_string_fields(tmp_path):
+    path = _relevance_roadmap(tmp_path, {"phases": [{"name": "Draw", "goal": None, "dir": "phase-1"}]})
+    assert R.phase_relevance_text(path, "phase-1") == "Draw"
+
+
+@pytest.mark.parametrize("doc", [
+    "{not json",
+    "[]",
+    {"feature": "f", "phases": {"dir": "phase-1"}},
+    {"feature": "f", "phases": [{"name": "Other", "dir": "phase-9"}, "phase-1"]},
+])
+def test_phase_relevance_text_is_empty_for_a_bad_document_or_an_unknown_phase(tmp_path, doc):
+    assert R.phase_relevance_text(_relevance_roadmap(tmp_path, doc), "phase-1") == ""
+
+
+def test_phase_relevance_text_is_empty_without_a_roadmap(tmp_path):
+    assert R.phase_relevance_text(str(tmp_path / "roadmap.json"), "phase-1") == ""
