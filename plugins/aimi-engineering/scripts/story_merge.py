@@ -2169,17 +2169,28 @@ def _string_fields(value, path):
             yield from _string_fields(child, path)
 
 
+def outline_tokens_in(story, skip=()):
+    """(field path, token) for each `outline:` + digits in a story, in walk order.
+
+    The one reading of "an outline token left in a story" that the leftover
+    smell below, validate-staging's malformed-token findings and validate-tasks
+    rule R26 (tasks.py) all share, so the three cannot disagree. Working keys,
+    `_`-prefixed keys and the keys in `skip` are not read; a token repeated in
+    one field is yielded each time, and callers dedupe as they need.
+    """
+    for key, value in story.items():
+        if key in skip or key in _WORKING_KEYS or key.startswith("_"):
+            continue
+        for path, text in _string_fields(value, key):
+            for match in LEFTOVER_OUTLINE_PATTERN.finditer(text):
+                yield path, match.group(0)
+
+
 def leftover_outline_token_smells(stories):
     """Stories where an `outline:` + digits survived the remap in a non-dependsOn field."""
     entries = []
     for story in stories:
-        fields = set()
-        for key, value in story.items():
-            if key == "dependsOn" or key in _WORKING_KEYS or key.startswith("_"):
-                continue
-            for path, text in _string_fields(value, key):
-                if LEFTOVER_OUTLINE_PATTERN.search(text):
-                    fields.add(path)
+        fields = {path for path, _token in outline_tokens_in(story, skip=("dependsOn",))}
         if fields:
             ordered = sorted(fields)
             entries.append(
@@ -2205,21 +2216,16 @@ def malformed_outline_token_findings(story):
     reference) never matches.
     """
     findings = []
-    for key, value in story.items():
-        if key in _WORKING_KEYS or key.startswith("_"):
+    for path, token in outline_tokens_in(story):
+        if OUTLINE_TOKEN.fullmatch(token):
             continue
-        for path, text in _string_fields(value, key):
-            for match in LEFTOVER_OUTLINE_PATTERN.finditer(text):
-                token = match.group(0)
-                if OUTLINE_TOKEN.fullmatch(token):
-                    continue
-                finding = rm_sanitize(
-                    path + ": " + token + " is not an outline reference; write outline:NN"
-                    " with the two-digit idx of the staged file it names",
-                    _FINDING_MAXLEN,
-                )
-                if finding not in findings:
-                    findings.append(finding)
+        finding = rm_sanitize(
+            path + ": " + token + " is not an outline reference; write outline:NN"
+            " with the two-digit idx of the staged file it names",
+            _FINDING_MAXLEN,
+        )
+        if finding not in findings:
+            findings.append(finding)
     return findings
 
 

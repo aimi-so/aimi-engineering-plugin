@@ -93,18 +93,27 @@ def test_validate_staging_cli_keys_the_finding_by_staged_idx(tmp_path):
 # --- validate-tasks R26 -------------------------------------------------------
 
 
-def test_r26_walker_reports_each_field_and_token_once():
+def test_the_shared_walk_yields_field_and_token_in_order_and_honours_skip():
     story = {
         "id": "US-001",
         "notes": "see outline:03 and outline:03 and outline:edit:02",
         "implementation": {"approach": "after outline:7"},
         "gate": {"options": ["outline:04", "no"]},
+        "dependsOn": ["outline:05"],
+        "_stagedIdx": "outline:09",
     }
-    assert T._leftover_outline_tokens(story) == [
+    assert list(SM.outline_tokens_in(story)) == [
+        ("notes", "outline:03"),
         ("notes", "outline:03"),
         ("implementation.approach", "outline:7"),
         ("gate.options", "outline:04"),
+        ("dependsOn", "outline:05"),
     ]
+    assert ("dependsOn", "outline:05") not in list(SM.outline_tokens_in(story, skip=("dependsOn",)))
+
+
+def test_tasks_r26_uses_the_shared_walk():
+    assert T.outline_tokens_in is SM.outline_tokens_in
 
 
 def _validate_tasks(tmp_path, stories):
@@ -141,7 +150,7 @@ def _task(number, **fields):
 
 def test_r26_a_leftover_token_in_notes_is_an_error_naming_story_field_and_token(tmp_path):
     code, out, err = _validate_tasks(
-        tmp_path, [_task(1), _task(2, notes="[audit-deferred: resolved at plan review] see outline:01")]
+        tmp_path, [_task(1), _task(2, notes="[audit-deferred: resolved at plan review] see outline:01, outline:01")]
     )
     assert code == 1, err
     verdict = json.loads(out)
