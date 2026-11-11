@@ -35,7 +35,7 @@ A spawned split task is a Task the orchestrator started for one member of a spli
 
 ## Step 0: Resolve CLI Path
 
-Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`: its Fast path block is one Bash call, and the layers after it run one at a time only when it prints `AIMI_CLI_UNRESOLVED`.
 
 If resolution fails, report error and STOP.
 
@@ -176,6 +176,7 @@ elif [ "$INLINE_FLAG" = "true" ]; then
 else
   EXECUTION_OVERRIDE=""
 fi
+echo "EXECUTION_OVERRIDE=$EXECUTION_OVERRIDE"
 ```
 
 If `EXECUTION_OVERRIDE` is `"conflict"`, report `--container and --inline are mutually exclusive — pass at most one.` and STOP. Otherwise `EXECUTION_OVERRIDE` is `"container"`, `"inline"`, or empty (no flag passed) — consumed by Execution Mode Detection below.
@@ -190,7 +191,7 @@ Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute
 ## Step 1.5: Branch Freshness Check
 
 Applies when: every run; it derives `AIMI_ROOT_IS_GIT_REPO`, `DEFAULT_BRANCH` and fetches origin.
-Covers: `### Detect Git Repo Layout`, `### Default Branch and Origin Fetch`.
+Covers: `### Detect Git Repo Layout` (which also detects the default branch and fetches origin).
 Before running this step, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/execute/step-1-5-branch-freshness.md in full.
 
 

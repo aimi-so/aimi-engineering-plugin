@@ -11,17 +11,14 @@ AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-p
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 TASKS_PATH="$($AIMI_CLI init-session 2>/dev/null | jq -r '.tasks // empty')"
 VERIF_REPORT=$($AIMI_CLI verification-report --tasks-file "$TASKS_PATH" 2>/dev/null)
-VISUAL_STORIES=$(printf '%s' "$VERIF_REPORT" | jq '.visual | length' 2>/dev/null)
-REPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.repairable | length' 2>/dev/null)
-UNREPAIRABLE_COUNT=$(printf '%s' "$VERIF_REPORT" | jq '.malformed.unrepairable | length' 2>/dev/null)
+printf '%s' "$VERIF_REPORT" | jq -r '"VISUAL_STORIES=\(.visual | length)",
+  "REPAIRABLE_COUNT=\(.malformed.repairable | length)",
+  "UNREPAIRABLE_COUNT=\(.malformed.unrepairable | length)",
+  "REPAIRABLE_IDS=\(.malformed.repairable | join(", "))",
+  "UNREPAIRABLE_IDS=\(.malformed.unrepairable | join(", "))"' 2>/dev/null
 ```
 
-If `REPAIRABLE_COUNT` > 0 or `UNREPAIRABLE_COUNT` > 0, collect the affected story IDs and abort. The two counts are kept apart deliberately: `normalize-verification` (`_verification_migrated` in `tasks.py`) rewrites a bare-string `verification` — the empty string included — and returns every other non-object shape untouched, so a number-, array- or boolean-typed `verification` is malformed but not something that verb can fix. Naming it as the fix for a shape it declines to touch would send the user into a loop with no exit; this is a deliberate divergence from the single undifferentiated `MALFORMED_VERIF` scan this replaced, not a preserved behavior — the UNION of the two counts still matches what that scan counted.
-
-```bash
-REPAIRABLE_IDS=$(printf '%s' "$VERIF_REPORT" | jq -r '.malformed.repairable | join(", ")' 2>/dev/null)
-UNREPAIRABLE_IDS=$(printf '%s' "$VERIF_REPORT" | jq -r '.malformed.unrepairable | join(", ")' 2>/dev/null)
-```
+Read the five values back from the lines this block echoes. If `REPAIRABLE_COUNT` > 0 or `UNREPAIRABLE_COUNT` > 0, abort with the affected story IDs. The two counts are kept apart deliberately: `normalize-verification` (`_verification_migrated` in `tasks.py`) rewrites a bare-string `verification` — the empty string included — and returns every other non-object shape untouched, so a number-, array- or boolean-typed `verification` is malformed but not something that verb can fix. Naming it as the fix for a shape it declines to touch would send the user into a loop with no exit; this is a deliberate divergence from the single undifferentiated `MALFORMED_VERIF` scan this replaced, not a preserved behavior — the UNION of the two counts still matches what that scan counted.
 
 Report the error and STOP. The header is always present; the two paragraphs below it are each included only when their own count is non-zero, so a file with only one shape of malformed `verification` gets a one-paragraph report, and a file with both gets both:
 ```
@@ -47,7 +44,7 @@ Rewrite each of these stories' verification field into the object form by hand, 
 ```
 STOP execution.
 
-- **If `VISUAL_STORIES` is 0 or empty:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
+- **If `VISUAL_STORIES` is 0 or absent:** Set `VISUAL_FOLLOW=false`. Proceed to Step 1.
 
 - **If `VISUAL_STORIES` > 0:** Prompt the user:
 

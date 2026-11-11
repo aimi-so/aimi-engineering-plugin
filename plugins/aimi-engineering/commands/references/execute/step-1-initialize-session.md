@@ -41,9 +41,12 @@ if [ -f "$FEATURE_DIR/roadmap.json" ]; then
   PHASE_MODE=true
   FEATURE=$(basename "$FEATURE_DIR")
   ROADMAP_PATH="$FEATURE_DIR/roadmap.json"
+  echo "FEATURE=$FEATURE"
+  echo "ROADMAP_PATH=$ROADMAP_PATH"
 else
   PHASE_MODE=false
 fi
+echo "PHASE_MODE=$PHASE_MODE"
 ```
 
 This needs no new CLI call: a flat file's tasks path is a direct child of `.aimi/tasks/` (e.g. `<root>/.aimi/tasks/2026-02-24-feature-tasks.json`), so `$FEATURE_DIR` resolves to `<root>/.aimi` — which never contains `roadmap.json`. A nested phase file's tasks path is `<root>/.aimi/tasks/<feature>/phase-N[.M]-<slug>/<feature>-phase-N-tasks.json`, so `$FEATURE_DIR` resolves to `<root>/.aimi/tasks/<feature>` — exactly where `roadmap-init` writes `roadmap.json`. This is the same directory-arithmetic `cmd_list_archivable` already uses to group nested files by feature.

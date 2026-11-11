@@ -14,7 +14,7 @@ Perform a meticulous final pass to catch all the small details that separate goo
 
 ### Resolve CLI Path
 
-Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`. Each layer is a separate Bash call.
+Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path** and **Version Check** sections to set `$AIMI_CLI`: its Fast path block is one Bash call, and the layers after it run one at a time only when it prints `AIMI_CLI_UNRESOLVED`.
 
 If resolution fails, fall back to a default of `INTERACTIVE_MODE=picker` and log: `warning: aimi-cli.sh unresolved — forcing INTERACTIVE_MODE=picker`.
 

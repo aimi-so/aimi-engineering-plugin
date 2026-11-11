@@ -34,6 +34,10 @@ PLAN_DISC = sanitized stem of WAVE_TASKS_FILE
 # On EXECUTOR_BRIEF_MISSING, stop and report: never spawn a worker without its brief.
 EXECUTOR_BRIEF = path echoed above
 
+# metadata — this run's tasks-file metadata, read once; the post-merge design
+# review reads its `prototypePaths`.
+metadata = $AIMI_CLI metadata --tasks-file [WAVE_TASKS_FILE]
+
 while true:
     # ========================================
     # RE-POINT THE CLI — TOP OF THE WAVE, NEVER MID-WAVE
@@ -74,8 +78,11 @@ while true:
             # GATE-BLOCKED STORY DETECTION
             # ========================================
             # Before reporting deadlock, check if stories are blocked by gates.
-            # Use $AIMI_CLI status to get all stories and identify gate-blocked ones.
-            all_stories = $AIMI_CLI status --tasks-file [WAVE_TASKS_FILE]
+            # `status` rows carry no `gate`: take the ids from `status`, then each
+            # story's gate from `get-story`, in ONE Bash call — the same loop
+            # Step 5's gate summary runs, with `{id, status, dependsOn, gate}`
+            # printed for every story rather than pending gates only.
+            all_stories = $AIMI_CLI status --tasks-file [WAVE_TASKS_FILE], each row joined with its gate from get-story
             decision_blocked = []  # stories with pending decision gates
             action_blocked = []    # stories whose dependencies have pending action gates
 
@@ -691,6 +698,12 @@ while true:
                 #   5. errors  --json   ← capture this story's uncaught exceptions
                 # Per-story attribution depends on the --clear in step 1 — without it,
                 # console buffer is wave-cumulative and last-story-merged eats the blame.
+                #
+                # The wave's stories are `list-ready --brief` stubs ({id, title,
+                # priority, dependsOn, project, gate}): no `verification`, no
+                # `implementation`. Replace this one with the whole story before
+                # the visual, judge and design-review checks below read them:
+                full_story = $AIMI_CLI get-story [full_story.id] --tasks-file [WAVE_TASKS_FILE]
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
                     # --- Post-merge visual verification origin rewrite / degradation gate ---
                     # `group_key` is already in scope here from the enclosing "for
@@ -735,6 +748,8 @@ while true:
                             # Sub-Orchestrators), so this applies unmodified one level
                             # deeper too.
                             ```bash
+                            AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+                            : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
                             WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                             : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
                             cd "$AIMI_ROOT"
@@ -770,9 +785,11 @@ while true:
                                 SKIP_VISUAL=true
                             else:
                                 ```bash
+                                AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+                                : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
                                 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                                 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
-                                BRANCH_NAME=$(jq -r '.metadata.branchName' "$TASKS_PATH")
+                                BRANCH_NAME=$($AIMI_CLI metadata --tasks-file "$TASKS_PATH" | jq -r '.branchName')
                                 if [ "[group_key]" = "DEFAULT" ]; then
                                   cd "$AIMI_ROOT"
                                 else

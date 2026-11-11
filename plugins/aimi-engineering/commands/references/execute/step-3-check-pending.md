@@ -9,15 +9,24 @@ Resolve this run's own tasks file explicitly — `$PHASE_TASKS_PATH` when `PHASE
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+PHASE_MODE="[PHASE_MODE echoed by Step 1, or from the spawn prompt]"
+TASKS_PATH="[tasks path from the init-session output]"
+PHASE_TASKS_PATH="[PHASE_TASKS_PATH from Step 1.7 or the spawn prompt, empty in flat mode]"
 if [ "$PHASE_MODE" = "true" ]; then
   RUN_TASKS_FILE="$PHASE_TASKS_PATH"
 else
   RUN_TASKS_FILE="$TASKS_PATH"
 fi
-$AIMI_CLI count-pending --tasks-file "$RUN_TASKS_FILE"
+PENDING=$($AIMI_CLI count-pending --tasks-file "$RUN_TASKS_FILE")
+echo "PENDING=$PENDING"
+if [ "$PENDING" != "0" ]; then
+  $AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE" || echo "VALIDATE_DEPS=failed"
+fi
 ```
 
-If result is `0`:
+The block also runs Validate Dependencies below whenever something is pending, so on the common path Step 3 is one Bash call.
+
+If `PENDING` is `0`:
 
 **Re-verify branch — a phase that entered `verification_failed` with nothing left to execute.** Evaluate this branch **first**, before the release-and-STOP below. It fires only when **all five** of these hold together:
 
@@ -65,20 +74,9 @@ STOP execution.
 
 ### Validate Dependencies
 
-Same resolution as this step's own `count-pending` above — the identical `PHASE_MODE`-conditioned formula:
+`validate-deps` ran in this step's `count-pending` block above, on the same file, whenever `PENDING` was not `0`.
 
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-if [ "$PHASE_MODE" = "true" ]; then
-  RUN_TASKS_FILE="$PHASE_TASKS_PATH"
-else
-  RUN_TASKS_FILE="$TASKS_PATH"
-fi
-$AIMI_CLI validate-deps --tasks-file "$RUN_TASKS_FILE"
-```
-
-If validation fails (non-zero exit), release the claim under the same phase-mode guard as above, report the error, and STOP:
+If that block printed `VALIDATE_DEPS=failed`, release the claim under the same phase-mode guard as above, report the error, and STOP:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)

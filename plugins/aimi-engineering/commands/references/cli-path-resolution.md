@@ -4,7 +4,23 @@ Shared reference for resolving `$AIMI_CLI` and `$WORKTREE_MGR` across all comman
 
 ## Resolve CLI Path
 
-**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it using the layered strategy below. Each command is a separate Bash call (no compound operators).
+**CRITICAL:** The CLI script lives in the plugin install directory, NOT the project directory. Resolve it with the Fast path block below, which is one Bash call; the layers after it run one at a time only when the fast path prints `AIMI_CLI_UNRESOLVED`.
+
+### Fast path: one Bash call
+
+Layers 0, 0-dev, 1 and the Layer 1 validation, each line byte-identical to its section below, in one shell, followed by the [Version Check](#version-check). None of them writes a cache file. Layer 0 comes before Layer 0-dev here because neither line checks for an earlier answer, so the later one wins, and Layer 0-dev must win.
+
+```bash
+if [ -z "${CLAUDECODE:-}" ] && [ -n "$AIMI_PLUGIN_DIR" ] && [ "${AIMI_PLUGIN_DIR#/}" != "$AIMI_PLUGIN_DIR" ] && [ -d "$AIMI_PLUGIN_DIR" ] && [ -x "$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh" ]; then AIMI_CLI="$AIMI_PLUGIN_DIR/scripts/aimi-cli.sh"; fi
+if [ -n "$AIMI_DEV_DIR" ] && [ "${AIMI_DEV_DIR#/}" != "$AIMI_DEV_DIR" ] && [ -d "$AIMI_DEV_DIR" ] && [ -x "$AIMI_DEV_DIR/scripts/aimi-cli.sh" ] && [ "${AIMI_DEV_DIR#*/.worktrees/}" = "$AIMI_DEV_DIR" ]; then AIMI_CLI="$AIMI_DEV_DIR/scripts/aimi-cli.sh"; fi
+if [ -z "$AIMI_CLI" ]; then AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null); fi
+if [ -n "$AIMI_CLI" ] && [ ! -x "$AIMI_CLI" ]; then AIMI_CLI=""; fi
+[ -n "$AIMI_CLI" ] || { echo "AIMI_CLI_UNRESOLVED"; exit 0; }
+echo "AIMI_CLI=$AIMI_CLI"
+$AIMI_CLI check-version --quiet --fix
+```
+
+`AIMI_CLI=<path>` followed by the check-version JSON means resolution and the Version Check are both done: skip every layer below and read the JSON's `status` as the Version Check section says. `AIMI_CLI_UNRESOLVED` means the cache missed (a host the SessionStart hook has not primed): run Layer 2, its cache update and Layer 3 below, one Bash call each, then the Version Check.
 
 ### Layer 0-dev: AIMI_DEV_DIR (development override, any host)
 
@@ -268,12 +284,14 @@ Fix: add the per-call re-read one-liner at the top of the failing Bash call. If 
 
 ## Resolve Agent Models
 
-After `$AIMI_CLI` is resolved and the version check passes, call `resolve-models` **once per command invocation** to obtain the category-to-model map. Re-read `$AIMI_CLI` from the cache before calling (each Bash tool call is an isolated shell):
+After `$AIMI_CLI` is resolved and the version check passes, run this block **once per command invocation**. It re-reads `$AIMI_CLI` from the cache (each Bash tool call is an isolated shell, and a `--fix` above may have moved it) and echoes the category-to-model map plus the two values the first-run prompt below needs:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-AGENT_MODELS=$($AIMI_CLI resolve-models)
+echo "AGENT_MODELS=$($AIMI_CLI resolve-models)"
+echo "INTERACTIVITY=$($AIMI_CLI detect-interactivity)"
+echo "MODELS_PROMPT=$($AIMI_CLI models-prompt-check)"
 ```
 
 `resolve-models` always emits a single-line JSON object with exactly five keys:
@@ -315,14 +333,9 @@ When `AGENT_MODELS` could not be parsed or `$AIMI_CLI` was not resolved, treat e
 
 ### First-run configuration prompt (interactive hosts only)
 
-After `AGENT_MODELS` is resolved, check once whether the user should be offered the one-time model-selection prompt:
+The block above already echoed `INTERACTIVITY` (`detect-interactivity`) and `MODELS_PROMPT` (`models-prompt-check`). A command that resolved its own interactivity mode with a flag (brainstorm's `--non-interactive`) uses that mode in place of `INTERACTIVITY`.
 
-```bash
-_aimi_interactivity=$($AIMI_CLI detect-interactivity)
-_aimi_prompt_check=$($AIMI_CLI models-prompt-check)
-```
-
-**Only** when `detect-interactivity` returns `picker` AND `models-prompt-check` returns `prompt`, show the user exactly this question via `AskUserQuestion`:
+**Only** when `INTERACTIVITY` is `picker` AND `MODELS_PROMPT` is `prompt`, show the user exactly this question via `AskUserQuestion`:
 
 > Question: "No subagent model configuration found — agents inherit the main thread's model. Configure model selection per category?"
 > Options: A — "Configure now" ; B — "Keep the default (inherit)"
@@ -353,7 +366,7 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
 
 - Regardless of the choice (A or B): always run `$AIMI_CLI models-prompt-dismiss` so the prompt is never shown again.
 
-When `detect-interactivity` is not `picker` (agent-mode / CI) OR `models-prompt-check` returns `skip`, do nothing — proceed silently with the already-resolved map. The prompt is shown at most once ever.
+When `INTERACTIVITY` is not `picker` (agent-mode / CI) OR `MODELS_PROMPT` is `skip`, do nothing — proceed silently with the already-resolved map. The prompt is shown at most once ever.
 
 ## CWD Auto-Discovery
 
