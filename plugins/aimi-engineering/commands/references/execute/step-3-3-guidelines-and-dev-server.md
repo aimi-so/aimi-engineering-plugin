@@ -1,6 +1,6 @@
 # Execute: Step 3.3: Project Guidelines and Dev Server
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 3.3: Find Project Guidelines
 

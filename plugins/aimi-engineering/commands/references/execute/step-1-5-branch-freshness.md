@@ -1,6 +1,6 @@
 # Execute: Step 1.5: Branch Freshness Check
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 1.5: Branch Freshness Check
 

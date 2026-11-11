@@ -1,6 +1,6 @@
 # Execute: Step 0.5: Archival Check
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 
 ## Step 0.5: Archival Check

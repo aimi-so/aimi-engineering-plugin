@@ -1,6 +1,6 @@
 # Execute: Step 2: Flat Container Mode
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 2: Branch Setup
 

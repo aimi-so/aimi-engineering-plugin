@@ -11,6 +11,8 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/hooks.md` | a hook guard (staging-file, raw forge write) or a bypass env (§ Guard Bypass Envs) |
 | `docs/dev/ratchets.md` | the artifact-language or spec-section ratchet, or their baselines |
 | `docs/dev/routers.md` | `commands/plan.md`, `commands/execute.md`, their step files, or the OpenCode references allowlist |
+| `docs/dev/execute-wave-loop.md` | `commands/references/execute/step-4-wave-execution-loop.md` (the reasoning its comments point at) |
+| `docs/dev/cli-path-resolution.md` | a resolution layer or line in `commands/references/cli-path-resolution.md`, or `hooks/auto-approve-cli.sh` |
 | `docs/dev/story-lifecycle.md` | `remove-story`, `set-verification`, `acknowledge-*`, `judge-verification`, `triage-verify`, `split-detect` |
 | `docs/dev/planning-verbs.md` | `story-merge`, `apply-audit-patches`, `validate-outline`/`validate-staging`/`outline-shift`, `plan_checks.py`, advisory smells |
 | `docs/dev/cli-verbs.md` | the research and spec-derivation verbs, `check-version`, `slugify`, `detect-design-bundle` |

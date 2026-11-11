@@ -1,6 +1,6 @@
 # Execute: Step 1.7: Phase Container Dev Server and Path Notes
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Phase Container Dev Server Bootstrap
 

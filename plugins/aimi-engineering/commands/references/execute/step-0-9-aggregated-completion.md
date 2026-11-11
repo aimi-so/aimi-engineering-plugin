@@ -1,6 +1,6 @@
 # Execute: Step 0.9: Aggregated Completion
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Aggregated Completion (Split Mode)
 

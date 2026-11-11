@@ -1,6 +1,6 @@
 # Execute: Phase-Mode Paired Split: Branches and Worktrees
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 
 ## Phase-Mode Paired Split

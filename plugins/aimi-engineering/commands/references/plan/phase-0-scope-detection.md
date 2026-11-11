@@ -1,6 +1,6 @@
 # Plan: Phase 0: Implementation Scope Detection
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Implementation Scope Detection
 

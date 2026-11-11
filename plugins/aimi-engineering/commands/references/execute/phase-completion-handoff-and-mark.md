@@ -1,6 +1,6 @@
 # Execute: Phase Completion: Write Handoff and Mark Completed
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Write Handoff
 

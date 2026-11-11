@@ -1,6 +1,6 @@
 # Execute: Steps 3.1 and 3.2: Worktree Manager and Concurrency
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 3.1: Resolve Worktree Manager
 

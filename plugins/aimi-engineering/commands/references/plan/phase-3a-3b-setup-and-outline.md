@@ -1,6 +1,6 @@
 # Plan: Phase 3a and 3b: Run Setup and Pass 1 Outline Generation
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 >
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 

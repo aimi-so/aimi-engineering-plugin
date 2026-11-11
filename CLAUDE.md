@@ -134,7 +134,7 @@ Every plugin change requires synchronized bumps in three files (per `plugins/aim
 After resolution, commands call `$AIMI_CLI check-version --quiet --fix` for self-heal. The fix path is gated by `_is_claude_code_host()` — it short-circuits to "managed by converter" only when running under OpenCode.
 
 When editing resolution logic, mirror changes in:
-- `plugins/aimi-engineering/commands/references/cli-path-resolution.md` (command-facing docs)
+- `plugins/aimi-engineering/commands/references/cli-path-resolution.md` (command-facing docs; the reasoning behind each layer is in `plugins/aimi-engineering/docs/dev/cli-path-resolution.md`)
 - `plugins/aimi-engineering/scripts/aimi-cli.sh` (`_dev_dir_path`, `_resolve_latest_cache_path`, `read_global_cli_cache`, `read_global_worktree_cache`, `cmd_check_version`, `cmd_cleanup_versions`)
 - `plugins/aimi-engineering/scripts/test-aimi-cli-fixtures.sh` (`source_cache_functions` must eval every helper used by the code under test)
 

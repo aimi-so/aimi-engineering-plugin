@@ -1,6 +1,6 @@
 # Execute: Post-Loop Cleanup
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Post-Loop Cleanup
 

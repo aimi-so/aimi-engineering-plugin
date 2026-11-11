@@ -1,6 +1,6 @@
 # Execute: Step 3.4: Open Visual Follow Session
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Open Visual Follow Session
 

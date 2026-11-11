@@ -1,6 +1,6 @@
 # Plan: Phase 1.9: Greenfield Foundation Gate, decision and recording
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Step 3: Non-Interactive Fast Path
 

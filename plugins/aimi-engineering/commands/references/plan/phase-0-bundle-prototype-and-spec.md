@@ -1,6 +1,6 @@
 # Plan: Phase 0: Bundle Prototype Auto-Generation, Phase-Tier Spec Detail and Spec Ingestion
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 >
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 

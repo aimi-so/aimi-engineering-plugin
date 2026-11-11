@@ -1,6 +1,6 @@
 # Plan: Phase 0: Rolling-Wave Phase Selection, load the roadmap and select the target phase
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 #### Load the roadmap and ask the CLI which phases may be expanded
 

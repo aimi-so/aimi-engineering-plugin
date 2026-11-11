@@ -1,6 +1,6 @@
 # Plan: Phase 1.8: Post-Research Open Questions and Scope-Pruning Gates
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ## Phase 1.8: Post-Research Open Questions Gate
 

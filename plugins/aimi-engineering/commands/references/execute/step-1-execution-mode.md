@@ -1,6 +1,6 @@
 # Execute: Step 1: Execution Mode, Orphan Recovery and Content Validation
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Execution Mode Detection
 

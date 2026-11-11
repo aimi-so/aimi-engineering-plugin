@@ -1,6 +1,6 @@
 # Plan: Phase 3d.5: Cross-Story DAG Audit, skip condition and auditor spawn
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ## Phase 3d.5: Cross-Story DAG Audit
 
