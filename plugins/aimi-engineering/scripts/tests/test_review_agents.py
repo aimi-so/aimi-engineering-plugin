@@ -104,3 +104,13 @@ def test_the_readme_counts_match_the_tree():
     assert re.search(rf"^\| Skills \| {skills} \|", readme, re.M), f"README skills row should say {skills}"
     review = len(list(REVIEW.glob("*.md")))
     assert f"{review} review," in readme
+
+
+def test_the_plugin_notice_credits_every_reviewer_and_ships_with_the_plugin():
+    notice = (ROOT / "NOTICE.md").read_text(encoding="utf-8")
+    for name in REVIEWERS:
+        assert f"`{name}`" in notice, f"NOTICE.md does not credit {name}"
+    assert "Copyright (c) 2025 Every" in notice
+    assert "Permission is hereby granted" in notice
+    # a notice under agents/ would be installed as an agent
+    assert not list((ROOT / "agents").rglob("NOTICE*"))

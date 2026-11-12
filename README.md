@@ -302,4 +302,4 @@ Contributions are welcome. Open an issue before starting anything substantial, s
 
 ## License
 
-MIT
+MIT. Parts of the plugin are adapted from other MIT-licensed projects; each is credited in [plugins/aimi-engineering/NOTICE.md](plugins/aimi-engineering/NOTICE.md) and in the `NOTICE.md` of the skill concerned.
