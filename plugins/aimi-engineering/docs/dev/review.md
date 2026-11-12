@@ -10,6 +10,8 @@ A bare word that is not a number, a URL or an existing branch is a focus: `/aimi
 
 The comment inside the Setup block no longer repeats the request: a multi-line request pasted into a comment would make its second line a command.
 
+A request can name several PRs, one per repository, when a change spans a backend and a frontend in a multi-repo layout. The PR fetch used to run in the current repository only, so a second URL had no path through the command, and the orchestrator improvised a raw forge CLI call that skipped the gates. Each URL is now matched to the local folder whose `origin` remote points at the repository the URL names, and item 1's block runs once per URL with that folder in `PR_PROJECT`, passed to `forge-pr-view --project`. The verb already took `--project` and changes into that directory before any forge call, so no new CLI surface was needed. `PR_PROJECT` is a value the orchestrator substitutes, so it is gated in the same block as `$ARGUMENTS`, for the same reason: a `case` that admits only a path's characters and refuses `..` keeps a crafted value from leaving the quotes or the layout. A URL that matches no folder is reported and skipped, because reviewing it would mean reviewing a checkout that is not there.
+
 ## Which reviewers run
 
 The set was chosen from usage, not from a list of well-known reviewers. Over ten runs, bugs, security and performance were the focus asked for most, and no reviewer existed for bugs; the orchestrator repurposed a TypeScript style reviewer with a prompt that said "only correctness bugs". The default set is now correctness, security, performance and maintainability. The rest run only when the diff touches their subject, which is what Step 2 tabulates.

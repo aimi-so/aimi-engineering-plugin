@@ -102,7 +102,7 @@ $AIMI_CLI check-version --quiet --fix
 
 The request is free text. Read it once and split it into three things:
 
-- **TARGET:** a PR number, a PR URL, a branch name, or nothing.
+- **TARGET:** a PR number, a PR URL, a branch name, or nothing. There may be several. A URL names its repository on the forge: review it in the local folder whose `origin` remote (`git -C <dir> remote get-url origin`) points at that repository, the current one or a sibling under the `.aimi/` root. A number or branch alone belongs to the current repository. A URL no local folder matches is not reviewed: say which one, and go on with the others.
 - **SCOPE:** `diff-only` when the person asks for the diff alone ("only the diff", "somente o diff"); otherwise `diff-and-affected-code`.
 - **FOCUS:** what to look for, if stated: bugs, security, performance, simplicity or structure, project conventions. Empty when none is stated.
 
@@ -117,19 +117,26 @@ A bare word that is not a number, a URL or an existing branch (`git show-ref --v
    ```bash
    AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
    : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+   PR_PROJECT="[the folder of this PR's repository, or . for the current one]"
    case "$ARGUMENTS" in
      ''|*[!0-9]*)
        echo "Error: Invalid PR number: $ARGUMENTS" >&2
        exit 1
        ;;
    esac
-   PR_JSON=$($AIMI_CLI forge-pr-view --pr "$ARGUMENTS" --include title,body,headRefName,baseRefName)
+   case "$PR_PROJECT" in
+     ''|*[!A-Za-z0-9._/-]*|*..*)
+       echo "Error: Invalid repository folder: $PR_PROJECT" >&2
+       exit 1
+       ;;
+   esac
+   PR_JSON=$($AIMI_CLI forge-pr-view --pr "$ARGUMENTS" --project "$PR_PROJECT" --include title,body,headRefName,baseRefName)
    ```
 
    This gate is defense-in-depth, not the only line of defense — `forge-pr-view` validates its own `--pr` value against a fixed regex before it reaches any `gh` command, which is what covers a value crafted to break out of the quoting in the gate line itself.
 
    Branch on `PR_JSON`'s `status` field (`found` | `not_found` | `error` — forge-contract.md's Three-Way Status Convention): on `found`, read `.pr.title`/`.pr.body`/`.pr.headRefName`/`.pr.baseRefName`; on `not_found` or `error`, fall through to the git-diff comparison the same way a missing `gh` does (see Error Handling below).
-2. **GitHub URL**: Extract the PR number from the URL, assign that extracted number into `$ARGUMENTS`, then run item 1's block **unchanged** — the same validation gate and the same `forge-pr-view` call. Do NOT write a second, parallel `forge-pr-view` invocation for this case: item 1's block is the single gated path to that command, and re-entering it is what makes the URL case inherit the digits-only check instead of skipping it.
+2. **PR URL**: Extract the PR number from the URL, assign that extracted number into `$ARGUMENTS` and the URL's local folder into `PR_PROJECT`, then run item 1's block **unchanged** — the same validation gates and the same `forge-pr-view` call — once per URL. Do NOT write a second, parallel `forge-pr-view` invocation or a raw forge CLI call for this case: item 1's block is the single gated path to that command, and re-entering it is what makes the URL case inherit its checks instead of skipping them.
 3. **Branch name**: Validate `$ARGUMENTS` against `^[a-zA-Z0-9][a-zA-Z0-9/_-]*$` before it is ever interpolated into a git command — the same check Case B step 4 below applies to `$CANDIDATE_BRANCH`:
 
    ```bash
@@ -185,7 +192,7 @@ Track whether `$REVIEW_BRANCH` was resolved from the tasks file (i.e. `$REVIEW_B
 # Get changed files
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-PR_FILES_JSON=$($AIMI_CLI forge-pr-view --pr [number] --include files)
+PR_FILES_JSON=$($AIMI_CLI forge-pr-view --pr [number] --project [folder of the PR, as in item 1] --include files)
 echo "$PR_FILES_JSON" | jq -r '.pr.files[].path'
 # OR for branch comparison (REVIEW_BRANCH is the branch-name TARGET of item 3
 # above, or the value resolved by "Resolve Review Branch (Empty Argument)"
