@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.159.0] - 2026-11-12
+
+`/aimi:review` now reads what you ask for and runs the reviewers that fit, with fewer and better ones; a failed story keeps the plan's notes; a conflict between split branches is resolved in place; and the agents and skills adapted from other projects are credited. Nothing in the state on disk, the CLI verbs' output or the verification gates changes, apart from the `notes` field described below.
+
+### Added
+- `/aimi:review` reads its argument as plain words: a pull request, URL or branch plus a focus ("bugs and security") and a scope ("only the diff"). It announces the reviewers it chose and why, runs them per repository when the change spans a frontend and a backend, and reads the target project's own review agents when the session lists them. Before reporting, it reads the quoted line of every P1 and P2 finding, drops what the code does not support and marks each finding it keeps as checked, pattern-only or unchecked. `docs/dev/review.md` holds the reasoning.
+- `aimi-correctness-reviewer`, a reviewer for bugs that does not depend on language or framework, and `aimi-project-standards-reviewer`, which checks a change against the rules in the target project's own `CLAUDE.md`, `AGENTS.md` or `CODING_STANDARDS.md`, as they stand on the base of the change, and cites the rule and the line.
+- `NOTICE.md` at the plugin root credits the seventeen agents adapted from the compound-engineering plugin, and `NOTICE.md` files in `agent-browser`, `git-worktree`, `resolve-pr-parallel`, `agent-native-architecture`, `create-agent-skills` (which also credits taches-cc-resources) and `react-native-skills` (Vercel).
+- `react-native-skills` has a row in the expander's skills table, so it is finally attached to stories.
+
+### Changed
+- The split merge of `/aimi:execute` resolves a conflict between two split branches of one repository in place, as the wave merge already did: it edits the conflicted files to keep what each story adds, runs the involved stories' `implementation.verify` from the merge directory, and only then commits. When the requirements cannot all hold or a verify fails, it restores git's own conflict and stops as before, with the reason in the report.
+- `mark-failed`, `cascade-skip` and `reset-orphaned` no longer replace a story's `notes`. They keep the plan's paragraphs and own one last paragraph, `[execution: failed]`, `[execution: skipped]` or `[execution: reset]` followed by the cause, which a later transition replaces. `status` shows that paragraph alone for a failed or skipped story; `get-story` and `get-story-context` return all of them. The retry `/aimi:next` starts after a failure now carries the plan's notes. Three `mark-failed` recordings in the golden file move, in their `file` field only.
+- Nine review agents, all declaring Read, Grep, Glob and Bash, end with the same two sections, how they work and what they return, and quote the line of each finding. Seven were renamed or rewritten from the compound-engineering reviewer personas, free of Rails, Hotwire and Stimulus content: `aimi-security-sentinel` is now `aimi-security-reviewer`, `aimi-performance-oracle` `aimi-performance-reviewer`, `aimi-code-simplicity-reviewer` `aimi-maintainability-reviewer`, `aimi-julik-frontend-races-reviewer` `aimi-frontend-races-reviewer` and `aimi-data-migration-expert` `aimi-data-migration-reviewer`; `aimi-agent-native-reviewer` and `aimi-deployment-verification-agent` keep their names. The deployment reviewer reports readiness gaps as findings, with the query or step in the fix.
+- The expander's skills table: `typescript-node-conventions` is for TypeScript that runs on Node.js or Bun, not for browser code; `nextjs-tanstack-conventions` is for the Next.js App Router and TanStack Query, not for any path that contains `tanstack`; every match is kept once, up to ten.
+- The `brainstorm` command and skill reword the passages they shared with the compound-engineering original; the document format is unchanged.
+- The installer replaces the agents and skills of the plugin copy and removes the `aimi-*` agents and skills a release dropped, in the destination as well.
+
+### Fixed
+- `mark-failed` and its two siblings threw away what the plan had found for a story, so the first failure left the retry with the failure line alone.
+- `/aimi:status` told the person to run `/aimi:execute` to retry a failed story, or `/aimi:skip`. There is no `/aimi:skip`, and neither `/aimi:execute` nor `/aimi:next` picks up a story whose status is `failed`; the sentence, the orphan recovery note, the deadlock report and the troubleshooting guide now say to set it back to `pending`.
+- An upgrade of an OpenCode install kept every agent and skill a release had removed.
+- The catalogue said the cross-story auditor writes no file, and omitted the spec deriver.
+
+### Removed
+- Eight review agents: `aimi-architecture-strategist`, `aimi-pattern-recognition-specialist`, `aimi-data-integrity-guardian`, `aimi-schema-drift-detector`, `aimi-dhh-rails-reviewer`, `aimi-kieran-rails-reviewer`, `aimi-kieran-python-reviewer` and `aimi-kieran-typescript-reviewer`. A project's style now comes from its own rules through the project-standards reviewer.
+- Six skills: `andrew-kane-gem-writer`, `dspy-ruby`, `dhh-rails-style`, `every-style-editor`, `rclone` and `file-todos`. A tasks file that still names one gets the warning that the skill was not found.
+
 ## [1.158.1] - 2026-11-12
 
 ### Changed
