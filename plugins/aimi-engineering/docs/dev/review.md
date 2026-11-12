@@ -18,7 +18,9 @@ The set was chosen from usage, not from a list of well-known reviewers. Over ten
 
 Reviewers for one language or one framework's style (Rails, Python, TypeScript) are gone: a project's style lives in its own `CLAUDE.md` and `AGENTS.md`, and `aimi-project-standards-reviewer` reads those and cites the rule. Architecture and pattern review overlapped the maintainability reviewer (2 of the 35 findings the architecture reviewer made were its alone), and the data-integrity and schema-drift reviewers overlapped the data-migration reviewer.
 
-The team is announced before any reviewer starts, so the person can stop a run that picked the wrong reviewers before it spends anything. While they run, the orchestrator writes nothing per reviewer: each such summary is one more turn over a context that already holds every finished report, so it costs a turn per reviewer and repeats what the report says a minute later.
+The team is announced before any reviewer starts, so the person can stop a run that picked the wrong reviewers before it spends anything. A sentence asking for the announcement was skipped in practice: the orchestrator went straight from choosing to spawning. A printed block, in a message of its own with no tool call, is harder to fold into the spawn.
+
+While the reviewers run, the orchestrator writes nothing per reviewer. Each finished reviewer wakes the orchestrator for a turn whether or not it writes, so silence does not save the turn. It saves the output tokens of a summary that the report repeats a minute later, and it keeps the conversation readable.
 
 A project may define review agents of its own. The host lists them in the session, so the command includes one that fits instead of copying it into the plugin.
 

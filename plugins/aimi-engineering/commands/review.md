@@ -238,7 +238,13 @@ Read and follow the **Resolve Agent Models** section of `commands/references/cli
 
 ## Step 2: Choose the Reviewers
 
-Pick from this table, then announce the team in one message, before Step 3 starts any reviewer: one line per reviewer saying why it runs, and one line for each subject the FOCUS left out.
+Pick from this table, then print the team as a message of its own, with no tool call in it, before Step 3 starts any reviewer:
+
+```
+Team for [repository]:
+- [reviewer]: [why it runs, from the table]
+- Not run: [subject the FOCUS left out, or a conditional row whose subject is not in the diff], [why]
+```
 
 | Reviewer | With no FOCUS, it runs when |
 |----------|-----------------------------|
@@ -256,7 +262,7 @@ With a FOCUS, run only the rows whose subject it names: bugs, correctness; vulne
 
 ## Step 3: Run the Reviewers
 
-Run the chosen reviewers **in parallel** with the Task tool, one per repository. While they run, write nothing about each one that finishes: the next message is the report. The prompt carries data lines only; the reviewer runs `DIFF_CMD` and reads the code itself:
+Run the chosen reviewers **in parallel** with the Task tool, one per repository. While they run, write nothing when one finishes, not even a line saying you are waiting: the next text is the report. The prompt carries data lines only; the reviewer runs `DIFF_CMD` and reads the code itself:
 
 ```
 Task subagent_type="aimi-engineering:review:[REVIEWER]"
