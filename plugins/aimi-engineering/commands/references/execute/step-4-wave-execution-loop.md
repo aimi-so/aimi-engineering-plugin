@@ -455,9 +455,33 @@ while true:
                 [for s in stories: --subject-for [all_worktrees[s.id].worktree_name] "Merge story: [s.title]"] \
                 --into [merge_target]
 
+            # A conflict between stories of this wave is resolved here, and the stop further down is
+            # the fallback (docs/dev/execute-wave-loop.md § Wave merge conflicts are resolved in place).
+            unresolved_reason = "merge did not start"   # merge-all printed git's own reason, no conflicted file
+            while merge_result is non-zero and `git -C [merge_cwd] diff --name-only --diff-filter=U` lists files:
+                conflicted = that list
+                involved = the story merge-all stopped at, plus each story of this wave already merged into
+                           [merge_target] whose implementation.files names a file in conflicted
+                Read each involved story with `$AIMI_CLI get-story [id] --tasks-file [WAVE_TASKS_FILE]`.
+                Edit each conflicted file in [merge_cwd] so it keeps what every involved story adds; their
+                acceptanceCriteria are what the result must satisfy. Stage nothing yet.
+                Run each involved story's implementation.verify from [merge_cwd] (from the project's
+                subfolder inside it when the project is a subfolder of a larger repository).
+                if the criteria cannot all hold, or a verify fails:
+                    git -C [merge_cwd] checkout --merge -- [conflicted...]   # git's own conflict, back for the human
+                    unresolved_reason = "[ids] state requirements that cannot both hold" or "verify failed for [ids]"
+                    break
+                git -C [merge_cwd] add -- [conflicted...]
+                git -C [merge_cwd] commit --no-edit --cleanup=strip   # keeps merge-all's "Merge story: <title>" subject
+                Report: "Resolved merge conflict in [conflicted] (wave [wave], [group_key]); verify passed for [involved ids]."
+                remaining = stories whose worktree_name is not yet reachable from [merge_target]
+                            (git -C [merge_cwd] merge-base --is-ancestor)
+                merge_result = success when remaining is empty, otherwise
+                               $WORKTREE_MGR merge-all [remaining worktree names...] [their --subject-for pairs] --into [merge_target]
+
             if merge conflict (non-zero exit):
                 Report:
-                "MERGE CONFLICT during wave [wave] merge in project [group_key]."
+                "MERGE CONFLICT during wave [wave] merge in project [group_key]: [unresolved_reason]."
                 "Conflicting files:"
                 "[conflict output from merge-all]"
                 ""

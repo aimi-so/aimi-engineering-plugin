@@ -210,6 +210,18 @@ to, so running it from AIMI_ROOT in phase mode would check the phase
 branch out onto the main working tree, violating the Main Working
 Tree Untouched Invariant.
 
+## Wave merge conflicts are resolved in place
+
+Stories of one wave have no `dependsOn` edge between them, and every worktree of the wave was cut from a base that already holds the earlier waves. A conflict in a wave merge is therefore between two stories of the same wave, most often two additions to the same region of a shared file, where both belong. The merge target is the run's own branch (the feature, container or phase branch), never the default branch, so a resolution there touches nothing outside the run.
+
+The step used to stop at every conflict and hand it to a person. In practice the orchestrator resolved the conflict itself and ran the project's checks, so the text described a run that did not happen. It now describes that run and bounds it:
+
+- The resolution counts only when the `implementation.verify` of every involved story passes: the story `merge-all` stopped at, and each story of the wave already merged whose `implementation.files` names a conflicted file. The earlier waves need no re-run, because the conflicting worktree already held their work.
+- Nothing is staged before those verifies pass. That keeps `git checkout --merge -- <files>` able to put git's own conflict back, so a run that gives up leaves the person exactly the state the old stop left.
+- `git commit --no-edit` alone keeps the commented `# Conflicts:` lines git writes into `MERGE_MSG`; `--cleanup=strip` drops them and keeps the `Merge story: <title>` subject `merge-all` passed with `-m`. Both were checked against git 2.34.
+- A merge that never started (an untracked file in the way, which `merge-all` reports as "Merge did not start") has no conflicted file and is not a conflict to resolve, so it still stops.
+- After a resolution, `merge-all` runs again over the stories not yet reachable from the target, found with the same `merge-base --is-ancestor` test the cleanup below uses, so a second conflict in the same group goes through the same loop.
+
 ## Conflict cleanup keeps unmerged branches
 
 Cleanup this wave's worktrees -- but ONLY the ones whose work
