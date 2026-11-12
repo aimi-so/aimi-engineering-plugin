@@ -18,6 +18,10 @@ AGENTS = ROOT / "agents"
 CONTEXT7 = "mcp__plugin_aimi-engineering_context7__*"
 READ_ONLY = {"Read", "Grep", "Glob", "Bash"}
 RESEARCHER = {"Read", "Grep", "Glob", "Write", "Bash"}
+# A reviewer has the same tools as a read-only agent but may also run one check
+# that confirms a finding (a test, a type check, a reproduction). It never
+# changes the repository, which its body states in so many words.
+REVIEWER = READ_ONLY
 
 TABLE = {
     "research/aimi-spec-deriver.md": READ_ONLY,
@@ -30,6 +34,14 @@ TABLE = {
     "research/aimi-bundle-prototype-author.md": {"Read", "Write", "Grep", "Glob"},
     "research/aimi-foundation-architect.md": {"Read", "Write", "Grep", "Glob", CONTEXT7},
     "review/aimi-cross-story-auditor.md": {"Read", "Write"},
+    "review/aimi-correctness-reviewer.md": REVIEWER,
+    "review/aimi-project-standards-reviewer.md": REVIEWER,
+}
+
+# The agents in TABLE that review code: Bash may run a check, never edit.
+REVIEWERS = {
+    "review/aimi-correctness-reviewer.md",
+    "review/aimi-project-standards-reviewer.md",
 }
 
 TOOL_NAMES = {"Read", "Write", "Edit", "Grep", "Glob", "Bash"}
@@ -98,6 +110,15 @@ def test_body_does_not_drift_from_frontmatter(rel):
 
 def test_read_only_agents_state_bash_is_read_only():
     for rel, tools in TABLE.items():
-        if tools == READ_ONLY:
+        if tools == READ_ONLY and rel not in REVIEWERS:
             _, body = _split(rel)
             assert "Bash is for reading and searching only" in "\n".join(body), rel
+
+
+@pytest.mark.parametrize("rel", sorted(REVIEWERS))
+def test_reviewers_may_run_a_check_and_never_change_the_repository(rel):
+    _, body = _split(rel)
+    text = "\n".join(body)
+    assert "Bash is for reading, searching and running one check that confirms a finding" in text, rel
+    assert "Never edit, write, stage, commit or otherwise change the repository or its git state" in text, rel
+    assert "Bash is for reading and searching only" not in text, rel

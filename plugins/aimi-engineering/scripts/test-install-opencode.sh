@@ -274,7 +274,7 @@ for src in "$SRC_PLUGIN"/agents/*/*.md; do
   done
   assert_eq "yes" "$ok" "real tree: $base carries an explicit permission for all ten names"
 done
-assert_eq "10" "$WITH_TOOLS" "real tree: ten agent sources declare a tools line"
+assert_eq "12" "$WITH_TOOLS" "real tree: twelve agent sources declare a tools line"
 
 AUD="$AGENTS_DIR/aimi-cross-story-auditor.md"
 assert_eq "allow" "$(perm_get "$AUD" read)" "real tree: auditor read is allow"
@@ -284,6 +284,10 @@ VER="$AGENTS_DIR/aimi-scope-negative-verifier.md"
 assert_eq "deny" "$(perm_get "$VER" edit)" "real tree: scope verifier edit is deny"
 for n in read grep bash; do
   assert_eq "allow" "$(perm_get "$VER" "$n")" "real tree: scope verifier $n is allow"
+done
+for rev in aimi-correctness-reviewer aimi-project-standards-reviewer; do
+  assert_eq "deny" "$(perm_get "$AGENTS_DIR/$rev.md" edit)" "real tree: $rev edit is deny"
+  assert_eq "allow" "$(perm_get "$AGENTS_DIR/$rev.md" bash)" "real tree: $rev bash is allow (it may run a check)"
 done
 RES="$AGENTS_DIR/aimi-codebase-researcher.md"
 assert_eq "allow" "$(perm_get "$RES" edit)" "real tree: codebase researcher edit is allow"

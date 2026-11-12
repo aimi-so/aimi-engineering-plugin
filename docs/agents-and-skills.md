@@ -53,7 +53,7 @@ These are invoked by commands, not by you.
 
 ---
 
-## Agents (33)
+## Agents (35)
 
 ### Research (7)
 
@@ -67,7 +67,7 @@ These are invoked by commands, not by you.
 | `aimi-design-bundle-researcher` | Reads BusinessSpec and DesignSpec bundles into structured findings |
 | `aimi-foundation-architect` | Proposes a stack-adaptive Clean Architecture foundation for new repositories |
 
-### Review (16)
+### Review (18)
 
 | Agent | What it does |
 |-------|--------------|
@@ -86,6 +86,8 @@ These are invoked by commands, not by you.
 | `aimi-kieran-typescript-reviewer` | TypeScript type safety and modern patterns |
 | `aimi-kieran-python-reviewer` | Pythonic patterns, type safety, maintainability |
 | `aimi-julik-frontend-races-reviewer` | JavaScript race conditions and DOM lifecycle bugs |
+| `aimi-correctness-reviewer` | Bugs in a change: logic, boundaries, null and error propagation, races, state transitions |
+| `aimi-project-standards-reviewer` | Checks a change against the rules in the target project's own CLAUDE.md or AGENTS.md |
 | `aimi-cross-story-auditor` | Audits staged stories for drift between them; emits patches, writes no file |
 
 ### Design (2)
