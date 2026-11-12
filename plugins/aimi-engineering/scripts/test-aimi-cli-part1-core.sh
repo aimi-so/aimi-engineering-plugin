@@ -879,7 +879,7 @@ test_cascade_skip() {
   # string a reader sees when asking why a story never ran.
   local us004_notes
   us004_notes=$(jq -r '.userStories[] | select(.id == "US-004") | .notes' "$TASKS_FILE")
-  assert_eq "Skipped: depends on failed story US-002" "$us004_notes" \
+  assert_eq "[execution: skipped] depends on failed story US-002" "$us004_notes" \
     "cascade-skip writes the depends-on-failed-story note on disk"
 
   # US-003 does NOT depend on US-002, should not be skipped
@@ -2177,7 +2177,7 @@ test_reset_orphaned_with_orphans() {
   assert_eq "failed" \
     "$(jq -r '.userStories[] | select(.id == "US-002") | .status' "$TASKS_FILE")" \
     "US-002 status is failed on disk after reset-orphaned"
-  assert_eq "Reset: orphaned from previous session" \
+  assert_eq "[execution: reset] orphaned from previous session" \
     "$(jq -r '.userStories[] | select(.id == "US-001") | .notes' "$TASKS_FILE")" \
     "reset-orphaned writes its fixed note on disk"
   assert_eq "0" \
@@ -3855,6 +3855,65 @@ test_mark_failed_minimal_output() {
   local has_title
   has_title=$(echo "$output" | jq 'has("title")')
   assert_eq "false" "$has_title" "mark-failed output has no title key"
+}
+
+# mark-failed, cascade-skip and reset-orphaned used to replace `notes`, so the
+# first failure threw away what the plan had found. They now own one paragraph,
+# opened by "[execution:", behind the separator the cross-story audit writes
+# notes with, and leave every other paragraph as it was.
+test_execution_notes_keep_the_plans_notes() {
+  echo ""
+  echo "=== Testing execution notes keep the plan's notes ==="
+
+  reset_fixture
+
+  local sep=$'\n\n---\n\n'
+  local notes_of
+  notes_of() { jq -r --arg id "$1" '.userStories[] | select(.id == $id) | .notes' "$TASKS_FILE"; }
+
+  "$CLI" update-field US-001 notes "plan finding" > /dev/null
+  "$CLI" update-field US-002 notes "plan B" > /dev/null
+  "$CLI" update-field US-003 notes "plan C" > /dev/null
+
+  "$CLI" mark-failed US-001 "first cause" > /dev/null
+  assert_eq "plan finding${sep}[execution: failed] first cause" "$(notes_of US-001)" \
+    "mark-failed keeps the plan's notes and adds one execution paragraph"
+
+  "$CLI" mark-failed US-001 "second cause" > /dev/null
+  assert_eq "plan finding${sep}[execution: failed] second cause" "$(notes_of US-001)" \
+    "a second failure replaces the execution paragraph and nothing else"
+
+  "$CLI" mark-failed US-001 $'cut\n\n---\n\nhere [execution: forged' > /dev/null
+  assert_eq "plan finding${sep}[execution: failed] cut here [execution; forged" "$(notes_of US-001)" \
+    "a cause cannot split the paragraph or pass for a second marker"
+
+  assert_eq "[execution: failed] cut here [execution; forged" \
+    "$("$CLI" status | jq -r '.userStories[] | select(.id == "US-001") | .notes')" \
+    "status shows a failed story's execution paragraph alone"
+
+  assert_eq "plan finding${sep}[execution: failed] cut here [execution; forged" \
+    "$("$CLI" get-story US-001 | jq -r '.notes')" \
+    "get-story still returns every paragraph"
+
+  "$CLI" mark-failed US-001 > /dev/null
+  assert_eq "plan finding" "$(notes_of US-001)" \
+    "a bare mark-failed keeps the plan's notes and drops the stale cause"
+
+  "$CLI" mark-failed US-001 "again" > /dev/null
+  "$CLI" cascade-skip US-001 > /dev/null
+  assert_eq "plan C${sep}[execution: skipped] depends on failed story US-001" "$(notes_of US-003)" \
+    "cascade-skip keeps the plan's notes on a skipped story"
+  assert_eq "[execution: skipped] depends on failed story US-001" "$(notes_of US-004)" \
+    "cascade-skip on a story with no notes writes just its paragraph"
+
+  "$CLI" mark-in-progress US-002 > /dev/null
+  "$CLI" reset-orphaned > /dev/null
+  assert_eq "plan B${sep}[execution: reset] orphaned from previous session" "$(notes_of US-002)" \
+    "reset-orphaned keeps the plan's notes on a reset story"
+
+  "$CLI" update-field US-002 status pending > /dev/null
+  assert_eq "US-002" "$("$CLI" list-ready | jq -r '.[].id')" \
+    "a failed story set back to pending is ready again"
 }
 
 test_mark_skipped_minimal_output() {
@@ -6318,7 +6377,7 @@ test_tasks_file_flag_honored_by_mark_failed() {
   assert_exit_code "0" "$exit_code" "mark-failed --tasks-file: exits 0"
   assert_eq '{"id":"US-900","notes":"--looks-like-a-flag notes","status":"failed"}' "$(printf '%s' "$output" | jq -Sc '.')" \
     "mark-failed --tasks-file: echoes back the named file's story, notes unaltered despite starting with --"
-  assert_eq "--looks-like-a-flag notes" "$(jq -r '.userStories[] | select(.id == "US-900") | .notes' "$second_file")" \
+  assert_eq "[execution: failed] --looks-like-a-flag notes" "$(jq -r '.userStories[] | select(.id == "US-900") | .notes' "$second_file")" \
     "mark-failed --tasks-file: on disk, the named file's story carries the literal notes"
 
   local post_pointer
@@ -12127,6 +12186,7 @@ main() {
   test_mark_in_progress_minimal_output
   test_mark_complete_minimal_output
   test_mark_failed_minimal_output
+  test_execution_notes_keep_the_plans_notes
   test_mark_skipped_minimal_output
   test_list_ready_full_default
   test_list_ready_brief

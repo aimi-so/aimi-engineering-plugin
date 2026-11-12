@@ -151,7 +151,7 @@ Display each wave:
 - **Gate column:** Shows `type:status` from the story's `gate` object (e.g., `decision:pending`, `action:passed`). Show `—` if story has no gate.
 - **Verification column:** Shows `strategy:status` from the story's `verification` object (e.g., `api:pending`, `test:passed`). Show `—` if story has no verification.
 - Status uses the status values: pending, in_progress, completed, failed, skipped
-- If a story has notes (especially failures), show on the next line: `Note: [notes text]`
+- If a story has notes (especially failures), show on the next line: `Note: [notes text]`. For a failed or skipped story `status` already returns just the `[execution: ...]` paragraph, which is the reason it is not running.
 
 ### Dependency Graph
 

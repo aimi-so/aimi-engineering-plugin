@@ -51,11 +51,11 @@ Why this field has a reader at all, since the record says otherwise: audit findi
 
 ## What `notes` holds
 
-The brief used to say that `story.notes` "carries notes from earlier attempts at this story". A first run never has an earlier attempt: `list-ready` selects only `pending` stories, so a story reaches a worker with whatever the plan wrote. The writers of the field, as of 1.158.1:
+The brief used to say that `story.notes` "carries notes from earlier attempts at this story". A first run never has an earlier attempt: `list-ready` selects only `pending` stories, so a story reaches a worker with whatever the plan wrote. The writers of the field, as of 1.159.0:
 
 - `aimi-story-expander` writes it as residue: what no other field carries, planning measurements included (`agents/workflow/aimi-story-expander.md`).
 - `/aimi:deepen` adds research file paths, patterns, gotchas, rule-id annotations and open questions, appending to what is there (`commands/deepen.md`).
 - `apply-audit-patches` adds or replaces whole paragraphs, separated by `NOTES_SEPARATOR` (`\n\n---\n\n`), and `--annotate-deferred` appends `[audit-deferred: …]` paragraphs (`scripts/audit_patches.py`).
-- `mark-failed`, `reset-orphaned` and `cascade-skip` replace the whole field with the cause they record (`scripts/tasks.py`), so a story set back to `pending` by hand reaches its next worker with that cause in place of the plan's notes.
+- `mark-failed`, `reset-orphaned` and `cascade-skip` own one paragraph, opened by `[execution: failed]`, `[execution: skipped]` or `[execution: reset]`, and touch nothing else (`with_execution_note` in `scripts/tasks.py`). They used to replace the whole field, so the first failure threw away what the plan had found, and the retry `/aimi:next` starts right after it, like a story set back to `pending` by hand, reached its next worker with the failure line alone. The paragraph goes last, behind the separator the audit uses; a later transition replaces it where it stands, so a story carries the latest cause only. A bare `mark-failed` (no cause) writes no paragraph and removes an old one. A cause is trimmed, and a separator or a `[execution:` inside it is rewritten, so recorded text cannot split the paragraph or forge a second one. `status` shows a failed or skipped story's paragraph alone; `get-story` and `get-story-context` return every paragraph.
 
 `story-merge`'s `stale-sibling-note` smell exists because a paragraph before the last separator can cite a sibling as it stood before the audit (`docs/dev/planning-verbs.md` § Advisory smells), which is why the brief says the criteria and `implementation` win over `notes`.

@@ -20337,7 +20337,7 @@
             "id": "US-001",
             "title": "Story 1",
             "status": "failed",
-            "notes": ""
+            "notes": "primeira"
           },
           {
             "id": "US-002",
@@ -20348,7 +20348,7 @@
             "id": "US-001",
             "title": "Story 1",
             "status": "failed",
-            "notes": ""
+            "notes": "segunda"
           }
         ]
       },
@@ -21683,7 +21683,7 @@
             "status": "failed",
             "priority": 1,
             "dependsOn": [],
-            "notes": "quebra \"aspas\" aqui",
+            "notes": "[execution: failed] quebra \"aspas\" aqui",
             "verification": {
               "strategy": "test",
               "status": "pending",
@@ -21752,7 +21752,7 @@
             "status": "failed",
             "priority": 1,
             "dependsOn": [],
-            "notes": "falhou — çãé 🎯",
+            "notes": "[execution: failed] falhou — çãé 🎯",
             "verification": {
               "strategy": "test",
               "status": "pending",
@@ -24377,7 +24377,7 @@
       "state_after": {}
     }
   ],
-  "_comment_tasks_write": "The seven locked tasks.json WRITERS -- mark-complete, mark-failed, mark-in-progress, mark-skipped, update-field, normalize-status and normalize-verification -- captured the same way every block before them was, by running the jq that used to live in aimi-cli.sh BEFORE it was deleted. Sibling block to tasks_read_cases and tasks_ready_cases; the record carries lifecycle_cases' WRITER fields on top of theirs, because what the file looks like afterwards IS the contract here: `file` is the whole resulting document and `tree` the whole .aimi listing, so a refusal that still wrote something -- or a temp file nobody removed -- cannot hide. args/input make every case replayable; state_after is kept because four of the seven write .aimi/state/ as part of what they do. Temp roots normalize to /TMP, the CLI's own path to /CLI/aimi-cli.sh, a bash line number to <N>, and a leaked mktemp suffix to .XXXXXX. 528 of 546 field comparisons identical after the port -- every stdout, every resulting document and every .aimi/state/ file matched in all 91 cases, the four mark-* verbs' state writes included. The 18 that differ fall in 8 cases and in two classes, named here so nobody has to rediscover them. (1) THE LEAKED TEMP FILE, tree only, in mark-complete-lock-inutilizavel, update-field-lock-inutilizavel and normalize-status-lock-inutilizavel: each hands the verb a .lock that is a DIRECTORY, so the `200>` redirect fails before the lock body runs at all. The pre-port bash had already run `mktemp` by then and `set -euo pipefail` aborts the script before the matching `rm -f`, so jq's recording carries a `<tasks>.XXXXXX` nobody removes. tasks.py owns the temp file now and unlinks it on the way out of any exception, so the listing is one entry shorter. Exit code, stdout, the document and the state files are identical in all three -- what these cases pin is that the failure still ABORTS: no mark printed, no state written. (2) THE ENGINE'S OWN MESSAGE AND EXIT STATUS, plus that same temp file, in update-field-intermediario-nao-objeto, normalize-status-historia-string, normalize-status-sem-userstories, normalize-verification-historia-string and normalize-verification-sem-userstories: jq aborted mid-expression at its own exit 5, where the Python refuses at 1 with a message naming the same field. Recorded rather than reproduced, exactly as tasks_read_cases and tasks_ready_cases did -- synthesizing an engine error is not a thing to write on purpose. All five still refuse, still write nothing, and still leave the document byte-for-byte as they found it, which the file field proves. NOTHING in this capture shows a verb swallowing a failure: `set -euo pipefail` means the failing lock subshell ends the script in all seven, whether or not the verb also carries an explicit propagation line. US-001 gave mark-complete, mark-failed, mark-in-progress, mark-skipped and update-field a [--tasks-file <path>] override (aimi-cli.sh), which lengthened each verb's own no-argument Usage line -- mark-complete-sem-id, mark-failed-sem-id, mark-in-progress-sem-id, mark-skipped-sem-id and the three update-field-*-vazio/sem-args cases carry that new text, and nothing about the write itself changed.",
+  "_comment_tasks_write": "The seven locked tasks.json WRITERS -- mark-complete, mark-failed, mark-in-progress, mark-skipped, update-field, normalize-status and normalize-verification -- captured the same way every block before them was, by running the jq that used to live in aimi-cli.sh BEFORE it was deleted. Sibling block to tasks_read_cases and tasks_ready_cases; the record carries lifecycle_cases' WRITER fields on top of theirs, because what the file looks like afterwards IS the contract here: `file` is the whole resulting document and `tree` the whole .aimi listing, so a refusal that still wrote something -- or a temp file nobody removed -- cannot hide. args/input make every case replayable; state_after is kept because four of the seven write .aimi/state/ as part of what they do. Temp roots normalize to /TMP, the CLI's own path to /CLI/aimi-cli.sh, a bash line number to <N>, and a leaked mktemp suffix to .XXXXXX. 528 of 546 field comparisons identical after the port -- every stdout, every resulting document and every .aimi/state/ file matched in all 91 cases, the four mark-* verbs' state writes included. The 18 that differ fall in 8 cases and in two classes, named here so nobody has to rediscover them. (1) THE LEAKED TEMP FILE, tree only, in mark-complete-lock-inutilizavel, update-field-lock-inutilizavel and normalize-status-lock-inutilizavel: each hands the verb a .lock that is a DIRECTORY, so the `200>` redirect fails before the lock body runs at all. The pre-port bash had already run `mktemp` by then and `set -euo pipefail` aborts the script before the matching `rm -f`, so jq's recording carries a `<tasks>.XXXXXX` nobody removes. tasks.py owns the temp file now and unlinks it on the way out of any exception, so the listing is one entry shorter. Exit code, stdout, the document and the state files are identical in all three -- what these cases pin is that the failure still ABORTS: no mark printed, no state written. (2) THE ENGINE'S OWN MESSAGE AND EXIT STATUS, plus that same temp file, in update-field-intermediario-nao-objeto, normalize-status-historia-string, normalize-status-sem-userstories, normalize-verification-historia-string and normalize-verification-sem-userstories: jq aborted mid-expression at its own exit 5, where the Python refuses at 1 with a message naming the same field. Recorded rather than reproduced, exactly as tasks_read_cases and tasks_ready_cases did -- synthesizing an engine error is not a thing to write on purpose. All five still refuse, still write nothing, and still leave the document byte-for-byte as they found it, which the file field proves. NOTHING in this capture shows a verb swallowing a failure: `set -euo pipefail` means the failing lock subshell ends the script in all seven, whether or not the verb also carries an explicit propagation line. US-001 gave mark-complete, mark-failed, mark-in-progress, mark-skipped and update-field a [--tasks-file <path>] override (aimi-cli.sh), which lengthened each verb's own no-argument Usage line -- mark-complete-sem-id, mark-failed-sem-id, mark-in-progress-sem-id, mark-skipped-sem-id and the three update-field-*-vazio/sem-args cases carry that new text, and nothing about the write itself changed. The notes of a story are no longer replaced by mark-failed, cascade-skip and reset-orphaned: they keep the plan's paragraphs and set one paragraph of their own, opened by [execution: , after the audit's separator. Three recordings moved, and only in their file field: mark-failed-id-duplicado (the two notes the stories carried, primeira and segunda, were wiped to an empty string and now stay, because the verb was given no cause), mark-failed-notas-com-aspas and mark-failed-notas-acentuadas (the cause is now the text of an [execution: failed] paragraph instead of the whole field). The other six mark-failed recordings that succeed started with no notes and an empty cause, and still end with an empty string. cascade-skip and reset-orphaned have no recording here; their notes are pinned in test-aimi-cli-part1-core.sh.",
   "tasks_validate_cases": [
     {
       "label": "limpo-deps",

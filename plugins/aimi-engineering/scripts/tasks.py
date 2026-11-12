@@ -185,6 +185,11 @@ from story_merge import compute_waves, outline_tokens_in
 # rule rather than a third copy of it.
 from sanitize import rm_sanitize, SUSPICIOUS
 
+# The paragraph separator the cross-story audit already writes `notes` with.
+# story_merge imports it from the same place, so this adds no new edge to the
+# import graph: audit_patches is loaded by the line above either way.
+from audit_patches import NOTES_SEPARATOR
+
 # THE default, in the one place it is now written.
 #
 # A FOURTH copy lives in hooks/pre-bash-dispatcher.py's worktree-budget handler
@@ -734,11 +739,84 @@ def count_with_status(stories, status):
     return len([s for s in stories if jq_index(s, "status", ".userStories[]") == status])
 
 
+# ---------------------------------------------------------------------------
+# The execution paragraph of `notes`
+# ---------------------------------------------------------------------------
+#
+# `notes` is written twice in a story's life. At plan time the expander, the
+# cross-story audit and /aimi:deepen put into it what no other field carries:
+# measurements, research findings, gotchas, `[audit-deferred:` paragraphs. At
+# run time mark-failed, cascade-skip and reset-orphaned record WHY a story is
+# not running. They used to replace the whole field, so the first failure
+# threw away everything the plan had found, and the retry that /aimi:next
+# starts right after it read a story with only the failure line left.
+#
+# They now own ONE paragraph, opened by EXECUTION_MARKER, and touch nothing
+# else. The paragraph sits after the plan's notes behind the separator the
+# audit already uses; a later transition replaces it where it stands, so a
+# story that fails twice carries one cause, the latest.
+EXECUTION_MARKER = "[execution:"
+
+
+def _execution_text(text):
+    """A cause as it is stored: trimmed, and with nothing in it that could cut
+    the paragraph in two or pass for a second marker. The cause is free text
+    from the orchestrator (a build error, a triage finding), and a paragraph
+    is found again by the separator and the marker, so both are rewritten the
+    way audit_patches neutralises `[audit-deferred:` inside recorded text."""
+    text = text.strip() if isinstance(text, str) else ""
+    while NOTES_SEPARATOR in text:
+        text = text.replace(NOTES_SEPARATOR, " ")
+    return text.replace(EXECUTION_MARKER, "[execution;")
+
+
+def execution_note(notes):
+    """The execution paragraph of `notes`, or None when it has none."""
+    if isinstance(notes, str):
+        for paragraph in notes.split(NOTES_SEPARATOR):
+            if paragraph.startswith(EXECUTION_MARKER):
+                return paragraph
+    return None
+
+
+def with_execution_note(notes, kind, cause):
+    """`notes` with its execution paragraph set to `[execution: <kind>] <cause>`.
+
+    The plan's paragraphs are returned exactly as they were. An existing
+    execution paragraph is replaced where it stands (a duplicate, which only
+    hand-editing produces, is dropped); with none, the new one goes last. An
+    empty cause writes no paragraph and removes an old one, so a bare
+    `mark-failed US-001` keeps the plan's notes and leaves no stale cause.
+    Notes that are null, absent or not a string count as empty -- the verbs
+    wrote a string over any of them before, and they still do.
+    """
+    paragraphs = notes.split(NOTES_SEPARATOR) if isinstance(notes, str) and notes else []
+    cause = _execution_text(cause)
+    paragraph = "[execution: " + kind + "] " + cause if cause else None
+    kept = []
+    placed = False
+    for existing in paragraphs:
+        if existing.startswith(EXECUTION_MARKER):
+            if paragraph is not None and not placed:
+                kept.append(paragraph)
+                placed = True
+            continue
+        kept.append(existing)
+    if paragraph is not None and not placed:
+        kept.append(paragraph)
+    return NOTES_SEPARATOR.join(kept)
+
+
 def story_row(story):
     """The status projection: `{id, title, status, dependsOn: (.dependsOn // []),
     priority, notes}`. Key order is jq's written order, which a diff of two
-    status outputs depends on."""
-    return {
+    status outputs depends on.
+
+    For a failed or skipped story `notes` is the execution paragraph alone when
+    it has one: that is the answer to "why is this not running", and the plan's
+    notes behind it are long. They are still there for `get-story` and for the
+    worker's `get-story-context`."""
+    row = {
         "id": jq_index(story, "id", ".userStories[]"),
         "title": jq_index(story, "title", ".userStories[]"),
         "status": jq_index(story, "status", ".userStories[]"),
@@ -746,6 +824,9 @@ def story_row(story):
         "priority": jq_index(story, "priority", ".userStories[]"),
         "notes": jq_index(story, "notes", ".userStories[]"),
     }
+    if row["status"] in ("failed", "skipped"):
+        row["notes"] = execution_note(row["notes"]) or row["notes"]
+    return row
 
 
 def status_view(doc, counts_only):
@@ -4172,10 +4253,16 @@ def mark_stories(doc, story_id, patch):
 
     Every match is updated, not the first: a tasks file carrying the same id
     twice had both stories marked, and mark-complete-id-duplicado records it.
+
+    `patch` is a dict, or a function from the story being marked to its dict.
+    The function form is for a patch that depends on the story it lands on
+    (mark-failed builds its `notes` from that story's own), which a single dict
+    shared by every match cannot do when two stories carry the same id.
     """
     container, selected = _selected_slots(doc, story_id)
     for key in selected:
-        container[key] = jq_add_object(container[key], patch, STORY)
+        story = container[key]
+        container[key] = jq_add_object(story, patch(story) if callable(patch) else patch, STORY)
 
 
 def assign_field(doc, story_id, segments, value):
@@ -4803,8 +4890,8 @@ def op_project_groups(argv):
 # read, so there is nothing for a concurrent writer to invalidate.
 
 
-CASCADE_NOTE = "Skipped: depends on failed story "
-ORPHAN_PATCH = {"status": "failed", "notes": "Reset: orphaned from previous session"}
+CASCADE_REASON = "depends on failed story "
+ORPHAN_REASON = "orphaned from previous session"
 
 
 def _depends_on_any(story, skip_ids):
@@ -4872,10 +4959,20 @@ def cascade_skip(doc, failed_id):
     which is what the jq did.
     """
     skip_ids = cascade_skip_ids(_stories(doc), failed_id)
-    patch = {"status": "skipped", "notes": CASCADE_NOTE + failed_id}
+
+    def skipped(story):
+        # The plan's notes stay; only the execution paragraph is set.
+        patch = {
+            "status": "skipped",
+            "notes": with_execution_note(
+                jq_index(story, "notes", STORY), "skipped", CASCADE_REASON + failed_id
+            ),
+        }
+        return jq_add_object(story, patch, STORY)
+
     _mapped_stories(
         doc,
-        lambda story: jq_add_object(story, patch, STORY)
+        lambda story: skipped(story)
         if any(skip_id == jq_index(story, "id", STORY) for skip_id in skip_ids)
         else story,
     )
@@ -4903,7 +5000,13 @@ def reset_orphaned(doc):
     ]
     reset = [jq_index(container[key], "id", STORY) for key in selected]
     for key in selected:
-        container[key] = jq_add_object(container[key], ORPHAN_PATCH, STORY)
+        patch = {
+            "status": "failed",
+            "notes": with_execution_note(
+                jq_index(container[key], "notes", STORY), "reset", ORPHAN_REASON
+            ),
+        }
+        container[key] = jq_add_object(container[key], patch, STORY)
     return reset
 
 
@@ -5497,9 +5600,18 @@ def _mark_op(verb):
             )
         patch = {"status": status}
         if status == "failed":
-            # jq's `--arg notes "$notes"`: always a string, "" when the caller
-            # gave none, and it lands beside status in one merge.
-            patch["notes"] = _flag(argv, "--notes") or ""
+            # The cause is "" when the caller gave none. It lands in the story's
+            # execution paragraph (see with_execution_note); the plan's notes
+            # are not part of the patch, so the patch is built per story.
+            cause = _flag(argv, "--notes") or ""
+
+            def failure_patch(story):
+                return {
+                    "status": status,
+                    "notes": with_execution_note(jq_index(story, "notes", STORY), "failed", cause),
+                }
+
+            patch = failure_patch
         # The evidence does NOT travel in the patch. `patch` goes through
         # jq_add_object, a top-level `. + {…}`, so a {"verification": {…}} entry
         # would REPLACE the whole verification object and take strategy, status,

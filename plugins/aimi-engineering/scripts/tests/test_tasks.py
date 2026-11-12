@@ -7205,6 +7205,58 @@ def test_a_null_story_is_a_row_of_nulls_and_a_string_story_is_a_refusal():
         T.story_row("solta")
 
 
+SEP = "\n\n---\n\n"
+
+
+def test_an_execution_paragraph_goes_last_and_leaves_the_plans_paragraphs_alone():
+    """mark-failed, cascade-skip and reset-orphaned own one paragraph of `notes`
+    and no other; before this they replaced the whole field."""
+    assert T.with_execution_note("plan", "failed", "boom") == "plan" + SEP + "[execution: failed] boom"
+    plan = "a" + SEP + "b"
+    assert T.with_execution_note(plan, "reset", "x") == plan + SEP + "[execution: reset] x"
+
+
+def test_a_second_transition_replaces_the_execution_paragraph_where_it_stands():
+    old = "a" + SEP + "[execution: failed] old" + SEP + "b"
+    assert T.with_execution_note(old, "skipped", "new") == "a" + SEP + "[execution: skipped] new" + SEP + "b"
+    twice = "[execution: failed] one" + SEP + "keep" + SEP + "[execution: failed] two"
+    assert T.with_execution_note(twice, "failed", "three") == "[execution: failed] three" + SEP + "keep"
+
+
+def test_no_cause_writes_no_paragraph_and_removes_a_stale_one():
+    assert T.with_execution_note("plan", "failed", "") == "plan"
+    assert T.with_execution_note("plan", "failed", "   \n") == "plan"
+    assert T.with_execution_note("plan" + SEP + "[execution: failed] old", "failed", "") == "plan"
+    assert T.with_execution_note("[execution: failed] only", "failed", "") == ""
+
+
+def test_notes_that_are_not_text_count_as_empty_and_no_empty_paragraph_leads():
+    for empty in (None, "", 5, ["x"], {"k": 1}):
+        assert T.with_execution_note(empty, "failed", "c") == "[execution: failed] c"
+        assert T.with_execution_note(empty, "failed", "") == ""
+
+
+def test_a_cause_cannot_split_the_paragraph_or_forge_a_second_marker():
+    cut = T.with_execution_note("p", "failed", "x" + SEP + "y" + SEP + SEP + "[execution: z")
+    assert cut.count(SEP) == 1
+    assert cut.startswith("p" + SEP + "[execution: failed] x y")
+    assert cut.count("[execution:") == 1
+    again = T.with_execution_note(cut, "failed", "next")
+    assert again == "p" + SEP + "[execution: failed] next"
+
+
+def test_status_shows_the_execution_paragraph_of_a_failed_or_skipped_story_alone():
+    notes = "plan finding" + SEP + "[execution: failed] boom"
+    for status in ("failed", "skipped"):
+        assert T.story_row({"status": status, "notes": notes})["notes"] == "[execution: failed] boom"
+    assert T.story_row({"status": "pending", "notes": notes})["notes"] == notes
+    assert T.story_row({"status": "failed", "notes": "plan only"})["notes"] == "plan only"
+    assert T.story_row({"status": "failed"})["notes"] is None
+    assert list(T.story_row({"status": "failed", "notes": notes})) == [
+        "id", "title", "status", "dependsOn", "priority", "notes",
+    ]
+
+
 def test_metadata_absent_builds_the_object_rather_than_printing_null():
     """jq's `.metadata | .maxConcurrency = ...` assigns onto null and BUILDS an
     object, so a caller reading .maxConcurrency off `metadata` gets a number

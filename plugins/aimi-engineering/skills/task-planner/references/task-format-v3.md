@@ -123,7 +123,7 @@ Each story is ONE atomic unit of work completable in a single agent iteration.
 | `priority` | number | Yes | — | Tiebreaker for stories at the same dependency depth. Lower = runs first among peers. |
 | `status` | string | Yes | `"pending"` | One of: `"pending"`, `"in_progress"`, `"completed"`, `"failed"`, `"skipped"` |
 | `dependsOn` | string[] | Yes | `[]` | Array of story IDs this story depends on (e.g., `["US-001", "US-002"]`) |
-| `notes` | string | No | `""` | Error details, learnings, or skip reason |
+| `notes` | string | No | `""` | The plan's findings and gotchas, then at most one last paragraph `[execution: failed\|skipped\|reset] <cause>` recorded when the story stops running; the failure verbs never rewrite the plan's paragraphs |
 | `project` | string | No | absent | Relative path to the sub-project directory (relative to the parent folder where `.aimi/` lives). When absent, the story falls back to CWD (backwards compatible). |
 | `wave` | number | No | computed | Execution wave derived from the `dependsOn` graph. Wave 1 = stories with no dependencies; wave N = max(wave of each dependency) + 1. Read-only; computed by the executor, not set by hand. |
 | `implementation` | object | No | absent | Implementation hints for the executing agent. See [Implementation Object](#implementation-object). |
