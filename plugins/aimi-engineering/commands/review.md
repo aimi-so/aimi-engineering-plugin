@@ -238,7 +238,7 @@ Read and follow the **Resolve Agent Models** section of `commands/references/cli
 
 ## Step 2: Choose the Reviewers
 
-Pick from this table, then print the team as a message of its own, with no tool call in it, before Step 3 starts any reviewer:
+Pick from this table. Step 3's message that starts the reviewers opens with this block as text, before its first Task call; a message with no tool call would end the turn and stop the run:
 
 ```
 Team for [repository]:
@@ -262,7 +262,7 @@ With a FOCUS, run only the rows whose subject it names: bugs, correctness; vulne
 
 ## Step 3: Run the Reviewers
 
-Run the chosen reviewers **in parallel** with the Task tool, one per repository. While they run, write nothing when one finishes, not even a line saying you are waiting: the next text is the report. The prompt carries data lines only; the reviewer runs `DIFF_CMD` and reads the code itself:
+Run the chosen reviewers **in parallel** with the Task tool, one per repository. While they run, a reviewer that finishes gets one short progress line at most (how many are done), never its findings: the report states them once, checked. The prompt carries data lines only; the reviewer runs `DIFF_CMD` and reads the code itself:
 
 ```
 Task subagent_type="aimi-engineering:review:[REVIEWER]"

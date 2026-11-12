@@ -13,7 +13,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Before reporting, the orchestrator checks the premise of every P1 and P2 finding as well as its quoted line (the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes), with up to four tool calls each, and checks a P3 when two reads settle it. A claim the code does not support is removed from a finding that otherwise holds. `Checked: no` is kept for checks that need running code or exceed the budget, and P3 findings now carry the mark too.
 - A severity that rests on a rule the project does not write down drops to P3. The maintainability reviewer reports a long file as P3 always; a written size limit is the project-standards reviewer's to cite.
-- The team is printed as a block, in a message of its own, before any reviewer starts, and nothing is written while they run.
+- The team is printed as a block at the start of the message that launches the reviewers. While they run, a reviewer that finishes gets one short progress line at most, never its unchecked findings.
 
 ### Fixed
 - The report's next steps pointed at `/aimi:execute` and `/aimi:status`. They now say what to do with each severity.
