@@ -48,8 +48,9 @@ It is not a file copy. Several things are rewritten so they work under OpenCode:
 
 - **Commands** become nested directories — `commands/aimi/plan.md` — so they appear as `/aimi:plan`, `/aimi:execute`, and so on.
 - **Command bodies** are rewritten: agent invocations use the Task tool, CLI path lookups use `OPENCODE_CONFIG_DIR`, and error messages point at the OpenCode installer rather than the Claude Code one.
-- **Skills** are copied with their `SKILL.md` and reference files intact.
+- **Skills** are copied with their `SKILL.md`, reference files and `NOTICE.md` intact.
 - **Agents** land in `~/.config/opencode/agents/aimi-*.md` with their model fields preserved.
+- **Reinstalling** replaces what the plugin ships. An `aimi-*` agent or skill that a newer release dropped or renamed is removed from `agents/` and `skills/`, and so are the same files in the plugin copy; files without the `aimi-` prefix are never touched.
 - **Permissions** for autonomous Bash execution are configured in `opencode.json`.
 - **Plugin source** — the CLI scripts and hooks — is copied to `~/.config/opencode/plugins/aimi-engineering/`.
 - **The context7 MCP server** is added to `opencode.json`.

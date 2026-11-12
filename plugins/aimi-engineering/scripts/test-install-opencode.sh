@@ -351,6 +351,47 @@ else
   pass "agent fixture: no destination file written for the failing agent"
 fi
 
+# ---------------------------------------------------------------------------
+echo "== upgrade: agents and skills the plugin dropped leave the destination"
+# ---------------------------------------------------------------------------
+# The installer used to only add files, so a release that removed or renamed an
+# agent or a skill left the old one installed and offered to the model.
+UP=$(new_tmp)
+run_install "$INSTALL_SH" "$UP"
+assert_eq "0" "$RC" "upgrade: first install exits 0"
+AG="$UP/xdg/opencode/agents"
+SK="$UP/xdg/opencode/skills"
+PL="$UP/xdg/opencode/plugins/aimi-engineering"
+printf -- '---\ndescription: retired\n---\nold\n' > "$AG/aimi-kieran-rails-reviewer.md"
+mkdir -p "$SK/aimi-rclone" "$PL/skills/rclone" "$PL/agents/review"
+printf 'old\n' > "$SK/aimi-rclone/SKILL.md"
+printf 'old\n' > "$PL/skills/rclone/SKILL.md"
+printf 'old\n' > "$PL/agents/review/aimi-kieran-rails-reviewer.md"
+printf 'mine\n' > "$AG/my-own-agent.md"
+
+run_install "$INSTALL_SH" "$UP" --dry-run
+assert_eq "0" "$RC" "upgrade: dry run exits 0"
+case "$OUT" in
+  *"Would remove retired agent: aimi-kieran-rails-reviewer.md"*"Would remove retired skill: aimi-rclone"*) pass "upgrade: dry run names the retired agent and skill" ;;
+  *) fail "upgrade: dry run names the retired agent and skill" "$OUT" ;;
+esac
+if [ -e "$AG/aimi-kieran-rails-reviewer.md" ] && [ -d "$SK/aimi-rclone" ]; then
+  pass "upgrade: dry run removes nothing"
+else
+  fail "upgrade: dry run removes nothing"
+fi
+
+run_install "$INSTALL_SH" "$UP"
+assert_eq "0" "$RC" "upgrade: second install exits 0"
+for gone in "$AG/aimi-kieran-rails-reviewer.md" "$SK/aimi-rclone" "$PL/skills/rclone" "$PL/agents/review/aimi-kieran-rails-reviewer.md"; do
+  if [ -e "$gone" ]; then fail "upgrade: retired path is gone: ${gone#$UP/}"; else pass "upgrade: retired path is gone: ${gone#$UP/}"; fi
+done
+if [ -f "$AG/my-own-agent.md" ] && [ -f "$AG/aimi-correctness-reviewer.md" ] && [ -f "$SK/aimi-git-worktree/SKILL.md" ]; then
+  pass "upgrade: a file of the user's and the current agents and skills stay"
+else
+  fail "upgrade: a file of the user's and the current agents and skills stay"
+fi
+
 echo
 echo "Results: ${GREEN}${TESTS_PASSED} passed${NC}, ${RED}${TESTS_FAILED} failed${NC}"
 [ "$TESTS_FAILED" -eq 0 ]
