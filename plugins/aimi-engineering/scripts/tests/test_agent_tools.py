@@ -34,15 +34,22 @@ TABLE = {
     "research/aimi-bundle-prototype-author.md": {"Read", "Write", "Grep", "Glob"},
     "research/aimi-foundation-architect.md": {"Read", "Write", "Grep", "Glob", CONTEXT7},
     "review/aimi-cross-story-auditor.md": {"Read", "Write"},
-    "review/aimi-correctness-reviewer.md": REVIEWER,
-    "review/aimi-project-standards-reviewer.md": REVIEWER,
 }
 
-# The agents in TABLE that review code: Bash may run a check, never edit.
+# The agents that review code: Bash may run a check, never edit. They are the
+# nine files of agents/review/ other than the cross-story auditor.
 REVIEWERS = {
     "review/aimi-correctness-reviewer.md",
+    "review/aimi-security-reviewer.md",
+    "review/aimi-performance-reviewer.md",
+    "review/aimi-maintainability-reviewer.md",
     "review/aimi-project-standards-reviewer.md",
+    "review/aimi-frontend-races-reviewer.md",
+    "review/aimi-agent-native-reviewer.md",
+    "review/aimi-data-migration-reviewer.md",
+    "review/aimi-deployment-verification-agent.md",
 }
+TABLE.update({rel: REVIEWER for rel in REVIEWERS})
 
 TOOL_NAMES = {"Read", "Write", "Edit", "Grep", "Glob", "Bash"}
 FORBIDDING = re.compile(r"\b(?:do not|don't|never|no|without)\b", re.IGNORECASE)

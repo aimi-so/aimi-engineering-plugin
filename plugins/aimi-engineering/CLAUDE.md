@@ -17,6 +17,7 @@ area live under `docs/dev/`; read the one that matches what you are about to cha
 | `docs/dev/planning-verbs.md` | `story-merge`, `apply-audit-patches`, `validate-outline`/`validate-staging`/`outline-shift`, `plan_checks.py`, advisory smells |
 | `docs/dev/cli-verbs.md` | the research and spec-derivation verbs, `check-version`, `slugify`, `detect-design-bundle` |
 | `docs/dev/roadmap.md` | a `roadmap-*` verb, `roadmap.py`, or the `roadmap.json` shape |
+| `docs/dev/review.md` | `commands/review.md` or an agent under `agents/review/` (why the request is read as it is, why these reviewers, the shared closing sections) |
 | `docs/dev/story-executor.md` | `skills/story-executor/SKILL.md`, the worker's brief, or how a command spawns it |
 | `docs/dev/tasks-schema.md` | the `tasks.json` shape or a validator over it |
 | `docs/dev/jq-census.md` | a `jq` call in `aimi-cli.sh` or under `commands/` (the principle stays below) |

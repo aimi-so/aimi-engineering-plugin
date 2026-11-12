@@ -141,12 +141,13 @@ Pass `--base <branch>` to cut every container from this branch outright, instead
 
 ## `/aimi:review`
 
-Multi-agent code review. Runs architecture, security, simplicity, performance, and agent-native reviewers in parallel, plus migration and language-specific reviewers when relevant. Synthesizes the findings and sorts them by severity.
+Multi-agent code review. Reads what you ask for in plain words, a pull request or branch plus a focus ("bugs and security") and a scope ("only the diff"), and runs the reviewers that fit: correctness, security, performance and maintainability by default, plus project-standards, frontend, agent-native, data-migration and deployment reviewers when the change touches their subject. It checks each serious finding against the code before reporting it, and sorts the findings by severity.
 
 ```bash
-/aimi:review            # current branch
-/aimi:review 42         # pull request #42
-/aimi:review feat/auth  # a specific branch
+/aimi:review                                       # current branch
+/aimi:review 42                                    # pull request #42
+/aimi:review feat/auth                             # a specific branch
+/aimi:review 42 focus on bugs, only the diff       # a focus and a scope, in plain words
 ```
 
 Detects which forge your remote points at rather than assuming GitHub — GitHub and GitLab are the only adapters today; any other host gets manual steps.

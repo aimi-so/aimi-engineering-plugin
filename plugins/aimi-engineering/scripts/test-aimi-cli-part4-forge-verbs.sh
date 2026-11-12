@@ -2234,13 +2234,13 @@ test_forge_pr_view_include_field_sets() {
 
   local out
 
-  # review.md's five-field call site (review.md:36).
+  # review.md's five-field call site (Detect Target Type, item 1).
   out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include title,body,files,headRefName,baseRefName)
   assert_eq '{"status":"found","pr":{"title":"T","body":"B","files":[{"path":"a.txt"}],"headRefName":"feat","baseRefName":"main"},"unsupported_fields":[],"message":null}' \
     "$out" "forge-pr-view include: five-field review.md set returns exactly those keys"
 
-  # review.md's files-only call site (review.md:99).
+  # review.md's files-only call site (Setup).
   out=$(FAKE_GH_LIST_JSON='[{"number":7}]' FAKE_GH_PR_JSON='{"files":[{"path":"b.txt","additions":3,"deletions":1}]}' \
     PATH="$FAKE_GH_DIR:$PATH" "$CLI" forge-pr-view --pr feat-x --include files)
   assert_eq '{"status":"found","pr":{"files":[{"path":"b.txt","additions":3,"deletions":1}]},"unsupported_fields":[],"message":null}' \
