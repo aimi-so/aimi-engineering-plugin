@@ -5,7 +5,7 @@ description:
   when building React Native components, optimizing list performance,
   implementing animations, or working with native modules. Triggers on tasks
   involving React Native, Expo, mobile performance, or native platform APIs.
-license: MIT
+license: MIT (NOTICE.md)
 metadata:
   author: vercel
   version: '1.0.0'
