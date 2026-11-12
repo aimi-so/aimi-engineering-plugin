@@ -311,14 +311,16 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 ## Step 4: Check the Findings and Consolidate
 
 1. Collect the findings of every reviewer. Surface the learnings researcher's results: flag relevant past solutions as "Known Pattern", with links to the `.aimi/solutions/` files. Merge duplicates, meaning findings with the same cause or the same line, and keep the highest severity. Discard any finding that recommends deleting a protected artifact (see Protected Artifacts).
-2. **Check before reporting.** Read the quoted line of every P1 and P2 at its `path:line`, and of a P3 when one read settles it; two tool calls at most for each. Drop what the code does not support and count it. Mark each finding you keep:
-   - `Checked: yes` when the code confirms what it says;
-   - `Checked: pattern present, effect not measured` when it claims a speed, a race or an exploit that reading cannot measure;
-   - `Checked: no (reason)` when you did not check it. An unchecked P1 keeps its severity and this mark.
+2. **Check before reporting.** For every P1 and P2, read the quoted line at its `path:line`, then check the premise the finding rests on: the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes. Four tool calls at most for each. Check a P3 too when two reads settle it. Drop what the code does not support and count it. When a finding holds but one of its claims does not, remove that claim and say so. Mark each finding you keep:
+   - `Checked: yes` when the code confirms the line and the premise;
+   - `Checked: pattern present, effect not measured` when it confirms both, and the finding claims a speed, a race or an exploit that only running the code would measure;
+   - `Checked: no (reason)` when the check needs running code or more calls than allowed, never for a check two reads settle. An unchecked P1 keeps its severity and this mark.
 3. Categorize:
    - **P1 CRITICAL:** blocks merge: security vulnerabilities, data corruption risks, breaking changes.
    - **P2 IMPORTANT:** should fix: defects with limited reach, performance issues, structural problems.
    - **P3 NICE-TO-HAVE:** enhancements: minor improvements, cleanup.
+
+   A severity that rests on a rule the project does not write down (a size limit, a convention) is P3.
 4. Estimate effort for each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours).
 
 ## Step 5: Aimi-Branded Report
@@ -358,6 +360,7 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 
 1. **[Finding title]** — [description]
    - Suggestion: [improvement]
+   - Checked: [as above]
 
 ### Review Agents Used
 

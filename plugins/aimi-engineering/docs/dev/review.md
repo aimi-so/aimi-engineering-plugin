@@ -26,7 +26,11 @@ Reviewers never change the repository. The tools list is an accident guard, not 
 
 ## Why the findings are checked
 
-Every reviewer returns the quoted line next to `path:line`, so a check costs one read. The orchestrator checks all P1 and P2 findings and drops what the code does not support, counting it. For static claims the check measures what it claims: the statement about the cited code is true. For claims about speed, races or exploits it measures only that the pattern is present, so those findings carry that label instead of `Checked: yes`. This answers `commands/references/context-budget.md` § The Question Every New Gate Must Answer: what the gate claims and what it measures are the same thing, and the label is honest where they differ.
+Every reviewer returns the quoted line next to `path:line`, so finding the line costs one read. The line is not the claim, though. A finding usually rests on a premise somewhere else: the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes. A check that stops at the line confirms the quote and leaves the premise unread, so the finding goes out marked checked while the part that decides its severity was never looked at. The orchestrator therefore checks the line and the premise of every P1 and P2, with up to four tool calls each. It checks a P3 when two reads settle it, since an unchecked P3 the person then has to verify costs more than the two reads. It drops what the code does not support and counts it, and it removes a claim the code does not support from a finding that otherwise holds.
+
+For static claims the check measures what it claims: the statement about the cited code, and the premise it rests on, are true. For claims about speed, races or exploits it measures only that the pattern and its premise are present, so those findings carry that label instead of `Checked: yes`. `Checked: no` is kept for checks that need running code or exceed the budget, so it signals a real limit and not a skipped read. This answers `commands/references/context-budget.md` § The Question Every New Gate Must Answer: what the gate claims and what it measures are the same thing, and the label is honest where they differ.
+
+A severity that rests on a rule the project never wrote (a size limit, a naming convention) is a reviewer's preference, so the orchestrator lowers it to P3. A rule the project did write is the project-standards reviewer's to cite.
 
 ## The shared sections
 
