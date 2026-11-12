@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.158.1] - 2026-11-12
+
+### Changed
+- A merge conflict between two stories of one `/aimi:execute` wave is now resolved in place instead of stopping the run, which is what orchestrators already did while the text said to stop. The orchestrator edits the conflicted files in the group's execution root so they keep what every involved story adds. It runs the `implementation.verify` of the story the merge stopped at and of each story of the wave already merged whose `implementation.files` names a conflicted file. Only then does it stage and commit the merge, keeping its `Merge story: <title>` subject, and merge the rest of the wave. When the criteria cannot all hold or a verify fails, it puts git's own conflict back with `git checkout --merge` and stops as before, with the reason in the report. A merge that never started still stops. The reasoning is in `docs/dev/execute-wave-loop.md` § Wave merge conflicts are resolved in place.
+
+### Fixed
+- The story-executor brief described `story.notes` as notes from earlier attempts at the story, which a first run never has, because only `pending` stories are ready. It now says what the field holds: the plan's measurements and research findings, the audit's paragraphs and `[audit-deferred:` findings, and, on a story run again after a failed or interrupted attempt, the cause that attempt recorded. It also says that `acceptanceCriteria` and `implementation` win where `notes` disagrees with them. `docs/dev/story-executor.md` § What `notes` holds lists the field's writers.
+
 ## [1.158.0] - 2026-11-11
 
 The commands now spend fewer turns and less context for the same work. Every story worker reads one brief, the setup steps of `/aimi:execute` run in fewer Bash calls, the cross-story auditor writes its own result, and the files loaded on every run carry less rationale. A new hook suggests a fresh session when an aimi command starts in a long one. Nothing in the state on disk, the CLI verbs' output or the verification gates changes.
