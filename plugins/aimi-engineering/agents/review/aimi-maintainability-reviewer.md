@@ -25,7 +25,7 @@ Where a check below has a name in the design literature (Ousterhout's red flags,
 - **A simpler reframe that was missed.** A different way to see the problem would remove whole branches, flags, wrappers or orchestration layers and keep the behavior.
 - **Special cases bolted onto shared paths.** New one-off conditionals, booleans or feature checks inside general code, where a dedicated abstraction or policy belongs.
 - **Duplicated logic.** The same block copied in more than one place in the diff, or a new helper beside an existing one that already does the job. Name the existing one.
-- **A file that grows past the point of reading.** A touched file that crosses 1000 lines because of this diff (P2), or is already over it and gains surface without being split (P3).
+- **A file that grows past the point of reading.** A touched file that crosses 1000 lines because of this diff, or is already over it and gains surface without being split. Always P3: a size limit the project does not write down is a preference, not a defect. A limit the project does write down belongs to the project-standards reviewer, which cites it.
 - **Logic in the wrong layer** (information leakage). Feature-specific behavior in a general-purpose module; implementation details exposed through a public API.
 - **Thin wrappers** (pass-through method, shallow module). Helpers that only forward, identity abstractions, generic handlers that hide a simple data shape and add indirection without clarity.
 - **A comment that repeats the code**, or one that claims "same behavior as" a sibling that has since diverged. Suggest deleting the first and correcting the second.
