@@ -396,6 +396,8 @@ For each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours)
 3. **Run `/aimi:status`** — Check current task progress
 ```
 
+**Fresh session hint:** After the Next Steps, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode.
+
 ## Error Handling
 
 | Failure | Action |

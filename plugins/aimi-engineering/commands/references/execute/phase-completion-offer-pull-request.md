@@ -1,6 +1,6 @@
 # Execute: Phase Completion: Offer a Pull Request
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Offer a Pull Request
 

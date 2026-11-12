@@ -1,6 +1,6 @@
 # Execute: Step 1.6: Branch Base Selection
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 1.6: Branch Base Selection
 
@@ -14,22 +14,21 @@ This step resolves the base for AIMI_ROOT itself. In a multi-repo layout (`AIMI_
 
 ### Resolve Interactivity Mode
 
+One block resolves the interactivity mode and computes the four gating conditions below, and echoes each:
+
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)
+DEFAULT_BRANCH="[DEFAULT_BRANCH echoed by Step 1.5, empty when it echoed none]"
+echo "INTERACTIVE_MODE=$($AIMI_CLI detect-interactivity)"
+CURRENT_BRANCH=$(git branch --show-current)
+echo "TARGET_EXISTS_LOCAL=$(git branch --list [branchName])"
+echo "TARGET_EXISTS_REMOTE=$(git ls-remote --heads origin [branchName])"
+echo "CURRENT_BRANCH=$CURRENT_BRANCH"
+echo "CURRENT_IS_MERGED=$(git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "  $CURRENT_BRANCH" || git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "* $CURRENT_BRANCH")"
 ```
 
 ### Compute Gating Conditions
-
-Check whether a prompt is needed. Compute all four conditions:
-
-```bash
-TARGET_EXISTS_LOCAL=$(git branch --list [branchName])
-TARGET_EXISTS_REMOTE=$(git ls-remote --heads origin [branchName])
-CURRENT_BRANCH=$(git branch --show-current)
-CURRENT_IS_MERGED=$(git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "  $CURRENT_BRANCH" || git branch --merged "origin/$DEFAULT_BRANCH" | grep -Fx "* $CURRENT_BRANCH")
-```
 
 A prompt is needed when **all four** of the following are true:
 

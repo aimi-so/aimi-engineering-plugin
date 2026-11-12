@@ -331,6 +331,10 @@ Names must satisfy `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Omit `skills` entirely when no
 
 **Plugin-self-build override** — when the current repo is the `aimi-engineering-plugin` itself (detected by top-level `CLAUDE.md` containing `This repo builds the aimi-engineering plugin`), set `skills: ["create-agent-skills"]` for any story whose `implementation.files` touches `plugins/aimi-engineering/skills/` or `plugins/aimi-engineering/commands/` — this override takes precedence over the file-pattern mapping above.
 
+**Foundation-entry attach** — when the outline entry you are expanding carries `foundationEntry: true`, and only then, add `architecture-foundation` to `skills[]` in addition to (not instead of) what the mapping and the plugin-self-build override produced, e.g. `["create-agent-skills", "architecture-foundation"]` when both apply.
+
+The order of `skills[]` is not pinned, so under `get-story-context`'s 100 KB payload cap no particular skill is guaranteed to survive eviction.
+
 ## tasks[] (horizontal mechanical breakdown)
 
 3–15 entries, each ≤ 5000 chars, plain imperative verb-object phrasing. Order: creation/scaffolding first → integration wiring → local verification last. Cross-story integration steps (e.g., `"Wire <handler> into <owning file>"`) are mandatory when `implementation.files` lists a path that another outline entry's likely implementation also touches.
@@ -352,7 +356,7 @@ Scan `implementation.files` against `**/schemas/**/*.{ts,js,py,rb}`, `**/types/*
 - If the project contains a `**/mocks/**` path: append AC `Update mock data in matching **/mocks/** path to populate new fields (or document why mocks are intentionally unchanged).`
 - Otherwise: append AC `Verify no mock data files require updates`.
 
-Note: `story-merge` runs Rule 22 (cross-story mock-sync routing) after merge — it may move this AC to a consumer story. You only need to inject the AC when locally indicated; you do NOT route it.
+Note: `story-merge` runs Rule 22 (cross-story mock-sync routing) after merge — it may move this AC to a consumer story. You only need to inject the AC when locally indicated; you do NOT route it. Phase 3.1 (Reference Element Inventory) and Phase 4.1 (Coverage Self-Check) likewise run inside `story-merge` after merge, never in an expander.
 
 ## Spec-driven content (when present)
 
@@ -362,11 +366,13 @@ When `businessSpecContent` is non-null and the outline entry corresponds to a sc
 
 - Seed acceptance criteria verbatim from the matching entries in `BusinessSpec § 9` (Acceptance Criteria). Preserve rule IDs (`RN-01`, `RN-02`, …) exactly as written. Do NOT paraphrase.
 - Cite the spec line in AC anchors: `(BusinessSpec § N[.N] L<line>)`.
+- Decomposition follows the spec, one story per item: per screen listed in `BusinessSpec § 2` (the canonical screen list; map in `commands/references/spec-section-contract.md`), per non-trivial entity in `BusinessSpec § 4`, per endpoint group in `BusinessSpec § 5.1` and `BusinessSpec § 5.3`, per persona or permission tier in `BusinessSpec § 7`. Scope this story to the one item its outline entry names.
 
 When `designSpecContent` is non-null and the story includes UI work:
 
 - Use design tokens from `DesignSpec § 1` directly — do NOT re-parse from prototype CSS.
-- For visible-text elements, extract literals verbatim from the relevant `DesignSpec § N.N` subsection. Wrap each literal in double quotes followed by `(DesignSpec § N.N L<line>)`.
+- For visible-text elements, extract literals verbatim from the relevant `DesignSpec § N.N` subsection, with no paraphrase, translation or abbreviation; this is mandatory for every visual AC. Wrap each literal in double quotes followed by `(DesignSpec § N.N L<line>)`.
+- A story for a new component in `DesignSpec § 2.2` (one story per entry) includes the component's prop type signature verbatim as an acceptance criterion.
 
 ## Foundation proposal handling (when `foundation_proposal` is present)
 
@@ -391,7 +397,7 @@ When a `<foundation_proposal>` block is present (Phase 1.9's Greenfield Foundati
 
 ## Prototype citations (when prototypePaths non-empty and verification.strategy == "visual")
 
-Every visual-layout AC must include a citation to the specific prototype region. Three valid forms — pick the first that applies:
+The prototype is canonical for visual layout; `DesignSpec.md` is canonical for design tokens, component prop types and interaction states. Every visual-layout AC must include a citation to the specific prototype region. Three valid forms — pick the first that applies:
 
 - View citation (preferred for a sliced block): `(prototype: <relative-path> §<view-name>)`, where `<view-name>` is the `data-view` attribute value of the `<section>` the criterion is about.
 - Heading citation: `(prototype: <relative-path> §<heading-text>)`

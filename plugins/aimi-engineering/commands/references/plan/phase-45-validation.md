@@ -1,6 +1,6 @@
 # Plan: Phase 4.5: Post-Generation Validation
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ## Phase 4.5: Post-Generation Validation
 

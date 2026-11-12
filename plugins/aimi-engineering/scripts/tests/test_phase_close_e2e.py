@@ -382,7 +382,7 @@ def test_a_split_phase_closes_only_once_every_member_is_judged(tmp_path):
     'main' file -- the shape `_completed_gate_resolve_members` reaches by
     finding an anchor carrying a well-formed `metadata.splitGroup` and then
     following its declared `siblings`, per the schema in this plugin's own
-    CLAUDE.md (Tasks File Schema, `metadata.splitGroup`). Every story in
+    docs/dev/tasks-schema.md (`metadata.splitGroup`). Every story in
     BOTH files gets judged before the close; proves outline:06's per-member
     gate end to end rather than only against `_completed_gate_resolve_members`
     directly.

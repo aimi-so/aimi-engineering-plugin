@@ -5680,7 +5680,7 @@ def op_remove_story(argv):
     metadata.decisions has no other Python writer anywhere in this file --
     every existing entry is written command-side, at plan time. This is the
     first, and its shape is authored fresh from the schema documented in the
-    top-level CLAUDE.md's Tasks File Schema section, not ported from a jq
+    plugin's docs/dev/tasks-schema.md, not ported from a jq
     program that no longer exists.
     """
     path = _flag(argv, "--tasks-file")

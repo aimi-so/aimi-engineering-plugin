@@ -1,6 +1,6 @@
 # Execute: Steps 3.1 and 3.2: Worktree Manager and Concurrency
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 3.1: Resolve Worktree Manager
 
@@ -12,25 +12,13 @@ If resolution fails, report error and STOP.
 
 ## Step 3.2: Read Concurrency Setting
 
-Read the tasks file metadata to get maxConcurrency.
-
-**Phase mode (`PHASE_MODE=true`):** re-run `init-session` with `--file "$PHASE_TASKS_PATH"` explicitly — not the bare form — so `maxConcurrency` is read from the claimed phase's own tasks file (see Concurrency Source in `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD), not any feature-root or global file. The bare form would re-run `init-session`'s mtime-based auto-discovery and could silently re-point session state at a different, more-recently-touched sibling phase file:
+`init-session` does not return `maxConcurrency`; `metadata` does. Read it from this run's own tasks file — `$PHASE_TASKS_PATH` in phase mode (`PHASE_MODE=true`), so the value comes from the claimed phase's own tasks file and not from a feature-root or sibling phase file (see Concurrency Source in `${CLAUDE_PLUGIN_ROOT}/commands/references/container-execution.md` § Phase Mode: Worktree Naming and CWD), `$TASKS_PATH` otherwise. `--tasks-file` never re-runs auto-discovery and writes no session state.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI init-session --file "$PHASE_TASKS_PATH"
+CONCURRENCY_FILE="[PHASE_TASKS_PATH in phase mode, otherwise TASKS_PATH]"
+echo "MAX_CONCURRENCY=$($AIMI_CLI metadata --tasks-file "$CONCURRENCY_FILE" | jq -r '.maxConcurrency // 20')"
 ```
 
-**Flat mode (`PHASE_MODE=false`):** unchanged — bare `init-session`:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI init-session
-```
-
-Parse `maxConcurrency` from metadata. If not set, default to `20`.
-
-Store as `MAX_CONCURRENCY`.
-
+Fill `CONCURRENCY_FILE` from the value an earlier step echoed. Store the echoed value as `MAX_CONCURRENCY` (20 when the metadata sets none). No `init-session` re-run happens here: Step 1.7 already pointed the session at the phase's file, and a re-run would rewrite the shared current-tasks pointer under a concurrent split.

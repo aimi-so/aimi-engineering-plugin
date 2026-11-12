@@ -1,6 +1,6 @@
 # Execute: Step 2: Per-Project Branch Setup
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Per-Project Branch Setup
 

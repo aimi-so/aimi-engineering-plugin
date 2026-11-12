@@ -16,15 +16,15 @@ SKILL = PLUGIN / "skills" / "story-executor" / "SKILL.md"
 RECIPE = 'git worktree add --detach "$PWD/.aimi-probe-base" HEAD'
 
 
-def test_full_and_compact_templates_carry_the_recipe():
+def test_the_brief_carries_the_recipe_and_its_cleanup():
+    # One brief now; the worker reads it whole, so the recipe is stated once.
     text = SKILL.read_text(encoding="utf-8")
-    full, compact = text.split("## Compact Template", 1)
-    assert RECIPE in full
-    assert RECIPE in compact
-    assert 'git worktree remove --force "$PWD/.aimi-probe-base"' in full
+    assert "## Compact Template" not in text
+    assert text.count(RECIPE) == 1
+    assert 'git worktree remove --force "$PWD/.aimi-probe-base"' in text
 
 
-def test_full_template_says_why_an_outside_copy_fails():
+def test_the_brief_says_why_an_outside_copy_fails():
     flat = " ".join(SKILL.read_text(encoding="utf-8").split())
     assert "a copy under `/tmp` has no `.aimi/` ancestor" in flat
     assert "before you write a single file" in flat

@@ -1,6 +1,6 @@
 # Plan: Step 4.6 and Step 5: Research GC and Aimi-Branded Report
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 >
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 
@@ -55,6 +55,8 @@ Next steps:
 **Outline line:** `Outline: N stories (edits: M)` where `N` is the number of stories in the approved outline (from `outline.json`) and `M` is `outlineEditCount` (the number of edits applied during the Phase 3c gate — rename, add, remove, and reorder each count as one edit).
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:deepen`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:deepen`). Copy the block verbatim.
+
+**Fresh session hint:** After the block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it when `INTERACTIVE_MODE=agent`.
 
 **Audit line:** `Audit: shipped unaudited` is printed exactly when the Failure Fallback stub fired in this run (`auditFailed`); story-merge confirms it with a stderr line containing `plan shipped unaudited`. A run whose audit never failed prints nothing here.
 

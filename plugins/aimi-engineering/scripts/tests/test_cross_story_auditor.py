@@ -289,6 +289,9 @@ def test_auditor_baseline_has_exactly_one_line():
 
 
 def test_auditor_file_stays_within_its_recorded_budget():
-    # The ratchet in test-command-size.sh fails both ways; this pin reads the
-    # same line rather than a literal, so the two cannot disagree.
-    assert len(AGENT_TEXT.encode("utf-8")) == _recorded_budget()
+    # The ratchet in test-command-size.sh fails both ways, in 4096-byte steps;
+    # this pin reads the same line rather than a literal and applies the same
+    # rule, so the two cannot disagree.
+    budget = _recorded_budget()
+    assert budget % 4096 == 0
+    assert budget - 4096 < len(AGENT_TEXT.encode("utf-8")) <= budget

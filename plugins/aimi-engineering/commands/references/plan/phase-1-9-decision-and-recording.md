@@ -1,6 +1,6 @@
 # Plan: Phase 1.9: Greenfield Foundation Gate, decision and recording
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Step 3: Non-Interactive Fast Path
 
@@ -57,7 +57,7 @@ Append one entry to `oqDecisions[]` **per firing root**:
 }
 ```
 
-The `anchor` carries the root discriminator for every non-`.` root — `foundation:<topicSlug>:<repoSlug>`, where `<repoSlug>` is that root's validated key — and stays exactly `foundation:<topicSlug>` for the `.` root, which is the only form a single-repo run ever writes. Both forms are documented in `plugins/aimi-engineering/CLAUDE.md`'s `metadata.decisions[].anchor` valid-forms list. Every other field is per-root the same way: `text` condenses that root's own pointer-block bullets, and `resolution` records that root's own terminal choice.
+The `anchor` carries the root discriminator for every non-`.` root — `foundation:<topicSlug>:<repoSlug>`, where `<repoSlug>` is that root's validated key — and stays exactly `foundation:<topicSlug>` for the `.` root, which is the only form a single-repo run ever writes. Both forms are documented in `plugins/aimi-engineering/docs/dev/tasks-schema.md`'s `metadata.decisions[].anchor` valid-forms list. Every other field is per-root the same way: `text` condenses that root's own pointer-block bullets, and `resolution` records that root's own terminal choice.
 
 All five `resolution` values are mutually exclusive and exhaustive: `accepted` (Accept chosen with zero Adjust rounds), `adjusted-N-rounds` (any number N ≥ 1 of Adjust rounds preceded the terminal Accept or Skip choice), `skipped` (Skip chosen with zero Adjust rounds), `auto-accepted` (Step 3's non-interactive fast path), `auto-skipped-architect-failure` (Step 2's second architect failure).
 

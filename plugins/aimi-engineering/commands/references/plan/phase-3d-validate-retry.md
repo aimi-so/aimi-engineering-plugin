@@ -1,6 +1,6 @@
 # Plan: Phase 3d: Pass 2 Story Expansion, schema validation, retry and failure budget
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Schema Validation and Retry
 

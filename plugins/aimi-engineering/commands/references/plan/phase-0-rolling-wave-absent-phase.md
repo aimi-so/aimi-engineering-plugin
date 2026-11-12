@@ -1,6 +1,6 @@
 # Plan: Phase 0: Rolling-Wave Phase Selection, the ABSENT outcome
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 **The `ABSENT` outcome — offer to author the phase, or report and STOP**
 

@@ -22,7 +22,7 @@ Do not proceed until you have a feature description from the user.
 ## Step 0: Resolve CLI Path
 
 Read `${CLAUDE_PLUGIN_ROOT}/commands/references/cli-path-resolution.md` and follow the **Resolve CLI Path**
-section to set `$AIMI_CLI`. Each layer is a separate Bash call.
+section to set `$AIMI_CLI`: its Fast path block is one Bash call, and the layers after it run one at a time only when it prints `AIMI_CLI_UNRESOLVED`.
 
 If resolution fails, fall back to the legacy prose-only path for questions —
 do not abort the brainstorm. Log: `warning: aimi-cli.sh unresolved — forcing
@@ -1817,6 +1817,8 @@ Next steps:
 ```
 
 **IMPORTANT:** Output the "Next steps" block EXACTLY as shown above — use `/aimi:` prefix (e.g., `/aimi:plan`), NOT the fully-qualified plugin name (e.g., `/aimi-engineering:plan`). Copy the block verbatim.
+
+**Fresh session hint:** After the block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode.
 
 **If user selects "Continue brainstorming":** Return to Phase 2 with the existing document as context. Generate targeted follow-up questions about areas not yet explored.
 

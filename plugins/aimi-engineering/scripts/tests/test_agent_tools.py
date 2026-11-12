@@ -29,7 +29,7 @@ TABLE = {
     "research/aimi-design-bundle-researcher.md": RESEARCHER,
     "research/aimi-bundle-prototype-author.md": {"Read", "Write", "Grep", "Glob"},
     "research/aimi-foundation-architect.md": {"Read", "Write", "Grep", "Glob", CONTEXT7},
-    "review/aimi-cross-story-auditor.md": {"Read"},
+    "review/aimi-cross-story-auditor.md": {"Read", "Write"},
 }
 
 TOOL_NAMES = {"Read", "Write", "Edit", "Grep", "Glob", "Bash"}

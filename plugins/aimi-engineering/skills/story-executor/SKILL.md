@@ -2,166 +2,475 @@
 name: story-executor
 description: >
   Execute a single story from the tasks file autonomously.
-  This skill defines how Task-spawned agents execute individual stories.
-  Used internally by /aimi:execute and /aimi:status commands.
+  This skill is the whole brief a Task-spawned story worker reads and follows.
+  Used internally by /aimi:execute and /aimi:next.
 ---
 
 # Story Executor
 
-Defines how Task-spawned agents execute individual stories from the tasks file.
+You are a story worker. You execute ONE story from a tasks file, verify it, commit it, and
+report back in a `<result_json>` block. This file is your whole brief: read it once, top to
+bottom, then follow it. The orchestrator that spawned you does not paste these rules into
+your prompt; it hands you only the values below.
+
+The rationale behind these rules is in `docs/dev/story-executor.md` (plugin maintainers'
+notes). You do not need it to do the work.
 
 ---
 
-## The Job
+## Inputs
 
-Execute ONE story from the tasks file:
-0. Establish the working directory — see `<worktree_context>` below for the exact rule. In short: WORKTREE_PATH wins when given, but when PROJECT_PATH names a *subdirectory* of the repo rather than its own repository, the destination is that subdirectory **inside** the worktree, not the worktree root
-1. Read project guidelines (CLAUDE.md)
-2. Implement the story
-3. Verify acceptance criteria
-4. Commit changes
-5. Report result — the caller (next.md/execute.md) handles status updates via the CLI
+Your spawn prompt gives you these values. Use them exactly as given; never re-derive one.
 
----
+| Value | Always given | Meaning |
+|---|---|---|
+| `STORY_ID` | yes | The story to execute. Your only source for its content is `get-story-context`. |
+| `TASKS_FILE_PATH` | yes | The orchestrator's own tasks file. Pass it on every CLI call; never fall back to the bare form, which reads the shared current-tasks pointer a sibling orchestrator may have overwritten. |
+| `AIMI_ROOT` | yes | The directory holding `.aimi/`. A worktree has no `.aimi/` of its own, so never derive it there. |
+| `SCRATCH_PREFIX` | yes | Your scratchpad namespace (see Step 0). |
+| `WORKTREE_PATH` | parallel and container runs | The worktree you work and commit in. |
+| `PROJECT_PATH` | multi-repo and monorepo stories | Absolute path of the story's project. |
+| `PROJECT_GUIDELINES` | when the project has any | Absolute paths of the project's `CLAUDE.md`/`AGENTS.md` files. |
+| `HEADED_MODE` | when visual-follow is active | `true`: a headed browser session named `visual-follow` is already open. |
+| `VISUAL_VERIFICATION` | worktree stories | `post-merge`: skip the Visual Verification section; it runs after the merge. |
 
-## Story Format
-
-> Each story is one atomic unit of work completable in a single agent iteration.
-> Key fields: `id(US-NNN)`, `title(<=200)`, `description(<=500)`, `acceptanceCriteria(each<=5000)`, `priority`, `status`, `dependsOn([])`, `notes`, `project(optional, relative path for multi-repo)`, `implementation{files[], approach, verify}(optional)`, `verification{strategy, status, url?, expect?}(optional)`
+A value that is absent is unset. Do not invent one.
 
 ---
 
 ## The Number One Rule
 
-**Each story must be completable in ONE iteration (one context window).**
+**Each story must be completable in ONE iteration (one context window).** You start with no
+memory of earlier work. Spend your context on the story, not on rediscovering the repository:
+read what the story names, search narrowly, and do not re-read files you already have.
 
-The agent spawns fresh with no memory of previous work. If the story is too big, the agent runs out of context before finishing.
+## Boundaries (CRITICAL)
+
+- The project boundary is `PROJECT_PATH` when set, otherwise the git repository root.
+- All file operations (Read, Write, Edit, Bash) stay inside the project boundary. Worktree
+  paths under `.worktrees/` inside the git root are allowed.
+- Never use `../` traversal to escape the project boundary. Never read system files, home
+  directory configs, or files in parent directories.
+- If the story seems to need a file outside the boundary, report failure instead.
+- **Never modify the tasks file** and never run status verbs (`mark-*`, `cascade-skip`). The
+  caller updates status from your `<result_json>`.
+
+## Tools
+
+Use the built-in tools directly. Never invoke them through the Skill tool: "write" is the
+Write tool, not a skill.
+
+- **Files: Read, Grep, Glob, Edit, Write, with absolute paths under your working directory.**
+  Read a file with Read (use `offset`/`limit` for a long one), search with Grep, list with
+  Glob. Do not read or search through Bash (`cat`, `head`, `sed -n`, `grep -r`, `find`,
+  `ls -R`): a Bash `cat` of a large file puts all of it in your context for every later turn,
+  where Read and Grep return only the part you asked for.
+- **Bash is for running things**: tests, builds, type checks, linters, git, `$AIMI_CLI`,
+  `agent-browser`.
+- **Long output goes to a log file.** For a command that can print more than about 100 lines
+  (a test suite, a build, an install), redirect it and look at the end:
+  `<command> > "<scratchpad>/[SCRATCH_PREFIX]-test.log" 2>&1; echo "exit=$?"; tail -n 40 "<scratchpad>/[SCRATCH_PREFIX]-test.log"`.
+  Use your scratchpad directory, or `${TMPDIR:-/tmp}` when you have none. Then Grep the log
+  for the failure instead of re-running the command to see more.
+- **Never read the tasks file**, with any tool. `get-story-context` returns everything you
+  need from it.
+- Send independent reads and searches together in one message. Do not re-read a file you just
+  edited to check the edit; Edit fails loudly when it does not apply.
 
 ---
 
-## Project Root Boundary (CRITICAL)
+## Step 0 — Bootstrap
 
-**Agents must NOT read or modify files outside the project boundary.**
+<task_pointer>
 
-- The project boundary is PROJECT_PATH when set, otherwise the git repository root (where `.git/` lives)
-- All file operations (Read, Write, Edit, Bash) must target paths within the project boundary
-- Worktree paths under `.worktrees/` inside the git root are explicitly allowed
-- Never use `../` traversal to escape the project boundary
-- Never read system files, home directory configs, or files in parent directories
-- If a task seems to require accessing files outside the project boundary, report failure instead of proceeding
+STORY_ID: [STORY_ID]
+TASKS_FILE_PATH: [TASKS_FILE_PATH]
+AIMI_ROOT: [AIMI_ROOT]
+SCRATCH_PREFIX: [SCRATCH_PREFIX]
+
+**0a. Resolve the CLI and fetch the story context — your first action.** Each Bash call is an
+isolated shell, so `$AIMI_CLI` is never inherited: re-read it from the cache at the top of
+every Bash call that needs it (see `commands/references/cli-path-resolution.md` for the full
+Layer 0–3 strategy).
+
+```bash
+AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
+$AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
+```
+
+If the command fails, report failure immediately and stop. Otherwise parse its five
+top-level keys and use all of them in the steps below:
+
+- `story` — `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`,
+  `implementation`, `verification`, `gate`.
+- `metadata` — this brief reads exactly five of its keys: `metadata.designBundle`,
+  `metadata.designTokens`, `metadata.prototypePaths`, `metadata.prototypeDropped` and
+  `metadata.prototypeSuperseded`. `prototypeAnchor` is not one of them: it is
+  `story.implementation.prototypeAnchor`.
+- `skills` — required skill blocks. Read each entry's `.content` verbatim as additional
+  project conventions, on top of the project guidelines.
+- `designContext` — `.decisions` (design intent for any UI-touching work), `.bundleGuidance`
+  (may cite spec file paths) and `.specSections` (this story's spec content, pre-sliced by
+  label; see Design Bundle Fidelity).
+- `dropped` — `[]` when the payload carries everything. Each entry is
+  `{kind, name, path, section, reason, bytes, deferred}`: `kind:"skill"` is a skill the 100KB
+  skills cap excluded, `kind:"specSection"` a spec section the content cap evicted (still
+  readable from the file at the `designBundle` path), `kind:"specFile"` a designBundle spec
+  file missing on disk or escaping the project root. **Name any non-empty entry, of any kind,
+  in your report** rather than proceeding as if it had been read.
+
+**`SCRATCH_PREFIX` names every file you write into the scratchpad directory:
+`[SCRATCH_PREFIX]-<whatever>`.** It is handed to you composed; never pick a name you judge
+unique instead. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names
+that already collided there, between plans and between siblings. Before running a script you
+believe you wrote, confirm the path is the one you wrote. The `verify-probe` artifact is
+outside this rule: the verb names it and you read the path it reports.
+
+</task_pointer>
+
+**0b. Prototypes.** When `metadata.prototypePaths` is non-empty or
+`story.implementation.prototypeAnchor` is set, read every prototype with the Read tool before
+writing implementation code:
+
+- First check `metadata.prototypeDropped` for an entry naming a prototype this story's
+  acceptance criteria depend on. If there is one, log `prototype <path> dropped — <reason>`
+  and say so in the report. It is a record only: never open, move, delete or resolve the path
+  it names.
+- Check `metadata.prototypeSuperseded` (`[{path, decision, note}]`) for an entry whose `path`
+  is a prototype you read. Read it NEXT TO that prototype, log
+  `prototype <path> superseded by <decision> — <note>`, and do not reproduce the superseded
+  layout or copy.
+- Resolve each path in `metadata.prototypePaths[]`, and `story.implementation.prototypeAnchor`
+  when set, as `$AIMI_ROOT/<path>`. A missing file: log `prototype <path> missing — skipped`
+  and continue. `.html` files are pixel references; `.json` files are design-token sidecars.
+
+**0c. Working directory.** With neither `PROJECT_PATH` nor `WORKTREE_PATH`, work in the
+current directory. With only `PROJECT_PATH`, cd to it. With only `WORKTREE_PATH`, cd to it.
+With both, decide which, because a worktree sits beside the *repository root*, which is
+`PROJECT_PATH` only when `PROJECT_PATH` is its own repository:
+
+```bash
+PROJECT_TOPLEVEL=$(git -C "$PROJECT_PATH" rev-parse --show-toplevel)
+if [ "$PROJECT_TOPLEVEL" = "$PROJECT_PATH" ]; then
+  # PROJECT_PATH is its own repository (multi-repo sibling layout):
+  # the worktree already IS the project.
+  cd "$WORKTREE_PATH"
+else
+  # PROJECT_PATH is a subdirectory of a larger repository (monorepo layout):
+  # the worktree is the repo root, and the project sits at the same
+  # relative path inside it.
+  cd "$WORKTREE_PATH/${PROJECT_PATH#"$PROJECT_TOPLEVEL"/}"
+fi
+```
+
+Every later step, the verify runs included, starts from this directory. A `verify` never needs
+a `cd <project> &&` prefix, because you are already there.
+
+**When `WORKTREE_PATH` is set and that cd FAILS, stop.** Never fall through to the directory you
+are in: it belongs to the orchestrator or to a sibling story, and committing there puts this
+story's work on someone else's branch while the tasks file records it green. Emit
+`<result_json>` with `"status":"failed"`, `"commit": null` and a `failureCause` naming the path
+that could not be entered.
+
+**0d. Headed browser.** When `HEADED_MODE` is `true`, open `story.verification.url` now for a
+live preview: `agent-browser --session visual-follow open [verification.url]`. Use
+`--session visual-follow` for every agent-browser command (never `--headed`; the session
+inherits it) and never close that session, whose lifecycle belongs to the orchestrator.
+
+## Project Guidelines
+
+Read, in this order, before implementing:
+
+1. Every file listed in `PROJECT_GUIDELINES`, or, when it was not given, `CLAUDE.md` at the
+   project boundary's root (`PROJECT_PATH` when set).
+2. An `AGENTS.md` in a directory you are about to change, when one exists.
+3. When neither file exists, `references/default-rules.md` beside this file for commit rules.
+
+Apply the output compression rules in the plugin's `AGENTS.md` to your status prose: fragments
+over sentences, no filler, safety escapes preserved.
+
+Read `story.notes` before you start. It holds what the plan found that no other field carries:
+measurements, research findings, file paths and gotchas, and the cross-story audit's own
+paragraphs, separated by `---`. A paragraph opening with `[audit-deferred:` records an audit
+finding the plan left open, with the reason given. An older paragraph can describe a sibling
+story as it stood before the audit. When a story runs again after a failed or interrupted
+attempt, `notes` holds what that attempt recorded, its failure cause, in place of the plan's
+notes. It is context, not the contract: where it disagrees with `acceptanceCriteria` or
+`implementation`, those win.
+
+## Step 1.5 — Measure the verify before any work
+
+Skip this whole step when `story.implementation.verify` is absent or empty; it runs nothing and
+warns nothing (`implementation{}` is optional in schema v3.3).
+
+**The pre-run and the `verify-probe` call are your first commands after bootstrap, before you
+write a single file**, because both describe the tree BEFORE your work. If you already edited
+something, do not measure the edited tree and do not copy the repository anywhere outside it:
+a copy under `/tmp` has no `.aimi/` ancestor, so the CLI stops at `find_aimi_root` and nothing
+is measured. Take the pre-change tree from git instead, inside the repository:
+`git worktree add --detach "$PWD/.aimi-probe-base" HEAD` (your edits are uncommitted, so
+`HEAD` is the base), `cd` into it, run the pre-run and the probe there with the same exports,
+then `cd` back and `git worktree remove --force "$PWD/.aimi-probe-base"` before you stage
+anything. Say in the report that the baseline came from that detached copy.
+
+**Pre-run.** Run the verify once, exactly as written, from the Step 0c directory, with
+`TASKS_FILE_PATH` and `AIMI_ROOT` exported into its environment (exactly the values you were
+handed), so a verify that reads its own tasks file or `"$AIMI_ROOT/.aimi/..."` finds them.
+Record the exit code. A ZERO exit means the verify already passes before any work, so it does
+not discriminate before from after: put a warning in the report. The warning never blocks, in
+any mode, and must name its legitimate cause — a story re-run over partial work can pass this
+early run with nothing wrong.
+
+**Choose the probing CLI, and announce it.** Set
+`PROBE_TREE_CLI="$PWD/plugins/aimi-engineering/scripts/aimi-cli.sh"` (absolute, so it loads its
+Python modules from this checkout). When `[ -x "$PROBE_TREE_CLI" ]` — `-x`, never `-f` or
+`-e` — set `PROBE_CLI="$PROBE_TREE_CLI"` and print on stderr
+`probe-cli: $STORY_ID: probing with the aimi-cli.sh of the tree under test ($PROBE_TREE_CLI)`.
+Otherwise set `PROBE_CLI="$AIMI_CLI"` and print
+`probe-cli: $STORY_ID: no executable aimi-cli.sh in the tree under test ($PROBE_TREE_CLI) -- probing with the resolved CLI ($AIMI_CLI) instead`.
+BOTH branches print. The choice is per call and is NEVER persisted: write it into no cli-path
+cache and teach no resolution layer about it.
+
+**Probe.** From the same directory run
+`"$PROBE_CLI" verify-probe $STORY_ID --tasks-file $TASKS_FILE_PATH`. It returns a JSON array
+with one entry per verify segment, writes that array to a file itself, and names the file on
+one stderr line, `verify-probe: wrote <path>`. Carry that path; never compose one. A write the
+verb could not make is one stderr line and never a failure. If the verb is unavailable (an
+older CLI, or `python3` missing), say so in one line and carry on.
+The probe is a WARNING and NEVER a block. Report three lists, each under its own sentence and
+never merged:
+
+1. **Already passes before the work** — entries with `discriminates: false` and no
+   `guardRail: true`. Under `set -e` a verify stops at its first failing assertion, so one that
+   fails the pre-run can still carry assertions that prove nothing; this list finds them.
+2. **Declared guard-rails** — entries marked `guardRail: true`, matching the plan's
+   `implementation.guardRails`. They are supposed to pass before and after; list them apart.
+3. **Not measured** — entries with `discriminates: null`. The probe could not tell, so it did
+   not run the segment and its `exit` is `null` too. Name the variables in its
+   `unresolvedState` (shell state the probe's prelude never carried, such as a name set by
+   `eval`, a subshell or a function). An entry may instead carry `unterminated`: a quote,
+   bracket or compound left open, so the verify would not have run at all as written; read
+   `segments: 1, discriminating: 0` then as nothing measured. `skipped: true` marks a segment
+   `--skip-matching` excluded and `timedOut: true` one that outlived the per-segment ceiling.
+   A segment whose reads the prelude did cover keeps its own verdict, and only shell state is
+   lost between segments, never files on disk.
+
+**`--skip-matching <regex>`** skips the segments it matches (they stay in the report as
+`discriminates: null`, `skipped: true`). Use it when the verify ends in a suite whose cost you
+know and whose verdict the probe adds nothing to (`python3 -m pytest`, `test-aimi-cli.sh`),
+never merely to make a slow probe finish sooner: every skipped segment is one the probe can no
+longer warn about.
+
+**A story's own `implementation.verify` must NEVER name `verify-probe`.** The probe runs the
+verify's segments, so a verify that calls the verb back re-enters the probe and the CLI refuses.
+To probe from a verify, probe a sibling story's verify or a throwaway fixture, or call
+`probe_verify()` in `tasks.py` directly.
+
+## Step 2 — Implement
+
+- When `story.tasks[]` is present, follow it as the ordered recipe (creation → integration
+  wiring → local verification). A `"Wire <X> into <Y>"` entry is mandatory cross-story wiring
+  the acceptance criteria alone cannot enforce. `acceptanceCriteria` stays the completion gate.
+- **Follow `story.implementation.approach`**, the strategy the planner chose with the research
+  and the sibling stories in view. When it is absent or empty, invent none. When you diverge
+  from it, add a `deviations[]` entry naming the approach and your reason. Never diverge in
+  silence.
+- `story.implementation.files` lists the in-repository files you commit.
+- **`story.implementation.outputs`**, when present, lists paths relative to `AIMI_ROOT` that
+  start with `.aimi/`: artifacts the story produces outside the repository. Create each one
+  under `"$AIMI_ROOT"` (`mkdir -p` its parent), never stage or commit it, and never treat it as
+  a commit-verification target.
+- When the story is visual or carries a reference artifact, run the Visual Source-of-Truth
+  Protocol (V1/V2/V3) and the Reference-Artifact Parity Pass below BEFORE writing code.
+
+## Step 3 — Check the acceptance criteria
+
+Verify every acceptance criterion explicitly.
+
+- **3.5** When `story.verification.strategy == "visual"`, or `metadata.prototypePaths` is
+  non-empty, or `story.implementation.prototypeAnchor` is set: the Visual Source-of-Truth
+  Protocol must be complete, with every V1 element mapped.
+- **3.6** When the Reference-Artifact Parity Pass triggered: every enumerated element must have
+  a verdict before the commit.
+
+## Step 4 — Run the verify
+
+Run `story.implementation.verify` exactly as written, from the Step 0c directory, with
+`TASKS_FILE_PATH` and `AIMI_ROOT` exported (the same exports as the pre-run). When it is absent
+or empty, your Step 3 check is the gate; invent no command. When it is present, **a non-zero
+exit FAILS the story**: do NOT commit, and report the failure with the verify's output (tail of
+its log). This is not advisory.
+
+On that failure, re-run the probe with the pre-run's artifact:
+`"$PROBE_CLI" verify-probe $STORY_ID --tasks-file $TASKS_FILE_PATH --previous-file <the path Step 1.5 reported>`
+(it writes its own `-post.json` file). List every entry with `unsatisfiable: true` beside list 1
+above: a segment non-zero in both runs is possibly unsatisfiable, so check the harness, not
+the code. This never overrides the FAIL. If the verb or the saved file is unavailable, say so in
+one line and report the plain failure.
+
+When `story.verification.strategy` is `visual` and `VISUAL_VERIFICATION` is not `post-merge`,
+run Visual Verification (below) now. It is advisory and never blocks the commit.
+
+**4.5. When `WORKTREE_PATH` is set, confirm the branch before staging anything.** Run
+`git branch --show-current` and require the name to END in `-<STORY_ID>` (a branch ending
+`-US-003` for story US-003). On a mismatch, do NOT stage, do NOT commit, and report failure with
+the branch found and the id expected.
+
+## Step 5 — Commit
+
+a. Stage only story-related files: `git add <changed files>`. Never `git add -A` or `git add .`.
+b. Commit in conventional format: `git commit -m "type(scope): Story title"`, with type one of
+   **feat** | fix | refactor | docs | test | chore. Never skip hooks. Put any `KNOWN-GAP:` lines,
+   the parity verdict table and rule-ID citations (Design Bundle Fidelity) in the body.
+c. Confirm it landed: `git log -1 --oneline`.
+
+**FAIL FAST.** When `git commit` exits non-zero or `git log -1 --oneline` does not show your
+commit: do not retry and do not try to fix it. Report failure with the error output; the caller
+handles recovery.
+
+## Step 6 — Do not touch status
+
+Whether or not `WORKTREE_PATH` is set, do not update the tasks file. The caller reads your
+result and updates status through the CLI.
+
+## Step 7 — Report
+
+End your final message with the `<result_json>` block of the Result Contract below. Populate
+`"verify"` from numbers you already have: Step 4's exit as `exit`, the pre-run's exit as
+`preExit`, and the Step 1.5 probe array's length and `discriminates: true` count as `segments`
+and `discriminating`. Run nothing new for it. Above the block, keep any prose short: the
+warnings and lists the steps above asked for, `dropped` entries, prototype notes, and visual
+verification results.
 
 ---
+
+## Visual Verification
+
+Advisory: a failure here never blocks the commit. Skip this section when `VISUAL_VERIFICATION`
+is `post-merge`. With `HEADED_MODE` true, add `--session visual-follow` to every command below
+and skip the close.
+
+1. `command -v agent-browser`. Not found: report "visual verification skipped — agent-browser
+   not installed" and go on.
+2. `agent-browser open [verification.url]`
+3. `agent-browser screenshot /tmp/verify-[STORY_ID].png`
+4. View `/tmp/verify-[STORY_ID].png` with the Read tool and compare it with
+   `verification.expect`. Record pass or fail with the reason.
+5. Headless only: `agent-browser close`.
+6. Report "visual verification passed", "visual verification failed — <reason>" (the caller then
+   runs `$AIMI_CLI set-verification [STORY_ID] failed`), or "visual verification skipped" (the
+   caller runs `set-verification [STORY_ID] skipped --reason "agent-browser not installed"`).
 
 ## Design Bundle Fidelity Guidance
 
-Fires only when the story context includes `metadata.designBundle`. The worker receives bundle guidance via `designContext.bundleGuidance` in the `get-story-context` JSON; the executor reads any spec file paths cited there via the Read tool before authoring implementation code.
+Applies only when `metadata.designBundle` is present. Bundle guidance arrives in
+`designContext.bundleGuidance`; read any spec file path cited there with the Read tool before
+writing implementation code.
 
 ### Spec-aware read order
 
-Read and apply in this order — earlier entries are more authoritative:
+Earlier entries are more authoritative:
 
-1. `designContext.specSections["BusinessSpec § N"]` for the sections `designBundle.businessSpec` (if non-null) cites — authoritative requirements; all business rules and acceptance criteria here override assumptions. Use the matching entry directly; read the full file at `designBundle.businessSpec` only for a section absent from `specSections` (evicted by the spec content cap, or the file missing — see `dropped[]`).
-2. `designContext.specSections["DesignSpec § N"]` for the sections `designBundle.designSpec` (if non-null) cites — authoritative design; tokens, components, screens, and a11y rules defined here override prototype visuals. Same fallback: read the full file only for a section `specSections` does not carry.
-3. `designBundle.chats[]` — context only; use for intent and rationale, do NOT let chat content override specs.
-4. `prototypePaths[]` — pixel reference only; match the visual output, translate idiomatically to the project stack.
-5. Project's existing components per `DesignSpec § 6` mapping — reuse before creating.
+1. `designContext.specSections["BusinessSpec § N"]` for the sections `designBundle.businessSpec`
+   cites — authoritative requirements; its business rules and acceptance criteria override
+   assumptions. Read the full file only for a section absent from `specSections`.
+2. `designContext.specSections["DesignSpec § N"]` for the sections `designBundle.designSpec`
+   cites — authoritative design; its tokens, components, screens and a11y rules override
+   prototype visuals. Same fallback.
+3. `designBundle.chats[]` — context only, for intent and rationale; never overrides a spec.
+4. `prototypePaths[]` — pixel reference only; match the visual output, translate to the stack.
+5. The project's existing components per `DesignSpec § 6` — reuse before creating.
 
 ### Translate-not-copy rule
 
-Do NOT copy CDN React (`<script src="...react...cdn...">`), Babel-standalone (`<script src="...babel...">`), Alpine.js attributes (`x-data`, `x-show`, `@click`), or inline `<style>` blocks from prototype HTML into production code.
-Translate prototype DOM structure to the project's stack idiom (React/Vue/native) and use the project's design-token system — do NOT reproduce inline styles.
+Do NOT copy CDN React, Babel-standalone, Alpine.js attributes (`x-data`, `x-show`, `@click`) or
+inline `<style>` blocks from prototype HTML. Translate the DOM structure to the project's stack
+idiom and use the project's design-token system.
 
 ### Match-visual-output rule
 
-Match the visual output of the prototype — colors, spacing, layout, typography — but do NOT mirror prototype internal structure when it conflicts with the project's component conventions.
-When `DesignSpec § 6` (see `commands/references/spec-section-contract.md`) maps a desired component to an existing project component, use the existing component and do not create a duplicate — the mapped path is read from the project's own component-library alias or import convention, never assumed.
+Match the prototype's colors, spacing, layout and typography, but not its internal structure
+where that conflicts with the project's component conventions.
 
 ### designTokens passthrough rule
 
-When `metadata.designTokens` is present, use those token values directly — do NOT re-parse `DesignSpec § 1` or extract values from prototype CSS.
+When `metadata.designTokens` is present, use its values directly; do not re-parse
+`DesignSpec § 1` or extract values from prototype CSS.
 
 ### specSections passthrough rule
 
-When the matching label (`"BusinessSpec § N"` / `"DesignSpec § N"`) is present in `designContext.specSections`, use that content directly — do NOT re-read the full spec file at `designBundle.businessSpec`/`designBundle.designSpec` for a section already sliced there. This is a lazy-loading optimisation, the same one `/aimi:plan` already applies to its own section-scoped research excerpts — never a hard information cap: a section absent from `specSections` (evicted by the spec content cap, or its file missing or outside the project root — see `dropped[]`) stays readable on demand from the full file at the `designBundle` path.
+When the label (`"BusinessSpec § N"` / `"DesignSpec § N"`) is in `designContext.specSections`,
+use that content and do not re-read the spec file for it. A section absent there (evicted by the
+cap, or its file missing; see `dropped[]`) stays readable from the file at the `designBundle`
+path.
 
 ### Rule-ID citation rule
 
-When the implementation enforces or relies on a business rule from `BusinessSpec § 3`, cite the rule ID (e.g., `RN-04`) in the commit message and PR description.
-When the implementation satisfies a criterion from `BusinessSpec § 9`, cite the criterion ID in the same way.
+When the implementation enforces or relies on a business rule from `BusinessSpec § 3`, cite the
+rule ID (e.g. `RN-04`) in the commit message and PR description. Cite a criterion from
+`BusinessSpec § 9` the same way.
 
 ### Component-mapping rule
 
-Before creating a new component, check `metadata.designBundle.designSpec` (or `designBundle` if spec absent).
-If `DesignSpec § 6` maps the desired component to an existing project component, reuse the existing one — do NOT create a duplicate.
-
----
+Before creating a component, check `DesignSpec § 6` (see
+`commands/references/spec-section-contract.md`). When it maps the component to an existing
+project component, reuse that one and do not create a duplicate. The mapped path comes from the
+project's own component-library alias or import convention, never an assumed one.
 
 ## Visual Source-of-Truth Protocol
 
-Applies when `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty OR `story.implementation.prototypeAnchor` is set. Skip entirely for non-visual stories.
+Applies when `story.verification.strategy == "visual"`, or `metadata.prototypePaths` is
+non-empty, or `story.implementation.prototypeAnchor` is set. Skip it for any other story.
 
 ### V1 — Enumerate Visible Elements
 
-Before writing any implementation code, list every visible element in the prototype as a numbered enumeration. Cover:
-- Layout regions (header, body, footer; sidebar; modal/overlay)
-- Every distinct text label and its typography role (heading, subheading, body, caption)
-- Every interactive control (buttons, inputs, toggles, tabs)
-- Every icon, glyph, or decorative element
-- Distinct spacing or typography zones that differ from the surrounding region
-
-Numbered list format: `1. <element> — <distinguishing detail>`. Do NOT proceed to V2 until V1 is complete.
+Before writing code, number every visible element of the prototype:
+`1. <element> — <distinguishing detail>`. Cover layout regions, every text label and its
+typography role, every interactive control, every icon or decorative element, and distinct
+spacing or typography zones. Finish V1 before V2.
 
 ### V2 — Map Elements to Acceptance Criteria
 
-For each numbered V1 element, identify the matching acceptance criterion (or assert "no AC match"). Use a paired list or two-column table:
-- `V1.1 → AC #2 — "header shows org name"`
-- `V1.5 → no AC match (candidate KNOWN-GAP)`
+Pair each V1 element with its acceptance criterion or "no AC match":
+`V1.1 → AC #2 — "header shows org name"`, `V1.5 → no AC match (candidate KNOWN-GAP)`.
 
 ### V3 — Escalate Prototype-Only Elements
 
-Any V1 element flagged "no AC match" in V2 is a KNOWN-GAP candidate. Add it to the implementation queue ONLY if it is a trivial visual detail (icon, spacing token). For non-trivial gaps, emit a `KNOWN-GAP:` trailer line in the commit body (one per element) with brief rationale. NEVER silently drop a prototype-visible element.
-
----
+A "no AC match" element is implemented only when it is a trivial visual detail (an icon, a
+spacing token). For any other, add a `KNOWN-GAP: <element> — <reason>` line to the commit body.
+NEVER silently drop a prototype-visible element.
 
 ## Reference-Artifact Parity Pass (BLOCKING when triggered)
 
-**Trigger:** Fire this pass when any of the following is true for the story being executed:
-- The story JSON declares any reference artifact field (`prototypeAnchor`, `specSection`, `referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl`, or equivalent)
-- Any `acceptanceCriteria` line contains a prototype or spec citation (e.g., a file path, URL, or section identifier)
-- `verification.strategy` implies a reference artifact (`visual`, `api`, `cli`, `migration`, or `sdk`)
+**Trigger:** the story declares a reference artifact field (`prototypeAnchor`, `specSection`,
+`referenceCommand`, `referenceFixture`, `migrationDiff`, `referenceUrl` or equivalent), or an
+acceptance criterion cites a prototype or spec (a path, URL or section id), or
+`verification.strategy` implies one (`visual`, `api`, `cli`, `migration`, `sdk`).
 
-**Procedure:**
+1. Read the cited artifact.
+2. Enumerate the addressable elements in the cited region (text nodes, attributes, fields,
+   flags, columns, rows).
+3. Check each against the implementation and give it a verdict: `Implemented`, or a
+   `KNOWN-GAP: <element> — <reason>` line in the commit body.
 
-1. **Load reference** — read the artifact at the cited path or URL into working context.
-2. **Enumerate addressable elements** in the cited region (all text nodes, attributes, fields, flags, columns, rows, etc. visible in that region).
-3. **Cross-check against implementation** — for each enumerated element, determine whether the implementation addresses it.
-4. **Verdict per element:**
-   - `Implemented` — the element is handled by the implementation
-   - `KNOWN-GAP: <element> — <reason>` — the element is not handled; append one line per gap to the commit message body
+**Block the commit until every element has a verdict.** If the artifact cannot be read, add the
+trailer `Parity pass skipped — reference not readable: <path>` and go on.
 
-Silent drops are NOT acceptable — every enumerated element must receive an explicit verdict before the commit is written.
-
-**Block commit until every element has a verdict.**
-
-Agent-mode fallback: if the reference artifact is not readable from disk or network, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed without blocking.
-
-### Per-Element Verdict Table (required for visual stories)
-
-When `verification.strategy == "visual"`, append the following table to the commit body, with one row per V1-enumerated element:
+For a `visual` story, also append this table to the commit body, one row per V1 element:
 
 | Element | Verdict | Notes |
 | --- | --- | --- |
 | <element from V1> | PASS \| DIVERGES \| KNOWN-GAP | <brief detail> |
 
-Verdict values: `PASS` (implementation matches prototype), `DIVERGES` (implementation differs and that difference is intentional or unavoidable — explain in Notes), `KNOWN-GAP` (implementation does not cover this element — pair with a `KNOWN-GAP:` trailer line). The table is required only for visual stories; omit entirely for non-visual stories.
+`PASS` matches the prototype; `DIVERGES` differs on purpose or unavoidably (say why in Notes);
+`KNOWN-GAP` is not covered and pairs with a `KNOWN-GAP:` line.
 
----
+## Result Contract (REQUIRED)
 
-## Result Contract (REQUIRED for all workers)
-
-Every worker MUST end its final message with a `<result_json>` block. The orchestrator parses this block as its source of truth — anything outside the block is debugging prose that the leader does NOT consume in the happy path.
-
-Required shape (omit optional fields when empty rather than emitting null/empty arrays):
+Your final message MUST end with a `<result_json>` block. The orchestrator parses the LAST
+`<result_json>` block as its source of truth; prose outside it is for human debugging only.
+Omit optional fields that are empty rather than emitting null or empty arrays.
 
 ```
 <result_json>
@@ -178,473 +487,54 @@ Required shape (omit optional fields when empty rather than emitting null/empty 
 </result_json>
 ```
 
-Rules:
+- The block is the LAST thing in the message; anything after it is ignored. The JSON parses
+  cleanly (no comments, no trailing commas).
+- `status` and `commit` are mandatory; `commit` is `null` when no commit was made.
+  `failureCause` is mandatory when `status` is `failed` or `skipped`: one short sentence the
+  caller shows the user.
+- `verify`: `exit` is Step 4's exit, `preExit` the pre-run's, `segments` the number of probe
+  entries, `discriminating` the number with `discriminates: true` and NOTHING ELSE (a `null` is
+  never counted there, and `segments - discriminating` is not a null tally). Omit the WHOLE
+  object when `story.implementation.verify` is absent or empty: the missing key is the signal
+  that the story ran with no verify.
+- A number that was never measured is OMITTED, never invented. `segments` and `discriminating`
+  leave together when `verify-probe` was unavailable; `exit` leaves when Step 4 never ran.
+  **Zero never means "not measured"**: zero is a measured, successful exit.
 
-- The block MUST be the LAST thing in the worker's final message. Anything after it is ignored by the orchestrator.
-- The JSON inside MUST parse cleanly (no trailing commas, no comments).
-- `status` is mandatory. `commit` is mandatory but may be `null` when intentionally no commit was created.
-- `failureCause` is mandatory when `status` is `failed` or `skipped` — one short sentence the leader will surface to the user.
-- `verify` carries the evidence steps 1.5 and 4 ALREADY produce and today throw away: `exit` is step 4's real verify exit, `preExit` is step 1.5's pre-run exit, `segments` is how many entries `verify-probe` returned, and `discriminating` is how many of those had `discriminates` true. **`discriminating` counts `discriminates: true` and NOTHING ELSE.** An entry whose `discriminates` is `null` — the probe could not tell, because it declined to run a segment reading shell state the prelude never carried — counts toward `segments` and never toward `discriminating`, so a withheld verdict can never inflate the number of checks claimed to discriminate. There is deliberately no third count: `segments - discriminating` is `false` plus `null` together and was never a null tally, so do not read it as one. Omit the WHOLE object when `story.implementation.verify` is absent or empty — the missing key is the point, not a formatting detail: it is the signal, readable downstream, that the story ran with no verify at all.
-- Inside the object, a number that does not exist is OMITTED and never invented. `segments` and `discriminating` leave together when the `verify-probe` verb was unavailable (an older CLI, or `python3` missing — the case step 1.5 already reports in one line and never treats as a failure); `exit` leaves when step 4 never ran at all, because the story failed before reaching it. **Zero is NEVER used to say "not measured"** — zero is a measured, successful exit, and using it as filler would let an empty record pass for a clean one, which is the exact defect this field exists to close.
-- Prose OUTSIDE the block is for human debugging only. Keep it short; the orchestrator does not need it.
-- Examples — success:
-  ```
-  <result_json>
-  {"status":"ok","commit":"a6cd4678","tests":{"passed":7,"failed":0,"total":7},"typecheck":"ok","verify":{"exit":0,"preExit":1,"segments":12,"discriminating":9}}
-  </result_json>
-  ```
-  Failure:
-  ```
-  <result_json>
-  {"status":"failed","commit":null,"failureCause":"Pre-commit hook failed: tsc not in PATH"}
-  </result_json>
-  ```
-  Skipped (gate blocked):
-  ```
-  <result_json>
-  {"status":"skipped","commit":null,"failureCause":"Decision gate pending: choose OAuth provider"}
-  </result_json>
-  ```
-
-## Prompt Template
-
-> This is the canonical worker prompt template. execute.md and next.md should reference this skill rather than duplicating the prompt inline.
-
-When spawning a Task agent to execute a story:
-
+Success:
 ```
-You are executing a single story from the tasks file.
-
-<project_guidelines>
-
-[CLAUDE.md content or default rules]
-
-</project_guidelines>
-
-<output_rules>
-
-Apply output compression rules from `AGENTS.md` (spawned-agent status updates: fragments over sentences, drop filler, preserve safety escapes).
-
-</output_rules>
-
-<project_context>
-
-[PROJECT_PATH]   ← optional, resolved absolute path to the target project
-
-If PROJECT_PATH is provided:
-- cd to PROJECT_PATH before any work
-- Load CLAUDE.md from PROJECT_PATH root
-- All file operations stay within PROJECT_PATH
-
-</project_context>
-
-<worktree_context>
-
-[WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
-
-If both PROJECT_PATH and WORKTREE_PATH are provided, the destination depends on whether PROJECT_PATH is its own repository or a subdirectory of one. `worktree-manager.sh` creates every worktree under `$(git rev-parse --show-toplevel)/.worktrees`, so a worktree sits beside the *repository root* — which is the same place as PROJECT_PATH only when PROJECT_PATH is itself that root. Decide it rather than assume it:
-
-```bash
-PROJECT_TOPLEVEL=$(git -C "$PROJECT_PATH" rev-parse --show-toplevel)
-if [ "$PROJECT_TOPLEVEL" = "$PROJECT_PATH" ]; then
-  # PROJECT_PATH is its own repository (multi-repo sibling layout):
-  # the worktree already IS the project.
-  cd "$WORKTREE_PATH"
-else
-  # PROJECT_PATH is a subdirectory of a larger repository (monorepo layout):
-  # the worktree is the repo root, and the project sits at the same
-  # relative path inside it.
-  cd "$WORKTREE_PATH/${PROJECT_PATH#"$PROJECT_TOPLEVEL"/}"
-fi
+<result_json>
+{"status":"ok","commit":"a6cd4678","tests":{"passed":7,"failed":0,"total":7},"typecheck":"ok","verify":{"exit":0,"preExit":1,"segments":12,"discriminating":9}}
+</result_json>
 ```
-
-Getting this wrong is issue #105: a monorepo story ran from the repository root while its `implementation.verify` was written for the project directory, so a bare `bun run typecheck` failed for want of a `package.json` one level down. The fix belongs here, in the cd — never in what a story author writes. A `verify` must not carry a `cd <project> &&` prefix; by the time it runs you are already there.
-
-Then, in either case:
-- All file operations happen within the worktree
-- Commit to the worktree's branch (already checked out)
-- Do NOT modify the tasks.json file (leader handles this)
-- Report result (success/failure + details) — the leader processes your report
-
-If only WORKTREE_PATH is provided:
-- cd to WORKTREE_PATH before any work
-- All file operations happen within the worktree
-- Commit to the worktree's branch (already checked out)
-- Do NOT modify the tasks.json file (leader handles this)
-- Report result (success/failure + details) — the leader processes your report
-
-If neither is provided:
-- Work in current directory (standard sequential behavior)
-- Report result — the caller (next.md/execute.md) handles status updates via the CLI
-
-</worktree_context>
-
-<headed_mode_context>
-
-[HEADED_MODE]   ← optional, true when visual-follow is active
-
-If HEADED_MODE is true:
-- A headed browser session named `visual-follow` is already running (opened by execute.md)
-- Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
-- The session lifecycle is managed by execute.md — do NOT close it
-- Navigate to verification.url at story start (step 0) for live preview
-
-If HEADED_MODE is false or absent:
-- Standard headless mode — executor owns the full browser lifecycle (open → use → close)
-
-</headed_mode_context>
-
-<task_pointer>
-
-STORY_ID: [STORY_ID]
-TASKS_FILE_PATH: [TASKS_FILE_PATH]
-AIMI_ROOT: [AIMI_ROOT]
-SCRATCH_PREFIX: [SCRATCH_PREFIX]
-
-Your first action is to resolve the CLI path, then fetch full story context.
-
-**Step 0 — Resolve CLI Path** (see [cli-path-resolution.md](../commands/references/cli-path-resolution.md) for full Layer 0–3 strategy).
-Each Bash call is an isolated shell — `$AIMI_CLI` is never inherited. Re-read from cache at the top of every Bash call that needs it:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
+Failure:
 ```
-
-`--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file, threaded through explicitly so this call reads it even when a sibling split orchestrator's `init-session` last overwrote the shared current-tasks pointer — never fall back to the bare form.
-
-**`SCRATCH_PREFIX` is your scratchpad namespace and it arrives already composed: EVERY file you write into the scratchpad directory is named `[SCRATCH_PREFIX]-<whatever>`.** This is a prefix you are HANDED, never an invitation to pick a name you judge unique — picking a good name is precisely what failed. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names that already collided in that directory, each one chosen by an agent who believed it was theirs; treat all five as non-examples rather than as a list to avoid and then improvise around. The scratchpad is shared with every sibling executor of this wave, with the orchestrator, and with every run that used it before yours, so before executing a script you believe you wrote, confirm the path you are running is the one you wrote. `SCRATCH_PREFIX` leads with the PLAN's identity and ends with your story id because the collision that was measured crossed PLANS rather than siblings: the file read by mistake belonged to an earlier plan's run whose story carried the same `US-NNN`, so a prefix keyed on the story id alone would have composed the same name twice. This rule does NOT reach the `verify-probe` artifact — that file lands beside the tasks file under a name the verb itself chooses and announces on stderr, and step 1.5 below tells you to read that path rather than compose one.
-
-Parse the returned JSON for five top-level fields:
-- `story` — contains `id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`
-- `metadata` — session metadata. This file reads exactly five of its keys: `designBundle`, `designTokens`, `prototypePaths`, `prototypeDropped` and `prototypeSuperseded`. `prototypeAnchor` is NOT one of them — it is `story.implementation.prototypeAnchor`, and every step below reads it from there. `prototypeDropped` is a RECORD, not a path to act on: it names a prototype the plan declared but never sent (see `<prototype_context>` below) — read it to learn the prototype is gone, never to open, move, delete or resolve the path it names. `prototypeSuperseded` is `[{path, decision, note}]`: a later decision changed something the prototype at `path` depicts — read it NEXT TO that prototype and do not reproduce the superseded layout or copy.
-- `skills` — array of required skill blocks; treat each `.content` as additional project conventions
-- `designContext` — contains `.decisions` (design intent), `.bundleGuidance` (may cite spec file paths), and `.specSections` (this story's spec content, pre-sliced by label — see the Design Bundle Fidelity Guidance's spec-aware read order)
-- `dropped` — array of `{kind, name, path, section, reason, bytes, deferred}` for everything the payload declared but did not carry. `kind` is `"skill"` (the 100KB skills cap excluded it — `name` set, `deferred:false`), `"specSection"` (the spec content cap evicted it — `path`/`section` set, `deferred:true` because the bundle path stays reachable via `designContext.bundleGuidance` as a Read-tool fallback), or `"specFile"` (a designBundle spec path missing on disk or escaping the project root — `path` set, `deferred:false`). Every entry carries all seven keys, `null` for whichever identity field its kind does not use. `[]` when nothing was dropped, so the key is always present and always safe to read. Any non-empty entry, of any kind, means something the story declared is NOT fully in this payload — say so in the completion report rather than proceeding as if it had been read.
-
-Use all five keys for subsequent steps. If the command fails, report failure immediately and stop.
-
-</task_pointer>
-
-<visual_verification>
-
-Visual verification is **advisory** — failures do NOT block the story commit.
-
-<headed_mode_visual>
-
-0. **Navigate to verification URL at story start (before implementation):**
-   `agent-browser --session visual-follow open [verification.url]`
-   This gives the user a live preview in the headed browser while implementation proceeds.
-
-1. **Check agent-browser availability:**
-   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
-
-2. **Navigate to verification URL:**
-   `agent-browser --session visual-follow open [verification.url]`
-
-3. **Take screenshot:**
-   `agent-browser --session visual-follow screenshot /tmp/verify-[STORY_ID].png`
-
-4. **Evaluate screenshot against expected outcome:**
-   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
-   Compare what you see against `verification.expect` (natural language description).
-   Record whether the visual matches expectations (pass/fail + reasoning).
-
-5. **Cleanup — SKIP:** Session lifecycle is managed by execute.md. Do NOT run `agent-browser close`.
-
-6. **Report result:**
-   - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller runs `$AIMI_CLI set-verification [STORY_ID] failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller runs `$AIMI_CLI set-verification [STORY_ID] skipped --reason "agent-browser not installed"`.
-
-</headed_mode_visual>
-
-<headless_mode_visual>
-
-1. **Check agent-browser availability:**
-   Run `command -v agent-browser`. If not found, note "visual verification skipped — agent-browser not installed" in your report and proceed to commit.
-
-2. **Open the page:**
-   `agent-browser open [verification.url]`
-
-3. **Take screenshot:**
-   `agent-browser screenshot /tmp/verify-[STORY_ID].png`
-
-4. **Evaluate screenshot against expected outcome:**
-   Use the Read tool to view `/tmp/verify-[STORY_ID].png`.
-   Compare what you see against `verification.expect` (natural language description).
-   Record whether the visual matches expectations (pass/fail + reasoning).
-
-5. **Cleanup:**
-   `agent-browser close`
-
-6. **Report result:**
-   - If visual check passes: note "visual verification passed" in your report.
-   - If visual check fails or errors: note "visual verification failed — [reason]" in your report so the caller runs `$AIMI_CLI set-verification [STORY_ID] failed`. Do NOT fail the story — proceed to commit.
-   - If agent-browser was not installed: note "visual verification skipped" so the caller runs `$AIMI_CLI set-verification [STORY_ID] skipped --reason "agent-browser not installed"`.
-
-</headless_mode_visual>
-
-</visual_verification>
-
-<previous_notes>
-
-[story.notes]
-
-</previous_notes>
-
-<prototype_context>
-
-When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file yourself using the Read tool.
-
-- Before reading, check `metadata.prototypeDropped` for an entry whose `path` matches a prototype this story's acceptance criteria depend on. If one is found, log `prototype <path> dropped — <reason>` and say so in the completion report. `prototypeDropped` is a record only — never open, move, delete or resolve the path it names; a live prototype is read only from `metadata.prototypePaths[]` below.
-- Also check `metadata.prototypeSuperseded` for an entry whose `path` is a prototype you read: it names a later decision that changes what that prototype depicts. Read the entry NEXT TO the prototype, log `prototype <path> superseded by <decision> — <note>`, and do not reproduce the superseded layout or copy.
-- For each path in `metadata.prototypePaths[]` (and `story.implementation.prototypeAnchor` if set), resolve the absolute path as `$AIMI_ROOT/<path>` and read it.
-- If a prototype file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue.
-- `.html` files are pixel-reference prototypes; `.json` files are design-token sidecars.
-- Read all available prototypes before writing any implementation code.
-
-</prototype_context>
-
-<tools>
-
-Use built-in tools directly: Read, Write, Edit, Bash, Grep, Glob.
-Do NOT invoke these via the Skill tool — "write" is a Write tool, not a skill.
-
-</tools>
-
-<project_root_boundary>
-
-All file operations MUST stay within the project boundary: PROJECT_PATH when set, otherwise the git repository root.
-- Do NOT read or modify files outside the project boundary
-- Worktree paths (.worktrees/ inside git root) are allowed
-- Never use ../ traversal to escape the project boundary
-- If a task requires accessing external files, report failure instead
-
-</project_root_boundary>
-
-<execution_flow>
-
-0a. **Bootstrap (FIRST ACTION):** Re-read `$AIMI_CLI` from cache (per-call re-read — see `<task_pointer>` Step 0 above), then run `$AIMI_CLI get-story-context $STORY_ID --tasks-file $TASKS_FILE_PATH` and parse the returned JSON. Extract:
-    - `story` — full story object (`id`, `title`, `description`, `acceptanceCriteria`, `notes`, `tasks`, `implementation`, `verification`, `gate`)
-    - `metadata` — session metadata; the keys this flow reads are `designBundle`, `designTokens`, `prototypePaths`, `prototypeDropped` and `prototypeSuperseded` (`prototypeAnchor` is not among them — it lives at `story.implementation.prototypeAnchor`; `prototypeDropped` is a record naming a prototype never sent — see step 0b)
-    - `skills` — array of required skill blocks; for each entry, read its `.content` verbatim as additional project conventions (treat each as a required SKILL.md conventions block, in addition to project CLAUDE.md)
-    - `designContext` — read `.decisions` as design intent for any UI-touching work; use `.specSections` directly for a section already sliced there (this story's spec content, pre-sliced by label); if `.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec) for a section absent from `.specSections`, use the Read tool to load those files before authoring implementation code
-    - `dropped` — `[]` when nothing was excluded; a non-empty entry names a skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`). Report any non-empty entry, of any kind, rather than proceeding as if it had been read.
-    If this command fails, report failure immediately and stop.
-0b. If `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool:
-    - First, check `metadata.prototypeDropped` for an entry naming a prototype this story's AC depend on; if found, log `prototype <path> dropped — <reason>` and report it — never open, move, delete or resolve that path, it is a record only
-    - Then check `metadata.prototypeSuperseded` for an entry whose `path` is a prototype you read; read it NEXT TO that prototype and do not reproduce the superseded decision (log `prototype <path> superseded by <decision>`)
-    - Resolve path as `$AIMI_ROOT/<path>` for each entry in `metadata.prototypePaths[]` and for `story.implementation.prototypeAnchor` when set
-    - If a file does not exist at the resolved path, log: `prototype <path> missing — skipped` and continue
-0c. If PROJECT_PATH is set, cd to PROJECT_PATH; if WORKTREE_PATH is also set, cd to WORKTREE_PATH instead (takes precedence).
-
-    **When WORKTREE_PATH is set and that cd FAILS, stop and report — never fall through to whatever directory you happen to be in.** Until now this step had no failure branch at all for the worktree path, which is what made the bad outcome silent rather than loud. There is nothing to recover here and nowhere safe to continue from: the directory the orchestrator named does not exist or cannot be entered, so the CWD you are still holding belongs to someone else's tree — the orchestrator's own checkout, or a sibling story's worktree. Carrying on writes this story's commit into that tree, and the damage is invisible from both ends: the tasks file records a green story while the branch that was supposed to carry it stays empty, and a second story's branch acquires a change nobody wrote for it. Emit `<result_json>` with `"status":"failed"`, `"commit": null`, and a `failureCause` naming the exact path that could not be entered.
-1. Read CLAUDE.md for project conventions (from PROJECT_PATH root when set)
-1.5. **Pre-run `story.implementation.verify` once, before implementing anything, and record the result.** Skip this step entirely when `implementation.verify` is absent or empty — it does not run and warns nothing, the same treatment step 4 gives the absent case (`implementation{}` is optional in schema v3.3). When present, run it exactly as written, from the working directory established in step 0c, with `TASKS_FILE_PATH` and `AIMI_ROOT` (exactly the value you were handed — never re-derived here, a worktree has no `.aimi/`) exported into its environment — a `verify` that needs its own tasks file (e.g. to read `metadata.baseRef`) can then resolve it directly rather than falling back to the shared `current-tasks` pointer a sibling split orchestrator's `init-session` may have since overwritten, and one that reads `"$AIMI_ROOT/.aimi/..."` finds it. If this pre-run exits ZERO — the verify already passes before any work exists — emit a warning, carried in the completion report, that the check does not discriminate the before-state from the after-state: a verify that passes both before and after proves nothing about what was done. This warning NEVER blocks, in any mode. Name its legitimate cause rather than accusing the verify of being broken: a story re-executed over partial work already done can genuinely pass this early run with nothing wrong — a warning that accuses wrongly gets ignored the third time it fires. Running the verify twice per story is a deliberate trade-off, accepted on purpose even though it doubles the run time of a story whose verify is a long suite: a verify that always passes reports success, and discovering that later costs more than the second run.
-
-    **The pre-run and the `verify-probe` call below are the first commands after bootstrap, before you write a single file**, because both describe the tree BEFORE your work. If you already edited something, do not measure the edited tree and do not copy the repository anywhere outside it: a copy under `/tmp` has no `.aimi/` ancestor, so the CLI stops at `find_aimi_root` and nothing is measured. Take the pre-change tree from git instead, inside the repository: `git worktree add --detach "$PWD/.aimi-probe-base" HEAD` (your edits are uncommitted, so `HEAD` is the base), `cd` into it, run the pre-run and the probe there with the same exports, then `cd` back and `git worktree remove --force "$PWD/.aimi-probe-base"` before you stage anything. Say in the report that the baseline came from that detached copy.
-
-    **Choose the CLI that will do the probing before probing with it, and announce which one you chose.** Set `PROBE_TREE_CLI="$PWD/plugins/aimi-engineering/scripts/aimi-cli.sh"` — `$PWD` is the working directory step 0c established, and the path has to be absolute because `aimi-cli.sh` invoked by a relative path resolves its sibling Python modules against the directory it lands in after `find_aimi_root`, and can load another checkout's. When `[ -x "$PROBE_TREE_CLI" ]` — `-x`, never `-f` or `-e`, the same test `commands/execute.md`'s Creates Verification applies to its own container CLI, because a file that is present but not executable probes nothing — set `PROBE_CLI="$PROBE_TREE_CLI"` and print `probe-cli: $STORY_ID: probing with the aimi-cli.sh of the tree under test ($PROBE_TREE_CLI)` on stderr. Otherwise set `PROBE_CLI="$AIMI_CLI"` and print `probe-cli: $STORY_ID: no executable aimi-cli.sh in the tree under test ($PROBE_TREE_CLI) -- probing with the resolved CLI ($AIMI_CLI) instead`. **BOTH branches print** — a deliberate divergence from that precedent, which prints only on the fallback: there the silent branch is the rare one, here the tree under test is the COMMON case, so a silent preferred branch would hide precisely what this exists to show. On a feature branch the installed CLI is OLDER than the branch's own, and an old parser accepts an unknown flag in silence — so with no instrument named, two contradictory findings about the same flag are indistinguishable from each other. The prefix is `probe-cli: ` and not `verify-probe: ` because the verb itself writes `verify-probe: wrote <path>` to this same stream and you have to read that path back out of it; two producers under one prefix is confusion bought for nothing. **The preference is per-call and is NEVER persisted:** write it into no cli-path cache and teach no resolution layer about it. `write_global_cli_cache` and `_dev_dir_path` each refuse a path under `.worktrees/` on purpose, after a symlink bug that exited 127 — this stderr line is the substitute for persisting, not a complement to it.
-
-    In the same step, run `"$PROBE_CLI" verify-probe $STORY_ID --tasks-file $TASKS_FILE_PATH` from that same working directory and list, in the completion report, every returned entry whose `discriminates` is `false` — under the sentence that these assertions already pass before the work. The pre-run above is at the granularity of the whole SCRIPT; this is at the granularity of the ASSERTION, and the two answer different questions. Under the `set -e` most verifies open with, the script stops at its first failing assertion and every assertion after it never runs at all — so a verify that exits non-zero here can still be carrying assertions that would have passed before a line was written, and the script-level pre-run says nothing about them. This listing is a WARNING and NEVER a block, exactly like the pre-run: a non-discriminating assertion is not automatically wrong. Some are guardrails by design — an assertion that a prior story's behaviour has not regressed is *supposed* to pass before and after. The plan declares those in `implementation.guardRails`, and the probe marks a matching entry `guardRail: true`: report those under their own sentence as declared guard-rails, and call out only the `discriminates: false` entries NOT so marked, which are the unlabelled kind. What the list is for is the other kind, the assertion that asserts nothing about this story, which no one can see while it hides behind the first clause that fails. If the verb is unavailable (an older CLI, or `python3` missing), say so in one line and carry on — its absence never fails a story. **The verb writes this call's JSON array itself and names the file it wrote on one line of stderr (`verify-probe: wrote <path>`) — read that path and carry it; do not compose one.** The name is keyed on the tasks file's own stem, which is what keeps one plan's `US-002` off the previous plan's, and the file lands beside the tasks file rather than in any directory created here — both rules live in `tasks.py` now, where a suite reaches them. It is the PRE-change verdict step 4 hands back to this same verb once the real verify has run post-change. A write the verb could not make is one stderr line and nothing else: it never fails the probe, and stdout still carries the array.
-
-    **A THIRD listing, under its own sentence and never merged into the one above: every returned entry whose `discriminates` is `null`.** A `null` is the probe saying it COULD NOT TELL. The segment reads shell state the probe's carried prelude never reproduced — the prelude carries plain assignments and `cd`s and nothing else, so a name set by an `eval`, a subshell or a function call is not there — and rather than measure it in a world that never existed, the probe DID NOT RUN IT AT ALL: its `exit` is `null` too. Its `unresolvedState` array names the variables that were missing, and the report must name them, not merely say a verdict was withheld — which state was absent is what points at the line that sets it, where "no verdict" points at nothing. A `null` entry may instead carry `unterminated` rather than `unresolvedState` — a quote, backtick, paren, brace or compound state left open at end-of-text, meaning the verify would not have run AT ALL as written; say so instead of hunting for an `unresolvedState` that is not there, and read `segments: 1, discriminating: 0` as "nothing was measured", never as a per-assertion count. Keeping this list apart from the `discriminates: false` one is the entire reason the third answer exists: a withheld verdict listed among the assertions that already pass reads as dead weight, and "already passes before the work" is the sentence that tells a reader to STOP LOOKING at the check it names. Two things a `null` does NOT mean, and the report must not imply either — a segment whose reads the prelude DID cover keeps its ordinary `true`/`false` verdict, unaffected by a `null` neighbour; and only SHELL state is lost, never disk, because each segment the probe runs is a real subprocess in the same working directory, so a fixture an earlier segment wrote to a FILE is still there for the ones after it. Warning only, exactly like the two lists it sits beside: a `null` entry never fails a story and never blocks a wave.
-
-    **When probing would cost a full suite run, `--skip-matching <regex>` is the way out — and it is a trade, not a free win.** A segment the regex matches is not run, and it STAYS in the report carrying `discriminates: null` and `skipped: true`, so a skip can never be read as a segment the verify does not contain. Reach for it when the verify ends in a suite whose cost you already know and whose pass/fail this step adds nothing to — `python3 -m pytest`, `test-aimi-cli.sh` — because probing one of those costs its whole run time on top of the two runs steps 1.5 and 4 already pay. Do NOT reach for it just to make a slow probe finish sooner: every skipped segment is one this step can no longer warn you about, which is the opposite of why you ran it. It AVOIDS the cost rather than removing it. The same `null` now covers a segment that outlives the probe's per-segment ceiling: a run that was cut off measured nothing, so it is reported unknown — with `timedOut: true` — rather than as the verdict it used to be given, and like every other `null` it counts toward `segments` and never toward `discriminating`.
-
-    **If step 4's verify later FAILS**, re-run `"$PROBE_CLI" verify-probe $STORY_ID --tasks-file $TASKS_FILE_PATH --previous-file <the path step 1.5 reported>` from the same working directory (that second run reports a path of its own, ending in `-post.json`, so it never overwrites the artifact it just read), and list, alongside the `discriminates:false` entries above rather than in a step of their own, every returned entry whose `unsatisfiable` is `true`. `discriminates` computed from one run cannot tell "the work is not done yet" from "this assertion can never pass" — both are non-zero — and the case this closes cost three fifteen-minute suite re-runs against a check that could never pass, because nothing told the two apart. A segment non-zero in BOTH runs is named possibly unsatisfiable: check the harness, not the code, rather than reported as ordinary unfinished work. This comparison is a WARNING like the rest of this step and NEVER overrides step 4's own FAIL verdict; if the verb or the saved file is unavailable, say so in one line and report the plain failure as before.
-
-    **A story's own `implementation.verify` must NEVER name `verify-probe`.** This step RUNS that verify's segments, so a verify that calls the verb back re-enters the probe, and the CLI refuses rather than answering — the failure reported then says nothing about the story's own code. The refusal message is the one place that states the problem in full, and it names the two ways out: probe from a verify that does not itself call the verb (a sibling story's, or a throwaway fixture's), or call `probe_verify()` in `tasks.py` directly, which is not guarded. The mutual case is the same loop — story A's verify probing B while B's probes A, two ids and neither equal to the other — so the refusal catches it too.
-2. Implement the story requirements. When `story.tasks[]` is present, follow it as the ordered recipe (creation → integration wiring → local verification) — pay particular attention to any `"Wire <X> into <Y>"` entries, which encode cross-story file wiring that AC alone cannot enforce. `tasks[]` is planner guidance; `acceptanceCriteria` remains the completion gate.
-
-    **`story.implementation.outputs`, when present, is a list of paths relative to `AIMI_ROOT` that start with `.aimi/`** — artifacts the story produces outside the repository. Create each one yourself (`mkdir -p` its parent under `"$AIMI_ROOT"`), never stage or commit it, and never treat it as a commit-verification target. `implementation.files` stays the list of in-repository files you commit.
-
-    **Read `story.implementation.approach` first: it is the strategy the planner chose, and it is yours to follow.** It is optional in schema v3.3 — when it is absent or empty, do nothing here and invent no strategy of your own, the same treatment step 4 gives an absent `verify`. When it is present and non-empty, it is not one opinion to weigh against your own first idea: the planner wrote it holding the research, the outline and the sibling stories, and you hold one story. Follow it, or diverge and say so — a `deviations[]` entry in the completion report naming the approach and the reason you went another way. The one thing that is never acceptable is diverging in silence, which leaves the plan and the code disagreeing with no one able to see it.
-
-    Why this field has a reader at all, since the record says otherwise: audit finding #4 observed that `implementation.approach` had no reader in the executor and concluded it should be retired. That observation was right and the conclusion was wrong, and measurement is what inverted it. As of 2026-09-03, **nine** files across `agents/`, `commands/`, `skills/` and `scripts/` read or write the field — `aimi-cross-story-auditor.md`, `aimi-story-expander.md`, `deepen.md`, `execute.md`, `next.md`, `plan.md`, `story_merge.py`, `architecture-foundation/SKILL.md`, `typescript-node-conventions/SKILL.md` (`deepen.md` is the one that does not match a literal `implementation.approach` grep — it writes `approach` as a key under `implementation`). `/aimi:deepen` writes it, `next.md` renders it to the user, and four of the cross-story auditor's six concerns derive from it. The executor was the single place with no reader; retiring the field would have silently disabled the other nine to fix that one. So the missing reader was added instead — this step. Anyone re-reading finding #4 will reach the retire conclusion again unless they read this paragraph first.
-3. Verify ALL acceptance criteria are met
-3.5. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set: run the Visual Source-of-Truth Protocol (V1/V2/V3 enumeration → mapping → escalation) BEFORE writing code, then proceed to the Reference-Artifact Parity Pass.
-3.6. Run Reference-Artifact Parity Pass (see full procedure in the named section above) if the story declares any reference artifact or any AC line contains a prototype/spec citation or `verification.strategy` implies a reference. Block commit until every element has a verdict; on unreadable reference, log `Parity pass skipped — reference not readable: <path>` as a commit trailer and proceed.
-4. Run `story.implementation.verify` exactly as written, from the working directory established in step 0c, with `TASKS_FILE_PATH` and `AIMI_ROOT` exported into its environment (same exports as the step 1.5 pre-run). `implementation` is optional in schema v3.3 — when it or `verify` is absent or empty, do exactly what you already do (step 3's acceptance-criteria check) and invent no command. When `verify` is present, a non-zero exit FAILS the story: report the failure (include the verify's output) and do NOT commit — this is not advisory. On that failure, apply step 1.5's post-change `verify-probe` comparison before writing the report.
-4.5. **When WORKTREE_PATH is set, confirm the checked-out branch is THIS story's before staging anything.** Run `git branch --show-current` and require the name to END in this story's id (`-<STORY_ID>` — e.g. a branch ending `-US-003` for story US-003). On a mismatch, stop: do NOT stage, do NOT commit, and report failure with both the branch actually found and the id expected. A worktree whose branch is not this story's is a worktree this story was never handed, and committing into it puts one story's work onto another story's branch — where the wave that merges them interleaves two unrelated changes with nothing marking the seam. This is the last moment at which that stays cheap to catch: once the commit lands, undoing it means rewriting a branch that belongs to someone else.
-5. If all checks pass, commit:
-   a. Stage only story-related files: `git add [changed files]` (never use `-A` or `.` — avoid staging unrelated files)
-   b. Commit with conventional format: `git commit -m "type(scope): Story title"`
-      Commit types: **feat** | fix | refactor | docs | test | chore
-   c. Verify the commit landed: `git log -1 --oneline`
-
-   **FAIL FAST — Commit failure:**
-   If `git commit` exits non-zero OR `git log -1 --oneline` does not show the expected commit:
-   - Do NOT retry or attempt to fix
-   - Report failure immediately with the error output
-   - The caller will handle recovery
-
-6. If WORKTREE_PATH is set: do NOT update tasks file — return result report instead
-   If no WORKTREE_PATH: do NOT update tasks file directly — the caller (next.md/execute.md) handles status updates via the CLI
-7. **Emit the `<result_json>` block as the LAST element of your final message** (see "Result Contract" section above). The orchestrator parses this block as source of truth — prose outside the block is debugging only and is NOT consumed by the leader. **Populate `"verify"` from the numbers steps 1.5 and 4 have already produced**: step 4's exit becomes `exit`, step 1.5's pre-run exit becomes `preExit`, and the `verify-probe` array from step 1.5 — at the path that step reported — gives `segments` (its length) and `discriminating` (how many of its entries had `discriminates` true). Nothing new is executed here — this adds no third run of the verify, it stops discarding what was already measured. Omit the whole object when `implementation.verify` was absent or empty, and omit any single number that was never measured rather than filling it with zero (the Result Contract's Rules say which is which).
-
-</execution_flow>
-
-<on_failure>
-
-If you cannot complete the story:
-
-1. Do NOT update the tasks file (the caller handles status via CLI)
-2. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` — the leader reads this to decide cascade-skip and report to the user.
-3. Optional prose (above the block) may include longer error details for human debugging.
-
-</on_failure>
+<result_json>
+{"status":"failed","commit":null,"failureCause":"Pre-commit hook failed: tsc not in PATH"}
+</result_json>
 ```
-
----
-
-## Compact Template
-
-> Condensed variant for subsequent stories in a wave session. Each Task agent gets fresh context (no memory carryover), so static sections are condensed to one-line summaries — NOT omitted. Story-specific and context-varying sections remain in full. Reduces prompt size by collapsing static sections; actual savings vary with story content and have not been benchmarked.
-
-When spawning a Task agent for subsequent stories (after the first story in a session):
-
+Skipped (gate blocked):
 ```
-You are executing a single story from the tasks file.
-
-<project_guidelines>
-Follow project guidelines from CLAUDE.md/AGENTS.md. Apply output compression rules from AGENTS.md.
-</project_guidelines>
-
-<project_context>
-
-[PROJECT_PATH]   ← optional, resolved absolute path to the target project
-
-If PROJECT_PATH is provided:
-- cd to PROJECT_PATH before any work
-- Load CLAUDE.md from PROJECT_PATH root
-- All file operations stay within PROJECT_PATH
-
-</project_context>
-
-<worktree_context>
-
-[WORKTREE_PATH]  ← optional, provided by execute.md parallel mode
-
-If both PROJECT_PATH and WORKTREE_PATH are provided, the destination depends on whether PROJECT_PATH is its own repository or a subdirectory of one. `worktree-manager.sh` creates every worktree under `$(git rev-parse --show-toplevel)/.worktrees`, so a worktree sits beside the *repository root* — which is the same place as PROJECT_PATH only when PROJECT_PATH is itself that root. Decide it rather than assume it:
-
-```bash
-PROJECT_TOPLEVEL=$(git -C "$PROJECT_PATH" rev-parse --show-toplevel)
-if [ "$PROJECT_TOPLEVEL" = "$PROJECT_PATH" ]; then
-  # PROJECT_PATH is its own repository (multi-repo sibling layout):
-  # the worktree already IS the project.
-  cd "$WORKTREE_PATH"
-else
-  # PROJECT_PATH is a subdirectory of a larger repository (monorepo layout):
-  # the worktree is the repo root, and the project sits at the same
-  # relative path inside it.
-  cd "$WORKTREE_PATH/${PROJECT_PATH#"$PROJECT_TOPLEVEL"/}"
-fi
+<result_json>
+{"status":"skipped","commit":null,"failureCause":"Decision gate pending: choose OAuth provider"}
+</result_json>
 ```
-
-Getting this wrong is issue #105: a monorepo story ran from the repository root while its `implementation.verify` was written for the project directory, so a bare `bun run typecheck` failed for want of a `package.json` one level down. The fix belongs here, in the cd — never in what a story author writes. A `verify` must not carry a `cd <project> &&` prefix; by the time it runs you are already there.
-
-Then, in either case:
-- All file operations happen within the worktree
-- Commit to the worktree's branch (already checked out)
-- Do NOT modify the tasks.json file (leader handles this)
-- Report result (success/failure + details) — the leader processes your report
-
-If only WORKTREE_PATH is provided:
-- cd to WORKTREE_PATH before any work
-- All file operations happen within the worktree
-- Commit to the worktree's branch (already checked out)
-- Do NOT modify the tasks.json file (leader handles this)
-- Report result (success/failure + details) — the leader processes your report
-
-If neither is provided:
-- Work in current directory (standard sequential behavior)
-- Report result — the caller (next.md/execute.md) handles status updates via the CLI
-
-</worktree_context>
-
-<headed_mode_context>
-
-[HEADED_MODE]   ← optional, true when visual-follow is active
-
-If HEADED_MODE is true:
-- A headed browser session named `visual-follow` is already running (opened by execute.md)
-- Use `--session visual-follow` for all agent-browser commands (do NOT pass --headed; the session inherits it)
-- The session lifecycle is managed by execute.md — do NOT close it
-- Navigate to verification.url at story start (step 0) for live preview
-
-If HEADED_MODE is false or absent:
-- Standard headless mode — executor owns the full browser lifecycle (open → use → close)
-
-</headed_mode_context>
-
-<task_pointer>
-STORY_ID: [STORY_ID]
-TASKS_FILE_PATH: [TASKS_FILE_PATH]
-AIMI_ROOT: [AIMI_ROOT]
-SCRATCH_PREFIX: [SCRATCH_PREFIX]
-
-First action — re-read `$AIMI_CLI` from cache, then fetch story context:
-
-```bash
-AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
-: "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI get-story-context [STORY_ID] --tasks-file [TASKS_FILE_PATH]
-```
-
-`--tasks-file [TASKS_FILE_PATH]` is the orchestrator's own already-resolved tasks file — pass it explicitly rather than the bare form, which would fall back to whichever sibling split orchestrator's `init-session` call last wrote the shared current-tasks pointer.
-
-**`SCRATCH_PREFIX` arrives already composed: EVERY file you write into the scratchpad directory is named `[SCRATCH_PREFIX]-<whatever>`.** A mandatory prefix you are handed — never an invitation to choose a name you judge unique, which is the thing that failed. `verify.sh`, `verify.log`, `probe.sh`, `probe.err` and `v.sh` are real names that already collided in that shared directory; they are non-examples, not a denylist to improvise around. It leads with the PLAN's identity and ends with your story id because the measured collision was plan-against-plan — an earlier plan's leftover file for a story carrying the same `US-NNN` — so a story-id-only prefix would have separated nothing. Check the path before running a script you think you wrote. The `verify-probe` artifact is outside this rule: it lands beside the tasks file under a name the verb chooses and announces, and you read that path rather than composing one.
-
-Parse `{story, metadata, skills, designContext, dropped}` from the returned JSON — `metadata`'s five keys are `designBundle`/`designTokens`/`prototypePaths`/`prototypeDropped`/`prototypeSuperseded` (`prototypeDropped` a record only, never opened/moved/deleted/resolved; `prototypeSuperseded` `{path, decision, note}` read next to its prototype, never reproduced), and `designContext` adds `.specSections` (this story's spec content, pre-sliced by label) alongside `.decisions`/`.bundleGuidance`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions; a non-empty `dropped[]` names a declared skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance` or directly via `designContext.specSections`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`) — report any of the three in the completion report. Read `designContext.decisions` as design intent for UI-touching work, preferring an already-sliced `designContext.specSections` entry over re-reading its file. If `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec) for a section absent from `specSections`, use the Read tool to load those files before authoring implementation code. If the command fails, report failure and stop.
-</task_pointer>
-
-<prototype_context>
-Before reading, check `metadata.prototypeDropped` for an entry naming a prototype this story's AC depend on — if found, log `prototype <path> dropped — <reason>`, report it, and never open/move/delete/resolve that path (it is a record only). Check `metadata.prototypeSuperseded` beside it: an entry for a prototype you read is read NEXT TO that prototype, and its superseded decision is not reproduced. When `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, read each prototype file with the Read tool (resolve as `$AIMI_ROOT/<path>`). Log `prototype <path> missing — skipped` for any missing file and continue. Read all available prototypes before writing implementation code.
-</prototype_context>
-
-<tools>
-Use standard tools: Read, Write, Edit, Bash, Grep, Glob. Do NOT invoke these via the Skill tool.
-</tools>
-
-<project_root_boundary>
-CRITICAL: Stay within project root. Never read/write outside project boundary. Worktree paths (.worktrees/) are allowed. Never use ../ traversal to escape. If external access is needed, report failure.
-</project_root_boundary>
-
-<execution_flow>
-Bootstrap: re-read `$AIMI_CLI` from cache (per-call re-read one-liner — see `<task_pointer>` above), run `$AIMI_CLI get-story-context $STORY_ID --tasks-file $TASKS_FILE_PATH`, parse `{story, metadata, skills, designContext, dropped}`. For each entry in `skills[]`, read its `.content` verbatim as additional project conventions (in addition to CLAUDE.md); a non-empty `dropped[]` names a declared skill the 100KB cap excluded (`kind:"skill"`), a spec section the content cap evicted (`kind:"specSection"`, still reachable via `designContext.bundleGuidance`), or a designBundle spec file missing on disk or escaping the project root (`kind:"specFile"`) — report any of the three in the completion report. Read `designContext.decisions` as design intent for UI-touching work; if `designContext.bundleGuidance` cites spec file paths (DesignSpec / BusinessSpec), use the Read tool to load those files before authoring implementation code. Read prototype files from `metadata.prototypePaths[]` and `story.implementation.prototypeAnchor` via Read tool (log missing, skip). **cd to the working directory `<worktree_context>` establishes; when WORKTREE_PATH is set and that cd fails, STOP and report `"status":"failed"` with the unenterable path in `failureCause` — never fall through to the directory you are already in, which belongs to the orchestrator or to a sibling story and would take this story's commit silently.** Then follow standard execution flow: read criteria → **pre-run `story.implementation.verify` once, before implementing anything, with `TASKS_FILE_PATH` and `AIMI_ROOT` exported into its environment** (skipped entirely when absent or empty; run it, and the probe below, before writing any file — if you already did, take the baseline from `git worktree add --detach "$PWD/.aimi-probe-base" HEAD` inside the repository and remove it after, never from a copy outside it, which has no `.aimi/` and which the CLI refuses; a ZERO exit here means the check does not discriminate before from after — warn in the completion report, NEVER block, and see step 1.5 above for the legitimate cause it must name, why the second run is worth its cost, and why the export matters — a `verify` may need to resolve its own tasks file rather than the shared `current-tasks` pointer) → **choose the probing CLI before probing with it: `PROBE_TREE_CLI="$PWD/plugins/aimi-engineering/scripts/aimi-cli.sh"` (absolute, so `aimi-cli.sh` loads its sibling Python modules from THIS checkout), and when `[ -x "$PROBE_TREE_CLI" ]` — `-x`, never `-f` or `-e` — set `PROBE_CLI="$PROBE_TREE_CLI"` and print `probe-cli: $STORY_ID: probing with the aimi-cli.sh of the tree under test ($PROBE_TREE_CLI)` on stderr, else set `PROBE_CLI="$AIMI_CLI"` and print `probe-cli: $STORY_ID: no executable aimi-cli.sh in the tree under test ($PROBE_TREE_CLI) -- probing with the resolved CLI ($AIMI_CLI) instead`. BOTH branches print — unlike the `commands/execute.md` precedent, which prints only its fallback — because here the tree under test is the COMMON case and a silent preferred branch hides the very thing this shows: a feature branch's CLI is newer than the installed one, and an old parser accepts an unknown flag in silence. The prefix is `probe-cli:` so it never collides with the verb's own `verify-probe: wrote` on the same stream, and the choice is per-call and NEVER persisted — `write_global_cli_cache` and `_dev_dir_path` refuse a `.worktrees/` path on purpose, after an exit-127 symlink bug** → **in the same step run `"$PROBE_CLI" verify-probe $STORY_ID --tasks-file $TASKS_FILE_PATH`, which writes its JSON array itself and names the file on one stderr line (`verify-probe: wrote <path>`) — carry that path, never compose one** (the name is keyed on the tasks file's stem so one plan's story id cannot land on another's, and the file goes beside the tasks file rather than in any directory created here; a failed write is one stderr line and never a failure) from the same directory (**a story's own verify must NEVER name this verb: probing RUNS its segments, so a verify that calls it back re-enters the probe and the CLI refuses instead of answering — probe from a sibling story's verify or a throwaway fixture, or call `probe_verify()` in `tasks.py`, which is not guarded**) and list every entry whose `discriminates` is `false` as assertions that already pass before the work (the pre-run above only sees the whole script; under `set -e` the script stops at its first failure and hides every assertion after it, so a verify that FAILS here can still be full of ones that prove nothing — warning only, never a block, and a guardrail assertion legitimately shows up in this list; an unavailable verb is one reported line, never a failure; **list every entry whose `discriminates` is `null` under a SEPARATE sentence of its own — the probe could not tell: the segment reads shell state the carried prelude never reproduced, so it was not run at all and its `exit` is `null` too. Name its `unresolvedState` contents so the report says WHICH state was missing, and never merge these into the already-passes list, where a withheld verdict would read as dead weight and stop a reader looking. A segment whose reads the prelude did cover keeps its ordinary verdict, and only shell state is lost — disk writes survive between segments. A `null` may instead carry `unterminated` — a quote or bracket left open at the end of the verify, meaning it would not have run at all — read `segments: 1, discriminating: 0` as nothing measured, not as an assertion count, rather than hunting for an absent `unresolvedState`. A `null` never fails a story, never blocks a wave, and never counts toward `discriminating`**; **`--skip-matching <regex>` is the way out when probing would cost a full suite run: a matching segment is not run, stays in the report as `discriminates: null` with `skipped: true`, and a segment outliving the per-segment ceiling answers the same null with `timedOut: true`. It AVOIDS the cost rather than removing it, and every skipped segment is one this step can no longer warn about — so reach for it for a verify ending in a suite whose cost you already know, never merely to make a slow probe finish sooner**; **if the real verify FAILS later, re-run this same `"$PROBE_CLI" verify-probe` call with `--previous-file <the path reported above>`, and list every `unsatisfiable:true` entry here too — that run reports a `-post.json` path of its own and leaves the artifact it read alone — a segment non-zero in both runs is possibly unsatisfiable: check the harness, not the code, rather than unfinished work, and this never overrides the FAIL verdict below**) → implement (follow `story.tasks[]` as the ordered recipe when present; treat `"Wire <X> into <Y>"` entries as mandatory cross-story integration steps; AC remains the completion gate; **follow `story.implementation.approach` as the strategy the planner chose — optional in schema v3.3, so absent or empty means invent none, and a divergence from a present one goes in the report's `deviations[]` with its reason, never unsaid**) → run `story.implementation.verify` exactly as written from the working directory established above, `TASKS_FILE_PATH` and `AIMI_ROOT` still exported (optional in schema v3.3 — absent/empty means do exactly what you already do and invent no command; a non-zero exit FAILS the story, report and do NOT commit — apply the verify-probe comparison above before writing that report) → **when WORKTREE_PATH is set, check `git branch --show-current` ENDS in this story's id (`-<STORY_ID>`) before staging anything; a mismatch is a failure, not a warning — do not stage, do not commit, and report the branch found beside the id expected** → commit. If `story.verification.strategy == "visual"` OR `metadata.prototypePaths` is non-empty or `story.implementation.prototypeAnchor` is set, run the Visual Source-of-Truth Protocol (V1/V2/V3) before writing code. Stage only story-related files (never `-A` or `.`). Commit format: `git commit -m "type(scope): Story title"`. Verify with `git log -1 --oneline`. On commit failure: report immediately, do not retry. Do NOT update tasks file — caller handles status. When a reference artifact is declared, run the Reference-Artifact Parity Pass before committing (see full named section above). **End your final message with the `<result_json>` block per the Result Contract section — the orchestrator parses ONLY that block; prose outside is debugging only.** Populate `"verify"` in it from numbers already in hand — the real verify's exit as `exit`, the pre-run's exit as `preExit`, and the saved `verify-probe` array's length and `discriminates:true` count as `segments` and `discriminating`; no extra run of anything. Omit the whole object when `implementation.verify` was absent or empty, and omit a number that was never measured rather than writing zero for it.
-</execution_flow>
-
-<on_failure>
-On failure: do NOT update the tasks file. Emit `<result_json>` with `"status":"failed"` and a one-line `"failureCause"` as the LAST element of your message — that field is what the leader reads to decide cascade-skip and surface to the user. Optional prose above the block may include longer error details.
-</on_failure>
-```
-
----
 
 ## Failure Handling
 
-If you cannot complete a story:
-
-1. **Do NOT** update the tasks file — the caller (next.md or execute.md leader) handles all status changes via CLI
-2. **Do NOT** run cascade-skip — the caller handles dependent story skipping
-3. **Emit `<result_json>` with `"status":"failed"`** as the LAST element of your final message. Include `"commit": null` (or partial commit SHA if one landed) and `"failureCause": "<one-line cause>"` so the leader can surface it to the user without parsing prose.
-4. Optional prose above the block may include longer error details for human debugging.
-5. The caller will mark the story as failed and handle dependent stories based on `result_json`.
-
----
+When you cannot complete the story: do not update the tasks file and do not run cascade-skip.
+Emit `<result_json>` with `"status":"failed"`, `"commit": null` (or the SHA of a commit that did
+land) and a one-line `"failureCause"`. Longer error details may go in prose above the block. The
+caller marks the story and handles its dependents.
 
 ## Checklist
 
-Before completing a story:
-
-- [ ] All file operations stayed within project root (no parent directory access)
-- [ ] All acceptance criteria verified
+- [ ] Every file operation stayed inside the project boundary
+- [ ] Files were read with Read/Grep/Glob, long command output went to a log
+- [ ] Step 1.5 ran before the first edit (or the baseline came from `.aimi-probe-base`)
+- [ ] Every acceptance criterion verified
 - [ ] `story.implementation.verify` ran (when present) and exited zero
-- [ ] Changes committed with proper format (one commit per story, never skip hooks)
-- [ ] Commit verified via `git log -1 --oneline`
-- [ ] **`<result_json>` block emitted as the LAST element of the final message** (Result Contract section above)
-- [ ] **`verify` populated in that block** from the step 1.5 and step 4 numbers (whole object omitted when the story had no `verify`; an unmeasured number omitted, never zero-filled)
-- [ ] Result report returned to caller (do NOT update tasks file directly — caller handles via CLI)
+- [ ] One commit, conventional format, hooks not skipped, confirmed with `git log -1 --oneline`
+- [ ] The tasks file untouched
+- [ ] **`<result_json>` is the LAST element of the final message**, with `verify` populated
+      from measured numbers only

@@ -6,7 +6,7 @@ run and a `probe-plan` run. The executor exports the value /aimi:execute handed
 it; the two probes export the root `aimi-cli.sh` resolved. These cases cover the
 Python half (`probe_verify`'s `aimi_root`), both CLI verbs run from a nested
 directory with no `.aimi/` of its own, and the structural presence of the field
-in the two `<task_pointer>` templates and in execute.md's spawn fields.
+in the skill's `<task_pointer>` block and in execute.md's spawn fields.
 """
 
 import json
@@ -231,9 +231,9 @@ def _task_pointers(text):
     return re.findall(r"<task_pointer>(.*?)</task_pointer>", text, flags=re.S)
 
 
-def test_both_task_pointer_templates_carry_the_aimi_root_line_beside_tasks_file_path():
+def test_the_task_pointer_carries_the_aimi_root_line_beside_tasks_file_path():
     pointers = _task_pointers(_read(SKILL))
-    assert len(pointers) == 2
+    assert len(pointers) == 1
     for block in pointers:
         assert re.search(
             r"TASKS_FILE_PATH: \[TASKS_FILE_PATH\]\nAIMI_ROOT: \[AIMI_ROOT\]\n", block
@@ -242,7 +242,8 @@ def test_both_task_pointer_templates_carry_the_aimi_root_line_beside_tasks_file_
 
 def test_the_skill_names_aimi_root_in_both_verify_exports_and_keeps_the_boundary_rule():
     text = _read(SKILL)
-    assert text.count("`TASKS_FILE_PATH` and `AIMI_ROOT`") >= 4
+    # The pre-run (step 1.5) and the real run (step 4) each export both.
+    assert text.count("`TASKS_FILE_PATH` and `AIMI_ROOT`") >= 2
     assert "Never use `../` traversal to escape the project boundary" in text
     assert "implementation.outputs" in text
     assert "never stage or commit it" in text

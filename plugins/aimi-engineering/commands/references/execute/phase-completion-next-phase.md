@@ -1,6 +1,6 @@
 # Execute: Phase Completion: Next Phase
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ### Next Phase
 
@@ -32,7 +32,7 @@ The phase named here is whichever one `roadmap-get --next-eligible` selects, and
   B — Plan it later
   ```
   **Option A:** set `NEXT_PHASE_HANDOFF=$NEXT_PHASE_ID` (consumed after Step 5's report — see below).
-  **Option B:** report `"Resume with: /aimi:plan --phase [NEXT_PHASE_ID]"` and end the session after Step 5's report.
+  **Option B:** report `"Resume with: /clear, then /aimi:plan --phase [NEXT_PHASE_ID]"` (the roadmap and this phase's handoff are on disk, so a fresh session loses nothing) and end the session after Step 5's report.
 
 - **Agent mode** (`detect-interactivity` = `agent`): skip AskUserQuestion. Log exactly:
   ```

@@ -1,6 +1,6 @@
 # Plan: Phase 4: Schema v3.3 structure
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Derive `metadata.backendSpec` (frontend-only mode only)
 

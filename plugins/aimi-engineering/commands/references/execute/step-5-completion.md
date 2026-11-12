@@ -1,6 +1,6 @@
 # Execute: Step 5: Completion
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 
 ## Step 5: Completion
 
@@ -66,14 +66,17 @@ git -C "$GROUP_ROOT" log --oneline "$GROUP_DEFAULT".."$BRANCH_NAME" | wc -l
 
 When exactly one `group_key` was scheduled this run (the common single-repo case, `group_key = "DEFAULT"`), report its count on today's single `Commits: [count]` line below — no format change for that case. When more than one `group_key` was scheduled (multi-repo), report one `Commits (project_path): [count]` line per group instead, in place of the single line.
 
-Check for any remaining pending gates across all stories:
+Check for any remaining pending gates across all stories. `status` rows carry no `gate`, so read each story with `get-story`, which returns the whole story, against this run's own tasks file:
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-$AIMI_CLI status
+GATE_FILE="[PHASE_TASKS_PATH in phase mode, otherwise TASKS_PATH]"
+$AIMI_CLI status --tasks-file "$GATE_FILE" | jq -r '.userStories[].id' | while IFS= read -r story_id; do
+  $AIMI_CLI get-story "$story_id" --tasks-file "$GATE_FILE" | jq -c 'select(.gate.status == "pending") | {id, type: .gate.type, prompt: .gate.prompt}'
+done
 ```
 
-Parse gate summary from status output:
+Each line printed is one pending gate. Count them:
 - `pending_action_gates`: count of stories with gate.type == "action" and gate.status == "pending"
 - `pending_verify_gates`: count of stories with gate.type == "verify" and gate.status == "pending"
 - `pending_decision_gates`: count of stories with gate.type == "decision" and gate.status == "pending"
@@ -388,4 +391,6 @@ Resolve gates with: $AIMI_CLI gate-pass <story-id> [--option 'value']
 - Open a PR: `/aimi:open-pr --branch [branchName]`
 - Run `/aimi:review [branchName]` for code review
 ```
+
+**Fresh session hint:** After either Next Steps block, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode and when `NEXT_PHASE_HANDOFF` is set, since the run continues into `/aimi:plan`.
 

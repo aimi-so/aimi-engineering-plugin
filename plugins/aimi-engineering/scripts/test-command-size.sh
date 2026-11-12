@@ -17,29 +17,31 @@ set -uo pipefail
 #
 # WHAT IT CHECKS
 #
-#   1. every file in the corpus is within its recorded budget (the sixteen
-#      files in command-size-baseline.txt) or the shared DEFAULT_CEILING
+#   1. every file in the corpus is within its recorded budget (the files
+#      listed in command-size-baseline.txt) or the shared DEFAULT_CEILING
 #      (everything else) -- against the real tree
 #   2. every baseline line still names a file that exists
-#   3. the recursive sweep's file count matches an independent `find`, and
-#      actually reaches commands/references/, not just top-level files,
+#   3. the recursive sweep's commands/ half matches an independent `find`,
+#      and actually reaches commands/references/, not just top-level files,
 #      reaches skills/**/SKILL.md and nothing else under skills/, and reaches
 #      agents/**/*.md
 #   4. (self-contained, against a throwaway fixture) the same checking
 #      function used above discriminates in both ratchet directions: a file
-#      that grows past its budget fails, and a file that shrinks below its
-#      budget also fails
+#      that grows past its budget fails, and a file that shrinks into the
+#      step below its budget also fails
 #
-# THE RATCHET IS BIDIRECTIONAL, ON PURPOSE
+# THE RATCHET IS BIDIRECTIONAL, IN STEPS OF BUDGET_STEP BYTES
 #
-# A budget that only ever caught growth would let a file shrink and then
-# leave its old, now-too-generous number on the books -- slack a later,
-# unrelated change could spend without anyone reviewing it as growth. So a
-# recorded budget is a promise that someone measured that EXACT size: going
-# over fails as "over budget", going under fails as "stale budget", and the
-# only way to satisfy either is to write the file's real current size into
-# command-size-baseline.txt in the same commit. See that file's own header
-# for the fuller reasoning; it is not repeated here.
+# A budget is a multiple of BUDGET_STEP (4096), and a file passes when it
+# sits inside that step: budget - BUDGET_STEP < size <= budget. Going over
+# fails as "over budget"; shrinking into a lower step fails as "stale
+# budget", so a budget can never sit a whole step generous after the file
+# that earned it got smaller. A budget that is not a multiple of the step
+# fails as "malformed budget". The step is what keeps an ordinary
+# few-hundred-byte edit from touching the baseline at all: when budgets were
+# exact byte counts, this file changed in a third of all commits, nearly
+# always to record growth nobody was asked to review as growth. See
+# command-size-baseline.txt's own header for the rest of the reasoning.
 #
 # WHY THE BUDGET IS MEASURED PRE-INSTALL, NOT AGAINST install.sh'S OUTPUT
 #
@@ -82,10 +84,8 @@ set -uo pipefail
 # happens to measure.
 #
 # The skills half inherits that limit and adds its own: create-agent-skills
-# advises keeping a SKILL.md under 300 lines and the plugin's own CLAUDE.md
-# repeats it, but this suite measures bytes and cannot enforce a line count.
-# story-executor/SKILL.md is 613 lines against that 300-line guidance and its
-# byte budget below is green -- a recorded budget here is a ratchet against
+# gives a line-count guidance for SKILL.md, but this suite measures bytes and
+# cannot enforce a line count. A recorded budget here is a ratchet against
 # further growth, never a statement that the file is the right size.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,11 +100,11 @@ BASELINE_FILE="$SCRIPT_DIR/command-size-baseline.txt"
 # shellcheck source=lib/extract-command-blocks.sh
 source "$SCRIPT_DIR/lib/extract-command-blocks.sh"
 
-# Sits strictly between design/polish.md (15746 bytes, the largest file with
-# no baseline entry) and deepen.md (18029 bytes, the smallest grandfathered
-# file) -- see command-size-baseline.txt's own header for why these twelve
-# files could not simply be shrunk to fit under it instead.
+# The shared ceiling for every corpus file with no baseline entry. It is
+# itself a multiple of BUDGET_STEP, so a grandfathered file that shrinks
+# under it drops out of the baseline rather than keeping a budget of its own.
 DEFAULT_CEILING=16384
+BUDGET_STEP=4096
 
 # Colors for output
 # Colour only when stdout is a terminal, and held as a real ESC byte. The
@@ -172,7 +172,7 @@ assert_no_findings() {
 
 # ---------------------------------------------------------------------------
 # check_budgets(commands_root, skills_root, agents_root, baseline_file,
-# ceiling) -- the one function that gates both the real tree and the
+# ceiling, step) -- the one function that gates both the real tree and the
 # discrimination fixture below, so the code that enforces the rule is the
 # same code that proves it discriminates.
 #
@@ -182,18 +182,23 @@ assert_no_findings() {
 # $agents_root recursively -- measures each with `wc -c`, and for each file,
 # keyed by its relpath:
 #   - has a recorded budget in $baseline_file:
-#       size > budget  -> "over budget"  (the ratchet's growth-fails half)
-#       size < budget  -> "stale budget" (the ratchet's shrink-fails half)
-#       size == budget -> no finding
+#       budget not a multiple of step -> "malformed budget"
+#       size > budget                 -> "over budget"  (growth fails)
+#       size <= budget - step         -> "stale budget" (shrinking a step fails)
+#       otherwise                     -> no finding
 #   - no recorded budget:
 #       size > ceiling -> "over ceiling"
 #       size <= ceiling -> no finding
+#
+# A finding names the budget the file should carry instead: the smallest
+# multiple of step that holds it, or "remove the line" when that is within
+# the ceiling.
 #
 # Prints one finding per line, tab-free (findings themselves may not contain
 # a literal newline, since callers print one finding per line).
 # ---------------------------------------------------------------------------
 check_budgets() {
-  local commands_root="$1" skills_root="$2" agents_root="$3" baseline_file="$4" ceiling="$5"
+  local commands_root="$1" skills_root="$2" agents_root="$3" baseline_file="$4" ceiling="$5" step="$6"
   local -A budget=()
   local relpath amount plugin_root=""
 
@@ -215,7 +220,7 @@ check_budgets() {
     done < <(grep -vE '^[[:space:]]*(#|$)' "$baseline_file")
   fi
 
-  local file relp size have findings=""
+  local file relp size have want fix findings=""
   while IFS= read -r file; do
     [ -n "$file" ] || continue
     relp="$file"
@@ -225,13 +230,21 @@ check_budgets() {
       relp="${file#"$plugin_root"/}"
     fi
     size="$(wc -c < "$file" | tr -d ' ')"
+    want=$(( (size + step - 1) / step * step ))
+    if [ "$want" -le "$ceiling" ]; then
+      fix="remove its baseline line, the default ceiling covers it"
+    else
+      fix="set its baseline entry to $want"
+    fi
 
     if [ -n "${budget[$relp]+x}" ]; then
       have="${budget[$relp]}"
-      if [ "$size" -gt "$have" ]; then
-        findings="$findings$relp: over budget ($size bytes > $have recorded -- shrink the file, or raise its baseline entry in the same commit)"$'\n'
-      elif [ "$size" -lt "$have" ]; then
-        findings="$findings$relp: stale budget ($size bytes < $have recorded -- lower the baseline entry to $size in the same commit that shrank this file)"$'\n'
+      if ! [[ "$have" =~ ^[0-9]+$ ]] || [ $(( have % step )) -ne 0 ]; then
+        findings="$findings$relp: malformed budget ($have is not a multiple of $step -- $fix)"$'\n'
+      elif [ "$size" -gt "$have" ]; then
+        findings="$findings$relp: over budget ($size bytes > $have recorded -- shrink the file, or $fix in the same commit)"$'\n'
+      elif [ "$size" -le $(( have - step )) ]; then
+        findings="$findings$relp: stale budget ($size bytes fits a step below $have -- $fix in the same commit that shrank this file)"$'\n'
       fi
     else
       if [ "$size" -gt "$ceiling" ]; then
@@ -249,7 +262,7 @@ check_budgets() {
 # ---------------------------------------------------------------------------
 check_real_tree() {
   local findings
-  findings="$(check_budgets "$COMMANDS_DIR" "$SKILLS_DIR" "$AGENTS_DIR" "$BASELINE_FILE" "$DEFAULT_CEILING")"
+  findings="$(check_budgets "$COMMANDS_DIR" "$SKILLS_DIR" "$AGENTS_DIR" "$BASELINE_FILE" "$DEFAULT_CEILING" "$BUDGET_STEP")"
   assert_no_findings "$findings" \
     "Every commands/**/*.md, skills/**/SKILL.md and agents/**/*.md file is within its recorded budget or the default ceiling" \
     "See the finding above for which direction the drift went and what to do about it."
@@ -298,17 +311,22 @@ check_baseline_hygiene() {
 # what is worth pinning there is only that the sweep reaches it at all.
 # ---------------------------------------------------------------------------
 check_structural_coverage() {
-  local total refs corpus skills strays agents
+  local total swept refs corpus skills strays agents
 
+  corpus="$(command_block_files "$COMMANDS_DIR" "$SKILLS_DIR" "$AGENTS_DIR")"
+
+  # Two independent counts of the same set, compared to each other rather
+  # than to a literal: a literal here failed every time someone added a
+  # step file, which is not a regression.
   total="$(find "$COMMANDS_DIR" -name '*.md' | wc -l | tr -d ' ')"
-  assert_eq "121" "$total" \
+  swept="$(printf '%s\n' "$corpus" | grep -cF "$COMMANDS_DIR/" || true)"
+  assert_eq "$total" "${swept:-0}" \
     "commands/**/*.md sweep matches \`find plugins/aimi-engineering/commands -name '*.md' | wc -l\`"
 
-  refs="$(find "$COMMANDS_DIR" -name '*.md' | grep -c '/references/' || true)"
+  refs="$(printf '%s\n' "$corpus" | grep -F "$COMMANDS_DIR/" | grep -c '/references/' || true)"
   assert_eq "true" "$([ "${refs:-0}" -gt 0 ] && echo true || echo false)" \
     "The recursive sweep reaches commands/references/, not only top-level command files"
 
-  corpus="$(command_block_files "$COMMANDS_DIR" "$SKILLS_DIR" "$AGENTS_DIR")"
   # -F, not an anchored pattern: $SKILLS_DIR/$AGENTS_DIR are real paths and
   # can carry a regex metacharacter (a worktree checkout puts them under
   # `.worktrees/`).
@@ -329,12 +347,15 @@ check_structural_coverage() {
 # ---------------------------------------------------------------------------
 # check_discrimination() -- self-contained proof, against a throwaway
 # mktemp -d fixture (never a real commands/ file), that check_budgets()
-# actually discriminates in both ratchet directions. Five cases:
+# actually discriminates in both ratchet directions. With ceiling=8 and
+# step=4 (the real values scaled down), seven cases:
 #   - unbudgeted file under the ceiling             -> no finding
 #   - unbudgeted file over the ceiling               -> "over ceiling"
 #   - budgeted file exactly at its budget            -> no finding
+#   - budgeted file inside its step (budget-step < size < budget) -> no finding
 #   - budgeted file 1 byte over its budget           -> "over budget"
-#   - budgeted file under its budget                 -> "stale budget"
+#   - budgeted file that fits the step below         -> "stale budget"
+#   - budget that is not a multiple of the step      -> "malformed budget"
 #
 # The fixture includes a references/ subdirectory so the same recursive
 # coverage the real check relies on is exercised here too. Its skills and
@@ -350,21 +371,25 @@ check_discrimination() {
 
   mkdir -p "$fixture/dir/references"
 
-  printf '%s' "ab"                 > "$fixture/dir/plain.md"              # 2 bytes,  no budget, ceiling=5 -> under ceiling
-  printf '%s' "0123456789012345678901234567890123456789012345678" > "$fixture/dir/big.md"  # 51 bytes, no budget, ceiling=5 -> over ceiling
-  printf '%s' "12345"               > "$fixture/dir/references/exact.md"  # 5 bytes,  budget=5 -> exact match
-  printf '%s' "123456"              > "$fixture/dir/references/over.md"   # 6 bytes,  budget=5 -> 1 byte over
-  printf '%s' "12"                  > "$fixture/dir/references/stale.md"  # 2 bytes,  budget=5 -> stale (shrunk)
+  printf '%s' "ab"           > "$fixture/dir/plain.md"                # 2 bytes,  no budget, ceiling=8 -> under ceiling
+  printf '%s' "0123456789"   > "$fixture/dir/big.md"                  # 10 bytes, no budget, ceiling=8 -> over ceiling
+  printf '%s' "123456789012" > "$fixture/dir/references/exact.md"     # 12 bytes, budget=12 -> top of its step
+  printf '%s' "123456789"    > "$fixture/dir/references/inside.md"    # 9 bytes,  budget=12 -> inside (8, 12]
+  printf '%s' "1234567890123" > "$fixture/dir/references/over.md"     # 13 bytes, budget=12 -> 1 byte over
+  printf '%s' "12345678"     > "$fixture/dir/references/stale.md"     # 8 bytes,  budget=12 -> fits (4, 8]
+  printf '%s' "123456789"    > "$fixture/dir/references/malformed.md" # 9 bytes,  budget=11 -> not a multiple of 4
 
   cat > "$fixture/baseline.txt" <<'EOF'
 # fixture baseline for the discrimination test
-references/exact.md	5
-references/over.md	5
-references/stale.md	5
+references/exact.md	12
+references/inside.md	12
+references/over.md	12
+references/stale.md	12
+references/malformed.md	11
 EOF
 
   local findings
-  findings="$(check_budgets "$fixture/dir" "" "" "$fixture/baseline.txt" 5)"
+  findings="$(check_budgets "$fixture/dir" "" "" "$fixture/baseline.txt" 8 4)"
 
   assert_eq "false" "$(printf '%s\n' "$findings" | grep -q '^plain\.md:' && echo true || echo false)" \
     "Discrimination -- unbudgeted file under the ceiling produces no finding"
@@ -375,11 +400,17 @@ EOF
   assert_eq "false" "$(printf '%s\n' "$findings" | grep -q '^references/exact\.md:' && echo true || echo false)" \
     "Discrimination -- file exactly at its recorded budget produces no finding"
 
+  assert_eq "false" "$(printf '%s\n' "$findings" | grep -q '^references/inside\.md:' && echo true || echo false)" \
+    "Discrimination -- file inside its budget's step produces no finding"
+
   assert_eq "true" "$(printf '%s\n' "$findings" | grep -q '^references/over\.md: over budget' && echo true || echo false)" \
     "Discrimination -- file 1 byte over its recorded budget produces an 'over budget' finding (ratchet: growth fails)"
 
-  assert_eq "true" "$(printf '%s\n' "$findings" | grep -q '^references/stale\.md: stale budget' && echo true || echo false)" \
-    "Discrimination -- file below its recorded budget produces a 'stale budget' finding (ratchet: shrinking also fails)"
+  assert_eq "true" "$(printf '%s\n' "$findings" | grep -q '^references/stale\.md: stale budget.*remove its baseline line' && echo true || echo false)" \
+    "Discrimination -- file that fits the step below produces a 'stale budget' finding (ratchet: shrinking also fails)"
+
+  assert_eq "true" "$(printf '%s\n' "$findings" | grep -q '^references/malformed\.md: malformed budget.*set its baseline entry to 12' && echo true || echo false)" \
+    "Discrimination -- a budget that is not a multiple of the step produces a 'malformed budget' finding"
 
   rm -rf "$fixture"
   trap - RETURN

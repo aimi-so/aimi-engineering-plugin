@@ -1,24 +1,18 @@
 # Execute: Step 4: Wave Execution Loop
 
-> Loaded by `commands/execute.md` when its `Applies when:` condition holds. The section below moved here from `execute.md` verbatim.
+> Loaded by `commands/execute.md` when its `Applies when:` condition holds.
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 
 ## Step 4: Wave Execution Loop
 
 ```
 wave = 1
-is_first_story_in_session = true
 DESIGN_REVIEW_BUFFERS = {}  # key: story_id, value: {title, output}; populated by post-merge design reviewer
 CONSOLE_BUFFER = {}         # key: story_id, value: ATTRIBUTION object; populated by post-merge console capture (see Console Error Attribution section)
 
-# WAVE_TASKS_FILE — this run's own tasks file, resolved once here with the
-# same PHASE_MODE-conditioned formula Step 3 above already applied ($PHASE_TASKS_PATH
-# when PHASE_MODE=true, else $TASKS_PATH (absolute) — both already resolved by
-# this point in every flow, including a split sub-orchestrator, which pre-sets
-# PHASE_TASKS_PATH before it ever reaches here). Every CLI call in this loop
-# passes it explicitly as --tasks-file instead of falling through to the
-# shared current-tasks pointer, which is what let two concurrent split
-# orchestrators silently read and mutate each other's file.
+# WAVE_TASKS_FILE — this run's own tasks file (PHASE_TASKS_PATH in phase mode, else TASKS_PATH,
+# both already resolved here, a split sub-orchestrator's included). Every CLI call in this
+# loop passes it as --tasks-file, never the shared current-tasks pointer.
 WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else TASKS_PATH
 
 # PLAN_DISC — this run's own plan identity, the sanitized stem of the file
@@ -27,29 +21,27 @@ WAVE_TASKS_FILE = PHASE_TASKS_PATH if PHASE_MODE else TASKS_PATH
 # the PLAN_DISC= line it echoes, since every Bash call is an isolated shell.
 PLAN_DISC = sanitized stem of WAVE_TASKS_FILE
 
+# EXECUTOR_BRIEF — absolute path of the story-executor skill, the worker's whole
+# brief. Resolve it once, in a Bash call that already resolved $AIMI_CLI, and
+# read it back from the line it echoes (the skill sits beside the CLI that runs
+# this session, on both hosts and under AIMI_DEV_DIR alike):
+#   B="$(cd "$(dirname "$AIMI_CLI")/.." && pwd)/skills/story-executor/SKILL.md"; [ -f "$B" ] && echo "EXECUTOR_BRIEF=$B" || echo "EXECUTOR_BRIEF_MISSING=$B"
+# On EXECUTOR_BRIEF_MISSING, stop and report: never spawn a worker without its brief.
+EXECUTOR_BRIEF = path echoed above
+
+# metadata — this run's tasks-file metadata, read once; the post-merge design
+# review reads its `prototypePaths`.
+metadata = $AIMI_CLI metadata --tasks-file [WAVE_TASKS_FILE]
+
 while true:
     # ========================================
     # RE-POINT THE CLI — TOP OF THE WAVE, NEVER MID-WAVE
     # ========================================
-    # Step 0 resolves $AIMI_CLI once, at the start of the run, and nothing in
-    # this loop has ever revisited it. A wave loop outlives that resolution:
-    # a `cleanup-versions` run in another session prunes the cache directory
-    # this run's path points into, and every later call answers "No such file
-    # or directory" through a path that was correct when it was written.
-    #
-    # The POSITION is the load-bearing part, not the call. The same --fix run
-    # between spawn and merge is what broke a mark-complete mid-wave: the
-    # cached path moved while N workers already held the old one, so the
-    # orchestrator wrote through a CLI its own workers had never seen. Here,
-    # between the last merge of wave N and the first spawn of wave N+1,
-    # nothing is in flight and a re-point can strand no one. Do not move this
-    # call further down for symmetry with anything.
-    #
-    # Every Bash call in this file re-reads $AIMI_CLI from the cache --fix
-    # rewrites (Step 0's Per-Call Resolution note), so the repointing reaches
-    # the next call on its own; nothing is reassigned here. Read `status` and
-    # not the exit code alone — `unknown` exits 0 and means no plugin is
-    # installed at all (see cli-path-resolution.md's Version Check table).
+    # Step 0 resolved $AIMI_CLI once; a cleanup-versions in another session can prune that
+    # path mid-run. Re-point here, between the last merge of a wave and the next spawn, where
+    # nothing is in flight; never mid-wave, and never move this call. Later Bash calls re-read
+    # the cache --fix rewrites. Read `status`, not only the exit code: `unknown` exits 0 and
+    # means no plugin is installed.
     $AIMI_CLI check-version --quiet --fix
 
     # Check remaining work
@@ -67,8 +59,11 @@ while true:
             # GATE-BLOCKED STORY DETECTION
             # ========================================
             # Before reporting deadlock, check if stories are blocked by gates.
-            # Use $AIMI_CLI status to get all stories and identify gate-blocked ones.
-            all_stories = $AIMI_CLI status --tasks-file [WAVE_TASKS_FILE]
+            # `status` rows carry no `gate`: take the ids from `status`, then each
+            # story's gate from `get-story`, in ONE Bash call — the same loop
+            # Step 5's gate summary runs, with `{id, status, dependsOn, gate}`
+            # printed for every story rather than pending gates only.
+            all_stories = $AIMI_CLI status --tasks-file [WAVE_TASKS_FILE], each row joined with its gate from get-story
             decision_blocked = []  # stories with pending decision gates
             action_blocked = []    # stories whose dependencies have pending action gates
 
@@ -146,25 +141,16 @@ while true:
             project_roots[group_key] = AIMI_ROOT / group_key  (resolve to absolute path)
 
     # ========================================
-    # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see container-
-    # execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH, EXEC_OWNS_ROOT,
-    # EXEC_KEEPS_BRANCH. This is the only place in the wave loop
-    # and its cleanup passes that checks PHASE_MODE/CONTAINER_MODE directly —
-    # every consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key]
-    # instead (project_roots itself still survives untouched for the four
-    # consumers that need it independently of EXEC_ROOT — see that section).
+    # DERIVE EXEC_ROOT / EXEC_BRANCH PER PROJECT GROUP — see container-execution.md's
+    # Execution Context. The only PHASE_MODE/CONTAINER_MODE check in the loop; every
+    # consumer below reads EXEC_ROOT[group_key]/EXEC_BRANCH[group_key].
     # ========================================
     EXEC_ROOT = {}    # key: group_key, value: path every git/worktree op targets
     EXEC_BRANCH = {}  # key: group_key, value: branch every git/worktree op targets
     for group_key in project_groups:
         if PHASE_MODE:
-            # PHASE_CONTAINER_PATHS[group_key] is populated for every
-            # participating group by Create Phase Containers Per Project
-            # Group (Step 1.7) in the top-level orchestrator. A Phase-Mode
-            # Paired Split sub-orchestrator never runs Step 1.7 — its spawn
-            # prompt pre-sets only the scalar PHASE_CONTAINER_PATH to its own
-            # split's worktree (see Spawn Split Sub-Orchestrators), so the map
-            # is empty there and this falls back to that scalar unchanged.
+            # PHASE_CONTAINER_PATHS comes from Step 1.7; a Phase-Mode Paired Split sub-orchestrator
+            # never runs it, so its map is empty and the scalar PHASE_CONTAINER_PATH is used.
             EXEC_ROOT[group_key] = PHASE_CONTAINER_PATHS[group_key] if group_key in PHASE_CONTAINER_PATHS else PHASE_CONTAINER_PATH
             EXEC_BRANCH[group_key] = PHASE_BRANCH
         elif CONTAINER_MODE:
@@ -192,11 +178,8 @@ while true:
         worktree_cwd = EXEC_ROOT[group_key]
         worktree_base = EXEC_BRANCH[group_key]
 
-        # PLAN_DISC comes from Multi-Repo Handling's `### Plan Discriminator`,
-        # derived once from WAVE_TASKS_FILE above. worktree_base is deliberately
-        # NOT redefined: it is read a second time below as `--from [worktree_base]`
-        # and must keep naming a branch that really exists, so the discriminator
-        # goes into a separate prefix rather than being folded into the base.
+        # worktree_base keeps naming a real branch (it is read again as --from), so the plan
+        # discriminator goes into a separate prefix.
         worktree_prefix = PLAN_DISC + "-" + worktree_base
 
         for full_story in stories:
@@ -212,24 +195,13 @@ while true:
             # ========================================
             # READ BOTH CREATE SENTINELS — OR FAIL THE STORY HERE
             # ========================================
-            # worktree-manager.sh's create emits two unprefixed lines on BOTH
-            # of its branches, fresh creation and silent reuse alike:
-            #     WORKTREE_PATH=<absolute path>
-            #     WORKTREE_BASE=<full 40-char sha of the new tree's own HEAD>
-            # Take the LAST occurrence of each: the fresh-creation branch
-            # prints a `cd <path>` hint after them, and everything else create
-            # writes is ANSI-coloured progress text carrying neither prefix.
-            # The sha is deliberately full-length — an abbreviated one is
-            # ambiguous exactly when two bases are close enough to confuse.
+            # create prints WORKTREE_PATH=<absolute path> and WORKTREE_BASE=<full sha of the new
+            # tree's HEAD> on both fresh creation and reuse; take the LAST occurrence of each.
             worktree_path = value of the last WORKTREE_PATH= line in create_output
             worktree_base_sha = value of the last WORKTREE_BASE= line in create_output
 
-            # Either sentinel missing is a FAILURE OF THIS STORY, decided
-            # BEFORE the executor is spawned. There is no useful recovery
-            # after that point: by the time a wrong tree announces itself the
-            # work is already written onto it. The usual cause is a
-            # worktree-manager.sh predating the sentinels, which is a host
-            # problem and not this story's — say so and stop.
+            # Either sentinel missing fails THIS story before it is spawned (the usual cause is a
+            # worktree-manager.sh older than the sentinels).
             if worktree_path is absent or worktree_base_sha is absent:
                 $AIMI_CLI mark-failed [full_story.id] "Worktree create emitted no WORKTREE_PATH/WORKTREE_BASE sentinel" --tasks-file [WAVE_TASKS_FILE]
                 $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
@@ -239,30 +211,9 @@ while true:
             # ========================================
             # THE TREE MUST STAND ON THE BASE WE ASKED FOR
             # ========================================
-            # base_sha[group_key] is this group's EXEC_BRANCH HEAD, captured
-            # above before any worktree was cut — the base every story in this
-            # wave is meant to stand on. worktree_base_sha is what the tree
-            # ACTUALLY stands on. Divergence is a FAILURE, not a warning.
-            #
-            # Measured, in this repository's own phase 2: a story worktree cut
-            # from main instead of from its phase branch announced nothing at
-            # creation. It surfaced three levels downstream as a CLI verb
-            # answering "Unknown command", a pytest suite short by the phase's
-            # own new cases, and a golden file still holding the previous
-            # value — three symptoms pointing at three different places, none
-            # of them at the base. This comparison is what turns that into one
-            # line, before a single file is written.
-            #
-            # Equality is the fresh-creation case. The one other ACCEPTED
-            # shape is a reused worktree that already carries commits of its
-            # own: a story that committed and then failed keeps both worktree
-            # and branch (see the merge-conflict cleanup below), so a re-run
-            # legitimately finds a tree AHEAD of the base. Accept exactly that
-            # — base_sha[group_key] reachable from worktree_base_sha — and
-            # nothing else. A tree cut from a different branch fails this,
-            # which is the whole point; a strict equality test would instead
-            # fail every resumed run, and a check that cries wolf on the
-            # normal path is a check someone deletes.
+            # base_sha[group_key] is the base every story in this wave must stand on. Accept the tree
+            # when its base equals it or descends from it (a resumed story's reused worktree may be
+            # ahead of it); fail the story on anything else, never warn.
             if worktree_base_sha != base_sha[group_key] and not (git -C [worktree_path] merge-base --is-ancestor [base_sha[group_key]] [worktree_base_sha]):
                 $AIMI_CLI mark-failed [full_story.id] "Worktree base [worktree_base_sha] does not descend from [base_sha[group_key]]" --tasks-file [WAVE_TASKS_FILE]
                 $AIMI_CLI cascade-skip [full_story.id] --tasks-file [WAVE_TASKS_FILE]
@@ -282,56 +233,38 @@ while true:
     #
     # IMPORTANT: subagent_type MUST be "general-purpose" — story-executor is a skill, NOT an agent.
     #
-    # Template selection: full for first story in session, compact for subsequent.
-    # In a multi-story wave, the first story uses full_template only if is_first_story_in_session
-    # is true; all others in the wave use compact_template.
+    # The prompt is a POINTER, never a copy: the worker reads EXECUTOR_BRIEF itself.
+    # Do not paste, summarize or paraphrase the skill into the prompt — a pasted
+    # copy is what drifted before, and a paraphrase drops rules.
     # In one tool-call turn, emit N Task calls (across ALL project groups):
-    story_index = 0
     for full_story in full_stories:
         wt = all_worktrees[full_story.id]
         project_path = project_roots[wt.group_key] if wt.group_key != "DEFAULT" else null
         project_guidelines = PROJECT_GUIDELINES_MAP[wt.group_key] if wt.group_key != "DEFAULT" else PROJECT_GUIDELINES
 
-        template = full_template if (is_first_story_in_session and story_index == 0) else compact_template
-
         Task(
             subagent_type: "general-purpose",
             model: <AGENT_MODELS.executor when not "inherit">,
             description: "Execute [full_story.id]: [full_story.title]",
-            prompt: [story-executor SKILL.md [template] with:
-                - WORKTREE_PATH = wt.worktree_path
-                - PROJECT_PATH = project_path (only include if non-null)
-                - PROJECT_GUIDELINES = project_guidelines
-                - HEADED_MODE = (do NOT include for worktree stories — visual verification runs post-merge, not inside the worktree)
-                - Omit the <visual_verification> section entirely for worktree stories
-                  (the dev server cannot see worktree changes; verification runs after merge-all instead)
+            prompt: exactly this text, one "NAME: value" line per field below, nothing else:
+                "You are a story worker for aimi-engineering. Before any other action, read
+                 [EXECUTOR_BRIEF] in full with the Read tool and follow it exactly: it is your
+                 whole brief, and the values below are its inputs."
+              with:
                 - STORY_ID = full_story.id  ← only the id; no description, no criteria, no prototype HTML
-                - TASKS_FILE_PATH = WAVE_TASKS_FILE  ← this wave's own resolved tasks file. The
-                  story-executor SKILL.md <task_pointer> template substitutes TASKS_FILE_PATH onto
-                  its own get-story-context call, so the spawned executor reads this orchestrator's
-                  file even when a sibling split orchestrator's init-session call last wrote the
-                  shared pointer
+                - TASKS_FILE_PATH = WAVE_TASKS_FILE  ← this wave's own file, never the shared pointer
                 - AIMI_ROOT = this run's already-resolved AIMI_ROOT (the directory holding `.aimi/`)
                   ← passed in, never re-derived inside a worktree, which has no `.aimi/` of its own;
                   the executor exports it beside TASKS_FILE_PATH for both verify runs
-                - SCRATCH_PREFIX = PLAN_DISC + "-" + full_story.id  ← the executor's scratchpad
-                  namespace, handed over ALREADY COMPOSED rather than left to be chosen. `PLAN_DISC`
-                  is READ here and never recomposed nor re-sanitized: `### Plan Discriminator` under
-                  Multi-Repo Handling derived it once from WAVE_TASKS_FILE, its sanitization is
-                  load-bearing (`validate_branch_name` refuses a single dot), and a second derivation
-                  is only a second chance to disagree with the first.
-                  The axis is the PLAN and the story id comes SECOND, which is why that order is
-                  not arbitrary. The collision measured on 2026-09-08 was not
-                  sibling-against-sibling: a `verify-US-002.sh` left in the shared scratchpad by an
-                  EARLIER plan's run was read by this run's US-002, whose id happened to be the same
-                  string. A prefix keyed on the story id alone composes the identical name for both
-                  and would have separated nothing — only the plan's own identity does.
-                - Do NOT modify the tasks.json file — report result (success/failure + details)
-            ]
+                - SCRATCH_PREFIX = PLAN_DISC + "-" + full_story.id  ← handed over composed; PLAN_DISC is
+                  read, never recomposed. The plan comes first so two plans' same US-NNN never collide.
+                - WORKTREE_PATH = wt.worktree_path
+                - PROJECT_PATH = project_path (only include if non-null)
+                - PROJECT_GUIDELINES = project_guidelines (the absolute paths Step 3.3 found; omit when empty)
+                - VISUAL_VERIFICATION = post-merge  ← every worktree story: the dev server cannot see
+                  worktree changes, so visual verification runs after merge-all instead
+                - HEADED_MODE: never for a worktree story, for the same reason
         )
-        story_index += 1
-
-    is_first_story_in_session = false
 
     # All Tasks return in the same turn. Collect results.
     failed_stories = []
@@ -350,10 +283,6 @@ while true:
     # is parsed as JSON. If the block is malformed, missing, or fails to parse,
     # fall back to the legacy heuristic: Task's own exit signal (succeeded/failed)
     # + commit verification below.
-    #
-    # Reading the structured block keeps the next orchestrator turn's input
-    # token cost down — empirically a worker returns ~600 tokens of prose where
-    # the orchestrator only consumes ~50-200 tokens of structured signal.
 
     for each Task result:
         payload = parse_result_json(Task.final_message_text)  # see extraction rule above
@@ -377,37 +306,11 @@ while true:
     # ========================================
     # STALLED EXECUTOR DETECTION — the executor that went idle
     # ========================================
-    # This happened for real, twice in phase 1 of this feature: a spawned
-    # executor finished its work, ran its own verify suite, and went idle
-    # without ever emitting <result_json> and without running `git commit`.
-    # Both times the only way it surfaced was the orchestrator going and
-    # looking at `ps` / the agent roster by hand — nothing in this loop told
-    # anyone to. The fallback above (missing or malformed <result_json> —
-    # falling back to Task exit signal) presupposes the Task returned with
-    # SOMETHING usable; a stalled executor's Task call still returns in this
-    # same turn (every Task here is foreground — see "Spawn ALL workers"
-    # above), but its own exit signal says nothing about whether real work
-    # got left behind uncommitted, because it never looked.
-    #
-    # No clock, no liveness probe of the agent — this crosses three facts
-    # the loop already captures for every story with no valid result_json:
-    #   1. missing or malformed result_json (payload is None, from the loop above)
-    #   2. HEAD in the worktree is unchanged from base_sha (no commit landed)
-    #   3. the worktree is dirty (the executor wrote SOMETHING before going idle)
-    # All three together is a stalled story. Any one of them alone is not:
-    # (1) alone is the existing fallback, untouched, trusting Task's own
-    # signal; (2)+(3) without (1) is the ordinary ok-but-no-commit case the
-    # COMMIT VERIFICATION step below already walks through result_payload_by_id.
-    #
-    # Detection runs over EVERY story with no result_json, whichever bucket
-    # the fallback above placed it in — a stalled executor's own Task exit
-    # signal can read as a success (nothing errored, it just never reported)
-    # or as a failure (it ran out of turns going idle), and the fallback has
-    # no way to tell those apart. A stalled story found sitting in
-    # failed_stories is moved into succeeded_stories so it reaches the SAME
-    # commit-verification / commit-rescue pass below as every other
-    # no-commit story — this never adds a third resolution path, it only
-    # widens which stories reach the two that already exist.
+    # A story with no valid result_json whose worktree HEAD is still base_sha and whose tree is
+    # dirty is stalled: the executor went idle without reporting or committing. Check every
+    # story without result_json, whichever bucket the fallback above put it in, and move a
+    # stalled one to succeeded_stories so it reaches commit verification and commit rescue
+    # below. This adds no third resolution path.
     stalled_story_ids = []
     for full_story in (succeeded_stories + failed_stories):
         if result_payload_by_id.get(full_story.id) is not None:
@@ -453,24 +356,10 @@ while true:
     # ========================================
     # COMMIT RESCUE — BEFORE mark-failed, AND ONLY ON THE SUBSET
     # ========================================
-    # A story that reached here reported ok and left a dirty tree with no
-    # commit on it. That is a mechanics defect, not a bad story: the work
-    # exists and the only thing missing is the `git commit` the executor owed.
-    # Failing it discards a finished implementation and cascade-skips
-    # everything downstream of it, which is a far larger loss than the defect.
-    # This happened for real — a story in this very phase finished its work
-    # and returned without committing.
-    #
-    # THE SUBSET IS THE GUARD, and it is the only thing making this safe to do
-    # on someone else's behalf. `implementation.files` is what the planner said
-    # this story would touch. When every modified path is inside that list, the
-    # orchestrator knows exactly what it is committing and to which story it
-    # belongs. One path outside the list means the tree holds something nobody
-    # declared — a stray edit, a half-finished second concern, another story's
-    # leftovers — and the orchestrator has no basis to attribute it. That case
-    # takes the unchanged failure flow below; it is never rescued, never
-    # partially staged, and never trimmed down to the declared subset to make
-    # it fit.
+    # A story that reported ok but left a dirty tree and no commit is committed on its behalf
+    # only when every modified path is inside its implementation.files. One path outside that
+    # list takes the unchanged failure flow: never rescued, never partially staged, never
+    # trimmed to fit.
     rescued_stories = []
     for full_story in no_commit_stories:
         wt = all_worktrees[full_story.id]
@@ -483,15 +372,10 @@ while true:
         if dirty_paths is empty:
             continue    # falls through to the failure flow below
 
-        # 2. The subset guard. `implementation.files` comes from the CLI, not
-        #    from a raw read of the tasks file — get-story-context is the same
-        #    verb the executor itself bootstraps with, so orchestrator and
-        #    worker read one document through one reader.
+        # 2. The subset guard, read through get-story-context (the executor's own reader).
         declared_files = $AIMI_CLI get-story-context [full_story.id] --tasks-file [WAVE_TASKS_FILE]
                          → .story.implementation.files
-        # `implementation` is optional in schema v3.3. Absent or empty declares
-        # nothing, so nothing can be inside it — no list, no rescue. Do not
-        # read an absent list as "anything is allowed"; that inverts the guard.
+        # An absent or empty list declares nothing: no rescue. Never read it as "anything goes".
         if declared_files is absent or empty:
             continue    # falls through to the failure flow below
         if any path in dirty_paths is not in declared_files:
@@ -525,12 +409,7 @@ while true:
         stalled_note = " (stalled executor — resolved by mark-failed + cascade-skip)" if full_story.id in stalled_story_ids else ""
         Report: "[full_story.id] failed (no commit detected)[stalled_note]. Dependent stories cascade-skipped."
 
-    # Replace succeeded_stories with the ones carrying a commit — verified by
-    # the worker itself, or rescued above. A rescued story is a SUCCESS from
-    # here on: it merges with the wave and reaches mark-complete like any
-    # other, because its work is on its branch exactly as if the executor had
-    # committed it. The rescue is reported so the human sees the diff someone
-    # else committed; it is not tracked as a separate story state.
+    # A rescued story is a success from here on: it merges and reaches mark-complete like any other.
     succeeded_stories = verified_stories + rescued_stories
 
     # Handle failures first
@@ -565,13 +444,8 @@ while true:
             merge_target = EXEC_BRANCH[group_key]
             succeeded_worktree_names = [all_worktrees[s.id].worktree_name for s in stories]
 
-            # cd to this group's execution root before merging (see container-
-            # execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH,
-            # EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH) -- merge-all issues a bare
-            # `git checkout <target-branch>` against whatever repo its CWD belongs
-            # to, so running it from AIMI_ROOT in phase mode would check the phase
-            # branch out onto the main working tree, violating the Main Working
-            # Tree Untouched Invariant.
+            # cd to this group's EXEC_ROOT first: merge-all checks out the target branch in its CWD's
+            # repo, and from AIMI_ROOT in phase mode that would be the main working tree.
             cd [merge_cwd]
             # One `--subject-for <worktree_name> "Merge story: <title>"` per story, each
             # value handed over as data in ONE argv element (never interpolated into
@@ -581,9 +455,33 @@ while true:
                 [for s in stories: --subject-for [all_worktrees[s.id].worktree_name] "Merge story: [s.title]"] \
                 --into [merge_target]
 
+            # A conflict between stories of this wave is resolved here, and the stop further down is
+            # the fallback (docs/dev/execute-wave-loop.md § Wave merge conflicts are resolved in place).
+            unresolved_reason = "merge did not start"   # merge-all printed git's own reason, no conflicted file
+            while merge_result is non-zero and `git -C [merge_cwd] diff --name-only --diff-filter=U` lists files:
+                conflicted = that list
+                involved = the story merge-all stopped at, plus each story of this wave already merged into
+                           [merge_target] whose implementation.files names a file in conflicted
+                Read each involved story with `$AIMI_CLI get-story [id] --tasks-file [WAVE_TASKS_FILE]`.
+                Edit each conflicted file in [merge_cwd] so it keeps what every involved story adds; their
+                acceptanceCriteria are what the result must satisfy. Stage nothing yet.
+                Run each involved story's implementation.verify from [merge_cwd] (from the project's
+                subfolder inside it when the project is a subfolder of a larger repository).
+                if the criteria cannot all hold, or a verify fails:
+                    git -C [merge_cwd] checkout --merge -- [conflicted...]   # git's own conflict, back for the human
+                    unresolved_reason = "[ids] state requirements that cannot both hold" or "verify failed for [ids]"
+                    break
+                git -C [merge_cwd] add -- [conflicted...]
+                git -C [merge_cwd] commit --no-edit --cleanup=strip   # keeps merge-all's "Merge story: <title>" subject
+                Report: "Resolved merge conflict in [conflicted] (wave [wave], [group_key]); verify passed for [involved ids]."
+                remaining = stories whose worktree_name is not yet reachable from [merge_target]
+                            (git -C [merge_cwd] merge-base --is-ancestor)
+                merge_result = success when remaining is empty, otherwise
+                               $WORKTREE_MGR merge-all [remaining worktree names...] [their --subject-for pairs] --into [merge_target]
+
             if merge conflict (non-zero exit):
                 Report:
-                "MERGE CONFLICT during wave [wave] merge in project [group_key]."
+                "MERGE CONFLICT during wave [wave] merge in project [group_key]: [unresolved_reason]."
                 "Conflicting files:"
                 "[conflict output from merge-all]"
                 ""
@@ -591,16 +489,9 @@ while true:
                 "[merge_cwd] itself — this group's execution root, whichever mode created it — and any live dev server running inside it are left untouched by this failure, so the conflict can be resolved directly in the still-live working tree."
                 "Merged story worktrees were removed; the ones that did NOT merge keep both their worktree and their branch, so the retry has something to retry."
 
-                # Cleanup this wave's worktrees -- but ONLY the ones whose work
-                # is already reachable from the merge target. merge_all_worktrees
-                # processes its argv in order and stops at the first conflict
-                # without attempting the rest, so a story from the conflicting
-                # one onward has NOT been merged: removing it without
-                # --keep-branch would run `git branch -D` on the only ref naming
-                # its commits, stranding them. This is the same rule the
-                # Phase-Mode Paired Split conflict path already applies to its
-                # own members (see "Merge Split Branches Into the Phase Branch"),
-                # and the two must not disagree about the same scenario.
+                # Clean up only the worktrees already merged into the target. merge-all stops at the first
+                # conflict, so a story from that one on is unmerged, and removing it would delete the only
+                # branch naming its commits.
                 for full_story_id, wt in all_worktrees:
                     cd EXEC_ROOT[wt.group_key]
                     if git -C [EXEC_ROOT[wt.group_key]] merge-base --is-ancestor [wt.worktree_name] [EXEC_BRANCH[wt.group_key]]:
@@ -625,21 +516,11 @@ while true:
             # Merges succeeded for this project group — mark stories complete
             for full_story in stories:
                 # --- Extract knownGaps: prefer result_json.knownGaps, fall back to commit trailers ---
-                # When result_payload_by_id[full_story.id].knownGaps is a non-empty array,
-                # use those entries (one line each). Otherwise, fall back to grepping
-                # KNOWN-GAP trailers from the commit body for backward compat. Two spellings
-                # are matched -- bare "KNOWN-GAP:" and "KNOWN-GAP (US-NNN):" with the story id
-                # folded in -- because a worker legitimately writes either one, and a
-                # single-spelling grep silently drops whichever it does not cover. Both stay
-                # anchored to line start so a KNOWN-GAP mention inside a paragraph is never
-                # extracted as if it were a trailer.
+                # Use result_json.knownGaps when non-empty; otherwise grep KNOWN-GAP trailers (bare
+                # "KNOWN-GAP:" or "KNOWN-GAP (US-NNN):", anchored at line start) from the commit body.
                 ```bash
-                # Absolute, never relative to the CWD: the merge above cd'd into
-                # EXEC_ROOT, which in container and phase mode is the container,
-                # and a relative .aimi/known-gaps would land inside it and be
-                # deleted with it (it would also leave a stray .aimi/ there that
-                # find_aimi_root stops at). AIMI_ROOT is this run's carried value,
-                # never re-derived from the container's CWD.
+                # Absolute under this run's AIMI_ROOT, never relative to the CWD (in container and phase
+                # mode the CWD is the container, which is deleted).
                 AIMI_ROOT="[this run's already-resolved AIMI_ROOT, the directory holding .aimi/]"
                 mkdir -p "$AIMI_ROOT/.aimi/known-gaps"
                 # Pseudo: prefer payload; fall back to commit grep
@@ -649,41 +530,22 @@ while true:
                 else
                   WORKER_GAPS=$(git -C "[all_worktrees[full_story.id].worktree_path]" log -1 --format=%B | grep -E '^KNOWN-GAP( \([^)]+\))?:' || true)
                 fi
-                # Discriminated by PLAN_DISC, this run's own plan identity (see
-                # `### Plan Discriminator` under Multi-Repo Handling) — two plans
-                # that both produce a gap for the same story id on the same day
-                # would otherwise compose the same path and silently truncate
-                # each other's finding.
+                # PLAN_DISC in the name keeps two plans' gaps for one story id on one day apart.
                 if [ -n "$WORKER_GAPS" ]; then
                   GAP_DATE=$(date +%Y-%m-%d)
                   GAP_FILE="$AIMI_ROOT/.aimi/known-gaps/${GAP_DATE}-[full_story.id]-[PLAN_DISC].md"
                   printf '%s\n' "$WORKER_GAPS" > "$GAP_FILE"
                 fi
-                # --- Extract verify evidence: the FOURTH result_json field this
-                # command consumes, beside .commit, .failureCause and .knownGaps ---
-                # The story-executor Result Contract carries `verify`
-                # ({exit, preExit, segments, discriminating}) — the count of verify
-                # segments that behaved differently before the story's work than
-                # after. Empty here is a real answer and a common one: an executor
-                # whose payload predates that contract, a payload recovered by the
-                # fallback parse rather than read as JSON, or a story whose verify
-                # never ran. It is NOT the same as a zeroed evidence object, and the
-                # call below is written so the two can never collapse into each other.
+                # --- Extract verify evidence: result_json.verify ({exit, preExit, segments, discriminating}).
+                # Empty is a real and common answer (older executor, fallback parse, verify never ran) and
+                # is never the same as a zeroed object. ---
                 VERIFY_EVIDENCE_JSON="${result_payload_by_id[full_story.id].verify or ''}"
                 ```
 
                 $AIMI_CLI mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE] --evidence "$VERIFY_EVIDENCE_JSON"
 
                 # Pass `--evidence` ONLY when `VERIFY_EVIDENCE_JSON` is non-empty. When it is empty the flag is omitted ENTIRELY — the call is exactly `mark-complete [full_story.id] --tasks-file [WAVE_TASKS_FILE]`, never `--evidence ""`, never `--evidence {}`, and never `--verify-evidence`: the flag is spelled `--evidence` and `cmd_mark_complete` parses no other spelling, so a `--verify-evidence` reached for on the strength of the variable name falls through to the positional parser and is read as a second story id.
-                # Two reasons the flagless argv has to stay byte-identical rather than
-                # gaining an always-passed empty flag. It is the argv the pre-existing
-                # golden `mark-complete` recordings replay, so a flag that is always
-                # present rewrites all of them for nothing. And an empty evidence object
-                # would persist at `verification.evidence` as "we looked and found
-                # nothing" — precisely the conflation this reporting exists to remove:
-                # `tasks.py`'s `_report_discriminating` routes a missing count to
-                # `unrecorded` and a real 0 to `blind`, and those are two different
-                # statements about the same run.
+                # The flagless argv stays byte-identical: the golden recordings replay it, and an empty object would record "looked, found nothing".
 
                 # --- Post-merge visual verification for visual stories ---
                 # Session lifecycle: see Visual Follow Lifecycle section.
@@ -695,17 +557,16 @@ while true:
                 #   5. errors  --json   ← capture this story's uncaught exceptions
                 # Per-story attribution depends on the --clear in step 1 — without it,
                 # console buffer is wave-cumulative and last-story-merged eats the blame.
+                #
+                # The wave's stories are `list-ready --brief` stubs ({id, title,
+                # priority, dependsOn, project, gate}): no `verification`, no
+                # `implementation`. Replace this one with the whole story before
+                # the visual, judge and design-review checks below read them:
+                full_story = $AIMI_CLI get-story [full_story.id] --tasks-file [WAVE_TASKS_FILE]
                 if full_story.verification and full_story.verification.strategy == "visual" and full_story.verification.status == "pending":
                     # --- Post-merge visual verification origin rewrite / degradation gate ---
-                    # `group_key` is already in scope here from the enclosing "for
-                    # group_key, stories in succeeded_by_project" loop above — this
-                    # story's own project group. Discriminates on EXEC_OWNS_ROOT (see
-                    # container-execution.md's Execution Context: EXEC_ROOT,
-                    # EXEC_BRANCH, EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH) rather
-                    # than checking PHASE_MODE/CONTAINER_MODE separately at this top
-                    # level: false only for inline mode (no shared server exists to
-                    # rewrite against), true for both phase and container mode, which
-                    # keep their own distinct port-acquisition mechanisms below.
+                    # group_key is this story's group from the enclosing loop. Inline mode (EXEC_OWNS_ROOT
+                    # false) has no shared server to rewrite against.
                     SKIP_VISUAL=false
                     if DEPS_STATUS[group_key] == "failed":
                         # The group's install failed (a split member's status is its pre-set
@@ -715,30 +576,19 @@ while true:
                         Report: "[full_story.id] visual verification skipped — dependency install failed for project group [group_key]."
                         SKIP_VISUAL=true
                     elif not EXEC_OWNS_ROOT:
-                        # Inline mode — identical to today's inline branch: the
-                        # story's own verification.url, no rewrite, no gate.
-                        # verification-report already normalizes a non-string
-                        # url to the empty string, so no `// empty` is needed
-                        # here — see the closed jq -r non-string hazard note
-                        # above Container Dev Server Bootstrap.
+                        # Inline mode: the story's own verification.url, no rewrite, no gate.
                         STORY_TASKS_FILE="$TASKS_PATH"
                         STORY_VERIFICATION_URL=$($AIMI_CLI verification-report --tasks-file "$STORY_TASKS_FILE" | jq -r --arg id "[full_story.id]" '.visual[] | select(.id == $id) | .url')
                         EFFECTIVE_URL="$STORY_VERIFICATION_URL"
                     else:
-                        # EXEC_OWNS_ROOT is true for both phase and container mode.
-                        # PHASE_MODE is read here too, but only to pick between the
-                        # two modes' own distinct port-acquisition mechanisms — never
-                        # again as a top-level EXEC_ROOT/EXEC_BRANCH mode gate.
+                        # Phase and container mode; PHASE_MODE only picks the port mechanism.
                         if PHASE_MODE:
-                            # Apply container-execution.md's § Rewrite a Verification
-                            # URL Origin with EXEC_ROOT="$AIMI_ROOT", EXEC_BRANCH=
-                            # "$PHASE_BRANCH" — never a value cached from Phase/Split
-                            # Container Dev Server Bootstrap or Step 3.3 earlier in
-                            # this run. Inside a split sub-orchestrator, PHASE_BRANCH
-                            # is already that split's own branch (see Spawn Split
-                            # Sub-Orchestrators), so this applies unmodified one level
-                            # deeper too.
+                            # container-execution.md § Rewrite a Verification URL Origin with EXEC_ROOT=$AIMI_ROOT and
+                            # EXEC_BRANCH=$PHASE_BRANCH (a split's own branch inside a split sub-orchestrator), never
+                            # a value cached earlier in this run.
                             ```bash
+                            AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+                            : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
                             WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                             : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
                             cd "$AIMI_ROOT"
@@ -749,34 +599,25 @@ while true:
                             EFFECTIVE_URL=$(printf '%s' "$SERVE_URL_JSON" | jq -r '.url')
                             ```
                             if REWRITTEN != "true":
-                                # No dev server running for this phase's (or split's) own
-                                # branch. Degrade to skipped — this is also the expected,
-                                # non-bug outcome for a full-stack split story whose page
-                                # depends on the sibling split's API (no proxy exists between
-                                # the two split servers — see Split Container Dev Server
-                                # Bootstrap). mark-complete already ran above; this never
-                                # blocks it, never blocks the wave, and never retries.
+                                # No dev server for this branch (expected for a split story whose page needs the sibling
+                                # split's API): skip. Never blocks mark-complete or the wave, never retries.
                                 $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server running for [PHASE_BRANCH]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server running for [PHASE_BRANCH]."
                                 SKIP_VISUAL=true
                         else:
-                            # CONTAINER_MODE — EXEC_OWNS_ROOT is true and PHASE_MODE is
-                            # false, so this is the only remaining case. Gates on the
-                            # Step 3.3 cache before applying container-execution.md's
-                            # § Rewrite a Verification URL Origin, keyed by this story's
-                            # own project group.
+                            # CONTAINER_MODE: gate on the Step 3.3 cache, then rewrite the origin.
                             if group_key not in CONTAINER_DEV_URL:
-                                # No dev server ever resolved a port for this group (see Container
-                                # Dev Server Bootstrap in Step 3.3) — degrade to skipped. mark-complete
-                                # already ran above; this never blocks it or the wave loop.
+                                # No port resolved for this group in Step 3.3: skip; never blocks mark-complete or the wave.
                                 $AIMI_CLI set-verification [full_story.id] skipped --reason "no dev server resolved for project group [group_key]" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — no dev server resolved for project group [group_key]."
                                 SKIP_VISUAL=true
                             else:
                                 ```bash
+                                AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
+                                : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
                                 WORKTREE_MGR=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/worktree-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-worktree-path" 2>/dev/null)
                                 : "${WORKTREE_MGR:?WORKTREE_MGR is empty — re-resolve via cat ~/.config/aimi/worktree-path in this Bash call}"; [ -x "$WORKTREE_MGR" ] || { echo "WORKTREE_MGR is stale: $WORKTREE_MGR does not exist — re-run check-version --quiet --fix" >&2; exit 1; }
-                                BRANCH_NAME=$(jq -r '.metadata.branchName' "$TASKS_PATH")
+                                BRANCH_NAME=$($AIMI_CLI metadata --tasks-file "$TASKS_PATH" | jq -r '.branchName')
                                 if [ "[group_key]" = "DEFAULT" ]; then
                                   cd "$AIMI_ROOT"
                                 else
@@ -853,13 +694,8 @@ while true:
                                 $AIMI_CLI set-verification [full_story.id] skipped --reason "agent-browser not installed" --tasks-file [WAVE_TASKS_FILE]
                                 Report: "[full_story.id] visual verification skipped — agent-browser not installed."
 
-                # Non-visual stories: the verdict now comes from the verify evidence
-                # mark-complete already persisted above (see VERIFY_EVIDENCE_JSON) —
-                # a blanket rewrite to "passed" here claimed success whether or not
-                # this story's own check ever ran, which is exactly the dishonesty
-                # judge-verification exists to close. It is a safe no-op (writes
-                # nothing, reports why) for a story already judged, so the pending
-                # check below is an optimization, not a correctness requirement.
+                # Non-visual stories: judge from the evidence mark-complete persisted, never a blanket
+                # "passed". A no-op for a story already judged.
                 elif full_story.verification and full_story.verification.status == "pending":
                     $AIMI_CLI judge-verification [full_story.id] --tasks-file [WAVE_TASKS_FILE]
 
@@ -912,11 +748,8 @@ Output your full structured review under the heading '## Design Implementation R
                         Report: "Verification pending for [full_story.id]: [full_story.gate.prompt]"
                         Report: "  Dependents proceed immediately (non-blocking)."
 
-    # Remove all worktrees from this wave (per project group, EXEC_ROOT[wt.group_key]
-    # — see container-execution.md's Execution Context: EXEC_ROOT, EXEC_BRANCH,
-    # EXEC_OWNS_ROOT, EXEC_KEEPS_BRANCH). Branch deletion
-    # here is unconditional in every mode (no --keep-branch) — container mode's
-    # own teardown (outline:08) is the only removal call that preserves branchName.
+    # Remove this wave's worktrees, per group's EXEC_ROOT. Branch deletion is unconditional
+    # here; only container mode's own teardown keeps branchName.
     for full_story_id, wt in all_worktrees:
         cd EXEC_ROOT[wt.group_key]
         $WORKTREE_MGR remove [wt.worktree_name]

@@ -1,6 +1,6 @@
 # Plan: Phase 0: Roadmap Materialization
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 >
 > Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_PLUGIN_ROOT}/commands/references/user-communication.md`.
 
@@ -67,7 +67,7 @@ Collect the results into a `sanitizedPhases` working-memory list — each entry 
 
 - **`absent`:** call `roadmap-init` in creation mode, passing the brainstorm's own path (relative to `AIMI_ROOT`, no leading `./`, no `..` — the file read at the top of Phase 0) as `--brainstorm-path`. The CLI creates `.aimi/tasks/<feature-slug>/` itself as part of its locked write — no separate `mkdir` call is needed, and no Write tool call ever touches `roadmap.json`.
 
-  `roadmap-init` still accepts `--integration-branch` (see `plugins/aimi-engineering/CLAUDE.md`), and this step deliberately does not pass it. The flag is a human affordance for materialising a feature onto a long-lived integration branch, in the same shape `roadmap-amend-phase` is a human affordance for correcting a phase; nothing in this plugin writes the value, and issue #87 direction 1 documents hand-editing `roadmap.json` as the supported route. Threading it from brainstorm frontmatter meant parsing a key no command emits and interpolating the result — LLM-authored text — into this very bash line through a model-substituted placeholder, with sanitization guaranteed only by the prose telling the model to sanitize. Removing the parse removes that, and costs nothing that ever worked.
+  `roadmap-init` still accepts `--integration-branch` (see `plugins/aimi-engineering/docs/dev/roadmap.md`), and this step deliberately does not pass it. The flag is a human affordance for materialising a feature onto a long-lived integration branch, in the same shape `roadmap-amend-phase` is a human affordance for correcting a phase; nothing in this plugin writes the value, and issue #87 direction 1 documents hand-editing `roadmap.json` as the supported route. Threading it from brainstorm frontmatter meant parsing a key no command emits and interpolating the result — LLM-authored text — into this very bash line through a model-substituted placeholder, with sanitization guaranteed only by the prose telling the model to sanitize. Removing the parse removes that, and costs nothing that ever worked.
 
   ```bash
   AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)

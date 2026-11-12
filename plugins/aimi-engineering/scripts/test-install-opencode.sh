@@ -278,7 +278,7 @@ assert_eq "10" "$WITH_TOOLS" "real tree: ten agent sources declare a tools line"
 
 AUD="$AGENTS_DIR/aimi-cross-story-auditor.md"
 assert_eq "allow" "$(perm_get "$AUD" read)" "real tree: auditor read is allow"
-assert_eq "deny" "$(perm_get "$AUD" edit)" "real tree: auditor edit is deny"
+assert_eq "allow" "$(perm_get "$AUD" edit)" "real tree: auditor edit is allow (it writes audit-result.json)"
 assert_eq "deny" "$(perm_get "$AUD" bash)" "real tree: auditor bash is deny"
 VER="$AGENTS_DIR/aimi-scope-negative-verifier.md"
 assert_eq "deny" "$(perm_get "$VER" edit)" "real tree: scope verifier edit is deny"

@@ -1,6 +1,6 @@
 # Plan: Phase 0: Issue Reference Confirmation Gate
 
-> Loaded by `commands/plan.md` when its `Applies when:` condition holds. The section below moved here from `plan.md` verbatim.
+> Loaded by `commands/plan.md` when its `Applies when:` condition holds.
 
 ### Issue Reference Confirmation Gate
 
