@@ -270,7 +270,8 @@ Task subagent_type="aimi-engineering:review:[REVIEWER]"
            INTENT: [one line: what the change is for, from the PR title, the branch name or the person's words]
            PROJECT_GUIDELINES: [absolute paths of the CLAUDE.md and AGENTS.md that govern the changed files, or none]
            RELATED: [the other repository's WORKDIR and DIFF_CMD, for the correctness reviewer only, or none]
-           DESIGN_REFERENCE: [prototype and tokens paths from Prototype Design Context, or none]"
+           DESIGN_REFERENCE: [prototype and tokens paths from Prototype Design Context, or none]
+           FILES: [changed files to read first, for the second pass in Step 4 only, or none]"
 ```
 
 The learnings researcher is `Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"` with `[model: <AGENT_MODELS.research when not "inherit">]` and the prompt "Search .aimi/solutions/ for past issues related to: [INTENT and the changed file paths]".
@@ -317,18 +318,19 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 
 ## Step 4: Check the Findings and Consolidate
 
-1. Collect the findings of every reviewer. Surface the learnings researcher's results: flag relevant past solutions as "Known Pattern", with links to the `.aimi/solutions/` files. Merge duplicates, meaning findings with the same cause or the same line, and keep the highest severity. Discard any finding that recommends deleting a protected artifact (see Protected Artifacts).
-2. **Check before reporting.** For every P1 and P2, read the quoted line at its `path:line`, then check the premise the finding rests on: the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes. Four tool calls at most for each. Check a P3 too when two reads settle it. Drop what the code does not support and count it. When a finding holds but one of its claims does not, remove that claim and say so. Mark each finding you keep:
+1. **Cover what nobody read.** From the reviewers' lists of files read, take the changed files no reviewer read, leaving out tests, generated files, lockfiles and fixtures. When one of them adds 100 lines or more, run the correctness reviewer once more for that repository with `FILES` naming the largest of them, five at most, and treat its findings like the others.
+2. Collect the findings of every reviewer. Surface the learnings researcher's results: flag relevant past solutions as "Known Pattern", with links to the `.aimi/solutions/` files. Merge duplicates, meaning findings with the same cause or the same line, and keep the highest severity. Discard any finding that recommends deleting a protected artifact (see Protected Artifacts).
+3. **Check before reporting.** For every P1 and P2, read the quoted line at its `path:line`, then check the premise the finding rests on: the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes. Four tool calls at most for each. Check a P3 too when two reads settle it. Drop what the code does not support and count it. When a finding holds but one of its claims does not, remove that claim and say so. Mark each finding you keep:
    - `Checked: yes` when the code confirms the line and the premise;
    - `Checked: pattern present, effect not measured` when it confirms both, and the finding claims a speed, a race or an exploit that only running the code would measure;
    - `Checked: no (reason)` when the check needs running code or more calls than allowed, never for a check two reads settle. An unchecked P1 keeps its severity and this mark.
-3. Categorize:
+4. Categorize:
    - **P1 CRITICAL:** blocks merge: security vulnerabilities, data corruption risks, breaking changes.
    - **P2 IMPORTANT:** should fix: defects with limited reach, performance issues, structural problems.
    - **P3 NICE-TO-HAVE:** enhancements: minor improvements, cleanup.
 
    A severity that rests on a rule the project does not write down (a size limit, a convention) is P3.
-4. Estimate effort for each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours).
+5. Estimate effort for each finding: Small (< 30 min), Medium (30 min - 2 hours), Large (> 2 hours).
 
 ## Step 5: Aimi-Branded Report
 
@@ -373,6 +375,7 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 
 - [each reviewer that ran, with its repository when there were several]
 - Not run: [each subject the FOCUS left out, or none]
+- Not read by any reviewer: [changed source files no reviewer read, after the second pass, or none]
 
 ### Next Steps
 

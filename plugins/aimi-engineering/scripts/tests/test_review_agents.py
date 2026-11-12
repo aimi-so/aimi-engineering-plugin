@@ -78,15 +78,23 @@ def test_the_command_spawns_reviewers_through_one_literal_template_and_names_all
     for name in REVIEWERS:
         assert f"`{name}`" in command, f"review.md does not name {name}"
     for line in ("REPO:", "WORKDIR:", "REVISION:", "DIFF_CMD:", "SCOPE:", "FOCUS:", "INTENT:",
-                 "PROJECT_GUIDELINES:", "RELATED:", "DESIGN_REFERENCE:"):
+                 "PROJECT_GUIDELINES:", "RELATED:", "DESIGN_REFERENCE:", "FILES:"):
         assert line in command, line
 
 
 def test_the_prompt_lines_the_command_sends_are_the_ones_the_reviewers_read():
     how = _text(REVIEWERS[0])
     for word in ("REPO", "WORKDIR", "REVISION", "DIFF_CMD", "SCOPE", "FOCUS", "INTENT",
-                 "PROJECT_GUIDELINES", "RELATED", "DESIGN_REFERENCE"):
+                 "PROJECT_GUIDELINES", "RELATED", "DESIGN_REFERENCE", "FILES"):
         assert f"`{word}`" in how, word
+
+
+def test_the_reviewers_return_their_coverage_by_path():
+    # Step 4's second pass is chosen from these lists, so every reviewer must name files
+    tail = _text(REVIEWERS[0])
+    assert "the changed files you read, and the changed files you did not read" in tail
+    command = (ROOT / "commands" / "review.md").read_text(encoding="utf-8")
+    assert "Not read by any reviewer:" in command
 
 
 def test_the_catalogue_lists_the_same_reviewers():

@@ -28,6 +28,12 @@ The prompt carries a place to work and the command that prints the diff. In prac
 
 Reviewers never change the repository. The tools list is an accident guard, not a sandbox, so the rule is also stated in the text, and `scripts/tests/test_agent_tools.py` pins the sentence.
 
+## Why there is a second pass
+
+On a large diff each reviewer reads by sampling, guided by its own subject, so a large changed file can end up read by none of them while the report still lists every reviewer as having run. Nothing in the report said so. Every reviewer now returns, by path, the changed files it read and the ones it did not, and the orchestrator takes the files no reviewer read. When one of them adds 100 lines or more, which is more new code than a skipped file can hide without the report mentioning it, the correctness reviewer runs once more for that repository with `FILES` naming the largest such files, five at most. Its findings are checked like the rest, and whatever is still unread is named in the report.
+
+Splitting the diff into fixed batches per reviewer would also close the gap, but it multiplies the cost of every large review. The second pass costs one reviewer, and only when a gap is left. Tests, generated files, lockfiles and fixtures are left out because a reviewer skipping them is usually the right call.
+
 ## Why the findings are checked
 
 Every reviewer returns the quoted line next to `path:line`, so finding the line costs one read. The line is not the claim, though. A finding usually rests on a premise somewhere else: the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes. A check that stops at the line confirms the quote and leaves the premise unread, so the finding goes out marked checked while the part that decides its severity was never looked at. The orchestrator therefore checks the line and the premise of every P1 and P2, with up to four tool calls each. It checks a P3 when two reads settle it, since an unchecked P3 the person then has to verify costs more than the two reads. It drops what the code does not support and counts it, and it removes a claim the code does not support from a finding that otherwise holds.

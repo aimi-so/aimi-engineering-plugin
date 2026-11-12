@@ -63,7 +63,7 @@ references/container-execution.md	36864
 references/visual-variants.md	28672
 next.md	24576
 references/cli-path-resolution.md	28672
-review.md	24576
+review.md	28672
 references/scope-contexts.md	24576
 plan.md	24576
 deepen.md	20480
