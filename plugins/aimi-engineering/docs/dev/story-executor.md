@@ -48,3 +48,14 @@ Why this field has a reader at all, since the record says otherwise: audit findi
 ## The branch check before staging
 
 4.5. **When WORKTREE_PATH is set, confirm the checked-out branch is THIS story's before staging anything.** Run `git branch --show-current` and require the name to END in this story's id (`-<STORY_ID>` — e.g. a branch ending `-US-003` for story US-003). On a mismatch, stop: do NOT stage, do NOT commit, and report failure with both the branch actually found and the id expected. A worktree whose branch is not this story's is a worktree this story was never handed, and committing into it puts one story's work onto another story's branch — where the wave that merges them interleaves two unrelated changes with nothing marking the seam. This is the last moment at which that stays cheap to catch: once the commit lands, undoing it means rewriting a branch that belongs to someone else.
+
+## What `notes` holds
+
+The brief used to say that `story.notes` "carries notes from earlier attempts at this story". A first run never has an earlier attempt: `list-ready` selects only `pending` stories, so a story reaches a worker with whatever the plan wrote. The writers of the field, as of 1.158.1:
+
+- `aimi-story-expander` writes it as residue: what no other field carries, planning measurements included (`agents/workflow/aimi-story-expander.md`).
+- `/aimi:deepen` adds research file paths, patterns, gotchas, rule-id annotations and open questions, appending to what is there (`commands/deepen.md`).
+- `apply-audit-patches` adds or replaces whole paragraphs, separated by `NOTES_SEPARATOR` (`\n\n---\n\n`), and `--annotate-deferred` appends `[audit-deferred: …]` paragraphs (`scripts/audit_patches.py`).
+- `mark-failed`, `reset-orphaned` and `cascade-skip` replace the whole field with the cause they record (`scripts/tasks.py`), so a story set back to `pending` by hand reaches its next worker with that cause in place of the plan's notes.
+
+`story-merge`'s `stale-sibling-note` smell exists because a paragraph before the last separator can cite a sibling as it stood before the audit (`docs/dev/planning-verbs.md` § Advisory smells), which is why the brief says the criteria and `implementation` win over `notes`.

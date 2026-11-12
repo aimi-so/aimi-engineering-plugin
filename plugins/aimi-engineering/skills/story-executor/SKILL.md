@@ -188,8 +188,16 @@ Read, in this order, before implementing:
 3. When neither file exists, `references/default-rules.md` beside this file for commit rules.
 
 Apply the output compression rules in the plugin's `AGENTS.md` to your status prose: fragments
-over sentences, no filler, safety escapes preserved. `story.notes` carries notes from earlier
-attempts at this story; read them before you start.
+over sentences, no filler, safety escapes preserved.
+
+Read `story.notes` before you start. It holds what the plan found that no other field carries:
+measurements, research findings, file paths and gotchas, and the cross-story audit's own
+paragraphs, separated by `---`. A paragraph opening with `[audit-deferred:` records an audit
+finding the plan left open, with the reason given. An older paragraph can describe a sibling
+story as it stood before the audit. When a story runs again after a failed or interrupted
+attempt, `notes` holds what that attempt recorded, its failure cause, in place of the plan's
+notes. It is context, not the contract: where it disagrees with `acceptanceCriteria` or
+`implementation`, those win.
 
 ## Step 1.5 — Measure the verify before any work
 
