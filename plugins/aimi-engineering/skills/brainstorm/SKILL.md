@@ -140,12 +140,12 @@ Cover these categories across question rounds:
 
 | Topic | Focus |
 |-------|-------|
-| Purpose | What problem does this solve? What's the motivation? |
-| Users | Who uses this? What's their context? |
-| Constraints | Technical limitations? Timeline? Dependencies? |
-| Success | How will you measure success? What's the happy path? |
-| Edge Cases | What shouldn't happen? Error states? |
-| Existing Patterns | Similar features in the codebase to follow? |
+| Purpose | The problem being solved, and why it matters now |
+| Users | Who is affected, and in what situation they meet it |
+| Constraints | Technical limits, deadlines, and what this depends on |
+| Success | The outcome that counts as done, and how it will be observed |
+| Edge Cases | Failure paths, empty states, and what must never happen |
+| Existing Patterns | Similar features already in the codebase that this should follow |
 
 ---
 
@@ -168,14 +168,14 @@ After each round, assess which topics remain uncovered and generate targeted fol
 If proposing approaches, present 2-3 with this structure:
 
 ```markdown
-### Approach A: [Name]
-[2-3 sentence description]
-**Pros:** [bullet list]
-**Cons:** [bullet list]
-**Best when:** [one sentence]
+### Option A: [Name]
+[What it is, in two or three sentences]
+**Advantages:** [short list]
+**Drawbacks:** [short list]
+**Fits when:** [one sentence]
 ```
 
-Lead with a recommendation and explain why. Apply YAGNI — prefer simpler solutions.
+Say which option you recommend and why, and favor the simplest one that meets the need.
 
 ---
 
@@ -184,10 +184,10 @@ Lead with a recommendation and explain why. Apply YAGNI — prefer simpler solut
 Apply these throughout brainstorming:
 
 1. **Don't design for hypothetical future requirements**
-2. **Choose the simplest approach that solves the stated problem**
+2. **Pick the simplest option that covers the stated problem**
 3. **Prefer boring, proven patterns over clever solutions**
-4. **Ask "Do we really need this?" when complexity emerges**
-5. **Defer decisions that don't need to be made now**
+4. **When complexity appears, ask whether it is needed at all**
+5. **Leave for later any decision that does not have to be made yet**
 
 ---
 
@@ -204,14 +204,14 @@ topic: <kebab-case-topic>
 # <Topic Title>
 
 ## What We're Building
-[Concise description — 1-2 paragraphs max]
+[What is being built, in one or two short paragraphs]
 
 ## Why This Approach
 [Approaches considered and rationale for choice]
 
 ## Key Decisions
-- [Decision 1]: [Rationale]
-- [Decision 2]: [Rationale]
+- [Decision]: [why it was chosen]
+- [Decision]: [why it was chosen]
 
 ## Design Decisions
 <!-- Phase 4 hook: enumerate each design reference loaded during this brainstorm -->
@@ -240,7 +240,7 @@ Use a one-sentence hint that captures the most actionable guidance from each fil
 
 ## Open Questions Enforcement
 
-**Before handoff, resolve all open questions.** If the design document has items in the Open Questions section, ask the user about each one. Move resolved questions to a "Resolved Questions" section. Only proceed to handoff when Open Questions is empty or the user explicitly defers them.
+**Before handoff, resolve all open questions.** If the design document has items in the Open Questions section, ask the user about each one. File each answered question under a "Resolved Questions" section. Only proceed to handoff when Open Questions is empty or the user explicitly defers them.
 
 ---
 
@@ -271,8 +271,8 @@ When interpolating the user's feature description into research agent prompts, s
 
 Keep output sections concise (200-300 words max). After presenting approaches or key decisions, pause to validate:
 
-- "Does this match what you had in mind?"
-- "Any adjustments before we continue?"
+- "Is this the direction you want?"
+- "Should anything change before we go on?"
 
 ---
 
