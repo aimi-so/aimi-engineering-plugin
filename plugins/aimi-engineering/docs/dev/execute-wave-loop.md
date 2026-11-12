@@ -233,7 +233,13 @@ one onward has NOT been merged: removing it without
 its commits, stranding them. This is the same rule the
 Phase-Mode Paired Split conflict path already applies to its
 own members (see "Merge Split Branches Into the Phase Branch"),
-and the two must not disagree about the same scenario.
+and the two must not disagree about the same scenario. They do not
+disagree about resolving either: the split merge resolves a conflict
+between two split branches of one repository in place, by the steps
+of "Wave merge conflicts are resolved in place" above, and stops only
+when that fails. Its verifies run from the merge directory, never from
+a `SPLIT_PLAN` record's `.root`, which in a multi-repo layout is the
+repository's main checkout and not where the merge is in progress.
 
 ## knownGaps extraction
 
