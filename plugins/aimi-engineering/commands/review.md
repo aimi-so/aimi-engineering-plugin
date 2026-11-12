@@ -376,9 +376,9 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 
 ### Next Steps
 
-1. **Address P1 findings** — Critical issues must be fixed before merge
-2. **Run `/aimi:execute`** — Continue autonomous execution
-3. **Run `/aimi:status`** — Check current task progress
+1. **Fix the P1 findings** — they block the merge
+2. **Fix the P2 findings, or record each one as an accepted risk**
+3. **Track the P3 findings as follow-up work**
 ```
 
 **Fresh session hint:** After the Next Steps, tell the person, in one sentence in their language, that this run's state is saved under `.aimi/` and that starting the next command in a fresh session (`/clear`) loses nothing and makes each of its turns cheaper. Skip it in agent mode.
