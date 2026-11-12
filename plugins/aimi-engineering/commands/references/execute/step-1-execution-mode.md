@@ -70,9 +70,9 @@ This atomically marks all `in_progress` stories as `failed` and returns:
 {"count": 2, "reset": ["US-003", "US-005"]}
 ```
 
-If count > 0, report: "Recovered [count] orphaned in_progress stories (reset to failed for retry): [reset IDs]"
+If count > 0, report: "Recovered [count] orphaned in_progress stories (marked failed): [reset IDs]"
 
-Note: These stories will appear as "failed" in status. The user can review and re-run.
+Note: These stories will appear as "failed" in status. `/aimi:execute` does not run a failed story again; to run one again, set it back to `pending` first.
 
 ### Content Validation
 

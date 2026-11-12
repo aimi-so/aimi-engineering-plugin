@@ -14,7 +14,7 @@ This may be caused by failed stories whose dependents were cascade-skipped, or b
 permanently pending action gate blocking every remaining dependent story.
 
 Run `/aimi:status` to see the dependency state.
-Review failed stories and either retry or adjust dependencies.
+Review failed stories and either set one back to pending to run it again or adjust dependencies.
 ```
 
 **Container mode (`CONTAINER_MODE=true` or `PHASE_MODE=true`):** this branch never runs Container Mode: Stop the Dev Server / Push the Branch / Remove the Container — those only run in the **If all stories complete** branch above. The feature or phase container and its `.aimi/state/dev-server.json` entry are left exactly as they were; append to the report above:

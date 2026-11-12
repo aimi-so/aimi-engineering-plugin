@@ -176,7 +176,7 @@ Next: Run /aimi:execute to continue execution.
 
 If there are failed stories:
 ```
-Failed stories detected. Run /aimi:execute to retry or /aimi:skip [story-id] to skip.
+Failed stories detected. /aimi:execute does not run them again. To run one again, set it back to pending.
 ```
 
 If all stories complete or skipped:
