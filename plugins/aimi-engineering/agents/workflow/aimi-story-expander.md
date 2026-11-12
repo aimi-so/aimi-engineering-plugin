@@ -315,11 +315,8 @@ Emit the measurement in that order — resolve the branch, refuse-if-empty, deri
 Match each path in `implementation.files` against this table. Collect every match, never the same skill twice, cap at 10:
 
 ```
-*.rb, *_spec.rb                            → dhh-rails-style
 app/javascript/**, *.tsx (non-test), *.jsx → react-best-practices
 *tailwind*, *.css, *design-token*          → frontend-design
-*.rake, db/migrate/**                      → dhh-rails-style
-.aimi/solutions/*.md                       → every-style-editor
 *.ts (non-test, non-.tsx) that runs on Node.js or Bun, bunfig.toml, bun.lock, bun.lockb → typescript-node-conventions
 *.module.ts, *.controller.ts, *.service.ts, nest-cli.json → nestjs-conventions
 app/**/*.tsx, app/**/*.ts (non-test), next.config.* in a project that depends on `next` → nextjs-tanstack-conventions

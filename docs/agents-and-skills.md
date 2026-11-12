@@ -8,7 +8,7 @@ An **agent** is a worker with its own fresh context. Commands spawn agents to re
 
 ---
 
-## Skills (25)
+## Skills (19)
 
 ### Core — used internally
 
@@ -25,11 +25,7 @@ These are invoked by commands, not by you.
 
 | Skill | What it carries |
 |-------|-----------------|
-| `dhh-rails-style` | Ruby and Rails in DHH's 37signals style |
-| `andrew-kane-gem-writer` | Ruby gems following Andrew Kane's patterns |
-| `dspy-ruby` | Type-safe LLM applications with DSPy.rb |
 | `frontend-design` | Distinctive, production-grade frontend interfaces |
-| `every-style-editor` | Copy review against Every's editorial style |
 | `agent-native-architecture` | Apps where agents are first-class users, not an afterthought |
 | `architecture-foundation` | Clean Architecture and DDD foundations, for both new and existing repositories |
 | `react-best-practices` | React and Next.js performance, from Vercel Engineering |
@@ -47,14 +43,12 @@ These are invoked by commands, not by you.
 | `agent-browser` | Browser automation through Vercel's agent-browser CLI |
 | `create-agent-skills` | How to author Claude Code skills and slash commands |
 | `git-worktree` | Managing git worktrees for isolated parallel work |
-| `rclone` | Uploading and syncing to S3, R2, B2, Google Drive, Dropbox |
 | `forge` | Every GitHub or GitLab action through the CLI's forge verbs, confirmed with you before each write |
 
 ### Disabled — kept for reference
 
 | Skill | What it carries |
 |-------|-----------------|
-| `file-todos` | File-based todo tracking |
 | `resolve-pr-parallel` | Resolving PR comments in parallel |
 
 ---
