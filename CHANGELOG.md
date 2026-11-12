@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.160.0] - 2026-11-12
+
+`/aimi:review` checks what a finding rests on, not only the line it quotes, reviews one pull request per repository of a multi-repo layout, and says which changed files no reviewer read. Nothing in the state on disk, the CLI verbs' output or the other commands changes.
+
+### Added
+- `/aimi:review` takes several pull request URLs. Each one is reviewed in the local folder whose `origin` remote points at the repository it names, through `forge-pr-view --project`; a URL no local folder matches is reported and skipped.
+- Every reviewer returns, by path, the changed files it read and the ones it did not. A changed file of 100 lines or more that no reviewer read, leaving out tests, generated files, lockfiles and fixtures, gets one more correctness pass through a new `FILES` prompt line, and the report names what stays unread.
+
+### Changed
+- Before reporting, the orchestrator checks the premise of every P1 and P2 finding as well as its quoted line (the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes), with up to four tool calls each, and checks a P3 when two reads settle it. A claim the code does not support is removed from a finding that otherwise holds. `Checked: no` is kept for checks that need running code or exceed the budget, and P3 findings now carry the mark too.
+- A severity that rests on a rule the project does not write down drops to P3. The maintainability reviewer reports a long file as P3 always; a written size limit is the project-standards reviewer's to cite.
+- The team is announced in one message before any reviewer starts, and nothing is written per reviewer while they run.
+
+### Fixed
+- The report's next steps pointed at `/aimi:execute` and `/aimi:status`. They now say what to do with each severity.
+- A second pull request URL had no path through the command, so it was fetched with a raw forge CLI call that skipped the command's gates.
+
 ## [1.159.0] - 2026-11-12
 
 `/aimi:review` now reads what you ask for and runs the reviewers that fit, with fewer and better ones; a failed story keeps the plan's notes; a conflict between split branches is resolved in place; and the agents and skills adapted from other projects are credited. Nothing in the state on disk, the CLI verbs' output or the verification gates changes, apart from the `notes` field described below.
