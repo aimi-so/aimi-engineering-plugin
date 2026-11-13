@@ -13,6 +13,7 @@ Spawn each sub-agent with:
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-story-expander"
   [model: <AGENT_MODELS.workflow when not "inherit">]
+  [effort: <AGENT_EFFORTS.workflow when not "inherit">]
   prompt: "Expand outline entry <idx> into a full story JSON object.
 
   Outline entry:

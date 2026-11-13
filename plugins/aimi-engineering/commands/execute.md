@@ -26,7 +26,7 @@ Artifacts written under `.aimi/` follow the Artifact Language Rule in `${CLAUDE_
 
 ## Spawned Tasks
 
-A spawned split task is a Task the orchestrator started for one member of a split; its prompt opens with a marker line `SPAWNED_SPLIT_TASK=<kind>` and holds nothing else of this conversation. It reads the router at ROUTER_PATH (the prompt names it), replaces every CLAUDE_PLUGIN_ROOT placeholder in the text it reads with PLUGIN_ROOT, and never runs Step 0: a spawned split task takes `AGENT_MODELS`, `BASE_BRANCH` and the other values from the pre-set state in its prompt, and every bash block it runs resolves `AIMI_CLI` for itself. The spawning orchestrator computes PLUGIN_ROOT from the absolute path a step-file Read resolved to (that path minus `commands/references/execute/<file>.md`) and ROUTER_PATH as PLUGIN_ROOT plus `commands/execute.md`, because the host expands the placeholder in the parent's copy while the child reads the file raw. For its kind the child evaluates the entries in the Evaluates cell, in document order, and skips the entries in the Skips cell; every entry heading sits in exactly one of the two cells of each row, and an entry whose `Applies when:` line holds is still skipped when its heading is in Skips.
+A spawned split task is a Task the orchestrator started for one member of a split; its prompt opens with a marker line `SPAWNED_SPLIT_TASK=<kind>` and holds nothing else of this conversation. It reads the router at ROUTER_PATH (the prompt names it), replaces every CLAUDE_PLUGIN_ROOT placeholder in the text it reads with PLUGIN_ROOT, and never runs Step 0: a spawned split task takes `AGENT_MODELS`, `AGENT_EFFORTS`, `BASE_BRANCH` and the other values from the pre-set state in its prompt, and every bash block it runs resolves `AIMI_CLI` for itself. The spawning orchestrator computes PLUGIN_ROOT from the absolute path a step-file Read resolved to (that path minus `commands/references/execute/<file>.md`) and ROUTER_PATH as PLUGIN_ROOT plus `commands/execute.md`, because the host expands the placeholder in the parent's copy while the child reads the file raw. For its kind the child evaluates the entries in the Evaluates cell, in document order, and skips the entries in the Skips cell; every entry heading sits in exactly one of the two cells of each row, and an entry whose `Applies when:` line holds is still skipped when its heading is in Skips.
 
 | Kind | Marker line | Evaluates | Skips |
 |---|---|---|---|
@@ -43,7 +43,7 @@ If resolution fails, report error and STOP.
 
 ### Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ### Parse --base Override
 

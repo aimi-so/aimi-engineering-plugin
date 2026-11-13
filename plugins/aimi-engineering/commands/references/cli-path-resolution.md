@@ -236,12 +236,13 @@ Fix: add the per-call re-read one-liner at the top of the failing Bash call. If 
 
 ## Resolve Agent Models
 
-After `$AIMI_CLI` is resolved and the version check passes, run this block **once per command invocation**. It re-reads `$AIMI_CLI` from the cache (each Bash tool call is an isolated shell, and a `--fix` above may have moved it) and echoes the category-to-model map plus the two values the first-run prompt below needs:
+After `$AIMI_CLI` is resolved and the version check passes, run this block **once per command invocation**. It re-reads `$AIMI_CLI` from the cache (each Bash tool call is an isolated shell, and a `--fix` above may have moved it) and echoes the category-to-model map, the category-to-effort map plus the two values the first-run prompt below needs:
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
 echo "AGENT_MODELS=$($AIMI_CLI resolve-models)"
+echo "AGENT_EFFORTS=$($AIMI_CLI resolve-efforts | head -n 1)"
 echo "INTERACTIVITY=$($AIMI_CLI detect-interactivity)"
 echo "MODELS_PROMPT=$($AIMI_CLI models-prompt-check)"
 ```
@@ -254,23 +255,46 @@ echo "MODELS_PROMPT=$($AIMI_CLI models-prompt-check)"
 
 When no `models.json` is configured, every value is the literal string `"inherit"`.
 
-Store the JSON string as `AGENT_MODELS` (or as a working-memory map keyed by category) for the rest of the command invocation.
+`resolve-efforts` emits the same shape for reasoning efforts, one single-line JSON object with the same five keys, each value an effort level or the literal string `"inherit"`; unset means `"inherit"`. The echo is bounded with `head -n 1` because a cached CLI older than the verb answers an unknown verb with its help text, thousands of lines, which must never reach the conversation.
+
+Store the JSON strings as `AGENT_MODELS` and `AGENT_EFFORTS` (or as working-memory maps keyed by category) for the rest of the command invocation.
 
 ### Applying the resolved model to a Task call
 
-At each `Task` spawn site, extract the model from `AGENT_MODELS` using the agent's `CATEGORY`:
+At each `Task` spawn site, extract the model from `AGENT_MODELS` and the effort from `AGENT_EFFORTS` using the agent's `CATEGORY` (the same category for both):
 
 - For namespaced agents (`subagent_type="aimi-engineering:CATEGORY:NAME"`), use the directory category — one of `research`, `review`, `design`, `workflow`.
 - For host built-in `general-purpose` spawns used as **sub-orchestrators** by `/aimi:execute` (the parallel frontend/backend Tasks and the per-story executor), use the `executor` category.
 
 - **When the resolved value is a model string** (anything other than `"inherit"`): add a `model:` line to the Task call with that string as the value.
 - **When the resolved value is `"inherit"`**: omit the `model:` line entirely — current behavior is preserved.
+- **When the resolved effort is a level** (anything other than `"inherit"`): add an `effort:` line to the Task call with that level as the value.
+- **When the resolved effort is `"inherit"`**: omit the `effort:` line entirely.
+
+On Claude Code an effort stands without a model: the two lines are independent, so a category whose model is `"inherit"` and whose effort is a level spawns with an `effort:` line and no `model:` line.
 
 Example (model configured for the `research` category):
 
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   model: claude-sonnet-4-5
+  prompt: "…"
+```
+
+Example (model configured and effort `high` for the `review` category):
+
+```
+Task subagent_type="aimi-engineering:review:aimi-correctness-reviewer"
+  model: claude-opus-4-5
+  effort: high
+  prompt: "…"
+```
+
+Example (model is `"inherit"`, effort `high` — only the effort line):
+
+```
+Task subagent_type="aimi-engineering:review:aimi-correctness-reviewer"
+  effort: high
   prompt: "…"
 ```
 
@@ -281,7 +305,7 @@ Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   prompt: "…"
 ```
 
-When `AGENT_MODELS` could not be parsed or `$AIMI_CLI` was not resolved, treat every category as `"inherit"` and proceed — never abort a command because model resolution failed.
+When `AGENT_MODELS` or `AGENT_EFFORTS` could not be parsed, or `$AIMI_CLI` was not resolved, treat every category as `"inherit"` and proceed — never abort a command because model or effort resolution failed. A value that is not a five-key JSON object counts as unparseable; that is what an older cached CLI without `resolve-efforts` produces, and it means all `"inherit"` for the efforts.
 
 ### First-run configuration prompt (interactive hosts only)
 
@@ -312,7 +336,7 @@ The model SELECTION must happen at the LLM-orchestrator layer using the interact
 
 3. Run `$AIMI_CLI detect-models --research <chosen_research> --review <chosen_review> --design <chosen_design> --workflow <chosen_workflow> --executor <chosen_executor>` with the user's picks to write the config.
 
-4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS`.
+4. Re-run `$AIMI_CLI resolve-models` to refresh `AGENT_MODELS` (and `$AIMI_CLI resolve-efforts | head -n 1` to refresh `AGENT_EFFORTS`).
 
 **Option B — "Keep the default (inherit)":** no action needed beyond dismissal.
 

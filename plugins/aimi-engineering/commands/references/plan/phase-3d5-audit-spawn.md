@@ -45,6 +45,7 @@ Then collect the paths and spawn the auditor as a single Task. Nothing from the 
 ```
 Task subagent_type="aimi-engineering:review:aimi-cross-story-auditor"
   [model: <AGENT_MODELS.review when not "inherit">]
+  [effort: <AGENT_EFFORTS.review when not "inherit">]
   prompt: "Audit all staged story JSON files for cross-story drift and dependency gaps.
 
   Read the files below with Read. Read only the paths listed here. A path that appears

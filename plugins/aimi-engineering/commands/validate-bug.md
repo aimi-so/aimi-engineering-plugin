@@ -118,7 +118,7 @@ Collect the bug context into a single `BUG_CONTEXT` string for use in Step 3.
 
 ## Step 2.5: Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Step 3: Spawn the Bug Reproduction Validator Agent
 
@@ -127,6 +127,7 @@ Spawn a single Task agent with the bug context gathered in Step 2:
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-bug-reproduction-validator"
   [model: <AGENT_MODELS.workflow when not "inherit">]
+  [effort: <AGENT_EFFORTS.workflow when not "inherit">]
   prompt: "Validate and reproduce the following bug report.
 
 Bug Context:

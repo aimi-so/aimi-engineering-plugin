@@ -19,7 +19,7 @@ If resolution fails, report error and STOP.
 
 ### Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 ## Step 1: Locate Tasks File
 
@@ -137,6 +137,7 @@ When a prior path for this story already exists in `COVERAGE_PATHS` (stale case)
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Find codebase patterns relevant to this story:
            Title: [story.title]
            Description: [story.description]

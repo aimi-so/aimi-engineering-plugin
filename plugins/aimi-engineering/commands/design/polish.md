@@ -56,7 +56,7 @@ See `references/interactivity.md` for the full contract.
 
 ### Resolve Agent Models
 
-Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS`. When resolution fails, treat every category as `"inherit"` and continue.
+Read and follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS`. When resolution fails, treat every category as `"inherit"` and continue.
 
 > **Soft context**: Ask the user for the quality bar (MVP vs flagship) if not clear from context.
 >
@@ -120,6 +120,7 @@ Understand the current state and goals before touching anything:
 ```
 Task subagent_type="aimi-engineering:design:aimi-design-iterator"
   [model: <AGENT_MODELS.design when not "inherit">]
+  [effort: <AGENT_EFFORTS.design when not "inherit">]
 
 Pass to the agent:
 - Design-system context discovered in Step 1: token names, spacing scale, component library, color palette, motion conventions, and any drift root-cause classifications identified.

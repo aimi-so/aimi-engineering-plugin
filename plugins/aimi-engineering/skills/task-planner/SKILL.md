@@ -80,7 +80,7 @@ When no brainstorm supplied a `phases:` cut and no roadmap is already being cont
 
 ### Resolve Agent Models
 
-Follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` (JSON map of category→model). Re-read `$AIMI_CLI` from cache in the same Bash call. When resolution fails, treat every category as `"inherit"` and continue.
+Follow the **Resolve Agent Models** section of `commands/references/cli-path-resolution.md` to populate `AGENT_MODELS` and `AGENT_EFFORTS` (JSON maps of category→model and category→effort). Re-read `$AIMI_CLI` from cache in the same Bash call. When resolution fails, treat every category as `"inherit"` and continue.
 
 ### Phase 1: Local Research (Parallel)
 
@@ -111,12 +111,14 @@ Run these agents **in parallel**:
 ```
 Task subagent_type="aimi-engineering:research:aimi-codebase-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "[feature description + brainstorm context + discovered repos]
            topicSlug: [topicSlug]
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-codebase.md"
 
 Task subagent_type="aimi-engineering:research:aimi-learnings-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "[feature description]
            topicSlug: [topicSlug]
            outputPath: .aimi/research/YYYY-MM-DD-[topicSlug]-[RUN_TS]-learnings.md"
@@ -137,6 +139,7 @@ Only if Phase 1.5 decides external research is needed:
 ```
 Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "[feature description]
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -144,6 +147,7 @@ Task subagent_type="aimi-engineering:research:aimi-best-practices-researcher"
 
 Task subagent_type="aimi-engineering:research:aimi-framework-docs-researcher"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "[feature description]
            researchDepth: [computed researchDepth from Phase 1.5]
            topicSlug: [topicSlug]
@@ -169,6 +173,7 @@ Merge findings into a structured consolidation with these sections:
 ```
 Task subagent_type="aimi-engineering:workflow:aimi-spec-flow-analyzer"
   [model: <AGENT_MODELS.workflow when not "inherit">]
+  [effort: <AGENT_EFFORTS.workflow when not "inherit">]
   prompt: "[feature description + consolidated research]"
 ```
 

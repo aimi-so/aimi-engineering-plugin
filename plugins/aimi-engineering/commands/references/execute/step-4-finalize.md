@@ -62,6 +62,7 @@ The `-finalize` suffix is chosen so the name does **not** match the `"[PLAN_DISC
 Task(
     subagent_type: "general-purpose",
     model: <AGENT_MODELS.executor when not "inherit">,
+    effort: <AGENT_EFFORTS.executor when not "inherit">,
     description: "Finalize [EXEC_BRANCH[group_key]]",
     prompt: [
         - WORKTREE_PATH = the path read from create_output above

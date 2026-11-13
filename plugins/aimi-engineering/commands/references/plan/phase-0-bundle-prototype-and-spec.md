@@ -51,6 +51,7 @@ mkdir -p "$(dirname "<output_path>")"
 ```
 Task subagent_type="aimi-engineering:research:aimi-bundle-prototype-author"
   [model: <AGENT_MODELS.research when not "inherit">]
+  [effort: <AGENT_EFFORTS.research when not "inherit">]
   prompt: "Generate a self-contained HTML prototype for the bundle.
            bundlePath: <bundlePath>
            viewList: <view_list extracted names as JSON array>
