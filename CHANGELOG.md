@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.161.0] - 2026-11-13
+
+Each agent category can carry a reasoning effort beside its model, delivered at every spawn. Unset means `inherit`, so a `models.json` written before this release behaves exactly as before.
+
+### Added
+- `/aimi:setup-models` asks `Adjust effort as well?` after the five model questions. Answering yes asks one effort question per category with the current value pre-selected; answering no keeps the stored efforts. On Claude Code the choices are `inherit`, `low`, `medium`, `high`, `xhigh` and `max`; on OpenCode they are the variants the chosen model defines, read from `opencode models --verbose`.
+- `aimi-cli resolve-efforts` prints the active host's five efforts as one JSON object, and `aimi-cli effort-options [--model <id>]` prints what the picker may offer. Both degrade without failing: all `inherit` for the first, `null` for the second when the OpenCode catalog is unavailable.
+- `aimi-cli detect-models` accepts `--research-effort`, `--review-effort`, `--design-effort`, `--workflow-effort` and `--executor-effort`. An absent flag keeps the stored value, `inherit` clears it, and both hosts' efforts survive every write. Efforts live in `categories.<host>.efforts` and `schemaVersion` stays `2.0`.
+- `docs/dev/efforts.md` documents the setting for maintainers, with a Headless effort check that runs one real `claude -p` against a scratch config and an assertion that reads the stream.
+
+### Changed
+- On Claude Code every spawn site that passes `model:` now also passes `effort:` for the same category, and omits it for `inherit`. The per-spawn parameter needs Claude Code 2.1.292 or newer, and `CLAUDE_CODE_EFFORT_LEVEL` overrides every per-category effort.
+- On OpenCode the `aimi-task` tool takes a `variant` argument and forwards it as `opencode run --variant`; the installed preamble tells the agent to pass it. A stored variant that a changed model does not define is dropped by the CLI.
+- `docs/commands.md`, `docs/architecture.md` and `docs/agents-and-skills.md` describe the effort setting, and both `CLAUDE.md` files count the new readers and test modules.
+
 ## [1.160.1] - 2026-11-12
 
 `/aimi:review` drops two rules from 1.160.0 that did not hold in real runs.

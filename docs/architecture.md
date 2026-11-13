@@ -90,6 +90,8 @@ That writes `~/.config/aimi/models.json`. The file maps each category to a logic
 
 On Claude Code the resolved model is passed through the Task tool's `model:` parameter. On OpenCode the `aimi-task` tool provides the equivalent. Run `aimi-cli resolve-models` to see what a category resolves to right now.
 
+A category also carries an effort, stored beside its model and unset (`inherit`) by default. On Claude Code it is delivered per spawn, as the Task call's `effort` parameter; on OpenCode it is the variant of the category's model, which `aimi-task` forwards as `--variant`. `aimi-cli resolve-efforts` prints what each category resolves to. See [commands.md](commands.md#aimisetup-models) for what an effort means per host.
+
 ---
 
 ## Project guidelines discovery
