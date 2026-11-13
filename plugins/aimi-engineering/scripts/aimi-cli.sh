@@ -11291,6 +11291,32 @@ _host_valid_models() {
   done <<< "$_raw"
 }
 
+# Print the raw text of `opencode models --verbose` (every model's id line and
+# its JSON object, `variants` included), or NOTHING when it cannot be had: no
+# opencode binary, a build whose `run --help` does not mention --variant, a
+# failing or timed-out call. Its own fetch -- never the mtime-keyed
+# _oc_models_cache_path, whose entries hold the plain id list. Bounded by
+# timeout or gtimeout when the host has one. Reused by effort-options.
+_oc_variant_catalog() {
+  command -v opencode >/dev/null 2>&1 || return 0
+  local _bound="" _help _out
+  if command -v timeout >/dev/null 2>&1; then
+    _bound="timeout 30"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    _bound="gtimeout 30"
+  fi
+  # shellcheck disable=SC2086
+  _help=$($_bound opencode run --help 2>&1) || _help=""
+  case "$_help" in
+    *--variant*) ;;
+    *) return 0 ;;
+  esac
+  # shellcheck disable=SC2086
+  _out=$($_bound opencode models --verbose 2>/dev/null) || return 0
+  [ -n "$_out" ] || return 0
+  printf '%s\n' "$_out"
+}
+
 # Membership of an ALREADY-NORMALIZED candidate in the host's valid set.
 # Usage: _model_id_valid_for_host <normalized-candidate> [<valid-set>]
 #
@@ -11576,8 +11602,22 @@ cmd_detect_models() {
 
   # ---- Parse category flags --------------------------------------------------
   local _flag_research="" _flag_review="" _flag_design="" _flag_workflow="" _flag_executor=""
+  # The effort flags are optional and independent of the model flags. Each one
+  # given is forwarded (trimmed) to the one crossing; models.py tests
+  # `name in argv`, so an absent flag keeps the stored value and `inherit`
+  # clears it. _effort_active is 1 when one of them is not `inherit`.
+  local _effort_args=() _effort_active=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --research-effort|--review-effort|--design-effort|--workflow-effort|--executor-effort)
+        if [ $# -lt 2 ] || ! _normalize_model_id "$2" >/dev/null; then
+          echo "Error: detect-models: $1 requires a non-empty value" >&2
+          exit 1
+        fi
+        _effort_args+=("$1" "$_MODEL_ID_NORMALIZED")
+        [ "$_MODEL_ID_NORMALIZED" = "inherit" ] || _effort_active=1
+        shift
+        ;;
       --research)
         shift
         _flag_research="${1:-}"
@@ -11774,6 +11814,28 @@ anthropic/claude-opus-4-7"
   # stdout; nothing in models.py opens or writes a file, so the mktemp + chmod
   # 0600 + mv discipline stays in write_aimi_models_config, which already owns
   # it and whose failure text is asserted.
+  #
+  # The variant catalog is fetched only on OpenCode, and only when an effort is
+  # being set or the existing document already holds some ("efforts" as a plain
+  # substring is enough to ask). It travels to the crossing as a temp file,
+  # because argv is too small for ~60 KB; an unavailable catalog is simply no
+  # file. Claude Code never reaches this.
+  _DETECT_CATALOG_FILE=""
+  if ! _is_claude_code_host; then
+    local _want_catalog=0
+    [ "$_effort_active" = "1" ] && _want_catalog=1
+    case "$_existing_json" in *efforts*) _want_catalog=1 ;; esac
+    if [ "$_want_catalog" = "1" ]; then
+      local _catalog_text
+      _catalog_text=$(_oc_variant_catalog) || _catalog_text=""
+      if [ -n "$_catalog_text" ]; then
+        _DETECT_CATALOG_FILE=$(mktemp "${TMPDIR:-/tmp}/aimi-variant-catalog.XXXXXX")
+        trap 'rm -f "${_DETECT_CATALOG_FILE:-}"' EXIT
+        printf '%s\n' "$_catalog_text" > "$_DETECT_CATALOG_FILE"
+      fi
+    fi
+  fi
+
   local _models_json
   _models_json=$(printf '%s' "$_existing_json" | python3 "$(_aimi_models_py)" detect \
     --host-key "$_host_key" \
@@ -11781,7 +11843,9 @@ anthropic/claude-opus-4-7"
     --review   "$_model_review" \
     --design   "$_model_design" \
     --workflow "$_model_workflow" \
-    --executor "$_model_executor")
+    --executor "$_model_executor" \
+    ${_DETECT_CATALOG_FILE:+--catalog-file "$_DETECT_CATALOG_FILE"} \
+    ${_effort_args[@]+"${_effort_args[@]}"})
 
   # ---- Atomic write ---------------------------------------------------------
   write_aimi_models_config "$_models_json"
@@ -17828,6 +17892,12 @@ COMMANDS:
     detect-models [--research <model>] [--review <model>] [--design <model>] [--workflow <model>] [--executor <model>]
                               Detect available models on the current host and write
                               ~/.config/aimi/models.json (schema v2.0).
+                              Optional per-category efforts, beside the model flags:
+                              --research-effort, --review-effort, --design-effort,
+                              --workflow-effort, --executor-effort <level>. Claude Code:
+                              inherit|low|medium|high|xhigh|max. OpenCode: a variant name
+                              of the category's model. An absent flag keeps the stored
+                              value; `inherit` clears it.
                               Claude Code: fixed set (opus, sonnet, haiku).
                               OpenCode: reads `opencode models`; falls back to built-in
                               Anthropic list with one warning when opencode is absent.

@@ -958,3 +958,261 @@ def test_indexing_a_non_object_aborts_where_indexing_null_does_not():
         M.read_categories({"categories": "nope"}, "claudeCode")
     with pytest.raises(T.MalformedTasks):
         M.read_categories({"categories": {"claudeCode": "nope"}}, "claudeCode")
+
+
+# ---------------------------------------------------------------------------
+# Efforts: the reasoning level (Claude Code) or variant (OpenCode) beside each
+# category's model. See models.py's EFFORTS note.
+# ---------------------------------------------------------------------------
+
+EFFORT_CASES = {c["label"]: c for c in GOLDEN["models_effort_cases"]}
+
+_ALL_INHERIT = {c: "inherit" for c in M.CATEGORIES}
+_MODELS_CC = ["--research", "haiku", "--review", "opus", "--design", "sonnet",
+              "--workflow", "sonnet", "--executor", "sonnet"]
+_MODELS_OC = ["--research", "p/haiku", "--review", "p/opus", "--design", "p/sonnet",
+              "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+
+_CATALOG_TEXT = """p/opus
+{
+  "id": "opus",
+  "variants": {"high": {}, "max": {}, "bad name": {}}
+}
+p/haiku
+{
+  "id": "haiku"
+}
+p/sonnet
+{
+  "variants": {"low": {}}
+}
+"""
+
+
+def _detect(doc, host_key, args, catalog=None, tmp_path=None):
+    """Run op_detect's CLI half as a subprocess: (exit, stdout, stderr)."""
+    argv = [sys.executable, os.path.join(SCRIPTS, "models.py"), "detect", "--host-key", host_key] + args
+    if catalog is not None:
+        path = tmp_path / "catalog.txt"
+        path.write_text(catalog, encoding="utf-8")
+        argv += ["--catalog-file", str(path)]
+    stdin = "" if doc is None else json.dumps(doc)
+    done = subprocess.run(argv, input=stdin, capture_output=True, text=True)
+    return done.returncode, done.stdout, done.stderr
+
+
+def test_effort_levels_are_the_six_and_in_order():
+    assert M.EFFORT_LEVELS == ("inherit", "low", "medium", "high", "xhigh", "max")
+
+
+@pytest.mark.parametrize("label", sorted(EFFORT_CASES))
+def test_effort_read_golden_cases(label):
+    case = EFFORT_CASES[label]
+    efforts, warnings = M.read_efforts(case["doc"], case["host"])
+    assert efforts == case["efforts"]
+    assert len(warnings) == case["warnings"]
+
+
+def test_effort_read_valid_values_per_host():
+    doc = {"categories": {"claudeCode": {"efforts": {"review": "xhigh", "design": " low "}}}}
+    efforts, warnings = M.read_efforts(doc, "claudeCode")
+    assert efforts["review"] == "xhigh" and efforts["design"] == "low"
+    assert efforts["research"] == "inherit" and warnings == []
+    doc = {"categories": {"opencode": {"efforts": {"review": "none", "design": "My.Var-1"}}}}
+    efforts, warnings = M.read_efforts(doc, "opencode")
+    assert efforts["review"] == "none" and efforts["design"] == "My.Var-1" and warnings == []
+
+
+def test_effort_read_unset_shapes_say_nothing():
+    for unset in (None, False, "", "   "):
+        doc = {"categories": {"claudeCode": {"efforts": {"review": unset}}}}
+        assert M.read_efforts(doc, "claudeCode") == (_ALL_INHERIT, [])
+    for doc in ({}, None, [], {"categories": None}, {"categories": {"claudeCode": None}},
+                {"categories": {"claudeCode": {"efforts": None}}}):
+        assert M.read_efforts(doc, "claudeCode") == (_ALL_INHERIT, [])
+
+
+def test_effort_read_invalid_values_warn_once_and_echo_cut():
+    long_value = "x" * 100
+    for bad in ("High", "ultra", True, 0, long_value, ["a"]):
+        doc = {"categories": {"claudeCode": {"efforts": {"review": bad}}}}
+        efforts, warnings = M.read_efforts(doc, "claudeCode")
+        assert efforts == _ALL_INHERIT
+        assert len(warnings) == 1 and "review" in warnings[0]
+    _, warnings = M.read_efforts(
+        {"categories": {"claudeCode": {"efforts": {"review": long_value}}}}, "claudeCode")
+    assert long_value not in warnings[0] and '"' + "x" * 10 in warnings[0]
+    _, warnings = M.read_efforts(
+        {"categories": {"opencode": {"efforts": {"review": "has space"}}}}, "opencode")
+    assert len(warnings) == 1 and '"has space"' in warnings[0]
+
+
+def test_effort_read_malformed_container_is_all_inherit_with_one_warning():
+    for container in ("high", ["high"], 5, True):
+        doc = {"categories": {"claudeCode": {"efforts": container}}}
+        efforts, warnings = M.read_efforts(doc, "claudeCode", verb="resolve-efforts")
+        assert efforts == _ALL_INHERIT and len(warnings) == 1
+        assert warnings[0].startswith("Warning: resolve-efforts:")
+
+
+def test_effort_malformed_container_leaves_model_reads_untouched():
+    doc = {"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "research": "haiku", "review": "opus", "efforts": "garbage"}}}
+    values = M.read_categories(doc, "claudeCode")
+    assert values["research"] == "haiku" and values["review"] == "opus"
+    assert values["design"] is None
+    assert M.read_efforts(doc, "claudeCode")[0] == _ALL_INHERIT
+
+
+def test_effort_read_never_raises_on_odd_documents():
+    for doc in (1, "x", [1], {"categories": [1]}, {"categories": {"claudeCode": 3}}):
+        efforts, warnings = M.read_efforts(doc, "claudeCode")
+        assert efforts == _ALL_INHERIT and warnings == []
+
+
+def test_effort_catalog_parses_ids_variants_and_order(capsys):
+    catalog = M.catalog_variants(_CATALOG_TEXT)
+    assert catalog == {"p/opus": ["high", "max"], "p/haiku": [], "p/sonnet": ["low"]}
+    assert list(catalog) == ["p/opus", "p/haiku", "p/sonnet"]
+    err = capsys.readouterr().err
+    assert err.count('"bad name"') == 1 and err.count("\n") == 1
+
+
+def test_effort_catalog_none_when_empty_or_unparseable():
+    assert M.catalog_variants("") is None
+    assert M.catalog_variants("  \n\n") is None
+    assert M.catalog_variants("no models here\nat all\n") is None
+    assert M.catalog_variants("p/x\n{ broken") is None
+
+
+def test_effort_write_stores_and_keeps_and_clears_on_claude_code(tmp_path):
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "high"])
+    assert code == 0
+    doc = json.loads(out)
+    assert doc["categories"]["claudeCode"]["efforts"] == {"review": "high"}
+    assert doc["schemaVersion"] == "2.0"
+    assert [k for k in doc["categories"]["claudeCode"] if k != "efforts"] == list(M.CATEGORIES)
+    # a later write with no effort flag keeps it
+    code, out, _ = _detect(doc, "claudeCode", _MODELS_CC)
+    assert json.loads(out)["categories"]["claudeCode"]["efforts"] == {"review": "high"}
+    # inherit clears it and drops the empty container
+    code, out, _ = _detect(doc, "claudeCode", _MODELS_CC + ["--review-effort", "inherit"])
+    assert "efforts" not in json.loads(out)["categories"]["claudeCode"]
+
+
+def test_effort_write_without_efforts_has_no_efforts_key():
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC)
+    assert code == 0 and "efforts" not in out
+
+
+def test_effort_write_trims_and_is_case_sensitive():
+    code, out, _ = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "  max\t"])
+    assert code == 0 and json.loads(out)["categories"]["claudeCode"]["efforts"] == {"review": "max"}
+    code, out, err = _detect(None, "claudeCode", _MODELS_CC + ["--review-effort", "MAX"])
+    assert code == 1 and out == "" and err.startswith("Error: detect-models:")
+
+
+def test_effort_write_refuses_invalid_claude_code_value_and_cuts_the_echo():
+    value = "z" * 90
+    code, out, err = _detect(None, "claudeCode", _MODELS_CC + ["--design-effort", value])
+    assert code == 1 and out == ""
+    assert err.startswith('Error: detect-models: --design-effort value "' + "z" * 10)
+    assert value not in err
+
+
+def test_effort_write_allows_effort_beside_model_inherit_on_claude_code():
+    models = ["--research", "inherit", "--review", "opus", "--design", "sonnet",
+              "--workflow", "sonnet", "--executor", "sonnet"]
+    code, out, _ = _detect(None, "claudeCode", models + ["--research-effort", "low"])
+    assert code == 0
+    table = json.loads(out)["categories"]["claudeCode"]
+    assert table["research"] == "inherit" and table["efforts"] == {"research": "low"}
+
+
+def test_effort_write_keeps_the_other_hosts_models_and_efforts():
+    other = {"research": "p/a", "review": "p/b", "design": "p/c", "workflow": "p/d",
+             "executor": "p/e", "efforts": {"review": "deep"}}
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": other}}
+    code, out, _ = _detect(existing, "claudeCode", _MODELS_CC + ["--review-effort", "high"])
+    assert code == 0
+    merged = json.loads(out)["categories"]
+    assert merged["opencode"] == other
+    assert merged["claudeCode"]["efforts"] == {"review": "high"}
+
+
+def test_effort_write_malformed_stored_container_does_not_block_a_write():
+    existing = {"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "research": "haiku", "efforts": "garbage"}}}
+    code, out, err = _detect(existing, "claudeCode", _MODELS_CC)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["claudeCode"]
+    assert "not an object" in err
+
+
+def test_effort_write_opencode_charset_and_none_variant_verbatim():
+    code, out, _ = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "none"])
+    assert code == 0 and json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "none"}
+    for bad in ("-lead", "has space", "a" * 65, "x/y"):
+        code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", bad])
+        assert code == 1 and out == "" and err.startswith("Error: detect-models:")
+
+
+def test_effort_write_opencode_model_inherit_writes_inherit_with_notice():
+    models = ["--research", "inherit", "--review", "p/opus", "--design", "p/sonnet",
+              "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+    code, out, err = _detect(None, "opencode", models + ["--research-effort", "high"])
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert "research" in err
+
+
+def test_effort_write_opencode_catalog_refuses_new_and_drops_kept(tmp_path):
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "high"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 0 and json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "high"}
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "medium"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 1 and out == "" and "p/opus" in err
+    # a model with no variants refuses any new variant
+    code, out, err = _detect(None, "opencode", _MODELS_OC + ["--research-effort", "high"],
+                             catalog=_CATALOG_TEXT, tmp_path=tmp_path)
+    assert code == 1 and out == ""
+    # a kept variant the model does not define is dropped with a notice
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": {
+        **{c: "p/opus" for c in M.CATEGORIES}, "efforts": {"design": "max"}}}}
+    code, out, err = _detect(existing, "opencode", _MODELS_OC, catalog=_CATALOG_TEXT,
+                             tmp_path=tmp_path)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert '"max"' in err and "p/sonnet" in err
+
+
+def test_effort_write_opencode_without_catalog_keeps_unchanged_drops_changed(tmp_path):
+    existing = {"schemaVersion": "2.0", "categories": {"opencode": {
+        **{c: "p/sonnet" for c in M.CATEGORIES}, "efforts": {"design": "low"}}}}
+    # model unchanged: kept
+    code, out, _ = _detect(existing, "opencode", _MODELS_OC[:4] + ["--design", "p/sonnet"] + _MODELS_OC[6:])
+    assert code == 0
+    assert json.loads(out)["categories"]["opencode"]["efforts"] == {"design": "low"}
+    # model changed: dropped, and the notice says the catalog was unavailable
+    changed = ["--research", "p/sonnet", "--review", "p/sonnet", "--design", "p/opus",
+               "--workflow", "p/sonnet", "--executor", "p/sonnet"]
+    code, out, err = _detect(existing, "opencode", changed)
+    assert code == 0 and "efforts" not in json.loads(out)["categories"]["opencode"]
+    assert "catalog was unavailable" in err
+    # a new variant is written as given after the charset check
+    code, out, _ = _detect(None, "opencode", _MODELS_OC + ["--review-effort", "whatever"])
+    assert json.loads(out)["categories"]["opencode"]["efforts"] == {"review": "whatever"}
+
+
+def test_effort_flags_do_not_change_the_unknown_flag_usage_line(tmp_path):
+    env = dict(os.environ, CLAUDECODE="1", AIMI_CONFIG_DIR=str(tmp_path))
+    done = subprocess.run(["bash", CLI, "detect-models", "--bogus"], capture_output=True,
+                          text=True, env=env, stdin=subprocess.DEVNULL)
+    assert done.returncode == 1
+    assert ("Usage: aimi-cli.sh detect-models [--research <model>] [--review <model>] "
+            "[--design <model>] [--workflow <model>] [--executor <model>]\n") in done.stderr
+
+
+def test_effort_cli_help_lists_all_five_flags():
+    done = subprocess.run(["bash", CLI, "help"], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    for category in M.CATEGORIES:
+        assert "--" + category + "-effort" in done.stdout + done.stderr
