@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.160.1] - 2026-11-12
+
+`/aimi:review` drops two rules from 1.160.0 that did not hold in real runs.
+
+### Changed
+- The command no longer asks for the team to be announced before the reviewers start. The orchestrator skipped it in every recorded run, and asking for it in a message without a tool call would have ended the turn and stopped the review. The report now gives the reason each reviewer ran and each reviewer that did not run.
+- While the reviewers run, a reviewer that finishes gets one short progress line at most, never its unchecked findings. 1.160.0 asked for silence, which cannot hold: each finished reviewer wakes the orchestrator, and the host asks for progress when the person has heard nothing for a while.
+
 ## [1.160.0] - 2026-11-12
 
 `/aimi:review` checks what a finding rests on, not only the line it quotes, reviews one pull request per repository of a multi-repo layout, and says which changed files no reviewer read. Nothing in the state on disk, the CLI verbs' output or the other commands changes.
@@ -13,7 +21,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Before reporting, the orchestrator checks the premise of every P1 and P2 finding as well as its quoted line (the guard it says is missing, the caller it says exists, the rule it cites, the concurrency guarantee it assumes), with up to four tool calls each, and checks a P3 when two reads settle it. A claim the code does not support is removed from a finding that otherwise holds. `Checked: no` is kept for checks that need running code or exceed the budget, and P3 findings now carry the mark too.
 - A severity that rests on a rule the project does not write down drops to P3. The maintainability reviewer reports a long file as P3 always; a written size limit is the project-standards reviewer's to cite.
-- While the reviewers run, a reviewer that finishes gets one short progress line at most, never its unchecked findings. The command no longer asks for the team to be announced before the reviewers start, which was skipped in practice; the report gives the reason each reviewer ran or did not.
+- The team is announced in one message before any reviewer starts, and nothing is written per reviewer while they run.
 
 ### Fixed
 - The report's next steps pointed at `/aimi:execute` and `/aimi:status`. They now say what to do with each severity.
