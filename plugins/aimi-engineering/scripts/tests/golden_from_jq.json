@@ -60089,5 +60089,113 @@
       },
       "warnings": 1
     }
+  ],
+  "_comment_efforts_read": "resolve-efforts, which has no jq ancestor: no jq produced these cases. They are PINNED RULES written by hand with the feature, replayed through the CLI (not only through models.py), and they exist for the same asymmetry as models_effort_cases -- a stored `false` or \"\" reads as unset with no warning where `0` is invalid and reads as inherit with exactly one -- plus the OpenCode rule that an effort needs a model. `config` is the models.json text, `stdout` the exact line, `stderr_lines` the number of `Warning: resolve-efforts:` lines.",
+  "efforts_read_cases": [
+    {
+      "label": "er-false-is-unset-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":{\"review\":false}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-empty-string-is-unset-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":{\"review\":\"\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-zero-is-invalid-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":{\"review\":0}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 1
+    },
+    {
+      "label": "er-turbo-is-invalid-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":{\"design\":\"turbo\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 1
+    },
+    {
+      "label": "er-valid-level-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":{\"review\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"high\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-container-not-object-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"efforts\":[\"high\"]}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 1
+    },
+    {
+      "label": "er-no-efforts-key-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"claudeCode\":{\"research\":\"haiku\"}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-other-host-efforts-ignored-cc",
+      "host": "claudeCode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"p/m\",\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-effort-with-model-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"p/m\",\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"high\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-effort-without-model-is-inherit-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-effort-model-inherit-is-inherit-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"inherit\",\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-effort-model-blank-is-inherit-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":\"   \",\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-effort-model-non-string-is-inherit-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"research\":5,\"efforts\":{\"research\":\"high\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 0
+    },
+    {
+      "label": "er-zero-is-invalid-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"design\":\"p/m\",\"efforts\":{\"design\":0}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 1
+    },
+    {
+      "label": "er-bad-variant-name-oc",
+      "host": "opencode",
+      "config": "{\"schemaVersion\":\"2.0\",\"categories\":{\"opencode\":{\"design\":\"p/m\",\"efforts\":{\"design\":\"bad name\"}}}}",
+      "stdout": "{\"research\":\"inherit\",\"review\":\"inherit\",\"design\":\"inherit\",\"workflow\":\"inherit\",\"executor\":\"inherit\"}",
+      "stderr_lines": 1
+    }
   ]
 }

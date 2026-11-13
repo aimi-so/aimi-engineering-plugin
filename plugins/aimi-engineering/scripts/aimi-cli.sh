@@ -11465,6 +11465,100 @@ cmd_resolve_models() {
     --host-qualifier "$_host_qualifier"
 }
 
+# Print the efforts configured for the active host: one line of compact JSON
+# with the five category keys, each the stored effort or "inherit". Reader of
+# the same family as resolve-models and built on the same degrade rule: it
+# never fails, calls neither check_python3 nor check_jq, takes no lock and
+# makes one crossing into models.py. A missing file answers silently, with no
+# crossing. It never runs `opencode`: on OpenCode a variant without a model
+# reads inherit (models.py), and nothing else here needs the catalog.
+cmd_resolve_efforts() {
+  local config_file
+  config_file=$(_aimi_models_config_path)
+  local _fallback='{"research":"inherit","review":"inherit","design":"inherit","workflow":"inherit","executor":"inherit"}'
+
+  if [ ! -f "$config_file" ]; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local config_json
+  config_json=$(read_aimi_models_config) || config_json=""
+  if [ -z "$config_json" ]; then
+    echo "Warning: resolve-efforts: models config file is empty: $config_file" >&2
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  local host
+  if _is_claude_code_host; then
+    host="claudeCode"
+  else
+    host="opencode"
+  fi
+
+  if ! _models_python3_or_degrade resolve-efforts all-inherit; then
+    printf '%s\n' "$_fallback"
+    return 0
+  fi
+
+  printf '%s' "$config_json" | python3 "$(_aimi_models_py)" resolve-efforts \
+    --host "$host" \
+    --config-file "$config_file" \
+    --fallback "$_fallback"
+}
+
+# Print the effort choices a picker may offer, as one line of JSON.
+# Claude Code: the six levels, a constant (no crossing, no python3); --model is
+# accepted and ignored. OpenCode: the variants --model defines, in catalog
+# order, from one _oc_variant_catalog fetch parsed by models.py; [] for a model
+# with no variants or absent from the catalog or `inherit` (not fetched), and
+# null (distinct from []) plus one warning when the catalog is unavailable.
+# Exits 0 on every catalog path; a bad argument exits 1.
+cmd_effort_options() {
+  local _model="" _have_model=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model)
+        if [ $# -lt 2 ]; then
+          echo "Error: effort-options: --model needs a value" >&2
+          return 1
+        fi
+        _model="$2"
+        _have_model=1
+        shift 2
+        ;;
+      *)
+        echo "Error: effort-options: unknown argument: $1" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if _is_claude_code_host; then
+    printf '["inherit","low","medium","high","xhigh","max"]\n'
+    return 0
+  fi
+
+  if [ "$_have_model" = "0" ]; then
+    echo "Error: effort-options: --model <id> is required on OpenCode" >&2
+    return 1
+  fi
+  if [ "$_model" = "inherit" ]; then
+    printf '[]\n'
+    return 0
+  fi
+
+  if ! _models_python3_or_degrade effort-options "null (variant catalog unavailable)"; then
+    printf 'null\n'
+    return 0
+  fi
+
+  local _catalog
+  _catalog=$(_oc_variant_catalog) || _catalog=""
+  printf '%s' "$_catalog" | python3 "$(_aimi_models_py)" effort-options --model "$_model"
+}
+
 # Emit the current per-category model assignments for the active host.
 # Shape: {"research": <id|null>, "review": <id|null>, "design": <id|null>,
 #         "workflow": <id|null>, "executor": <id|null>}
@@ -17882,6 +17976,20 @@ COMMANDS:
                               v1.0 configs (top-level .models key or schemaVersion != "2.0")
                               are rejected with a stderr warning; all-inherit returned.
                               Warnings go to stderr; stdout is always valid JSON.
+    resolve-efforts           Print the efforts configured for the active host as one
+                              line of compact JSON with keys research, review, design,
+                              workflow, executor; each is the stored effort or "inherit".
+                              Claude Code: low|medium|high|xhigh|max. OpenCode: a variant
+                              name, and only for a category whose model is set. Invalid
+                              stored values read inherit with one stderr line each.
+                              Never fails and never runs opencode; without python3 it
+                              prints all-inherit and one warning.
+    effort-options [--model <id>]
+                              Print the effort choices a picker may offer, as JSON.
+                              Claude Code: ["inherit","low","medium","high","xhigh","max"]
+                              (--model ignored). OpenCode: the variants <id> defines, in
+                              catalog order; [] when it has none, null (with a warning)
+                              when the catalog is unavailable. --model is required there.
     get-current-models        Emit current per-category model assignments for the
                               active host as a JSON object with keys research, review,
                               design, workflow, executor. Unset entries emit JSON null
@@ -18913,6 +19021,8 @@ main() {
     slugify) shift; cmd_slugify "$@"; return ;;
     list-models) cmd_list_models; return ;;
     resolve-models) shift; cmd_resolve_models "$@"; return ;;
+    resolve-efforts) cmd_resolve_efforts; return ;;
+    effort-options) shift; cmd_effort_options "$@"; return ;;
     get-current-models) cmd_get_current_models; return ;;
     detect-models) shift; cmd_detect_models "$@"; return ;;
     models-prompt-check) cmd_models_prompt_check; return ;;

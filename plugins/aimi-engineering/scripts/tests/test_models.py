@@ -546,7 +546,8 @@ def test_each_reader_crosses_at_most_once_per_invocation():
     cli = _source(CLI)
     bodies = {}
     for name in ("cmd_resolve_models", "cmd_get_current_models",
-                 "cmd_models_prompt_check", "cmd_list_models"):
+                 "cmd_models_prompt_check", "cmd_list_models",
+                 "cmd_resolve_efforts", "cmd_effort_options"):
         start = cli.index("\n" + name + "() {")
         end = cli.index("\n}\n", start)
         bodies[name] = cli[start:end]
@@ -1216,3 +1217,205 @@ def test_effort_cli_help_lists_all_five_flags():
                           stdin=subprocess.DEVNULL)
     for category in M.CATEGORIES:
         assert "--" + category + "-effort" in done.stdout + done.stderr
+
+
+# ---------------------------------------------------------------------------
+# resolve-efforts and effort-options: the two effort READER verbs.
+# ---------------------------------------------------------------------------
+
+EFFORTS_READ_CASES = {c["label"]: c for c in GOLDEN["efforts_read_cases"]}
+_INHERIT_LINE = json.dumps(_ALL_INHERIT, separators=(",", ":"))
+_VERBOSE = (
+    'p/glm\n{\n  "variants": {"high": {}, "max": {}}\n}\n'
+    'p/plain\n{\n  "id": "plain"\n}\n'
+)
+
+
+def _stub_bin(tmp_path, catalog=_VERBOSE, variant_flag=True, fail_verbose=False):
+    """A directory holding a stub `opencode` that logs every call to calls.log."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "catalog.txt").write_text(catalog)
+    script = (
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "' + str(tmp_path / "calls.log") + '"\n'
+        'case "${1:-} ${2:-}" in\n'
+        '  "run --help") ' + ('echo "  --variant  v"' if variant_flag else 'echo "  --model"') + ' ;;\n'
+        '  "models --verbose") ' + ('exit 1' if fail_verbose else 'cat "$(dirname "$0")/catalog.txt"') + ' ;;\n'
+        "esac\n"
+    )
+    stub = bindir / "opencode"
+    stub.write_text(script)
+    stub.chmod(0o755)
+    return bindir
+
+
+def _cli(tmp_path, host, args, config=None, bindir=None, strip_python=False):
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    if config is not None:
+        (cfg / "models.json").write_text(config)
+    env = {k: v for k, v in os.environ.items() if k not in ("AIMI_PLUGIN_DIR", "CLAUDECODE")}
+    env["AIMI_CONFIG_DIR"] = str(cfg)
+    if host == "cc":
+        env["CLAUDECODE"] = "1"
+    path = env["PATH"]
+    if strip_python:
+        # A PATH holding only bash plus the coreutils the verb needs, no python3.
+        safe = tmp_path / "nopy"
+        safe.mkdir(exist_ok=True)
+        for tool in ("bash", "cat", "mkdir", "dirname", "env", "grep", "sed", "tr", "head", "stat", "rm"):
+            found = shutil.which(tool)
+            if found and not (safe / tool).exists():
+                (safe / tool).symlink_to(found)
+        path = str(safe)
+    if bindir is not None:
+        path = str(bindir) + ":" + path
+    env["PATH"] = path
+    done = subprocess.run(["bash", CLI] + args, env=env, capture_output=True,
+                          text=True, timeout=120, cwd=str(tmp_path))
+    return done.returncode, done.stdout.strip(), done.stderr
+
+
+@pytest.mark.parametrize("label", sorted(EFFORTS_READ_CASES))
+def test_resolve_efforts_golden_cases(label, tmp_path):
+    case = EFFORTS_READ_CASES[label]
+    host = "cc" if case["host"] == "claudeCode" else "oc"
+    rc, out, err = _cli(tmp_path, host, ["resolve-efforts"], config=case["config"])
+    assert rc == 0
+    assert out == case["stdout"]
+    assert json.loads(out)
+    assert len([l for l in err.splitlines() if "resolve-efforts" in l]) == case["stderr_lines"]
+
+
+def test_efforts_golden_says_no_jq_produced_it():
+    assert "no jq produced" in GOLDEN["_comment_efforts_read"]
+
+
+def test_efforts_golden_pins_false_as_unset_and_zero_as_invalid():
+    assert EFFORTS_READ_CASES["er-false-is-unset-cc"]["stderr_lines"] == 0
+    assert EFFORTS_READ_CASES["er-zero-is-invalid-cc"]["stderr_lines"] == 1
+
+
+def test_resolve_efforts_claudecode_example(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0",
+                      "categories": {"claudeCode": {"efforts": {"review": "high"}}}})
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=cfg)
+    assert (rc, out, err) == (0, '{"research":"inherit","review":"high","design":"inherit",'
+                                 '"workflow":"inherit","executor":"inherit"}', "")
+
+
+def test_resolve_efforts_missing_file_is_silent_and_never_crosses(tmp_path):
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], strip_python=True)
+    assert (rc, out, err) == (0, _INHERIT_LINE, "")
+
+
+@pytest.mark.parametrize("text", ["", "   \n", "{not json", "[]"])
+def test_resolve_efforts_unreadable_file_is_all_inherit(tmp_path, text):
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=text)
+    assert (rc, out) == (0, _INHERIT_LINE)
+    if text != "[]":
+        assert err.count("Warning: resolve-efforts:") == 1
+
+
+def test_resolve_efforts_without_python3_degrades_with_one_line(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0",
+                      "categories": {"claudeCode": {"efforts": {"review": "high"}}}})
+    rc, out, err = _cli(tmp_path, "cc", ["resolve-efforts"], config=cfg, strip_python=True)
+    assert (rc, out) == (0, _INHERIT_LINE)
+    assert err.strip() == ("Warning: resolve-efforts: python3 is required to read models.json "
+                           "and was not found; falling back to all-inherit.")
+
+
+def test_resolve_efforts_never_invokes_opencode(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    cfg = json.dumps({"schemaVersion": "2.0", "categories": {"opencode": {
+        "research": "p/glm", "efforts": {"research": "high"}}}})
+    rc, out, _ = _cli(tmp_path, "oc", ["resolve-efforts"], config=cfg, bindir=bindir)
+    assert json.loads(out)["research"] == "high"
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_resolve_efforts_leaves_resolve_models_alone(tmp_path):
+    cfg = json.dumps({"schemaVersion": "2.0", "categories": {"claudeCode": {
+        "review": "opus", "efforts": {"review": "high", "design": 0}}}})
+    rc, out, _ = _cli(tmp_path, "cc", ["resolve-models"], config=cfg)
+    assert json.loads(out)["review"] == "opus" and rc == 0
+
+
+def test_effort_options_claudecode_is_a_constant_without_python3(tmp_path):
+    expected = json.dumps(list(M.EFFORT_LEVELS), separators=(",", ":"))
+    assert _cli(tmp_path, "cc", ["effort-options"], strip_python=True)[:2] == (0, expected)
+    assert _cli(tmp_path, "cc", ["effort-options", "--model", "x/y"])[:2] == (0, expected)
+
+
+def test_effort_options_opencode_variants_in_catalog_order(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"], bindir=bindir)[:2] == (0, '["high","max"]')
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/plain"], bindir=bindir)[:2] == (0, "[]")
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "p/absent"], bindir=bindir)[:2] == (0, "[]")
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert calls.count("models --verbose") == 3
+
+
+def test_effort_options_inherit_does_not_fetch(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    assert _cli(tmp_path, "oc", ["effort-options", "--model", "inherit"], bindir=bindir)[:2] == (0, "[]")
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_effort_options_never_prints_a_name_outside_the_pattern(tmp_path):
+    bindir = _stub_bin(tmp_path, catalog='p/m\n{"variants": {"ok": {}, "bad name": {}}}\n')
+    rc, out, _ = _cli(tmp_path, "oc", ["effort-options", "--model", "p/m"], bindir=bindir)
+    assert (rc, out) == (0, '["ok"]')
+
+
+@pytest.mark.parametrize("kind", ["no-opencode", "no-variant-flag", "verbose-fails", "unparseable"])
+def test_effort_options_unavailable_catalog_is_null_with_a_warning(tmp_path, kind):
+    bindir = None
+    if kind == "no-variant-flag":
+        bindir = _stub_bin(tmp_path, variant_flag=False)
+    elif kind == "verbose-fails":
+        bindir = _stub_bin(tmp_path, fail_verbose=True)
+    elif kind == "unparseable":
+        bindir = _stub_bin(tmp_path, catalog="not a catalog\n")
+    env_strip = kind == "no-opencode"
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"], bindir=bindir)
+    if env_strip:
+        pytest.skip("host has a real opencode on PATH") if shutil.which("opencode") else None
+    assert (rc, out) == (0, "null")
+    assert "Warning: effort-options:" in err
+
+
+def test_effort_options_without_python3_is_null_with_a_warning(tmp_path):
+    bindir = _stub_bin(tmp_path)
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options", "--model", "p/glm"],
+                        bindir=bindir, strip_python=True)
+    assert (rc, out) == (0, "null")
+    assert err.count("Warning: effort-options:") == 1
+
+
+@pytest.mark.parametrize("args", [[], ["--model"], ["--bogus"], ["--model", "p/glm", "extra"]])
+def test_effort_options_bad_arguments_exit_one_on_opencode(tmp_path, args):
+    bindir = _stub_bin(tmp_path)
+    rc, out, err = _cli(tmp_path, "oc", ["effort-options"] + args, bindir=bindir)
+    assert (rc, out) == (1, "")
+    assert "Error: effort-options:" in err
+
+
+def test_effort_verbs_are_listed_in_help_and_dispatched_without_a_root(tmp_path):
+    rc, out, err = _cli(tmp_path, "cc", ["help"])
+    for verb in ("resolve-efforts", "effort-options"):
+        assert "    " + verb in out + err
+    cli = _source(CLI)
+    assert "resolve-efforts) cmd_resolve_efforts" in cli
+    assert "effort-options) shift; cmd_effort_options" in cli
+    assert '"resolve-efforts": op_resolve_efforts' in _source(os.path.join(SCRIPTS, "models.py"))
+    assert '"effort-options": op_effort_options' in _source(os.path.join(SCRIPTS, "models.py"))
+
+
+def test_resolve_efforts_op_malformed_models_table_means_every_model_unset():
+    done = subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS, "models.py"), "resolve-efforts", "--host", "opencode"],
+        input=json.dumps({"categories": {"opencode": "nope"}}), capture_output=True, text=True)
+    assert done.returncode == 0 and done.stdout.strip() == _INHERIT_LINE

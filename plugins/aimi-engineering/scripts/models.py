@@ -618,6 +618,67 @@ def op_resolve(argv):
     return 0
 
 
+def op_resolve_efforts(argv):
+    """resolve-efforts: the host's stored efforts, five keys, never failing.
+
+    Efforts never go through read_categories for their own read, so a
+    malformed container cannot reach a model read. On OpenCode a variant needs
+    a model: a category whose stored model is unset, blank, `inherit` or not a
+    string reads `inherit` whatever variant is stored. The verb never lists
+    models, so an invalid stored model that resolve-models would reduce to
+    inherit keeps its variant here; the consumer rule (variant only with a
+    model) covers it.
+    """
+    verb = "resolve-efforts"
+    config_file = _flag(argv, "--config-file") or ""
+    fallback = _flag(argv, "--fallback") or ""
+    host = _flag(argv, "--host") or ""
+
+    try:
+        docs = parse_stream(sys.stdin.read())
+    except ValueError:
+        warn("Warning: " + verb + ": models config file is malformed JSON or "
+             "failed to parse: " + config_file)
+        return emit_fallback(fallback)
+    if not docs:
+        warn("Warning: " + verb + ": empty result from models config: " + config_file)
+        return emit_fallback(fallback)
+
+    doc = docs[0]
+    efforts, warnings = read_efforts(doc, host, verb)
+    if host != "claudeCode":
+        try:
+            models = read_categories(doc, host)
+        except MalformedTasks:
+            models = {}
+        for category in CATEGORIES:
+            model = models.get(category)
+            if (not isinstance(model, str) or normalize(model) in ("", "inherit")):
+                efforts[category] = "inherit"
+    for line in warnings:
+        warn(line)
+    _emit_compact({category: efforts[category] for category in CATEGORIES})
+    return 0
+
+
+def op_effort_options(argv):
+    """effort-options (OpenCode): the variants one model defines, from stdin.
+
+    stdin is the text of `opencode models --verbose` (no document is involved).
+    `null` plus one warning when the catalog cannot be had; `[]` for a model
+    that lists no variants or is absent from the catalog.
+    """
+    model = _flag(argv, "--model") or ""
+    catalog = catalog_variants(sys.stdin.read())
+    if catalog is None:
+        warn("Warning: effort-options: the variant catalog is unavailable "
+             "(opencode models --verbose gave nothing usable); no variants can be offered")
+        _emit_compact(None)
+        return 0
+    _emit_compact(list(catalog.get(model, [])))
+    return 0
+
+
 def op_current(argv):
     """get-current-models: the same read, with JSON null where resolve says
     "inherit".
@@ -902,6 +963,8 @@ _OPS = {
     "current": op_current,
     "detect": op_detect,
     "prompt-check": op_prompt_check,
+    "resolve-efforts": op_resolve_efforts,
+    "effort-options": op_effort_options,
     "list": op_list,
 }
 
