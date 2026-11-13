@@ -11,6 +11,13 @@ import { $ } from "bun"
 const SAFE_MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._-]*)?$/
 
 /**
+ * Safe model variant pattern (the OpenCode `--variant` value, e.g. "high").
+ * Letters, digits, dot, underscore and hyphen, starting with a letter or digit,
+ * at most 64 characters. Same literal as the variant pattern in models.py.
+ */
+const SAFE_VARIANT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+
+/**
  * Valid bare agent name: starts with a letter or digit, followed by letters,
  * digits, underscores, or hyphens. No colons, no slashes, no other characters.
  */
@@ -81,6 +88,47 @@ function validateModel(model: string | undefined): string | null {
   return model
 }
 
+/**
+ * Validate the variant against a safe charset and against the model it rides on.
+ * Returns the variant string if it is to be forwarded, null when it is omitted.
+ *
+ * An empty string, undefined or the sentinel "inherit" omits the flag.
+ *
+ * A variant outside the pattern, or a variant with no model to apply to
+ * (absent, empty or "inherit"), is a config error and throws — silent drops
+ * could mask misconfiguration.
+ */
+function validateVariant(
+  variant: string | undefined,
+  model: string | null
+): string | null {
+  if (!variant || variant === "inherit") {
+    return null
+  }
+  if (!SAFE_VARIANT_PATTERN.test(variant)) {
+    throw new Error(
+      `Invalid variant "${variant}": must match ` +
+        `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$.`
+    )
+  }
+  if (model === null) {
+    throw new Error(
+      `Variant "${variant}" was passed without a model: a variant needs a model. ` +
+        `Pass the model too, or omit the variant.`
+    )
+  }
+  return variant
+}
+
+/** Read stdout/stderr off a Bun ShellError (its message is only the exit code). */
+function shellOutput(err: unknown): string {
+  if (typeof err !== "object" || err === null) return ""
+  const e = err as { stdout?: unknown; stderr?: unknown }
+  return [e.stdout, e.stderr]
+    .map((v) => (v === undefined || v === null ? "" : String(v)))
+    .join("\n")
+}
+
 export default tool({
   description:
     "Spawn a named subagent with an optional per-spawn model override. " +
@@ -102,10 +150,18 @@ export default tool({
         "Model override in provider/model-id format, e.g. anthropic/claude-opus-4-5. " +
           'Omit or pass "inherit" to inherit the session model.'
       ),
+    variant: tool.schema
+      .string()
+      .optional()
+      .describe(
+        "Model variant (reasoning effort) forwarded as --variant, e.g. high. " +
+          'Only valid together with model. Omit or pass "inherit" to use the model default.'
+      ),
   },
   async execute(args, context): Promise<string> {
     const agentName = deriveAgentName(args.subagent_type)
     const safeModel = validateModel(args.model)
+    const safeVariant = validateVariant(args.variant, safeModel)
 
     // Build the command as an array — Bun's $ array form passes each element
     // as a separate argv entry with no shell interpolation, preventing injection.
@@ -113,6 +169,10 @@ export default tool({
 
     if (safeModel !== null) {
       cmd.push("--model", safeModel)
+    }
+
+    if (safeVariant !== null) {
+      cmd.push("--variant", safeVariant)
     }
 
     // Prompt is the positional argument — append last
@@ -123,6 +183,14 @@ export default tool({
       return output
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
+      // opencode ran once; a rejected variant is reported, never retried without it.
+      if (safeVariant !== null && shellOutput(err).includes(safeVariant)) {
+        throw new Error(
+          `opencode run rejected variant "${safeVariant}" for model "${safeModel}" ` +
+            `(agent "${agentName}"). Fix the effort for this category with ` +
+            `/aimi:setup-models. The spawn was not retried without the variant.`
+        )
+      }
       throw new Error(
         `opencode run failed for agent "${agentName}": ${message}`
       )

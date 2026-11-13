@@ -21,6 +21,14 @@ set -uo pipefail
 #       strings the rewrite targets, so it is excluded on purpose)
 #     - the installed aimi/plan.md body still starts with the OpenCode Agent
 #       Invocation preamble and carries no AskUserQuestion literal
+#   effort forwarding (real tree)
+#     - the installed preamble's Step 0 fences, run in bash against stub CLIs,
+#       give the configured effort per category, and `inherit` for every
+#       category when resolve-efforts prints nothing, a long help text or a JSON
+#       value that is not an object, or when the CLI cannot be run
+#     - the effort annotations of aimi/review.md and the execute wave loop
+#       survive the translation, the AGENT_EFFORTS echo line of
+#       cli-path-resolution.md is kept, and tools/aimi-task.ts is byte-identical
 #   fixture plugin tree (plan/x.md and execute/y.md carrying the literals)
 #     - the plan/*.md and execute/*.md globs are translated, config-dir rewrite
 #       included, with no agent-invocation preamble and no general-purpose ->
@@ -126,6 +134,79 @@ PLAN_INSTALLED="$REAL/xdg/opencode/commands/aimi/plan.md"
 assert_eq "## OpenCode Agent Invocation" "$(sed -n 4p "$PLAN_INSTALLED")" \
   "real tree: aimi/plan.md body still starts with the agent-invocation preamble"
 assert_file_lacks "$PLAN_INSTALLED" "AskUserQuestion" "real tree: aimi/plan.md has no AskUserQuestion literal"
+
+# ---------------------------------------------------------------------------
+echo "== effort forwarding: preamble Step 0 and annotation survival"
+# ---------------------------------------------------------------------------
+# Step 0's fences (everything between "### Step 0" and "#### First-run"),
+# concatenated, then the five model and five effort variables printed.
+STEP0="$REAL/step0.sh"
+awk '/^### Step 0/ { on = 1; next } /^#### First-run/ { on = 0 } on && /^```/ { infence = !infence; next } on && infence { print }' \
+  "$PLAN_INSTALLED" > "$STEP0"
+assert_eq "yes" "$([ -s "$STEP0" ] && echo yes || echo no)" "effort: Step 0 fences extracted from aimi/plan.md"
+cat >> "$STEP0" <<'EOS'
+for v in RESEARCH REVIEW DESIGN WORKFLOW EXECUTOR; do
+  eval "m=\$${v}_MODEL e=\$${v}_EFFORT"
+  printf '%s_MODEL=%s %s_EFFORT=%s\n' "$v" "$m" "$v" "$e"
+done
+EOS
+
+# run_step0 <file holding the resolve-efforts branch body> -- sets OUT
+run_step0() {
+  local d stub
+  d=$(new_tmp)
+  stub="$d/aimi-cli.sh"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$1" in\n'
+    printf '  resolve-models) printf "%%s\\n" '"'"'{"research":"m1","review":"m2","design":"inherit","workflow":"m4","executor":"m5"}'"'"' ;;\n'
+    printf '  resolve-efforts) %s ;;\n' "$1"
+    printf 'esac\n'
+  } > "$stub"
+  chmod +x "$stub"
+  OUT=$(AIMI_CLI="$stub" bash "$STEP0" 2>&1)
+}
+ALL_INH="RESEARCH_MODEL=m1 RESEARCH_EFFORT=inherit
+REVIEW_MODEL=m2 REVIEW_EFFORT=inherit
+DESIGN_MODEL=inherit DESIGN_EFFORT=inherit
+WORKFLOW_MODEL=m4 WORKFLOW_EFFORT=inherit
+EXECUTOR_MODEL=m5 EXECUTOR_EFFORT=inherit"
+run_step0 "echo '{\"research\":\"low\",\"review\":\"high\",\"design\":\"inherit\",\"workflow\":\"medium\",\"executor\":\"max\"}'"
+assert_eq "RESEARCH_MODEL=m1 RESEARCH_EFFORT=low
+REVIEW_MODEL=m2 REVIEW_EFFORT=high
+DESIGN_MODEL=inherit DESIGN_EFFORT=inherit
+WORKFLOW_MODEL=m4 WORKFLOW_EFFORT=medium
+EXECUTOR_MODEL=m5 EXECUTOR_EFFORT=max" "$OUT" "effort: a configured category gives its value, the others inherit"
+run_step0 ":"
+assert_eq "$ALL_INH" "$OUT" "effort: resolve-efforts printing nothing gives inherit everywhere"
+run_step0 'for i in $(seq 1 300); do echo "help line $i"; done'
+assert_eq "$ALL_INH" "$OUT" "effort: a long help text gives inherit everywhere"
+run_step0 "echo '[\"high\"]'"
+assert_eq "$ALL_INH" "$OUT" "effort: a JSON array gives inherit everywhere"
+run_step0 "echo '\"high\"'"
+assert_eq "$ALL_INH" "$OUT" "effort: a JSON string gives inherit everywhere"
+OUT=$(AIMI_CLI="$REAL/does-not-exist" bash "$STEP0" 2>/dev/null)
+assert_eq "5" "$(printf '%s\n' "$OUT" | grep -c '_EFFORT=inherit$')" \
+  "effort: a CLI that cannot be run gives inherit everywhere"
+
+assert_file_has "$PLAN_INSTALLED" 'RESOLVED_EFFORTS=$($AIMI_CLI resolve-efforts 2>/dev/null | head -n 1)' \
+  "effort: preamble resolves RESOLVED_EFFORTS through head -n 1"
+assert_file_has "$PLAN_INSTALLED" 'variant="[$EXECUTOR_EFFORT' "effort: the aimi-task example carries variant="
+
+# effort annotations survive the translation, in order
+effort_tokens() { grep -o 'effort: <AGENT_EFFORTS\.[a-z]* when not "inherit">' "$1"; }
+INST_PLUGIN="$REAL/xdg/opencode/plugins/aimi-engineering"
+for pair in "$SRC_PLUGIN/commands/review.md:$REAL/xdg/opencode/commands/aimi/review.md" \
+            "$SRC_PLUGIN/commands/references/execute/step-4-wave-execution-loop.md:$INST_PLUGIN/commands/references/execute/step-4-wave-execution-loop.md"; do
+  src="${pair%%:*}"; dst="${pair#*:}"
+  n=$(effort_tokens "$src" | wc -l | tr -d ' ')
+  assert_eq "yes" "$([ "$n" -ge 1 ] && echo yes || echo no)" "effort: $(basename "$src") source has effort tokens"
+  assert_eq "$(effort_tokens "$src")" "$(effort_tokens "$dst")" "effort: $(basename "$src") tokens survive in order"
+done
+assert_file_has "$REFS/cli-path-resolution.md" 'echo "AGENT_EFFORTS=$($AIMI_CLI resolve-efforts | head -n 1)"' \
+  "effort: cli-path-resolution.md keeps the AGENT_EFFORTS echo line"
+assert_same_file "$SRC_PLUGIN/tools/aimi-task.ts" "$REAL/xdg/opencode/tools/aimi-task.ts" \
+  "effort: installed aimi-task.ts is byte-identical to the source"
 
 # ---------------------------------------------------------------------------
 echo "== fixture plugin tree: glob mode, dry run, uninstall, repeat install"
