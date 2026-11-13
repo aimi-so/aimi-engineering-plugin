@@ -238,13 +238,7 @@ Read and follow the **Resolve Agent Models** section of `commands/references/cli
 
 ## Step 2: Choose the Reviewers
 
-Pick from this table. Step 3's message that starts the reviewers opens with this block as text, before its first Task call; a message with no tool call would end the turn and stop the run:
-
-```
-Team for [repository]:
-- [reviewer]: [why it runs, from the table]
-- Not run: [subject the FOCUS left out, or a conditional row whose subject is not in the diff], [why]
-```
+Pick from this table. Keep, for the report, one reason per reviewer that runs and per row that does not.
 
 | Reviewer | With no FOCUS, it runs when |
 |----------|-----------------------------|
@@ -379,8 +373,8 @@ Findings from this agent are emitted at the same severity levels (P1/P2/P3) as a
 
 ### Review Agents Used
 
-- [each reviewer that ran, with its repository when there were several]
-- Not run: [each subject the FOCUS left out, or none]
+- [each reviewer that ran, with its repository when there were several, and why it ran]
+- Not run: [each row that did not run, and why: the FOCUS left it out, or its subject is not in the diff]
 - Not read by any reviewer: [changed source files no reviewer read, after the second pass, or none]
 
 ### Next Steps
