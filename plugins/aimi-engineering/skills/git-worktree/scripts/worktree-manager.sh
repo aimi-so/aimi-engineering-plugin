@@ -2652,7 +2652,9 @@ serve_stop() {
 
 # Report a container worktree's dev server status: a true read-only verb.
 # Contract (consumed by US-007/US-013 via jq): prints EXACTLY one line of
-# JSON with keys running (boolean), port (number|null), pid (number|null);
+# JSON with keys running (boolean), port (number|null), pid (number|null),
+# command (string|null: the recipe command a `serve start --command` recorded,
+# null for a default-mode entry or a server that is not running);
 # exit 0 in EVERY state case — no .aimi/ locatable, no entry registered, a
 # dead pid, a live pid with a complete entry, and a live pid with a
 # partial/corrupt entry (e.g. missing port). No other stdout output is
@@ -2686,7 +2688,7 @@ serve_status() {
 
   local aimi_root
   if ! aimi_root=$(find_aimi_root); then
-    jq -n -c '{running: false, port: null, pid: null}'
+    jq -n -c '{running: false, port: null, pid: null, command: null}'
     return 0
   fi
 
@@ -2710,15 +2712,24 @@ serve_status() {
   IFS=',' read -r pid port <<<"$line"
 
   if [[ -n "$pid" ]] && _is_pid_alive "$pid"; then
+    # The recorded command, read on its own because it may hold a comma. jq
+    # -c prints a JSON string or null, so --argjson below always gets a
+    # literal; anything unreadable degrades to null.
+    local command_json
+    command_json=$(_dev_server_read_all "$state_file" | jq -c --arg key "$dev_server_key" \
+      'if type == "object" then (.[$key] // {}) else {} end
+       | if type == "object" then .command else null end
+       | if type == "string" and . != "" then . else null end' 2>/dev/null) || command_json=null
+    [[ -n "$command_json" ]] || command_json=null
     # --arg + tonumber?, never --argjson: --argjson requires a valid JSON
     # literal, so an empty or non-numeric port/pid string would abort jq
     # with exit 2 and no stdout at all — exactly the contract violation this
     # rewrite fixes. tonumber? // null degrades a missing/non-numeric field
     # to JSON null instead of crashing.
-    jq -n -c --arg port "$port" --arg pid "$pid" \
-      '{running: true, port: ($port | tonumber? // null), pid: ($pid | tonumber? // null)}'
+    jq -n -c --arg port "$port" --arg pid "$pid" --argjson command "$command_json" \
+      '{running: true, port: ($port | tonumber? // null), pid: ($pid | tonumber? // null), command: $command}'
   else
-    jq -n -c '{running: false, port: null, pid: null}'
+    jq -n -c '{running: false, port: null, pid: null, command: null}'
   fi
 }
 
@@ -2896,7 +2907,7 @@ Commands:
                                       whole process group)
   serve stop --root                   Stop the checkout's own --root server
   serve status <worktree-name>        Report a worktree's dev server status as
-                                      single-line JSON: {"running":bool,"port":n|null,"pid":n|null}
+                                      single-line JSON: {"running":bool,"port":n|null,"pid":n|null,"command":s|null}
   serve status --root                 The same for the checkout's own --root server
   serve url <name> <raw-url>          Rewrite <raw-url>'s origin to the worktree's
                                       running dev server (path/query preserved);
@@ -3024,7 +3035,7 @@ Serve (Dev Server):
     warning is printed and no signal is sent. The state entry is removed in
     every case: kill succeeded, kill failed, or kill was never attempted
   - serve status prints EXACTLY one line of JSON to stdout:
-    {"running":<bool>,"port":<number|null>,"pid":<number|null>}, exit 0 in
+    {"running":<bool>,"port":<number|null>,"pid":<number|null>,"command":<string|null>}, exit 0 in
     EVERY state case — no .aimi/ locatable, no entry registered, a dead pid,
     a live pid with a complete entry, or a live pid with a partial/corrupt
     entry (e.g. missing port). This exact shape is a contract consumed by

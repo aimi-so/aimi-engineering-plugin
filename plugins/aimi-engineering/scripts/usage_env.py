@@ -82,7 +82,6 @@ DOWN_VERB = "usage-env-down"
 RUN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9/_-]*$")
 BRANCH_RE = RUN_RE
 STATE_SUBDIR = os.path.join(".aimi", "state", "usage-env")
-DEV_SERVER_STATE = os.path.join(".aimi", "state", "dev-server.json")
 
 DEFAULT_STEP_TIMEOUT = 900
 DEFAULT_READY_TIMEOUT = 300
@@ -242,12 +241,21 @@ def _target_args(repo):
     return ["--root"] if repo.get("branch") is None else [repo["branch"]]
 
 
-def _server_running(manager, server):
+def _server_status(manager, server):
+    """The manager's `serve status` answer for <server>, or {} when unreadable.
+
+    The manager owns dev-server.json and its pid-ownership rules; this module
+    never opens that file."""
     try:
         out = _manager(manager, server["toplevel"], ["serve", "status"] + server["target"], 30)
-        return bool(json.loads(out.stdout.strip().splitlines()[-1]).get("running"))
+        answer = json.loads(out.stdout.strip().splitlines()[-1])
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
-        return False
+        return {}
+    return answer if isinstance(answer, dict) else {}
+
+
+def _server_running(manager, server):
+    return bool(_server_status(manager, server).get("running"))
 
 
 def _stop_server(manager, server):
@@ -256,29 +264,6 @@ def _stop_server(manager, server):
         return True
     except (OSError, subprocess.TimeoutExpired):
         return False
-
-
-def _registered_entry(aimi_root, key):
-    """The dev-server.json entry for <key>, or None. Read only."""
-    try:
-        with open(os.path.join(aimi_root, DEV_SERVER_STATE), "r", encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, ValueError):
-        return None
-    entry = doc.get(key) if isinstance(doc, dict) else None
-    return entry if isinstance(entry, dict) else None
-
-
-def _pid_alive(pid):
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
 
 
 def _port_busy(port):
@@ -668,14 +653,16 @@ class _Runner:
         if argv is None:
             return self.fail(stage, "serve command %s: %s" % (problem, serve), repo)
 
-        # Whatever sits on this key without a recorded recipe command (the
-        # default `run dev` server) would be adopted by serve start's reuse
-        # path; it is stopped first. One with a command is left for serve start
-        # to compare.
-        entry = _registered_entry(self.state["aimiRoot"], os.path.realpath(repo["worktree"]))
-        if entry and not entry.get("command") and _pid_alive(entry.get("pid")):
+        # Whatever runs on this key without a recorded recipe command (the
+        # default `run dev` server) would block serve start's reuse path; it is
+        # stopped first. One with a command is left for serve start to compare.
+        # `serve status` reports both, and `serve stop` signals the pid only
+        # when dev_server_entry_is_ours confirms it.
+        target = {"toplevel": toplevel, "target": _target_args(repo)}
+        current = _server_status(manager, target)
+        if current.get("running") and not current.get("command"):
             self.note("stopping the default dev server registered for %s" % repo["project"])
-            _stop_server(manager, {"toplevel": toplevel, "target": _target_args(repo)})
+            _stop_server(manager, target)
 
         cmd = ["serve", "start"] + _target_args(repo) + ["--command", serve]
         if isinstance(recipe.get("port"), int):

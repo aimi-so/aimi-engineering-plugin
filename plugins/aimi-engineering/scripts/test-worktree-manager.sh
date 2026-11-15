@@ -636,7 +636,7 @@ test_serve_status_never_started() {
   # whole script before it reaches its own jq -n fallback. This assertion
   # intentionally targets the documented contract in worktree-manager.sh's
   # serve_status comment, not today's behavior — see this story's report.
-  assert_eq '{"running":false,"port":null,"pid":null}' "$status_out" \
+  assert_eq '{"running":false,"port":null,"pid":null,"command":null}' "$status_out" \
     "serve status: never started — JSON shape"
   assert_exit_code "0" "$status_rc" "serve status: never started — exit code"
 
@@ -724,7 +724,7 @@ test_serve_status_stale_after_external_kill() {
   status_out=$(bash "$WTM" serve status "$_SERVE_FIXTURE_BRANCH" 2>/dev/null)
   status_rc=$?
 
-  assert_eq '{"running":false,"port":null,"pid":null}' "$status_out" \
+  assert_eq '{"running":false,"port":null,"pid":null,"command":null}' "$status_out" \
     "serve status: stale after kill — JSON shape (not running)"
   assert_exit_code "0" "$status_rc" "serve status: stale after kill — exit code"
 
@@ -1152,6 +1152,9 @@ test_serve_command_lifecycle() {
   assert_eq "$cmd" "$(jq -r '.[] | .command' "$state")" "serve command: dev-server.json records command"
   assert_eq "$port" "$(jq -r '.[] | .port' "$state")" "serve command: dev-server.json records the port"
 
+  assert_eq "$cmd" "$(bash "$WTM" serve status "$branch" 2>/dev/null | jq -r '.command')" \
+    "serve command: status reports the recorded command"
+
   local pid1
   pid1=$(jq -r '.[] | .pid' "$state")
   sc_start "$branch" --command "$cmd" --port "$port"
@@ -1177,6 +1180,8 @@ test_serve_command_lifecycle() {
   sc_start "$branch"
   assert_contains "http://127.0.0.1:" "$SC_OUT" "serve command: default mode still starts the package.json dev server"
   assert_eq "null" "$(jq -r '.[] | .command // "null"' "$state")" "serve command: a default entry records no command"
+  assert_eq "null" "$(bash "$WTM" serve status "$branch" 2>/dev/null | jq -r '.command')" \
+    "serve command: status reports no command for a default entry"
   sc_start "$branch" --command "$cmd" --port "$(sc_free_port)"
   assert_eq "" "$SC_OUT" "serve command: a command start does not reuse a default-mode entry"
   assert_contains "serve stop $branch" "$SC_ERR" "serve command: a command start names serve stop for a default entry"
