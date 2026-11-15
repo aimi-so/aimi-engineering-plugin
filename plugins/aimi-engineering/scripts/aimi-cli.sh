@@ -16880,6 +16880,65 @@ cmd_usage_validation_required() {
   python3 "$(_aimi_script_py usage_validation.py)" files --tasks-file "$tasks_file"
 }
 
+# Where a run's usage-validation record lives, and the record: the one reader
+# the commands call instead of branching phase versus flat themselves. A
+# phase-scoped tasks file is followed to its roadmap phase; a flat one answers
+# its own metadata.usageValidation. Prints {scope, feature, phase, record}.
+# A read: no lock, nothing written, one crossing into tasks.py. It refuses
+# without python3 like usage-validation-required and usage-recipe-get: a
+# "none recorded" that is only a missing interpreter would read a failing
+# verdict as no verdict, so the callers print "unknown" on a refusal instead.
+cmd_usage_validation_get() {
+  local feature="" phase_id="" tasks_file="" have_feature=0 have_phase=0 have_tasks=0
+  local usage="Usage: aimi-cli.sh usage-validation-get (--feature <slug> --phase <id> | [--tasks-file <path>])"
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --feature) have_feature=1; shift; feature="${1:-}" ;;
+      --phase) have_phase=1; shift; phase_id="${1:-}" ;;
+      --tasks-file) have_tasks=1; shift; tasks_file="${1:-}" ;;
+      *)
+        echo "Error: usage-validation-get: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if { [ "$have_feature" -eq 1 ] || [ "$have_phase" -eq 1 ]; } && [ "$have_tasks" -eq 1 ]; then
+    echo "Error: usage-validation-get: --tasks-file cannot be combined with --feature/--phase" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+  if [ "$have_feature" -ne "$have_phase" ]; then
+    echo "Error: usage-validation-get: --feature and --phase must be given together" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  local op_args=()
+  if [ "$have_feature" -eq 1 ]; then
+    _roadmap_validate_feature "$feature" usage-validation-get
+    _roadmap_validate_phase_id "$phase_id" "usage-validation-get"
+    local roadmap_path
+    roadmap_path=$(_roadmap_require "usage-validation-get" "$feature")
+    op_args=(--roadmap "$roadmap_path" --feature "$feature" --phase "$phase_id")
+  else
+    if [ -n "$tasks_file" ]; then
+      tasks_file=$(resolve_path "$tasks_file")
+      validate_path_in_project "$tasks_file"
+    else
+      tasks_file=$(get_tasks_file)
+    fi
+    op_args=(--tasks-file "$tasks_file" --project-root "$PROJECT_ROOT")
+  fi
+
+  # One crossing for both forms; a reader, so no lock.
+  check_python3
+  python3 "$(_aimi_tasks_py)" usage-validation-get "${op_args[@]}"
+}
+
 # The gate outcome of one usage validation, computed from the validator's last
 # usage_validation_verdict block (stdin), the required answer and the evidence
 # directory. A read: no lock, nothing written, one crossing into
@@ -19225,6 +19284,15 @@ COMMANDS:
                               surfaces, charters, specs}. skipKind is
                               disabled-by-operator (AIMI_USAGE_VALIDATION=off),
                               unable-to-evaluate, not-applicable or null. Needs python3.
+    usage-validation-get --feature <slug> --phase <id> | [--tasks-file <path>]
+                              Read-only. Where a run's usage-validation record lives
+                              and the record: a phase-scoped tasks file (the
+                              session's when --tasks-file is absent) is followed
+                              through metadata.roadmapPath to its roadmap phase, a
+                              flat one answers its own metadata.usageValidation.
+                              Prints {scope (phase|flat), feature, phase, record};
+                              record is null when none is stored. Exits 1 when the
+                              roadmap or the phase cannot be read. Needs python3.
     usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]...
                               Read-only. Reads the validator's final message on stdin,
                               takes only its LAST fenced usage_validation_verdict
@@ -19666,6 +19734,7 @@ main() {
     roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
     roadmap-record-usage-validation) shift; cmd_roadmap_record_usage_validation "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
+    usage-validation-get) shift; cmd_usage_validation_get "$@" ;;
     usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;

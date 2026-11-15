@@ -83,6 +83,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import tasks as T  # noqa: E402
+import usage_record  # noqa: E402
 from plan_text import plan_text  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -5344,7 +5345,16 @@ def test_the_only_file_tasks_py_writes_is_the_one_it_was_handed(tmp_path):
     # build the phase's tasks path. They compose strings and touch nothing: both
     # document-sourced paths reach the disk only through confined_spec_path, and
     # the reads go through load_docs, so no open() arrived with them.
-    assert code.count("os.path.") == 61
+    #
+    # The last SEVEN are op_usage_validation_get's: a relpath, a join, two
+    # dirnames and an abspath that name the roadmap.json two directories above
+    # a phase tasks file when metadata.roadmapPath is absent, then a basename
+    # and a dirname of the resolved roadmap path for the feature slug. They
+    # compose strings only: the roadmap path, whichever way it was named,
+    # reaches the disk only through confined_spec_path, and the read goes
+    # through _read_json_object, so no open() arrived with them. No new root,
+    # and the verb writes nothing.
+    assert code.count("os.path.") == 68
     assert code.count("os.path.isfile(") == 11  # 9 + acknowledge-evidence's two
     assert code.count("os.path.isdir(") == 4  # 3 + R23's verify_grep_directory_findings
     confinement = code.split("def confined_spec_path", 1)[1].split("\ndef ", 1)[0]
@@ -7128,6 +7138,7 @@ def test_every_op_is_named_after_the_verb_that_calls_it():
         "acknowledge-smell",
         "acknowledge-evidence",
         "usage-validation-record",
+        "usage-validation-get",
         "judge-verification",
         "reset-orphaned",
         "archive-task",
@@ -11927,15 +11938,49 @@ def test_usage_validation_findings_merge_keeps_accepted_and_drops_open_and_fixed
     assert list(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == ["a:1:h"]
 
 
+def test_usage_validation_keeps_a_stored_failing_record_over_an_unable_to_evaluate_skip(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    capsys.readouterr()
+    with open(path, "rb") as handle:
+        before = handle.read()
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["kept"] == "failing" and answer["usageValidation"]["reason"] == "open bug"
+    assert answer["requested"] == {"status": "skipped", "kind": "unable-to-evaluate", "reason": "env down"}
+    with open(path, "rb") as handle:
+        assert handle.read() == before
+
+
+@pytest.mark.parametrize("flags", [
+    ("--status", "passed"),
+    ("--status", "failing", "--reason", "new"),
+    ("--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"),
+    ("--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"),
+])
+def test_usage_validation_overwrites_a_stored_failing_record_with_a_judged_or_chosen_verdict(tmp_path, capsys, flags):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "failing", "--reason", "open bug") == 0
+    assert _uv(path, *flags) == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["status"] == flags[1]
+
+
+def test_usage_validation_an_unable_skip_without_a_failing_record_is_written(tmp_path, capsys):
+    path = _uv_file(tmp_path)
+    assert _uv(path, "--status", "passed") == 0
+    assert _uv(path, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down") == 0
+    assert _rs_read(path)["metadata"]["usageValidation"]["kind"] == "unable-to-evaluate"
+
+
 def test_usage_validation_findings_cap_and_reason_sanitizing(tmp_path, capsys):
     path = _uv_file(tmp_path)
     many = {"k%d" % i: {"status": "open"} for i in range(250)}
     assert _uv(path, "--status", "passed", "--findings-json", json.dumps(many)) == 0
-    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == T.USAGE_VALIDATION_FINDINGS_MAX
+    assert len(_rs_read(path)["metadata"]["usageValidation"]["findings"]) == usage_record.FINDINGS_MAX
     one = json.dumps({"a": {"status": "accepted", "reason": "x" * 900}})
     assert _uv(path, "--status", "passed", "--findings-json", one) == 0
     reason = _rs_read(path)["metadata"]["usageValidation"]["findings"]["a"]["reason"]
-    assert len(reason) <= T.USAGE_VALIDATION_FINDING_REASON_MAXLEN
+    assert len(reason) <= usage_record.FINDING_REASON_MAXLEN
 
 
 def test_usage_validation_failing_blocks_archive_and_the_predicate_until_passed(tmp_path):

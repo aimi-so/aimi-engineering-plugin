@@ -14,37 +14,30 @@ When execution ends (all stories complete, or deadlock detected):
 
 ### If all stories complete:
 
-**Usage-validation gate, once, before any container step.** Read the run's own stored verdict: a `failing` record holds this step's publishing path, and every other state leaves it exactly as it is. Only `failing` holds: a `skipped` record of any kind (an `unable-to-evaluate` one included) never does, an absent record prints `usage-validation: not recorded` and an unreadable one prints `usage-validation: unknown — <stage>`, never `passed`.
+**Usage-validation gate, once, before any container step.** Read the run's own stored verdict with `usage-validation-get`, which follows a phase-scoped tasks file to its roadmap phase's record and reads a flat one's own: a `failing` record holds this step's publishing path, and every other state leaves it exactly as it is. Only `failing` holds: a `skipped` record of any kind (an `unable-to-evaluate` one included) never does, an absent record prints `usage-validation: not recorded` and an unreadable one prints `usage-validation: unknown — <stage>`, never `passed`.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
 : "${AIMI_CLI:?AIMI_CLI is empty — re-resolve via cat ~/.config/aimi/cli-path in this Bash call}"
-USAGE_MODE="[phase in phase mode, otherwise flat]"
-USAGE_TASKS_FILE="[TASKS_PATH]"
-USAGE_FEATURE="[FEATURE in phase mode, otherwise empty]"
-USAGE_PHASE_ID="[PHASE_ID in phase mode, otherwise empty]"
+USAGE_TASKS_FILE="[PHASE_TASKS_PATH in phase mode, otherwise TASKS_PATH]"
 # usage-gate:begin
 USAGE_STAGE=""
-if [ "$USAGE_MODE" = phase ]; then
-  USAGE_JSON=$("$AIMI_CLI" roadmap-get --feature "$USAGE_FEATURE" --phase "$USAGE_PHASE_ID" 2>/dev/null) || USAGE_STAGE="roadmap-get exited non-zero"
-else
-  USAGE_JSON=$("$AIMI_CLI" metadata --tasks-file "$USAGE_TASKS_FILE" 2>/dev/null) || USAGE_STAGE="metadata exited non-zero"
-fi
+USAGE_JSON=$("$AIMI_CLI" usage-validation-get --tasks-file "$USAGE_TASKS_FILE" 2>/dev/null) || USAGE_STAGE="usage-validation-get exited non-zero"
 [ -n "$USAGE_STAGE" ] || [ -n "$USAGE_JSON" ] || USAGE_STAGE="empty answer"
 USAGE_STATUS=""
-[ -n "$USAGE_STAGE" ] || USAGE_STATUS=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.status // "none"' 2>/dev/null) || USAGE_STAGE="answer is not JSON"
+[ -n "$USAGE_STAGE" ] || USAGE_STATUS=$(printf '%s' "$USAGE_JSON" | jq -r '.record.status // "none"' 2>/dev/null) || USAGE_STAGE="answer is not JSON"
 USAGE_GATE=go
 if [ -n "$USAGE_STAGE" ]; then
   printf 'usage-validation: unknown — %s\n' "$USAGE_STAGE"
 elif [ "$USAGE_STATUS" = none ]; then
   echo "usage-validation: not recorded"
 else
-  USAGE_KIND=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.kind // ""')
-  USAGE_REASON=$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.reason // ""')
+  USAGE_KIND=$(printf '%s' "$USAGE_JSON" | jq -r '.record.kind // ""')
+  USAGE_REASON=$(printf '%s' "$USAGE_JSON" | jq -r '.record.reason // ""')
   printf 'usage-validation-detail: rounds=%s open=%s review=%s\n' \
-    "$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.rounds // 0')" \
-    "$(printf '%s' "$USAGE_JSON" | jq -r '[(.usageValidation.findings // {}) | to_entries[] | select(.value.status == "open")] | length')" \
-    "$(printf '%s' "$USAGE_JSON" | jq -r '.usageValidation.review // ""')"
+    "$(printf '%s' "$USAGE_JSON" | jq -r '.record.rounds // 0')" \
+    "$(printf '%s' "$USAGE_JSON" | jq -r '[(.record.findings // {}) | to_entries[] | select(.value.status == "open")] | length')" \
+    "$(printf '%s' "$USAGE_JSON" | jq -r '.record.review // ""')"
   USAGE_LINE="usage-validation: $USAGE_STATUS"
   [ "$USAGE_STATUS" = skipped ] && [ -n "$USAGE_KIND" ] && USAGE_LINE="$USAGE_LINE ($USAGE_KIND)"
   [ -z "$USAGE_REASON" ] || USAGE_LINE="$USAGE_LINE — $USAGE_REASON"

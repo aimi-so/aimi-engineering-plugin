@@ -120,6 +120,26 @@ def test_usage_phase_skip_a_refused_record_is_tooling_failed(tmp_path, shell):
     assert calls[-1] == "roadmap-release-claim --feature feat --phase 2.1"
 
 
+KEPT = '{"kept": "failing", "usageValidation": {"status": "failing", "reason": "old"}}'
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_usage_phase_skip_a_kept_answer_fails_the_phase_and_releases(tmp_path, shell):
+    """An unable-to-evaluate skip over a stored failing record: the writer keeps
+    the record and answers `kept`; the block never prints a skipped line, sets
+    verification_failed and releases the claim, so no handoff follows."""
+    proc, calls = run_block(tmp_path, shell, "usage-phase-skip", skip_preamble("unable-to-evaluate", "no recipe"),
+                            {"roadmap-record-usage-validation": (0, KEPT), "roadmap-set-status": (0, ""),
+                             "roadmap-release-claim": (0, "")})
+    assert proc.returncode == 0
+    assert calls == [
+        "roadmap-record-usage-validation --feature feat --phase 2.1 --status skipped --kind unable-to-evaluate --reason no recipe",
+        "roadmap-set-status --feature feat --phase 2.1 --status verification_failed",
+        "roadmap-release-claim --feature feat --phase 2.1",
+    ]
+    assert proc.stdout == "usage-validation: failing — re-validation could not run (no recipe)\n"
+
+
 def record_preamble(line, findings="{}", reason="", review_exists=False, tmp_path=None):
     pre = REQ + 'USAGE_LOOP_LINE="%s"\n' % line
     pre += "USAGE_LOOP_FINDINGS=$(cat <<'E1'\n%s\nE1\n)\n" % findings
@@ -176,6 +196,23 @@ def test_usage_phase_record_unable_to_evaluate_is_a_skip_with_the_loops_reason(t
 
 
 @pytest.mark.parametrize("shell", SHELLS)
+def test_usage_phase_record_a_kept_answer_fails_the_phase_and_releases(tmp_path, shell):
+    answers = dict(OK)
+    answers["roadmap-record-usage-validation"] = (0, KEPT)
+    proc, calls = run_block(tmp_path, shell, "usage-phase-record",
+                            record_preamble(loop_line("unable-to-evaluate", 0), "{}", "no browser"), answers)
+    assert proc.returncode == 0
+    assert calls == [
+        "roadmap-record-usage-validation --feature feat --phase 2.1 --status skipped "
+        "--kind unable-to-evaluate --reason no browser --rounds 0",
+        "roadmap-set-status --feature feat --phase 2.1 --status verification_failed",
+        "roadmap-release-claim --feature feat --phase 2.1",
+    ]
+    assert proc.stdout == "usage-validation: failing — re-validation could not run (no browser)\n"
+    assert "skipped" not in proc.stdout
+
+
+@pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("outcome", ["tooling-failed", "banana", ""])
 def test_usage_phase_record_any_other_outcome_records_nothing_and_releases(tmp_path, shell, outcome):
     proc, calls = run_block(tmp_path, shell, "usage-phase-record", record_preamble(loop_line(outcome)), OK)
@@ -209,7 +246,7 @@ def _help_flags(verb):
 
 
 @pytest.mark.parametrize("verb", ["usage-validation-required", "roadmap-record-usage-validation", "roadmap-set-status",
-                                  "roadmap-release-claim", "roadmap-get"])
+                                  "roadmap-release-claim", "usage-validation-get"])
 def test_usage_phase_every_flag_passed_is_one_the_cli_help_lists(verb):
     help_flags = _help_flags(verb)
     used = set()
@@ -286,3 +323,84 @@ def test_usage_phase_handoff_carries_the_two_locked_lines():
     text = (ROOT / "commands" / "references" / "execute" / "phase-completion-handoff-and-mark.md").read_text(encoding="utf-8")
     assert "`usage-validation: <status> — <reason>`" in text and "usage-validation-stale:" in text
     assert "**Eleven tokens in this payload are locked tokens" in text and "Nine tokens" not in text
+
+
+WTM = ROOT / "skills" / "git-worktree" / "scripts" / "worktree-manager.sh"
+
+
+def _git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=60)
+
+
+def _phase_container_repo(tmp_path, branch="feat/pb"):
+    """A throwaway repository whose PHASE_BRANCH is checked out in its phase
+    container, `<toplevel>/.worktrees/<branch>`, the way Step 1.7 leaves it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (("init", "-q", "-b", "main"), ("config", "user.email", "t@example.com"),
+                 ("config", "user.name", "t"), ("config", "commit.gpgsign", "false")):
+        assert _git(repo, *args).returncode == 0
+    (repo / ".gitignore").write_text(".worktrees/\n.aimi/\n", encoding="utf-8")
+    (repo / "a.txt").write_text("a\n", encoding="utf-8")
+    assert _git(repo, "add", ".").returncode == 0
+    assert _git(repo, "commit", "-q", "-m", "init").returncode == 0
+    made = subprocess.run(["bash", str(WTM), "create", branch, "--from", "main"], cwd=repo,
+                          capture_output=True, text=True, timeout=120, input="")
+    assert made.returncode == 0, made.stdout + made.stderr
+    assert (repo / ".worktrees" / branch / ".git").exists()
+    return repo
+
+
+def _stored_exec_lines(tmp_path, repo, branch):
+    (repo / ".aimi").mkdir(exist_ok=True)
+    answer_file = repo / ".aimi" / "usage-required-x"
+    answer_file.write_text(answer(projects=["."]), encoding="utf-8")
+    stub = tmp_path / "stub-cli.sh"
+    _exe(stub, 'echo "{}"\n')
+    script = tmp_path / "stored.sh"
+    script.write_text(
+        'AIMI_CLI="%s"\nFEATURE="feat"\nPHASE_ID="1"\nAIMI_ROOT="%s"\nPHASE_BRANCH="%s"\nUSAGE_ANSWER_FILE="%s"\n'
+        % (stub, repo, branch, answer_file) + extract_block("usage-phase-stored"),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    return [l for l in proc.stdout.splitlines() if l.startswith("usage-exec: ")]
+
+
+def test_usage_phase_exec_root_is_the_phase_container_not_the_toplevel(tmp_path):
+    repo = _phase_container_repo(tmp_path)
+    lines = _stored_exec_lines(tmp_path, repo, "feat/pb")
+    top = _git(repo, "rev-parse", "--show-toplevel").stdout.strip()
+    assert lines == ["usage-exec: project=. root=%s/.worktrees/feat/pb branch=feat/pb" % top]
+
+
+def test_usage_phase_a_fix_round_merges_from_the_printed_exec_root(tmp_path):
+    """The Usage Validation Loop cds to EXEC_ROOT, creates the fix worktree
+    --from EXEC_BRANCH and runs merge-all --into EXEC_BRANCH. From the
+    repository's toplevel git refuses the checkout (the branch is checked out in
+    the phase container); from the printed root the merge lands."""
+    branch = "feat/pb"
+    repo = _phase_container_repo(tmp_path, branch)
+    line = _stored_exec_lines(tmp_path, repo, branch)[0]
+    fields = dict(f.split("=", 1) for f in line.split(" ")[1:])
+    exec_root, exec_branch = fields["root"], fields["branch"]
+    name = exec_branch + "-usagefix-r1"
+
+    def wtm(cwd, *args):
+        return subprocess.run(["bash", str(WTM), *args], cwd=cwd, capture_output=True, text=True,
+                              timeout=120, input="")
+
+    made = wtm(exec_root, "create", name, "--from", exec_branch)
+    assert made.returncode == 0, made.stdout + made.stderr
+    fix_dir = Path(exec_root) / ".worktrees" / name
+    (fix_dir / "fix.txt").write_text("fixed\n", encoding="utf-8")
+    assert _git(fix_dir, "add", "fix.txt").returncode == 0
+    assert _git(fix_dir, "commit", "-q", "-m", "fix").returncode == 0
+
+    refused = wtm(repo, "merge-all", name, "--into", exec_branch)
+    assert refused.returncode != 0
+
+    merged = wtm(exec_root, "merge-all", name, "--subject-for", name, "Merge usage fixes", "--into", exec_branch)
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+    assert _git(repo, "show", exec_branch + ":fix.txt").stdout == "fixed\n"

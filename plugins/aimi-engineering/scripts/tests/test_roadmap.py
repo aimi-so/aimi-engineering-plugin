@@ -5290,17 +5290,87 @@ def test_usage_validation_closes_once_passed_or_skipped_is_recorded_through_the_
         assert _stored_status(root, feature) == "completed"
 
 
-@pytest.mark.parametrize("label,kwargs,record", [
-    ("no-recipe", {"recipe": False}, {"status": "failing", "reason": "x"}),
-    ("no-surface", {"surfaces": False}, {"status": "failing", "reason": "x"}),
-    ("switch-off", {"env_extra": {"AIMI_USAGE_VALIDATION": "off"}}, {"status": "failing", "reason": "x"}),
+_NOT_OWED = [
+    ("no-recipe", {"recipe": False}),
+    ("no-surface", {"surfaces": False}),
+    ("switch-off", {"env_extra": {"AIMI_USAGE_VALIDATION": "off"}}),
+]
+
+
+@pytest.mark.parametrize("label,kwargs", _NOT_OWED)
+@pytest.mark.parametrize("record", [
+    None,
+    {"status": "passed", "rounds": 0},
+    {"status": "skipped", "kind": "not-applicable", "reason": "x"},
+    {"status": "bogus"},
 ])
-def test_a_phase_not_owing_usage_validation_closes_whatever_is_recorded(tmp_path, label, kwargs, record):
+def test_a_phase_not_owing_usage_validation_closes_unless_failing_is_recorded(tmp_path, label, kwargs, record):
     root, env, feature, owed = _uv_fixture(tmp_path, record=record, **kwargs)
     assert owed is False
     proc = _close(root, env, feature)
     assert proc.returncode == 0, proc.stderr
     assert _stored_status(root, feature) == "completed"
+
+
+@pytest.mark.parametrize("label,kwargs", _NOT_OWED)
+def test_a_recorded_failing_refuses_completed_whatever_the_requirement_says(tmp_path, label, kwargs):
+    """A stored failing record is checked before the requirement: a phase whose
+    recipe disappeared, whose surfaces were dropped or whose switch was turned
+    off after the real usage run found severe problems cannot close with those
+    problems open. The way out is a human decision written with the verb."""
+    root, env, feature, owed = _uv_fixture(
+        tmp_path, record={"status": "failing", "reason": "SECRET-REASON", "rounds": 1}, **kwargs)
+    assert owed is False
+    for force in (False, True):
+        proc = _close(root, env, feature, force=force)
+        assert proc.returncode != 0
+        assert "recorded failing" in proc.stderr and "SECRET-REASON" not in proc.stderr
+        assert _stored_status(root, feature) == "in_progress"
+    rec = _uv_record(root, env, feature, "--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided")
+    assert rec.returncode == 0, rec.stderr
+    assert _close(root, env, feature).returncode == 0
+    assert _stored_status(root, feature) == "completed"
+
+
+def test_a_recorded_failing_refuses_even_when_the_requirement_cannot_be_computed(monkeypatch, capsys):
+    import usage_validation
+
+    def boom(*_a):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(usage_validation, "usage_validation_requirement", boom)
+    lines = R._completed_gate_usage_refusal("/x/roadmap.json", {}, 1, {"id": 1, "usageValidation": {"status": "failing"}})
+    assert len(lines) == 1 and "recorded failing" in lines[0]
+    assert "could not judge" not in capsys.readouterr().err
+
+
+def test_record_keeps_a_stored_failing_record_over_an_unable_to_evaluate_skip(tmp_path):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    first = _uv_record(root, env, feature, "--status", "failing", "--reason", "open bug",
+                       "--findings-json", json.dumps({"a:1:H1": {"status": "open"}}))
+    assert first.returncode == 0, first.stderr
+    before = _uv_bytes(root, feature)
+    kept = _uv_record(root, env, feature, "--status", "skipped", "--kind", "unable-to-evaluate", "--reason", "env down")
+    assert kept.returncode == 0, kept.stderr
+    answer = json.loads(kept.stdout)
+    assert answer["kept"] == "failing" and answer["phase"] == 1
+    assert answer["usageValidation"]["status"] == "failing" and answer["usageValidation"]["reason"] == "open bug"
+    assert _uv_bytes(root, feature) == before
+
+
+@pytest.mark.parametrize("flags", [
+    ("--status", "passed"),
+    ("--status", "failing", "--reason", "new"),
+    ("--status", "skipped", "--kind", "disabled-by-operator", "--reason", "decided"),
+    ("--status", "skipped", "--kind", "not-applicable", "--reason", "nothing to use"),
+])
+def test_record_overwrites_a_stored_failing_record_with_a_judged_or_chosen_verdict(tmp_path, flags):
+    root, env, feature, _ = _uv_fixture(tmp_path, recipe=False)
+    assert _uv_record(root, env, feature, "--status", "failing", "--reason", "open bug").returncode == 0
+    proc = _uv_record(root, env, feature, *flags)
+    assert proc.returncode == 0, proc.stderr
+    assert "kept" not in json.loads(proc.stdout)
+    assert _uv_phase(root, feature)["usageValidation"]["status"] == flags[1]
 
 
 def test_an_uncomputable_requirement_draws_an_advisory_and_does_not_refuse(tmp_path, monkeypatch, capsys):

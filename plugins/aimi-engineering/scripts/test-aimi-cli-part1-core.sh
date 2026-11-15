@@ -3536,7 +3536,7 @@ test_worktree_project_root_resolution() {
 
 # Builds a throwaway repository standing in for a main checkout, carrying a
 # REAL copy of the modules under test (aimi-cli.sh + tasks.py + roadmap.py +
-# sanitize.py — tasks.py's own import chain, see tasks.py's `from roadmap
+# sanitize.py + usage_record.py — tasks.py's own import chain, see tasks.py's `from roadmap
 # import ...`), plus one worktree of its own. Marks the WORKTREE's own copy
 # of tasks.py with a stderr marker after the worktree is created, so the
 # main checkout's copy stays byte-identical to $SCRIPT_DIR's and only the
@@ -3575,7 +3575,8 @@ setup_worktree_module_resolution_fixture() {
 EOF
 
   cp "$CLI" "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
-  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" "$WT_MOD_SCRIPTS_MAIN/"
+  cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
+    "$SCRIPT_DIR/usage_record.py" "$WT_MOD_SCRIPTS_MAIN/"
   chmod +x "$WT_MOD_SCRIPTS_MAIN/aimi-cli.sh"
 
   echo "probe" > "$WT_MOD_MAIN/README.md"
@@ -3665,9 +3666,12 @@ EOF
   # now one of tasks.py's siblings this fixture must provision, the same as
   # roadmap.py and sanitize.py already are. story_merge.py in turn imports
   # audit_patches.py (the staged-idx helper its audit gate shares with the
-  # apply-audit-patches verb), so that is provisioned too.
+  # apply-audit-patches verb), so that is provisioned too. tasks.py and
+  # roadmap.py both import usage_record.py (the one usage-validation record
+  # rule both writers share), so it is provisioned as well.
   cp "$SCRIPT_DIR/tasks.py" "$SCRIPT_DIR/roadmap.py" "$SCRIPT_DIR/sanitize.py" \
     "$SCRIPT_DIR/story_merge.py" "$SCRIPT_DIR/audit_patches.py" \
+    "$SCRIPT_DIR/usage_record.py" \
     "$real_dir/plugins/aimi-engineering/scripts/"
   chmod +x "$real_dir/plugins/aimi-engineering/scripts/aimi-cli.sh"
 

@@ -1,8 +1,8 @@
 """Tests for the usage-validation gate wiring of US-013.
 
 Three marked blocks are extracted from the command text and run under bash and
-zsh against a stub $AIMI_CLI that answers `metadata` and `roadmap-get` from
-canned files: `usage-gate` (step-5-completion.md), `usage-open-pr`
+zsh against a stub $AIMI_CLI that answers `metadata` and `usage-validation-get`
+from canned files: `usage-gate` (step-5-completion.md), `usage-open-pr`
 (open-pr.md) and `usage-rollup` (step-0-9-aggregated-completion.md). The stub
 never reads a real tasks file, and the aimi-cli.sh the flags are compared with
 is the one of the tree under test, never the cli-path cache.
@@ -36,8 +36,9 @@ def block(text, name):
     return "\n".join(lines[begin[0] + 1 : end[0]]) + "\n"
 
 
-def make_stub(tmp, meta, roadmap, per_file=None):
-    """meta/roadmap: ('json', obj) | ('raw', text) | ('exit', code)."""
+def make_stub(tmp, meta, uvg, per_file=None):
+    """meta/uvg: ('json', obj) | ('raw', text) | ('exit', code). `uvg` answers
+    usage-validation-get; per_file overrides it by the last argument's suffix."""
     def emit(name, spec):
         kind, val = spec
         if kind == "exit":
@@ -47,17 +48,18 @@ def make_stub(tmp, meta, roadmap, per_file=None):
         return 'cat "%s"; exit 0' % f
     cases = []
     for fname, spec in (per_file or {}).items():
-        cases.append('*%s) %s ;;' % (fname, emit("m-" + fname, spec)))
-    cases.append("*) %s ;;" % emit("meta", meta))
+        cases.append('*%s) %s ;;' % (fname, emit("u-" + fname, spec)))
+    cases.append("*) %s ;;" % emit("uvg", uvg))
     stub = tmp / "stub-cli.sh"
     stub.write_text(
         "#!/bin/sh\n"
-        'case "$1" in\n'
-        "metadata)\n"
+        'echo "$*" >> "%s"\n' % (tmp / "cli.log")
+        + 'case "$1" in\n'
+        "metadata) %s ;;\n" % emit("meta", meta)
+        + "usage-validation-get)\n"
         '  last=""; for a in "$@"; do last="$a"; done\n'
         '  case "$last" in\n' + "\n".join(cases) + "\n  esac ;;\n"
-        "roadmap-get) %s ;;\n" % emit("roadmap", roadmap)
-        + "*) exit 9 ;; esac\n",
+        "*) exit 9 ;; esac\n",
         encoding="utf-8",
     )
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
@@ -65,6 +67,11 @@ def make_stub(tmp, meta, roadmap, per_file=None):
     cfg.mkdir(exist_ok=True)
     (cfg / "cli-path").write_text(str(stub), encoding="utf-8")
     return cfg
+
+
+def uvg(rec, scope="flat"):
+    return {"scope": scope, "feature": "feat" if scope == "phase" else None,
+            "phase": 1 if scope == "phase" else None, "record": rec}
 
 
 def run(tmp, shell, header, body, cfg):
@@ -78,14 +85,15 @@ def run(tmp, shell, header, body, cfg):
     return r.stdout, r.stderr
 
 
-GATE_FLAT = 'USAGE_MODE=flat\nUSAGE_TASKS_FILE=/x/t.json\nUSAGE_FEATURE=""\nUSAGE_PHASE_ID=""\n'
-GATE_PHASE = 'USAGE_MODE=phase\nUSAGE_TASKS_FILE=/x/t.json\nUSAGE_FEATURE=feat\nUSAGE_PHASE_ID=1\n'
+GATE_HEADER = 'USAGE_TASKS_FILE=/x/t.json\n'
+GATE_FLAT = "flat"
+GATE_PHASE = "phase"
 
 
-def gate(tmp_path, shell, header, rec=None, meta_spec=None, roadmap_spec=None):
-    body = {"usageValidation": rec} if rec is not None else {}
-    cfg = make_stub(tmp_path, meta_spec or ("json", body), roadmap_spec or ("json", body))
-    out, _ = run(tmp_path, shell, header, block(STEP5, "usage-gate"), cfg)
+def gate(tmp_path, shell, scope, rec=None, uvg_spec=None):
+    cfg = make_stub(tmp_path, ("exit", 9), uvg_spec or ("json", uvg(rec, scope)))
+    out, _ = run(tmp_path, shell, GATE_HEADER, block(STEP5, "usage-gate"), cfg)
+    assert (tmp_path / "cli.log").read_text().splitlines() == ["usage-validation-get --tasks-file /x/t.json"]
     return out.splitlines()
 
 
@@ -131,10 +139,9 @@ def test_usage_gate_absent_record_goes(tmp_path, shell, header):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("header,spec_name", [(GATE_FLAT, "meta_spec"), (GATE_PHASE, "roadmap_spec")])
-@pytest.mark.parametrize("spec,stage", [(("exit", 1), "exited non-zero"), (("raw", ""), "empty answer"), (("raw", "not json{"), "not JSON")])
-def test_usage_gate_unreadable_record_is_unknown_and_never_passed(tmp_path, shell, header, spec_name, spec, stage):
-    out = gate(tmp_path, shell, header, None, **{spec_name: spec})
+@pytest.mark.parametrize("spec,stage", [(("exit", 1), "usage-validation-get exited non-zero"), (("raw", ""), "empty answer"), (("raw", "not json{"), "not JSON")])
+def test_usage_gate_unreadable_record_is_unknown_and_never_passed(tmp_path, shell, spec, stage):
+    out = gate(tmp_path, shell, GATE_FLAT, None, uvg_spec=spec)
     line = [l for l in out if l.startswith("usage-validation:")]
     assert len(line) == 1 and line[0].startswith("usage-validation: unknown — ") and stage in line[0]
     assert "passed" not in line[0]
@@ -144,8 +151,8 @@ def test_usage_gate_unreadable_record_is_unknown_and_never_passed(tmp_path, shel
 def test_usage_gate_block_shape():
     b = block(STEP5, "usage-gate")
     assert "jq" in b and not re.search(r"jq[^|\n]*<\s*\S", b)
-    assert "metadata --tasks-file" in b.replace('"$AIMI_CLI" ', "") or '"$AIMI_CLI" metadata --tasks-file' in b
-    assert 'roadmap-get --feature "$USAGE_FEATURE" --phase "$USAGE_PHASE_ID"' in b
+    assert b.count('"$AIMI_CLI" usage-validation-get --tasks-file "$USAGE_TASKS_FILE"') == 1
+    assert "roadmap-get" not in b and "metadata" not in b and "USAGE_MODE" not in STEP5
     resolve = 'AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)'
     i = STEP5.index("# usage-gate:begin")
     assert resolve in STEP5[:i][STEP5[:i].rindex("```bash"):]
@@ -165,9 +172,9 @@ def test_step5_text_cases():
 def test_usage_rollup_holds_on_any_failing_record(tmp_path, shell):
     plan = "\n".join(json.dumps({"file": f}) for f in ("/p/a.json", "/p/b.json", "/p/c.json"))
     cfg = make_stub(
-        tmp_path, ("json", {}), ("json", {}),
-        per_file={"a.json": ("json", {"usageValidation": {"status": "passed"}}),
-                  "b.json": ("json", {"usageValidation": {"status": "failing"}}),
+        tmp_path, ("exit", 9), ("json", uvg(None)),
+        per_file={"a.json": ("json", uvg({"status": "passed"})),
+                  "b.json": ("json", uvg({"status": "failing"}, "phase")),
                   "c.json": ("exit", 1)},
     )
     header = "SPLIT_PLAN='%s'\n" % plan
@@ -182,7 +189,7 @@ def test_usage_rollup_holds_on_any_failing_record(tmp_path, shell):
 @pytest.mark.parametrize("shell", SHELLS)
 def test_usage_rollup_go_without_failing_record(tmp_path, shell):
     plan = json.dumps({"file": "/p/a.json"})
-    cfg = make_stub(tmp_path, ("json", {"usageValidation": {"status": "skipped", "kind": "unable-to-evaluate"}}), ("json", {}))
+    cfg = make_stub(tmp_path, ("exit", 9), ("json", uvg({"status": "skipped", "kind": "unable-to-evaluate"})))
     out, _ = run(tmp_path, shell, "SPLIT_PLAN='%s'\n" % plan, block(ROLLUP, "usage-rollup"), cfg)
     assert out.splitlines()[-1] == "usage-rollup-gate: go"
     assert "usage-rollup-failing" not in out
@@ -199,28 +206,28 @@ OPEN_PR_HEADER = 'CURRENT_BRANCH=feat/x\n'
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_usage_open_pr_flat_failing_warns_on_stderr(tmp_path, shell):
-    meta = {"deliverableBranch": "feat/x", "usageValidation": {"status": "failing", "reason": "broken"}}
-    cfg = make_stub(tmp_path, ("json", meta), ("json", {}))
+    meta = {"deliverableBranch": "feat/x"}
+    cfg = make_stub(tmp_path, ("json", meta), ("json", uvg({"status": "failing", "reason": "broken"})))
     out, err = run(tmp_path, shell, OPEN_PR_HEADER, block(OPEN_PR, "usage-open-pr"), cfg)
-    assert out == ""
+    assert out == "usage-pr-line: Usage validation: FAILING — broken. Re-run /aimi:execute to re-validate.\n"
     assert "Warning: usage validation is FAILING (broken)" in err and "/aimi:execute" in err
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_usage_open_pr_phase_reads_roadmap_record(tmp_path, shell):
+def test_usage_open_pr_phase_reads_the_record_usage_validation_get_answers(tmp_path, shell):
     meta = {"deliverableBranch": "feat/x", "roadmapPath": ".aimi/tasks/feat/roadmap.json", "phase": {"id": 2}}
-    cfg = make_stub(tmp_path, ("json", meta), ("json", {"usageValidation": {"status": "passed"}}))
+    cfg = make_stub(tmp_path, ("json", meta), ("json", uvg({"status": "passed"}, "phase")))
     _, err = run(tmp_path, shell, OPEN_PR_HEADER, block(OPEN_PR, "usage-open-pr"), cfg)
     assert "usage-validation: passed" in err and "FAILING" not in err
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_usage_open_pr_silent_for_other_branch_or_no_record(tmp_path, shell):
-    other = {"deliverableBranch": "feat/other", "usageValidation": {"status": "failing"}}
-    cfg = make_stub(tmp_path, ("json", other), ("json", {}))
+    other = {"deliverableBranch": "feat/other"}
+    cfg = make_stub(tmp_path, ("json", other), ("json", uvg({"status": "failing"})))
     assert run(tmp_path, shell, OPEN_PR_HEADER, block(OPEN_PR, "usage-open-pr"), cfg) == ("", "")
     none = {"deliverableBranch": "feat/x"}
-    cfg = make_stub(tmp_path, ("json", none), ("json", {}))
+    cfg = make_stub(tmp_path, ("json", none), ("json", uvg(None)))
     assert run(tmp_path, shell, OPEN_PR_HEADER, block(OPEN_PR, "usage-open-pr"), cfg) == ("", "")
 
 
@@ -239,10 +246,9 @@ def test_publish_confirmation_exception_in_prose_only():
 
 def test_every_flag_the_blocks_pass_is_in_the_tree_cli_help():
     help_text = subprocess.run(["bash", str(CLI), "help"], capture_output=True, text=True, timeout=60).stdout
-    verbs = {"metadata": ["--tasks-file", "--with-deliverable-branch"], "roadmap-get": ["--feature", "--phase"]}
     used = set()
     for text, name in ((STEP5, "usage-gate"), (OPEN_PR, "usage-open-pr"), (ROLLUP, "usage-rollup")):
-        for m in re.finditer(r'"\$AIMI_CLI" (metadata|roadmap-get)([^|)\n]*)', block(text, name)):
+        for m in re.finditer(r'"\$AIMI_CLI" (metadata|usage-validation-get)([^|)\n]*)', block(text, name)):
             for flag in re.findall(r"--[a-z-]+", m.group(2)):
                 used.add((m.group(1), flag))
     assert used

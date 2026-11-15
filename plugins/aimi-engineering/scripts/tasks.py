@@ -185,6 +185,10 @@ from story_merge import compute_waves, outline_tokens_in
 # rule rather than a third copy of it.
 from sanitize import rm_sanitize, SUSPICIOUS
 
+# The usage-validation record (vocabulary, checks, build) is shared with
+# roadmap.py's phase writer and owned by neither: usage_record.py holds it.
+import usage_record
+
 # The paragraph separator the cross-story audit already writes `notes` with.
 # story_merge imports it from the same place, so this adds no new edge to the
 # import graph: audit_patches is loaded by the line above either way.
@@ -1238,16 +1242,6 @@ SMELL_ACKNOWLEDGE_REASON_MAXLEN = 500
 # name for the same reason: a different field that merely agrees today.
 EVIDENCE_ACKNOWLEDGE_REASON_MAXLEN = 500
 
-# usage-validation-record's vocabulary and caps. The run-level verdict of the
-# real-usage validation gate is stored on metadata.usageValidation; the words
-# below are the only ones the op writes, and the reason rules live beside them.
-USAGE_VALIDATION_STATUSES = ("passed", "failing", "skipped")
-USAGE_VALIDATION_KINDS = ("not-applicable", "unable-to-evaluate", "disabled-by-operator")
-USAGE_VALIDATION_FINDING_STATUSES = ("open", "fixed", "accepted")
-USAGE_VALIDATION_REASON_MAXLEN = 2000
-USAGE_VALIDATION_FINDING_REASON_MAXLEN = 500
-USAGE_VALIDATION_FINDINGS_MAX = 200
-USAGE_VALIDATION_FINDING_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 # set-verification never writes "pending" -- recording a verdict is the
 # opposite of "nobody looked yet" -- so its own allowed set is this tuple
@@ -6161,74 +6155,109 @@ def _usage_validation_failing(docs):
     return False
 
 
-def _usage_validation_findings(raw):
-    """Parse and check --findings-json: {key: {status, reason?}}. Dies naming the flag."""
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        die("Error: usage-validation-record: --findings-json is not valid JSON")
-    if not isinstance(parsed, dict):
-        die("Error: usage-validation-record: --findings-json must be a JSON object")
-    findings = {}
-    for key, entry in parsed.items():
-        if not USAGE_VALIDATION_FINDING_KEY.match(key):
-            die("Error: usage-validation-record: --findings-json key is not allowed: " + key)
-        if not isinstance(entry, dict) or entry.get("status") not in USAGE_VALIDATION_FINDING_STATUSES:
-            die(
-                "Error: usage-validation-record: --findings-json entry '" + key
-                + "' needs a status of " + "|".join(USAGE_VALIDATION_FINDING_STATUSES)
-            )
-        reason = entry.get("reason")
-        if reason is not None and not isinstance(reason, str):
-            die("Error: usage-validation-record: --findings-json reason of '" + key + "' must be a string")
-        clean = rm_sanitize(reason, USAGE_VALIDATION_FINDING_REASON_MAXLEN) if reason else ""
-        if entry["status"] == "accepted" and not clean.strip():
-            die("Error: usage-validation-record: --findings-json entry '" + key + "' is accepted and needs a reason")
-        built = {"status": entry["status"]}
-        if clean.strip():
-            built["reason"] = clean
-        findings[key] = built
-    return findings
+def _usage_phase_answer(roadmap_path, feature, phase_id, prefix):
+    """usage-validation-get's answer for a roadmap phase. Dies naming the
+    roadmap when it cannot be read or holds no such phase: a reader that
+    cannot find the record must not answer "none recorded"."""
+    roadmap = _read_json_object(roadmap_path)
+    if roadmap is None:
+        die(prefix + "cannot read roadmap.json: " + roadmap_path)
+    phases = roadmap.get("phases")
+    phase = None
+    if isinstance(phases, list):
+        phase = next(
+            (p for p in phases if isinstance(p, dict) and jq_equal(p.get("id"), phase_id)),
+            None,
+        )
+    if phase is None:
+        die(prefix + "phase " + _num(phase_id) + " not found in " + roadmap_path)
+    record = phase.get("usageValidation")
+    return {
+        "scope": "phase",
+        "feature": feature,
+        "phase": phase_id,
+        "record": record if isinstance(record, dict) else None,
+    }
+
+
+def op_usage_validation_get(argv):
+    """usage-validation-get: where a run's usage-validation record lives, and
+    the record. The one reader every command calls instead of branching on
+    phase versus flat itself.
+
+    `--roadmap/--feature/--phase` answers a roadmap phase directly. With
+    `--tasks-file`, a phase-scoped file (metadata.phase present) is followed to
+    its roadmap phase through metadata.roadmapPath, confined the way every
+    document-sourced path is (confined_spec_path), or, when that key is absent,
+    to the roadmap.json two directories above the file, where /aimi:plan puts
+    it. A flat file answers its own metadata.usageValidation. Prints
+    {scope, feature, phase, record}; record is null when none is stored or
+    the stored value is not an object.
+    """
+    prefix = "Error: usage-validation-get: "
+    roadmap_arg = _flag(argv, "--roadmap")
+    if roadmap_arg:
+        phase_raw = _flag(argv, "--phase")
+        if phase_raw is None:
+            die("Usage: tasks.py usage-validation-get --roadmap <path> --feature <slug> --phase <id>")
+        _emit(_usage_phase_answer(roadmap_arg, _flag(argv, "--feature"), jq_numbers(json.loads(phase_raw)), prefix))
+        return 0
+
+    path = _flag(argv, "--tasks-file")
+    project_root = _flag(argv, "--project-root")
+    if not path or not project_root:
+        die("Usage: tasks.py usage-validation-get --tasks-file <path> --project-root <path>")
+    docs = read_docs(path, "usage-validation-get")
+    first = docs[0] if docs else None
+    metadata = first.get("metadata") if isinstance(first, dict) else None
+    if not isinstance(metadata, dict):
+        die(prefix + "no metadata object in " + path)
+    phase_meta = metadata.get("phase")
+    if phase_meta is None:
+        record = metadata.get("usageValidation")
+        _emit({
+            "scope": "flat",
+            "feature": None,
+            "phase": None,
+            "record": record if isinstance(record, dict) else None,
+        })
+        return 0
+
+    phase_id = phase_meta.get("id") if isinstance(phase_meta, dict) else None
+    if isinstance(phase_id, bool) or not isinstance(phase_id, (int, float)):
+        die(prefix + "metadata.phase.id is not a number in " + path)
+    roadmap_rel = metadata.get("roadmapPath")
+    if not (isinstance(roadmap_rel, str) and roadmap_rel):
+        roadmap_rel = os.path.relpath(
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(path))), "roadmap.json"),
+            project_root,
+        )
+    roadmap_path, inside = confined_spec_path(project_root, roadmap_rel)
+    if not inside:
+        die(prefix + "the roadmap path escapes the project: " + roadmap_rel)
+    feature = os.path.basename(os.path.dirname(roadmap_path))
+    _emit(_usage_phase_answer(roadmap_path, feature, phase_id, prefix))
+    return 0
 
 
 def op_usage_validation_record(argv):
     """usage-validation-record: write metadata.usageValidation, the run-level
     verdict of the real-usage validation gate, replacing any earlier record.
 
-    Every vocabulary rule runs BEFORE the document is read, so a refusal never
-    opens the file. Only --review's confinement is bash's, before the lock;
-    this module takes no path of its own for it. An overwrite carries over the
-    previous record's accepted findings that the new call does not restate, so
-    an accepted decision is never asked again on a re-run.
+    The record's vocabulary, its checks and its build are usage_record.py's,
+    shared with roadmap.py's phase writer. Every vocabulary rule runs BEFORE the
+    document is read, so a refusal never opens the file. Only --review's
+    confinement is bash's, before the lock; this module takes no path of its
+    own for it. An overwrite carries over the previous record's accepted
+    findings that the new call does not restate, so an accepted decision is
+    never asked again on a re-run. A stored failing record is kept over an
+    unable-to-evaluate skip, and the answer is `{"kept": "failing", ...}`.
     """
     prefix = "Error: usage-validation-record: "
     path = _flag(argv, "--tasks-file")
     if not path:
         die("Usage: tasks.py usage-validation-record --tasks-file <path> --status <passed|failing|skipped> [flags]")
-    status = _flag(argv, "--status")
-    if status not in USAGE_VALIDATION_STATUSES:
-        die(prefix + "--status must be one of " + "|".join(USAGE_VALIDATION_STATUSES) + ", got: " + str(status or ""))
-    kind = _flag(argv, "--kind") if "--kind" in argv else None
-    if kind is not None and kind not in USAGE_VALIDATION_KINDS:
-        die(prefix + "--kind must be one of " + "|".join(USAGE_VALIDATION_KINDS) + ", got: " + kind)
-    if status == "skipped" and kind is None:
-        die(prefix + "--kind is required with --status skipped")
-    if status != "skipped" and kind is not None:
-        die(prefix + "--kind is only allowed with --status skipped")
-    raw_reason = _flag(argv, "--reason")
-    clean_reason = rm_sanitize(raw_reason, USAGE_VALIDATION_REASON_MAXLEN) if raw_reason else ""
-    if status in ("failing", "skipped") and not clean_reason.strip():
-        die(prefix + "--reason is required with --status " + status)
-    rounds = 0
-    if "--rounds" in argv:
-        raw_rounds = _flag(argv, "--rounds")
-        if raw_rounds is None or not re.fullmatch(r"[0-9]+", raw_rounds):
-            die(prefix + "--rounds must be a non-negative integer, got: " + str(raw_rounds or ""))
-        rounds = int(raw_rounds)
-    findings = {}
-    if "--findings-json" in argv:
-        findings = _usage_validation_findings(_flag(argv, "--findings-json") or "")
-    review = _flag(argv, "--review")
+    request = usage_record.parse_request(argv, prefix)
 
     docs = read_docs(path, "usage-validation-record")
     first = docs[0] if docs else None
@@ -6245,26 +6274,12 @@ def op_usage_validation_record(argv):
             "a phase's verdict is recorded in roadmap.json: " + path
         )
 
-    merged = dict(findings)
-    previous = target.get("usageValidation")
-    previous_findings = previous.get("findings") if isinstance(previous, dict) else None
-    if isinstance(previous_findings, dict):
-        for key, entry in previous_findings.items():
-            if key not in merged and isinstance(entry, dict) and entry.get("status") == "accepted":
-                merged[key] = entry
-    merged = dict(list(merged.items())[:USAGE_VALIDATION_FINDINGS_MAX])
-
-    record = {"status": status}
-    if kind is not None:
-        record["kind"] = kind
-    if clean_reason.strip():
-        record["reason"] = clean_reason
-    if review:
-        record["review"] = review
-    record["rounds"] = rounds
-    if merged:
-        record["findings"] = merged
-    record["recordedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    action, record = usage_record.build_record(request, target.get("usageValidation"))
+    if action == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # file is not written (usage_record.py's docstring says why).
+        _emit(usage_record.kept_answer(record, request))
+        return 0
     target["usageValidation"] = record
     write_docs_atomically(path, docs)
     _emit(record)
@@ -9908,6 +9923,7 @@ _OPS = {
     "acknowledge-smell": op_acknowledge_smell,
     "acknowledge-evidence": op_acknowledge_evidence,
     "usage-validation-record": op_usage_validation_record,
+    "usage-validation-get": op_usage_validation_get,
     "judge-verification": op_judge_verification,
     "reset-orphaned": op_reset_orphaned,
     "gate-pass": _gate_op("gate-pass", "passed"),

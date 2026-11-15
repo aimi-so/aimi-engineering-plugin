@@ -61,6 +61,10 @@ import time
 # one rule and nothing else, and both files import it from there.
 from sanitize import rm_sanitize, rm_sanitize_report
 
+# The usage-validation record (vocabulary, checks, build) is shared with
+# tasks.py's flat writer and owned by neither: usage_record.py holds it.
+import usage_record
+
 # THE TWO RULERS, NOW THAT THE TWO HALVES ARE TWO FIELDS.
 #
 # The description gets rm_sanitize above. The identity gets NOTHING: it is
@@ -4836,21 +4840,19 @@ def op_record_visual_gate(argv):
     return 0
 
 
-USAGE_VALIDATION_STATUSES = ("passed", "failing", "skipped")
-USAGE_VALIDATION_KINDS = ("not-applicable", "unable-to-evaluate", "disabled-by-operator")
-USAGE_VALIDATION_FINDING_STATUSES = ("open", "fixed", "accepted")
-USAGE_VALIDATION_REASON_MAXLEN = 2000
-USAGE_VALIDATION_FINDING_REASON_MAXLEN = 500
-USAGE_VALIDATION_FINDINGS_MAX = 200
-USAGE_VALIDATION_FINDING_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-
-
 def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
-    """The phase-level usage-validation line for the completed gate: one line
-    when usage validation is owed (usage_validation_requirement answers
-    required) and phase.usageValidation.status is neither passed nor skipped,
-    an empty list otherwise. An absent, malformed or unrecognised record reads
-    as none recorded.
+    """The phase-level usage-validation line for the completed gate, or [].
+
+    A stored `failing` record refuses first, whatever the requirement says: a
+    phase whose recipe disappeared, whose config.json became tracked or whose
+    switch was turned off after the real usage run found severe problems must
+    not close with them open. The way out is a decision written with
+    roadmap-record-usage-validation (passed, or a skip a person chose).
+
+    Otherwise the requirement decides: one line when usage validation is owed
+    (usage_validation_requirement answers required) and no passed or skipped
+    record is stored. An absent, malformed or unrecognised record reads as none
+    recorded.
 
     usage_validation is imported here, never at module scope: it imports this
     module at its own module scope. A requirement that cannot be computed
@@ -4858,6 +4860,15 @@ def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
     config) draws one advisory and returns [], neither a refusal nor silent.
     The stored reason is never echoed.
     """
+    record = phase.get("usageValidation")
+    status = record.get("status") if isinstance(record, dict) else None
+    if status == "failing":
+        return [
+            "  phase " + _num(phase_id) + ": usage validation recorded failing -- the real "
+            "usage run found problems still open; resolve them and re-record with "
+            "roadmap-record-usage-validation (passed, or skipped with a kind and a reason)"
+        ]
+
     try:
         import usage_validation
 
@@ -4873,61 +4884,20 @@ def _completed_gate_usage_refusal(roadmap_path, doc, phase_id, phase):
             phase_id, "the usage-validation requirement -- " + type(exc).__name__
         )
         return []
-    if not required:
+    if not required or status in ("passed", "skipped"):
         return []
-
-    record = phase.get("usageValidation")
-    status = record.get("status") if isinstance(record, dict) else None
-    if status in ("passed", "skipped"):
-        return []
-    if status == "failing":
-        return [
-            "  phase " + _num(phase_id) + ": usage validation recorded failing -- the real "
-            "usage run found problems still open; resolve them and re-record with "
-            "roadmap-record-usage-validation (passed, or skipped with a kind and a reason)"
-        ]
     return [
         "  phase " + _num(phase_id) + ": owes usage validation of the delivered surface "
         "and none is recorded -- record one with roadmap-record-usage-validation"
     ]
 
 
-def _usage_validation_findings(raw):
-    """Parse and check --findings-json: {key: {status, reason?}}. The same rule
-    tasks.py's usage-validation-record applies; kept equal by hand because this
-    module cannot import tasks at module scope."""
-    prefix = "Error: roadmap-record-usage-validation: "
-    try:
-        parsed = json.loads(raw)
-    except ValueError:
-        die(prefix + "--findings-json is not valid JSON")
-    if not isinstance(parsed, dict):
-        die(prefix + "--findings-json must be a JSON object")
-    findings = {}
-    for key, entry in parsed.items():
-        if not USAGE_VALIDATION_FINDING_KEY.match(key):
-            die(prefix + "--findings-json key is not allowed: " + key)
-        if not isinstance(entry, dict) or entry.get("status") not in USAGE_VALIDATION_FINDING_STATUSES:
-            die(
-                prefix + "--findings-json entry '" + key + "' needs a status of "
-                + "|".join(USAGE_VALIDATION_FINDING_STATUSES)
-            )
-        reason = entry.get("reason")
-        if reason is not None and not isinstance(reason, str):
-            die(prefix + "--findings-json reason of '" + key + "' must be a string")
-        clean = rm_sanitize(reason, USAGE_VALIDATION_FINDING_REASON_MAXLEN) if reason else ""
-        if entry["status"] == "accepted" and not clean.strip():
-            die(prefix + "--findings-json entry '" + key + "' is accepted and needs a reason")
-        built = {"status": entry["status"]}
-        if clean.strip():
-            built["reason"] = clean
-        findings[key] = built
-    return findings
-
-
 def op_record_usage_validation(argv):
     """The locked write of a phase's usage-validation verdict. Replaces the
-    whole phases[].usageValidation object. Every vocabulary rule runs before the
+    whole phases[].usageValidation object, except that a stored failing record
+    is kept over an unable-to-evaluate skip and the answer says `kept`. The
+    record's vocabulary, its checks and its build are usage_record.py's,
+    shared with tasks.py's flat writer; every vocabulary rule runs before the
     document is read, so a refusal never opens roadmap.json."""
     prefix = "Error: roadmap-record-usage-validation: "
     path = _flag(argv, "--roadmap")
@@ -4938,33 +4908,7 @@ def op_record_usage_validation(argv):
             "--status <passed|failing|skipped> [--kind <k>] [--reason <text>] "
             "[--review <path>] [--rounds <n>] [--findings-json <json>]"
         )
-    status = _flag(argv, "--status")
-    if status not in USAGE_VALIDATION_STATUSES:
-        die(
-            prefix + "--status must be one of " + "|".join(USAGE_VALIDATION_STATUSES)
-            + ", got: " + str(status or "")
-        )
-    kind = _flag(argv, "--kind") if "--kind" in argv else None
-    if kind is not None and kind not in USAGE_VALIDATION_KINDS:
-        die(prefix + "--kind must be one of " + "|".join(USAGE_VALIDATION_KINDS) + ", got: " + kind)
-    if status == "skipped" and kind is None:
-        die(prefix + "--kind is required with --status skipped")
-    if status != "skipped" and kind is not None:
-        die(prefix + "--kind is only allowed with --status skipped")
-    raw_reason = _flag(argv, "--reason")
-    clean_reason = rm_sanitize(raw_reason, USAGE_VALIDATION_REASON_MAXLEN) if raw_reason else ""
-    if status in ("failing", "skipped") and not clean_reason.strip():
-        die(prefix + "--reason is required with --status " + status)
-    rounds = 0
-    if "--rounds" in argv:
-        raw_rounds = _flag(argv, "--rounds")
-        if raw_rounds is None or not re.fullmatch(r"[0-9]+", raw_rounds):
-            die(prefix + "--rounds must be a non-negative integer, got: " + str(raw_rounds or ""))
-        rounds = int(raw_rounds)
-    findings = {}
-    if "--findings-json" in argv:
-        findings = _usage_validation_findings(_flag(argv, "--findings-json") or "")
-    review = _flag(argv, "--review")
+    request = usage_record.parse_request(argv, prefix)
 
     doc = read_doc(path, "roadmap-record-usage-validation")
     phase_id = jq_numbers(json.loads(phase_raw))
@@ -4972,28 +4916,16 @@ def op_record_usage_validation(argv):
     if not matches:
         die(prefix + "phase " + phase_raw + " not found in " + path)
 
-    for phase in matches:
-        merged = dict(findings)
-        previous = phase.get("usageValidation")
-        previous_findings = previous.get("findings") if isinstance(previous, dict) else None
-        if isinstance(previous_findings, dict):
-            for key, entry in previous_findings.items():
-                if key not in merged and isinstance(entry, dict) and entry.get("status") == "accepted":
-                    merged[key] = entry
-        merged = dict(list(merged.items())[:USAGE_VALIDATION_FINDINGS_MAX])
-
-        record = {"status": status}
-        if kind is not None:
-            record["kind"] = kind
-        if clean_reason.strip():
-            record["reason"] = clean_reason
-        if review:
-            record["review"] = review
-        record["rounds"] = rounds
-        if merged:
-            record["findings"] = merged
-        record["recordedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        phase["usageValidation"] = record
+    decisions = [usage_record.build_record(request, phase.get("usageValidation")) for phase in matches]
+    if decisions[0][0] == "keep":
+        # A stored failing record survives an unable-to-evaluate skip; the
+        # document is not written (usage_record.py's docstring says why).
+        answer = usage_record.kept_answer(decisions[0][1], request)
+        _emit(dict({"phase": phase_id}, **answer))
+        return 0
+    for phase, (action, record) in zip(matches, decisions):
+        if action == "write":
+            phase["usageValidation"] = record
     write_doc_atomically(path, doc)
     _emit({"phase": phase_id, "usageValidation": matches[0]["usageValidation"]})
     return 0

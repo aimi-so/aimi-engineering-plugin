@@ -53,7 +53,7 @@ A `usage-validation: tooling-failed` line (a non-zero exit, an empty answer or a
 
 #### The stored record and the run values
 
-Read the phase's stored `usageValidation` through a pipe, never by opening a file with `jq`. Set `USAGE_ANSWER_FILE` to the saved answer's path when validation is owed, and to an empty string otherwise.
+Read the phase's stored record with `usage-validation-get` through a pipe, never by opening a file with `jq`. Set `USAGE_ANSWER_FILE` to the saved answer's path when validation is owed, and to an empty string otherwise.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -63,11 +63,12 @@ PHASE_ID="[PHASE_ID]"
 AIMI_ROOT="[AIMI_ROOT]"
 PHASE_BRANCH="[PHASE_BRANCH]"
 USAGE_ANSWER_FILE="[the usage-validation-answer path, or empty]"
-PHASE_JSON=$("$AIMI_CLI" roadmap-get --feature "$FEATURE" --phase "$PHASE_ID") || PHASE_JSON="{}"
+# usage-phase-stored:begin
+USAGE_REC_JSON=$("$AIMI_CLI" usage-validation-get --feature "$FEATURE" --phase "$PHASE_ID") || USAGE_REC_JSON="{}"
 printf 'usage-validation-stored: status=%s kind=%s\n' \
-  "$(printf '%s' "$PHASE_JSON" | jq -r '.usageValidation.status // "none"')" \
-  "$(printf '%s' "$PHASE_JSON" | jq -r '.usageValidation.kind // "none"')"
-printf '%s' "$PHASE_JSON" | jq -r '(.usageValidation.findings // {}) | to_entries[] | select(.value.status == "accepted") | "usage-validation-accepted: " + .key'
+  "$(printf '%s' "$USAGE_REC_JSON" | jq -r '.record.status // "none"')" \
+  "$(printf '%s' "$USAGE_REC_JSON" | jq -r '.record.kind // "none"')"
+printf '%s' "$USAGE_REC_JSON" | jq -r '(.record.findings // {}) | to_entries[] | select(.value.status == "accepted") | "usage-validation-accepted: " + .key'
 if [ -n "$USAGE_ANSWER_FILE" ]; then
   USAGE_SAVED=$(cat "$USAGE_ANSWER_FILE")
   printf 'usage-run: %s-phase-%s\n' "$FEATURE" "$(printf '%s' "$PHASE_ID" | tr . -)"
@@ -78,12 +79,14 @@ if [ -n "$USAGE_ANSWER_FILE" ]; then
       .) usage_dir="$AIMI_ROOT" ;;
       *) usage_dir="$AIMI_ROOT/$usage_project" ;;
     esac
-    printf 'usage-exec: project=%s root=%s branch=%s\n' "$usage_project" "$(git -C "$usage_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$usage_dir")" "$PHASE_BRANCH"
+    usage_top=$(git -C "$usage_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$usage_dir")
+    printf 'usage-exec: project=%s root=%s branch=%s\n' "$usage_project" "$usage_top/.worktrees/$PHASE_BRANCH" "$PHASE_BRANCH"
   done
 fi
+# usage-phase-stored:end
 ```
 
-`usage-run:` is the run key, `usage-repo:` is one repository value per participating project with `PHASE_BRANCH` as its container, and `usage-exec:` gives each group's `EXEC_ROOT` and `EXEC_BRANCH`. `usage-validation-stored:` and the `usage-validation-accepted:` keys are what a re-run reads.
+`usage-run:` is the run key, `usage-repo:` is one repository value per participating project with `PHASE_BRANCH` as its container, and `usage-exec:` gives each group's `EXEC_ROOT` and `EXEC_BRANCH`. `EXEC_ROOT` is the phase container (`container-execution.md`'s Execution Context table), never the toplevel, where git refuses a fix round's `merge-all --into PHASE_BRANCH`. `usage-validation-stored:` and the `usage-validation-accepted:` keys are what a re-run reads.
 
 #### Skip ladder
 
@@ -95,7 +98,7 @@ fi
 - **A stored `skipped` record on the phase** answers that question already: reuse it with no question and no overwrite, print `usage-validation: skipped (<stored kind>) — <stored reason>` from the stored record and continue to Write Handoff.
 - **`disabled-by-operator`** is never asked about.
 
-Record the skip, then continue to Write Handoff. The block prints the line Write Handoff copies verbatim; a record call that exits non-zero is `tooling-failed`, never recorded.
+Record the skip, then continue to Write Handoff. The block prints the line Write Handoff copies verbatim; a record call that exits non-zero is `tooling-failed`, never recorded. An `unable-to-evaluate` skip never replaces a stored `failing` record: the writer answers `kept` and the block prints the kept line handled under Record the outcome.
 
 ```bash
 AIMI_CLI=$(cat "${AIMI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/aimi}/cli-path" 2>/dev/null || cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/aimi-engineering-cli-path" 2>/dev/null)
@@ -108,8 +111,14 @@ USAGE_REASON=$(cat <<'USAGE_REASON_EOF'
 USAGE_REASON_EOF
 )
 # usage-phase-skip:begin
-if "$AIMI_CLI" roadmap-record-usage-validation --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --kind "$USAGE_KIND" --reason "$USAGE_REASON" >/dev/null; then
-  printf 'usage-validation: skipped (%s) — %s\n' "$USAGE_KIND" "$USAGE_REASON"
+if USAGE_OUT=$("$AIMI_CLI" roadmap-record-usage-validation --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --kind "$USAGE_KIND" --reason "$USAGE_REASON"); then
+  if [ "$(printf '%s' "$USAGE_OUT" | jq -r '.kept // empty' 2>/dev/null)" = failing ]; then
+    printf 'usage-validation: failing — re-validation could not run (%s)\n' "$USAGE_REASON"
+    "$AIMI_CLI" roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status verification_failed
+    "$AIMI_CLI" roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+  else
+    printf 'usage-validation: skipped (%s) — %s\n' "$USAGE_KIND" "$USAGE_REASON"
+  fi
 else
   echo "usage-validation: tooling-failed"
   "$AIMI_CLI" roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
@@ -121,7 +130,7 @@ fi
 #### Bring up and validate
 
 1. Run the **Usage Validation Environment** entry's bring-up, Poll, Origins and Login and Browser sections. Its inputs: `USAGE_RUN` is the `usage-run:` value, `USAGE_REPOS` is every `usage-repo:` value, `USAGE_PROJECT` is `usage-project:`, `USAGE_SESSION` is `aimi-usage-<run key>`, and `USAGE_RESTART` is `true` exactly when `usage-validation-stored:` says `status=failing` (a re-validation on re-run) and `false` otherwise.
-2. Read its `usage-env:` line. `unable-to-evaluate` records a skip with the block above (`USAGE_KIND=unable-to-evaluate`, the reason naming the stage and reason it printed) and the phase continues to Write Handoff. `tooling-failed` is handled as the loop's `tooling-failed` below and the loop is not run.
+2. Read its `usage-env:` line. `unable-to-evaluate` records a skip with the block above (`USAGE_KIND=unable-to-evaluate`, the reason naming the stage and reason it printed) and the phase continues to Write Handoff, unless that block printed the kept `failing` line. `tooling-failed` is handled as the loop's `tooling-failed` below and the loop is not run.
 3. On `ready`, run the **Usage Validation Loop** entry. Its inputs, as that entry's Inputs and outputs section names them: the `usage-validation-answer:` file, its `usage-browser:` and `usage-origins:` values, the run key and repositories handed to step 1, the `usage-validation-accepted:` keys as the accepted keys, and the run's `FEATURE`, `PHASE_ID`, `PHASE_MODE=true` and each group's `EXEC_ROOT` and `EXEC_BRANCH` from the `usage-exec:` lines.
 4. Run the Environment's Tear Down on every outcome except `fails` (`USAGE_VALIDATION_OUTCOME` is `passing` for `pass` and `skipped` otherwise). On `fails` the container and the server stay up for the person.
 
@@ -174,8 +183,14 @@ case "$USAGE_OUTCOME" in
     printf 'usage-validation-verdict: failing review=%s\n' "${USAGE_REVIEW:-<not written>}"
     ;;
   unable-to-evaluate)
-    "$AIMI_CLI" roadmap-record-usage-validation --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --kind unable-to-evaluate --reason "$USAGE_LOOP_REASON" "$@" >/dev/null || usage_tooling_failed
-    printf 'usage-validation: skipped (unable-to-evaluate) — %s\n' "$USAGE_LOOP_REASON"
+    USAGE_OUT=$("$AIMI_CLI" roadmap-record-usage-validation --feature "$FEATURE" --phase "$PHASE_ID" --status skipped --kind unable-to-evaluate --reason "$USAGE_LOOP_REASON" "$@") || usage_tooling_failed
+    if [ "$(printf '%s' "$USAGE_OUT" | jq -r '.kept // empty' 2>/dev/null)" = failing ]; then
+      printf 'usage-validation: failing — re-validation could not run (%s)\n' "$USAGE_LOOP_REASON"
+      "$AIMI_CLI" roadmap-set-status --feature "$FEATURE" --phase "$PHASE_ID" --status verification_failed
+      "$AIMI_CLI" roadmap-release-claim --feature "$FEATURE" --phase "$PHASE_ID"
+    else
+      printf 'usage-validation: skipped (unable-to-evaluate) — %s\n' "$USAGE_LOOP_REASON"
+    fi
     ;;
   *)
     usage_tooling_failed
@@ -185,6 +200,7 @@ esac
 ```
 
 - **`usage-validation: passed — <summary>`** and **`usage-validation: skipped (<kind>) — <reason>`** are recorded; the phase falls through to Write Handoff, which copies the line verbatim, plus the loop's `usage-validation-stale:` line when one printed.
+- **`usage-validation: failing — re-validation could not run (<reason>)`** — the writer kept the stored `failing` record (`kept`); the phase is `verification_failed` and the claim is released. Handle it as the failing verdict below.
 - **`usage-validation-verdict: failing`** — recorded `failing` with the round count and each finding key's status (accepted decisions included, so they survive into the re-run), the phase is `verification_failed` and the claim is released. Report the review file, the findings the loop printed, and that re-running `/aimi:execute` validates again. Do **not** write `handoff.md`, do **not** run Mark Phase Completed, do **not** offer a PR, do **not** run Next Phase. Skip directly to Step 5.
 - **`usage-validation: tooling-failed`** — nothing was recorded, the claim is released and the status stays `in_progress`. Report:
 
