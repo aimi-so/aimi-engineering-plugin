@@ -335,6 +335,11 @@ Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/p
 Applies when: every run, after the identity fields.
 Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-4-metadata-context.md in full.
 
+### Usage Surfaces and Usage Recipe
+
+Applies when: every run, after the context fields; declares `metadata.usageSurfaces` and, in picker mode, asks once per project for the usage recipe.
+Before running this phase, Read ${CLAUDE_PLUGIN_ROOT}/commands/references/plan/phase-4-usage-surfaces.md in full.
+
 ### Schema v3.3 Structure
 
 Applies when: every run; holds the frontend-only backendSpec derivation.
