@@ -114,7 +114,7 @@ find_aimi_root() {
 # Only the values of the flags in _PATH_ARG_FLAGS are candidates, plus the
 # bare positional arguments of the verbs in _PATH_ARG_POSITIONAL_VERBS (never
 # the value of a flag); a story id, a reason or a branch name is never touched.
-_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path "
+_PATH_ARG_FLAGS=" --tasks-file --file --staging-dir --outline --result --output --old --new --input --tasks --spec --prototype --phase-dir --root --bundle --from --to --previous-file --review --dir --brainstorm-path --required-file --evidence-dir "
 _PATH_ARG_POSITIONAL_VERBS=" archive-task research-lookup extract-sections extract-prototype-sections measure-command-file "
 _rebase_invocation_relative_args() {
   local verb="$1"; shift
@@ -16765,6 +16765,59 @@ cmd_usage_validation_required() {
   python3 "$(_aimi_script_py usage_validation.py)" files --tasks-file "$tasks_file"
 }
 
+# The gate outcome of one usage validation, computed from the validator's last
+# usage_validation_verdict block (stdin), the required answer and the evidence
+# directory. A read: no lock, nothing written, one crossing into
+# usage_validation.py. Every outcome is an answer at exit 0, a tooling-failed
+# one included; only a bad invocation is refused.
+cmd_usage_validation_verdict() {
+  local required_file="" evidence_dir="" have_required=0 have_evidence=0
+  local -a extra=()
+  local usage="Usage: aimi-cli.sh usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]..."
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --required-file) have_required=1; shift; required_file="${1:-}" ;;
+      --evidence-dir) have_evidence=1; shift; evidence_dir="${1:-}" ;;
+      --reproduced|--accepted)
+        if [ $# -lt 2 ]; then
+          echo "Error: usage-validation-verdict: $1 needs a <charterId>:<step>:<heuristic> key" >&2
+          exit 1
+        fi
+        extra+=("$1" "$2")
+        shift
+        ;;
+      *)
+        echo "Error: usage-validation-verdict: unknown flag: $1" >&2
+        echo "$usage" >&2
+        exit 1
+        ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+
+  if [ "$have_required" -ne 1 ] || [ -z "$required_file" ] || [ "$have_evidence" -ne 1 ] || [ -z "$evidence_dir" ]; then
+    echo "Error: usage-validation-verdict: --required-file and --evidence-dir are required" >&2
+    echo "$usage" >&2
+    exit 1
+  fi
+
+  required_file=$(resolve_path "$required_file")
+  ( validate_path_in_project "$required_file" ) || {
+    echo "Error: usage-validation-verdict: --required-file escapes the project" >&2
+    exit 1
+  }
+  evidence_dir=$(resolve_path "$evidence_dir")
+  ( validate_path_in_project "$evidence_dir" ) || {
+    echo "Error: usage-validation-verdict: --evidence-dir escapes the project" >&2
+    exit 1
+  }
+
+  check_python3
+  python3 "$(_aimi_script_py usage_validation.py)" verdict \
+    --required-file "$required_file" --evidence-dir "$evidence_dir" ${extra[@]+"${extra[@]}"}
+}
+
 cmd_roadmap_claim() {
   local feature="" session_id="" session_pid="" phase_override=""
 
@@ -19034,6 +19087,20 @@ COMMANDS:
                               surfaces, charters, specs}. skipKind is
                               disabled-by-operator (AIMI_USAGE_VALIDATION=off),
                               unable-to-evaluate, not-applicable or null. Needs python3.
+    usage-validation-verdict --required-file <path> --evidence-dir <dir> [--reproduced <key>]... [--accepted <key>]...
+                              Read-only. Reads the validator's final message on stdin,
+                              takes only its LAST fenced usage_validation_verdict
+                              block and computes the gate outcome itself. Prints
+                              {outcome, reason, counts {planned, executed, blocked,
+                              exploratoryActions}, bugs, decisions, unmapped,
+                              unconfirmed, reported, blockedCharters, droppedEvidence,
+                              summary}. outcome is tooling-failed, unable-to-evaluate,
+                              fails or pass, always at exit 0. --required-file is the
+                              answer of usage-validation-required (its charters[].id
+                              are the planned charters), --evidence-dir the directory
+                              evidence paths are relative to. --reproduced and
+                              --accepted take a <charterId>:<step>:<heuristic> key and
+                              repeat. Needs python3.
     roadmap-visual-gate-required --feature <slug> --phase <id>
                               Read-only. Derives, from the phase's own tasks
                               file(s) (every member of a split phase), whether a
@@ -19459,6 +19526,7 @@ main() {
     roadmap-record-visual-gate)   shift; cmd_roadmap_record_visual_gate "$@" ;;
     roadmap-visual-gate-required) shift; cmd_roadmap_visual_gate_required "$@" ;;
     usage-validation-required) shift; cmd_usage_validation_required "$@" ;;
+    usage-validation-verdict) shift; cmd_usage_validation_verdict "$@" ;;
     write-review)         shift; cmd_write_review "$@" ;;
     validate-contracts)    shift; cmd_validate_contracts "$@" ;;
     verify-creates)        shift; cmd_verify_creates "$@" ;;

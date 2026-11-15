@@ -38,8 +38,12 @@ surface with a project whose recipe is absent, untrusted or unreadable counts as
 "no recipe recorded".
 """
 
+import ipaddress
+import json
 import os
+import re
 import sys
+from urllib.parse import urlsplit
 
 import roadmap as R
 from sanitize import rm_sanitize
@@ -50,6 +54,20 @@ SURFACE_KINDS = ("web", "cli")
 TITLE_MAXLEN = 200
 REASON_MAXLEN = 500
 ENV_SWITCH = "AIMI_USAGE_VALIDATION"
+
+VERDICT_VERB = "usage-validation-verdict"
+VERDICT_TAG = "usage_validation_verdict"
+FENCE = "```"
+MAX_CHARTERS = 100
+MAX_FINDINGS = 200
+MAX_EVIDENCE = 10
+HEURISTICS = tuple("H" + str(n) for n in range(1, 11)) + ("S", "F", "D", "P", "O", "T")
+FINDING_KINDS = ("bug", "decision", "unmapped")
+EVIDENCE_TYPES = ("screenshot", "console", "network", "command")
+RATINGS = ("severity", "frequency", "impact", "persistence")
+TEXT_MAXLEN = 1000
+KEY_PATTERN = re.compile(r"^[^:/\s]+:[1-9][0-9]*:(?:H10|H[1-9]|S|F|D|P|O|T)$")
+LOOPBACK_SCHEMES = ("http", "https", "ws", "wss")
 
 
 def _advise(detail):
@@ -341,6 +359,369 @@ def usage_validation_requirement_for_files(paths):
     return _answer(paths, anchor, "run")
 
 
+class _Unusable(Exception):
+    """The block cannot be used; the message names the field."""
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _last_block(message):
+    """The body of the LAST fenced usage_validation_verdict block.
+
+    The opening line is exactly the fence plus the tag and the closing line
+    exactly the fence, as the visual gate reads its own block. A later open line
+    replaces an earlier block, and a last block left open fails: an earlier
+    valid block never rescues a later one."""
+    opening = FENCE + VERDICT_TAG
+    inside = False
+    buf = []
+    last = None
+    for line in message.split("\n"):
+        if line == opening:
+            inside, buf = True, []
+        elif inside and line == FENCE:
+            inside = False
+            last = "\n".join(buf)
+        elif inside:
+            buf.append(line)
+    if inside:
+        raise _Unusable("the last " + VERDICT_TAG + " block has no closing fence")
+    if last is None:
+        raise _Unusable("no " + VERDICT_TAG + " block in the message")
+    return last
+
+
+def _need(obj, key, kind, where):
+    if key not in obj:
+        raise _Unusable(where + "." + key + " is missing")
+    value = obj[key]
+    if kind == "int":
+        ok = _is_int(value)
+    elif kind == "str":
+        ok = isinstance(value, str)
+    elif kind == "list":
+        ok = isinstance(value, list)
+    else:
+        ok = False
+    if not ok:
+        raise _Unusable(where + "." + key + " must be " + {"int": "an integer", "str": "a string", "list": "a list"}[kind])
+    return value
+
+
+def _parse_block(body):
+    try:
+        block = json.loads(body)
+    except (ValueError, RecursionError):
+        raise _Unusable("the block is not valid JSON")
+    if not isinstance(block, dict):
+        raise _Unusable("the block is not a JSON object")
+    charters = _need(block, "charters", "list", "block")
+    findings = _need(block, "findings", "list", "block")
+    origins = _need(block, "origins", "list", "block")
+    actions = _need(block, "exploratoryActions", "int", "block")
+    if actions < 0:
+        raise _Unusable("block.exploratoryActions must not be negative")
+    if "summary" in block and not isinstance(block["summary"], str):
+        raise _Unusable("block.summary must be a string")
+    if len(charters) > MAX_CHARTERS:
+        raise _Unusable("block.charters has more than " + str(MAX_CHARTERS) + " entries")
+    if len(findings) > MAX_FINDINGS:
+        raise _Unusable("block.findings has more than " + str(MAX_FINDINGS) + " entries")
+    for i, origin in enumerate(origins):
+        if not isinstance(origin, str):
+            raise _Unusable("block.origins[" + str(i) + "] must be a string")
+
+    status = {}
+    reasons = {}
+    for i, charter in enumerate(charters):
+        where = "block.charters[" + str(i) + "]"
+        if not isinstance(charter, dict):
+            raise _Unusable(where + " must be an object")
+        cid = _need(charter, "id", "str", where)
+        if cid == "" or re.search(r"[:/\s]", cid):
+            raise _Unusable(where + ".id must be non-empty and hold no colon, slash or whitespace")
+        if cid in status:
+            raise _Unusable(where + ".id repeats charter id " + repr(_clean(cid, 60)))
+        st = _need(charter, "status", "str", where)
+        if st not in ("executed", "blocked"):
+            raise _Unusable(where + ".status must be executed or blocked")
+        reason = charter.get("reason")
+        if "reason" in charter and not isinstance(reason, str):
+            raise _Unusable(where + ".reason must be a string")
+        if st == "blocked" and not (isinstance(reason, str) and reason.strip() != ""):
+            raise _Unusable(where + ".reason is required when the charter is blocked")
+        status[cid] = st
+        reasons[cid] = reason if isinstance(reason, str) else ""
+
+    parsed = []
+    seen = set()
+    for i, finding in enumerate(findings):
+        where = "block.findings[" + str(i) + "]"
+        if not isinstance(finding, dict):
+            raise _Unusable(where + " must be an object")
+        cid = _need(finding, "charterId", "str", where)
+        if cid not in status:
+            raise _Unusable(where + ".charterId names no charter of the block")
+        step = _need(finding, "step", "int", where)
+        if step < 1:
+            raise _Unusable(where + ".step must be a positive integer")
+        heuristic = _need(finding, "heuristic", "str", where)
+        if heuristic not in HEURISTICS:
+            raise _Unusable(where + ".heuristic is not one of H1 to H10, S, F, D, P, O, T")
+        kind = _need(finding, "kind", "str", where)
+        if kind not in FINDING_KINDS:
+            raise _Unusable(where + ".kind must be bug, decision or unmapped")
+        ratings = {}
+        for name in RATINGS:
+            value = _need(finding, name, "int", where)
+            if value < 0 or value > 4:
+                raise _Unusable(where + "." + name + " must be an integer from 0 to 4")
+            ratings[name] = value
+        texts = {name: _need(finding, name, "str", where) for name in ("title", "expected", "observed")}
+        evidence = _need(finding, "evidence", "list", where)
+        if len(evidence) > MAX_EVIDENCE:
+            raise _Unusable(where + ".evidence has more than " + str(MAX_EVIDENCE) + " entries")
+        for j, entry in enumerate(evidence):
+            if not isinstance(entry, dict):
+                raise _Unusable(where + ".evidence[" + str(j) + "] must be an object")
+            if entry.get("type") not in EVIDENCE_TYPES:
+                raise _Unusable(where + ".evidence[" + str(j) + "].type must be screenshot, console, network or command")
+        key = cid + ":" + str(step) + ":" + heuristic
+        if key in seen:
+            raise _Unusable(where + " repeats finding key " + repr(_clean(key, 80)))
+        seen.add(key)
+        parsed.append({"key": key, "charterId": cid, "step": step, "heuristic": heuristic, "kind": kind,
+                       "ratings": ratings, "texts": texts, "evidence": evidence})
+    return {"status": status, "reasons": reasons, "findings": parsed, "origins": origins,
+            "actions": actions, "summary": block.get("summary")}
+
+
+def _evidence_counts(entry, evidence_dir):
+    """True when the evidence entry names a re-checkable artifact: a relative
+    path with no .. segment that crosses no symlink and ends at an existing
+    regular file under the evidence directory, and, for a command, an integer
+    exit code."""
+    from tasks import confined_spec_path
+
+    path = entry.get("path")
+    if not isinstance(path, str) or path == "" or "\0" in path:
+        return False
+    if entry["type"] == "command" and not _is_int(entry.get("exitCode")):
+        return False
+    if os.path.isabs(path) or path.startswith("\\"):
+        return False
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        return False
+    here = evidence_dir
+    for part in parts:
+        if part in ("", "."):
+            continue
+        here = os.path.join(here, part)
+        if os.path.islink(here):
+            return False
+    _, inside = confined_spec_path(evidence_dir, path)
+    return inside and os.path.isfile(here) and not os.path.islink(here)
+
+
+def _loopback(origin):
+    try:
+        parts = urlsplit(origin)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in LOOPBACK_SCHEMES or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _verdict_answer(outcome, reason, planned, executed=0, blocked_list=(), actions=0,
+                    bugs=(), decisions=(), unmapped=(), unconfirmed=(), reported=(),
+                    dropped=0, summary=None):
+    return {
+        "outcome": outcome,
+        "reason": _clean(reason, REASON_MAXLEN),
+        "counts": {"planned": planned, "executed": executed, "blocked": len(blocked_list),
+                   "exploratoryActions": actions},
+        "bugs": list(bugs),
+        "decisions": list(decisions),
+        "unmapped": list(unmapped),
+        "unconfirmed": list(unconfirmed),
+        "reported": list(reported),
+        "blockedCharters": list(blocked_list),
+        "droppedEvidence": dropped,
+        "summary": _clean(summary, TEXT_MAXLEN) if isinstance(summary, str) else "",
+    }
+
+
+def usage_validation_verdict(message, planned_ids, evidence_dir, reproduced=(), accepted=()):
+    """The gate outcome of one usage validation, computed here and never read
+    from the validator.
+
+    <message> is the validator's final message, <planned_ids> the charter ids of
+    the `usage-validation-required` answer, <evidence_dir> the directory its
+    evidence paths are relative to. <reproduced> and <accepted> are finding keys
+    the orchestrator confirmed or the user accepted. Every outcome is an answer,
+    never an exception.
+
+    THE BLOCK (the one place its schema is written). Only the LAST fenced block
+    tagged `usage_validation_verdict` is read; it is one JSON object:
+
+      charters          [{id, status "executed"|"blocked", reason}], at most 100;
+                        ids unique; reason required when blocked
+      findings          [{charterId, step, heuristic, kind, severity, frequency,
+                          impact, persistence, title, expected, observed,
+                          evidence}], at most 200
+                        charterId  an id of `charters`
+                        step       positive integer
+                        heuristic  H1..H10, S, F, D, P, O or T
+                        kind       "bug" | "decision" | "unmapped"
+                        severity, frequency, impact, persistence   integers 0-4
+                        evidence   at most 10 of {type "screenshot"|"console"|
+                                   "network"|"command", path, exitCode}
+      origins           [str], every origin the validator drove
+      exploratoryActions  integer >= 0
+      summary           optional str
+
+    A `verdict` key is never read. A finding's key is
+    <charterId>:<step>:<heuristic>, computed here. An evidence entry counts only
+    for a relative path with no .. segment, crossing no symlink, naming an
+    existing regular file under <evidence_dir>, and a command entry also needs an
+    integer exitCode; the rest are dropped and tallied in droppedEvidence. A
+    finding rated 3 or 4 with no counted entry is capped to severity 2
+    (capped true, ratedSeverity kept).
+
+    OUTCOME, first match winning: tooling-failed (unusable block, no charter
+    planned or reported, or a non-loopback origin), unable-to-evaluate (no
+    planned charter executed), fails (a blocking bug or decision, or a planned
+    charter blocked or absent), pass."""
+    planned = []
+    for cid in planned_ids:
+        if isinstance(cid, str) and cid not in planned:
+            planned.append(cid)
+    n_planned = len(planned)
+    if not isinstance(message, str):
+        message = ""
+
+    try:
+        block = _parse_block(_last_block(message))
+    except _Unusable as err:
+        return _verdict_answer("tooling-failed", str(err), n_planned)
+
+    status = block["status"]
+    if not planned and not status:
+        return _verdict_answer("tooling-failed", "no charter is planned or reported", 0)
+    for origin in block["origins"]:
+        if not _loopback(origin):
+            return _verdict_answer("tooling-failed",
+                                   "origin " + repr(_clean(origin, 200)) + " is not a loopback origin",
+                                   n_planned, actions=block["actions"])
+
+    reproduced, accepted = set(reproduced), set(accepted)
+    planned_set = set(planned)
+    bugs, decisions, unmapped, unconfirmed, reported = [], [], [], [], []
+    dropped = 0
+    for f in block["findings"]:
+        counted = [e for e in f["evidence"] if _evidence_counts(e, evidence_dir)]
+        dropped += len(f["evidence"]) - len(counted)
+        rated = f["ratings"]["severity"]
+        severity, capped = rated, False
+        if rated >= 3 and not counted:
+            severity, capped = 2, True
+        origin = "charter" if f["charterId"] in planned_set else "exploratory"
+        item = {
+            "key": f["key"], "origin": origin, "kind": f["kind"], "charterId": f["charterId"],
+            "step": f["step"], "heuristic": f["heuristic"], "severity": severity, "capped": capped,
+            "ratedSeverity": rated, "frequency": f["ratings"]["frequency"],
+            "impact": f["ratings"]["impact"], "persistence": f["ratings"]["persistence"],
+            "title": _clean(f["texts"]["title"], TITLE_MAXLEN),
+            "expected": _clean(f["texts"]["expected"], TEXT_MAXLEN),
+            "observed": _clean(f["texts"]["observed"], TEXT_MAXLEN),
+            "evidence": [{"type": e["type"], "path": _clean(e["path"], 300)} for e in counted],
+        }
+        if f["kind"] == "unmapped":
+            unmapped.append(item)
+        elif severity == 0:
+            continue
+        elif severity >= 3:
+            is_decision = f["kind"] == "decision"
+            named = origin == "charter" or f["key"] in reproduced
+            if is_decision and f["key"] in accepted:
+                reported.append(item)
+            elif named:
+                (decisions if is_decision else bugs).append(item)
+            else:
+                unconfirmed.append(item)
+        else:
+            reported.append(item)
+
+    executed = sum(1 for cid in planned if status.get(cid) == "executed")
+    blocked_list = []
+    for cid in planned:
+        if cid not in status:
+            blocked_list.append({"id": cid, "reason": "not reported"})
+        elif status[cid] == "blocked":
+            blocked_list.append({"id": cid, "reason": _clean(block["reasons"][cid], REASON_MAXLEN)})
+
+    common = dict(planned=n_planned, executed=executed, blocked_list=blocked_list,
+                  actions=block["actions"], bugs=bugs, decisions=decisions, unmapped=unmapped,
+                  unconfirmed=unconfirmed, reported=reported, dropped=dropped, summary=block["summary"])
+    if executed == 0:
+        return _verdict_answer("unable-to-evaluate", "no planned charter was executed", **common)
+    if bugs or decisions or blocked_list:
+        return _verdict_answer("fails", str(len(bugs)) + " blocking bug(s), " + str(len(decisions))
+                               + " blocking decision(s), " + str(len(blocked_list)) + " planned charter(s) blocked or absent",
+                               **common)
+    return _verdict_answer("pass", "every planned charter executed, no blocking finding", **common)
+
+
+def _op_verdict(argv):
+    required = R._flag(argv, "--required-file")
+    evidence_dir = R._flag(argv, "--evidence-dir")
+    if not required or not evidence_dir:
+        sys.stderr.write("Usage: usage_validation.py verdict --required-file <path> --evidence-dir <dir> "
+                         "[--reproduced <key>]... [--accepted <key>]...\n")
+        return 2
+    lists = {"--reproduced": [], "--accepted": []}
+    i = 0
+    while i < len(argv):
+        if argv[i] in lists:
+            value = argv[i + 1] if i + 1 < len(argv) else ""
+            if not KEY_PATTERN.match(value):
+                sys.stderr.write("Error: " + VERDICT_VERB + ": " + argv[i] + " key " + repr(value)
+                                 + " is not <charterId>:<step>:<heuristic>\n")
+                return 1
+            lists[argv[i]].append(value)
+            i += 2
+        else:
+            i += 1
+    try:
+        with open(required, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        sys.stderr.write("Error: " + VERDICT_VERB + ": --required-file " + required + " is missing or unreadable\n")
+        return 1
+    charters = doc.get("charters") if isinstance(doc, dict) else None
+    if not isinstance(charters, list):
+        sys.stderr.write("Error: " + VERDICT_VERB + ": --required-file " + required + " has no charters list\n")
+        return 1
+    if not os.path.isdir(evidence_dir):
+        sys.stderr.write("Error: " + VERDICT_VERB + ": --evidence-dir " + evidence_dir + " is not a directory\n")
+        return 1
+    planned = [c.get("id") for c in charters if isinstance(c, dict) and isinstance(c.get("id"), str)]
+    message = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+    R._emit(usage_validation_verdict(message, planned, evidence_dir, lists["--reproduced"], lists["--accepted"]))
+    return 0
+
+
 def _op_required(argv):
     path = R._flag(argv, "--roadmap")
     phase_raw = R._flag(argv, "--phase")
@@ -370,7 +751,7 @@ def _op_files(argv):
     return 0
 
 
-_OPS = {"required": _op_required, "files": _op_files}
+_OPS = {"required": _op_required, "files": _op_files, "verdict": _op_verdict}
 
 
 def main(argv):
